@@ -1,0 +1,41 @@
+::openai::run ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+RunGraderResponse type {
+    reward: Dec,
+    metadata: Map,
+    sub_rewards: Map,
+    model_grader_token_usage_per_model: Map
+}
+
+RunGraderRequest type {
+    grader: Map,
+    item: Map?,
+    model_sample: Str
+}
+
+RunGraderRequest type {
+    grader: Map,
+    item: Map?,
+    model_sample: Str
+}
+
+RunGraderResponse type {
+    reward: Dec,
+    metadata: Map,
+    sub_rewards: Map,
+    model_grader_token_usage_per_model: Map
+}
+
+
+run-grader
+meta {
+    doc: """POST /fine_tuning/alpha/graders/run - Run a grader to evaluate model samples for reinforcement fine-tuning."""
+}
+fn (request: RunGraderRequest): RunGraderResponse {
+  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/alpha/graders/run`, {}, request)
+  if(is-ok-response(response), RunGraderResponse(response.body), err(HttpError(response)))
+}

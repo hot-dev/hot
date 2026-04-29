@@ -1,0 +1,104 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            Invite a user to this organization
+        </p>
+        {% include "org_tabs.html" %}
+    </div>
+
+    <div class="max-w-md mx-auto">
+                <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+                    <div class="p-6">
+                        {% if error_message != "" %}
+                        <div class="mb-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+                            {{ error_message }}
+                        </div>
+                        {% endif %}
+
+                        {% if success_message != "" %}
+                        <div class="mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded-md">
+                            {{ success_message }}
+                        </div>
+                        {% endif %}
+
+                        <form action="/@{{ org.slug }}/users/invite" method="post">
+                            <div class="mb-6">
+                                <label for="email" class="block text-sm font-medium mb-2">Email Address</label>
+                                <div class="relative">
+                                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                            <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z" />
+                                            <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z" />
+                                        </svg>
+                                    </div>
+                                    <input type="email"
+                                           id="email"
+                                           name="email"
+                                           value="{{ email }}"
+                                           required
+                                           class="w-full pl-10 pr-4 py-2 bg-white/50 dark:bg-gray-700 border border-gray-300 dark:border-gray-800 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 backdrop-blur-sm"
+                                           placeholder="user@example.com" />
+                                </div>
+                                <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                                    We'll send an invitation email to this address.
+                                </p>
+                            </div>
+
+                            <div class="mb-6">
+                                <label for="role_id" class="block text-sm font-medium mb-2">Role</label>
+                                <select id="role_id"
+                                        name="role_id"
+                                        class="w-full px-3 py-2 bg-white/50 dark:bg-gray-700 border border-gray-300 dark:border-gray-800 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 backdrop-blur-sm">
+                                    <option value="1" {% if role_id == 1 %}selected{% endif %}>Member</option>
+                                    <option value="2" {% if role_id == 2 %}selected{% endif %}>Admin</option>
+                                </select>
+                                <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                                    <strong>Member:</strong> Can view and work with organization data.<br>
+                                    <strong>Admin:</strong> Can manage organization settings and users.
+                                </p>
+                            </div>
+
+                            <div class="flex items-center justify-between">
+                                <a href="/@{{ org.slug }}/users" class="text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-white transition-colors">
+                                    Cancel
+                                </a>
+                                <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                                    </svg>
+                                    Send Invitation
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Info box -->
+                <div class="mt-6 rounded-lg backdrop-blur-sm border border-blue-200 dark:border-blue-700 transition-all duration-300 bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-200">
+                    <div class="p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+                                </svg>
+                            </div>
+                            <div class="ml-3">
+                                <h3 class="text-sm font-medium">How invitations work</h3>
+                                <div class="mt-2 text-sm">
+                                    <ul class="list-disc pl-5 space-y-1">
+                                        <li>An invitation email will be sent to the specified address</li>
+                                        <li>The invite is valid for 7 days from creation</li>
+                                        <li>If the user doesn't have an account, they'll be prompted to create one</li>
+                                        <li>Once they accept, they'll be added to this organization with the selected role</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+    </div>
+</div>
+{% endblock %}

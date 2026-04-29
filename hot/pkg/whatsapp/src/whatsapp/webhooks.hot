@@ -1,0 +1,98 @@
+::whatsapp::webhooks ns
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::base16 ::hot::base16
+
+// ============================================================================
+// Webhook Signature Verification
+// ============================================================================
+
+verify-request
+meta {
+    ctx: {"whatsapp.app.secret": {required: false}},
+    doc: """
+Verify a WhatsApp webhook request using HMAC-SHA256 signature. Meta signs webhook payloads with your App Secret and includes the signature in the `X-Hub-Signature-256` header as `sha256={hex}`.
+
+Uses the `whatsapp.app.secret` context variable by default, or accepts an explicit secret.
+
+**Example**
+
+```hot
+::webhooks ::whatsapp::webhooks
+
+// Using context variable (1-arity)
+is-valid ::webhooks/verify-request(request)
+
+// With explicit secret (2-arity)
+is-valid ::webhooks/verify-request(request, "my-app-secret")
+```
+"""
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("whatsapp.app.secret"), "")
+  if(is-empty(secret),
+    fail("whatsapp.app.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, app-secret: Str): Bool {
+  header get(request.headers, "x-hub-signature-256", "")
+
+  cond {
+    is-empty(app-secret) => { false }
+    is-empty(header) => { false }
+    not(starts-with(header, "sha256=")) => { false }
+    => {
+      signature slice(header, 7)
+      raw-body or(get(request, "body-raw", ""), "")
+      expected ::base16/encode(::hmac/hmac-sha256(app-secret, raw-body))
+      secure-compare(lowercase(expected), lowercase(signature))
+    }
+  }
+}
+
+// ============================================================================
+// Webhook Challenge Verification
+// ============================================================================
+
+verify-challenge
+meta {
+    ctx: {"whatsapp.verify.token": {required: false}},
+    doc: """
+Verify a webhook subscription challenge. When you configure a webhook URL in Meta's App Dashboard, Meta sends a GET request with `hub.mode`, `hub.verify_token`, and `hub.challenge` query parameters. Return the `hub.challenge` value if the token matches.
+
+Uses the `whatsapp.verify.token` context variable by default, or accepts an explicit token.
+
+**Example**
+
+```hot
+::webhooks ::whatsapp::webhooks
+
+// In a webhook handler for GET requests:
+result ::webhooks/verify-challenge(request.query)
+// Returns the challenge string on success, or an error on failure
+```
+"""
+}
+fn
+(query: Map): Str {
+  token or(::ctx/get("whatsapp.verify.token"), "")
+  if(is-empty(token),
+    fail("whatsapp.verify.token is not set. Add it in Context Variables to verify webhook subscriptions.")
+  )
+  verify-challenge(query, token)
+},
+(query: Map, verify-token: Str): Str {
+  mode get(query, "hub.mode", "")
+  token get(query, "hub.verify_token", "")
+  challenge get(query, "hub.challenge", "")
+
+  cond {
+    ne(mode, "subscribe") => { err("Invalid hub.mode") }
+    ne(token, verify-token) => { err("Invalid verify token") }
+    is-empty(challenge) => { err("Missing hub.challenge") }
+    => { challenge }
+  }
+}

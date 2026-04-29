@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.stripe-core {
+  name: "hot.dev/stripe-core",
+  version: "0.10.0",
+  hot-min-version: "1.2.0",
+  description: "stripe core types, authentication, and configuration.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["payments"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,104 @@
+::postmark::integration::templates ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Postmark Templates API
+// =============================================================================
+// These tests require postmark.server.token to be set in context
+
+// -----------------------------------------------------------------------------
+// Template Validation (read-only, no side effects)
+// -----------------------------------------------------------------------------
+
+test-validate-template-content
+meta ["test"]
+fn () {
+    response ::postmark::test/test-template-content(::postmark::test/TestTemplateContentRequest({
+        Subject: "Hello {{name}}!",
+        HtmlBody: "<html><body><p>Welcome, {{name}}!</p></body></html>",
+        TextBody: "Welcome, {{name}}!",
+        TestRenderModel: {"name": "Alice"}
+    }))
+
+    assert-eq(true, response.AllContentIsValid, "All template content should be valid")
+    assert(response.Subject, "Response should have Subject validation")
+    assert(response.HtmlBody, "Response should have HtmlBody validation")
+    assert(response.TextBody, "Response should have TextBody validation")
+}
+
+test-validate-template-invalid-content
+meta ["test"]
+fn () {
+    response ::postmark::test/test-template-content(::postmark::test/TestTemplateContentRequest({
+        Subject: "Hello {{#if}}!",
+        HtmlBody: "<html><body>{{#if}}</body></html>",
+        TextBody: "{{#if}}"
+    }))
+
+    assert-eq(false, response.AllContentIsValid, "Invalid template content should fail validation")
+}
+
+test-validate-template-suggested-model
+meta ["test"]
+fn () {
+    response ::postmark::test/test-template-content(::postmark::test/TestTemplateContentRequest({
+        Subject: "Order {{order_id}} confirmed",
+        HtmlBody: "<html><body><p>Hi {{customer_name}}, your order {{order_id}} totaling {{total}} is confirmed.</p></body></html>",
+        TextBody: "Hi {{customer_name}}, your order {{order_id}} totaling {{total}} is confirmed."
+    }))
+
+    assert(response.SuggestedTemplateModel, "Response should include a suggested template model")
+}
+
+// -----------------------------------------------------------------------------
+// Template CRUD
+// -----------------------------------------------------------------------------
+
+test-template-lifecycle
+meta ["test"]
+fn () {
+    // Create a template
+    created ::postmark::templates/create-template(::postmark::templates/POSTTemplatesRequest({
+        Name: "Hot Integration Test Template",
+        Subject: "Hello {{name}}",
+        HtmlBody: "<html><body><h1>Hello {{name}}</h1></body></html>",
+        TextBody: "Hello {{name}}"
+    }))
+
+    assert(created.TemplateId, "Created template should have a TemplateId")
+    assert-eq("Hot Integration Test Template", created.Name, "Template name should match")
+    assert-eq(true, created.Active, "Template should be active")
+
+    template-id Str(created.TemplateId)
+
+    // Update the template
+    updated ::postmark::update/update-template(template-id, ::postmark::update/UpdateTemplateRequest({
+        Name: "Hot Integration Test Template (Updated)",
+        Subject: "Updated: Hello {{name}}"
+    }))
+
+    assert-eq("Hot Integration Test Template (Updated)", updated.Name, "Updated name should match")
+
+    // Delete the template
+    deleted ::postmark::delete/delete-template(::postmark::delete/DeleteTemplateRequest({
+        template-id-or-alias: template-id
+    }))
+
+    assert-eq(0, deleted.ErrorCode, "Delete ErrorCode should be 0")
+    assert(deleted.Message, "Delete response should have a Message")
+}
+
+// -----------------------------------------------------------------------------
+// List Templates
+// -----------------------------------------------------------------------------
+
+test-list-templates
+meta ["test"]
+fn () {
+    response ::postmark::list/get-templates-associated-with-this-server(::postmark::list/ListTemplatesRequest({
+        count: "10",
+        offset: "0"
+    }))
+
+    assert(gte(response.TotalCount, 0), "TotalCount should be >= 0")
+}

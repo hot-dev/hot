@@ -1,0 +1,3736 @@
+<!-- Observability Tabs Component -->
+<style>
+/* Tab Navigation */
+.observability-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: white;
+    padding: 0 0 0 16px;
+}
+
+.dark .observability-tabs {
+    background: #111111;
+    border-bottom-color: rgba(64, 64, 64, 1);
+}
+
+.tab-button {
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(107, 114, 128, 1);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Mobile adjustments */
+@media (max-width: 767px) {
+    .tab-button {
+        padding: 8px 10px;
+        font-size: 12px;
+    }
+}
+
+.dark .tab-button {
+    color: rgba(156, 163, 175, 1);
+}
+
+.tab-button:hover {
+    color: rgba(239, 68, 68, 1);
+    background: rgba(254, 242, 242, 1);
+}
+
+.dark .tab-button:hover {
+    color: rgba(252, 165, 165, 1);
+    background: rgba(55, 65, 81, 0.5);
+}
+
+.tab-button.active {
+    color: rgba(239, 68, 68, 1);
+    border-bottom-color: rgba(239, 68, 68, 1);
+}
+
+.dark .tab-button.active {
+    color: rgba(252, 165, 165, 1);
+    border-bottom-color: rgba(239, 68, 68, 1);
+}
+
+.tab-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* Tab Content */
+.tab-content {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: auto;
+}
+
+.tab-content.active {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Timeline View */
+.timeline-view {
+    padding: 12px 16px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+@media (max-width: 767px) {
+    .timeline-view {
+        padding: 8px 12px 12px 12px;
+        gap: 8px;
+    }
+
+    /* Make graph nodes and text smaller on mobile */
+    #flow-graph-view-container text,
+    #run-graph-cloned text {
+        font-size: 10px !important;
+    }
+
+    #flow-graph-view-container rect,
+    #run-graph-cloned rect {
+        rx: 4 !important;
+    }
+
+    /* Improve touch targets for graph nodes */
+    #flow-graph-view-container .node,
+    #run-graph-cloned .node {
+        cursor: pointer;
+    }
+}
+
+/* Run Summary */
+.run-summary {
+    padding: 0 0 8px 0;
+    margin-bottom: 8px;
+}
+
+.run-summary-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(55, 65, 81, 1);
+    margin-bottom: 8px;
+}
+
+.dark .run-summary-title {
+    color: rgba(229, 231, 235, 1);
+}
+
+.run-summary-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 6px;
+}
+
+.run-summary-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+
+.run-summary-legend-box {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.run-summary-legend-queue-wait {
+    background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
+}
+
+.run-summary-legend-compilation {
+    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+}
+
+.run-summary-legend-execution {
+    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+}
+
+.run-summary-legend-label {
+    color: rgba(107, 114, 128, 1);
+    white-space: nowrap;
+}
+
+.dark .run-summary-legend-label {
+    color: rgba(156, 163, 175, 1);
+}
+
+.run-summary-legend-value {
+    font-weight: 600;
+    color: rgba(55, 65, 81, 1);
+}
+
+.dark .run-summary-legend-value {
+    color: rgba(229, 231, 235, 1);
+}
+
+.run-summary-percent {
+    font-size: 11px;
+    font-weight: 400;
+    color: rgba(107, 114, 128, 1);
+}
+
+.dark .run-summary-percent {
+    color: rgba(156, 163, 175, 1);
+}
+
+.run-summary-combined-bar {
+    height: 8px;
+    background: rgba(229, 231, 235, 1);
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+}
+
+.dark .run-summary-combined-bar {
+    background: rgba(64, 64, 64, 1);
+}
+
+.run-summary-bar-segment {
+    height: 100%;
+    min-width: 1px;
+    transition: width 0.3s ease;
+}
+
+.run-summary-bar-queue-wait {
+    background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
+}
+
+.run-summary-bar-compilation {
+    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+}
+
+.run-summary-bar-execution {
+    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+}
+
+.timeline-axis {
+    position: relative;
+    height: 30px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    margin-bottom: 16px;
+}
+
+.dark .timeline-axis {
+    border-bottom-color: rgba(55, 65, 81, 1);
+}
+
+.timeline-axis-label {
+    position: absolute;
+    font-size: 11px;
+    color: rgba(107, 114, 128, 1);
+    transform: translateX(-50%);
+    bottom: 4px;
+}
+
+.dark .timeline-axis-label {
+    color: rgba(156, 163, 175, 1);
+}
+
+.timeline-bar {
+    background: white;
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 3px;
+    padding: 4px 8px;
+    margin-bottom: 2px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.dark .timeline-bar {
+    background: #0a0a0a;
+    border-color: rgba(64, 64, 64, 1);
+}
+
+.timeline-bar:hover {
+    border-color: rgba(239, 68, 68, 1);
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);
+}
+
+.timeline-bar.selected {
+    border-color: rgba(220, 38, 38, 1);
+    background: rgba(249, 250, 251, 1);
+}
+
+.dark .timeline-bar.selected {
+    border-color: rgba(239, 68, 68, 1);
+    background: rgba(64, 64, 64, 1);
+}
+
+.timeline-bar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.timeline-bar-title {
+    display: flex;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+}
+
+.timeline-bar-duration {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(243, 244, 246, 1);
+    color: rgba(75, 85, 99, 1);
+}
+
+.dark .timeline-bar-duration {
+    background: rgba(64, 64, 64, 1);
+    color: rgba(209, 213, 219, 1);
+}
+
+.timeline-bar-visual-container {
+    position: relative;
+    height: 6px;
+    margin-top: 2px;
+    background: rgba(229, 231, 235, 0.3);
+    border-radius: 3px;
+}
+
+.dark .timeline-bar-visual-container {
+    background: rgba(64, 64, 64, 0.3);
+}
+
+.timeline-bar-visual {
+    position: absolute;
+    height: 100%;
+    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+    border-radius: 3px;
+    transition: all 0.15s ease;
+}
+
+/* Call Hierarchy in Tab */
+.hierarchy-tab-view {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.hierarchy-controls-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: rgba(249, 250, 251, 1);
+    min-height: 48px;
+}
+
+.dark .hierarchy-controls-tab {
+    border-bottom-color: rgba(64, 64, 64, 1);
+    background: #111111;
+}
+
+.hierarchy-tree-tab {
+    padding: 12px 16px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+/* Shared Value Inspector Panel */
+.value-inspector-panel {
+    width: 0;
+    min-width: 0;
+    background: white;
+    border-left: none;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: width 0.25s ease, min-width 0.25s ease, border-left 0.1s ease;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.dark .value-inspector-panel {
+    background: #111111;
+}
+
+.value-inspector-panel.open {
+    width: 400px;
+    min-width: 300px;
+    border-left: 1px solid rgba(229, 231, 235, 1);
+    overflow: visible;
+}
+
+.dark .value-inspector-panel.open {
+    border-left-color: rgba(64, 64, 64, 1);
+}
+
+/* Sticky inner wrapper for inspector content */
+.value-inspector-panel .inspector-sticky-wrapper {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 120px);
+    background: inherit;
+}
+
+@media (max-width: 767px) {
+    .value-inspector-panel {
+        display: none !important;
+    }
+    #inspector-toggle-btn {
+        display: none !important;
+    }
+}
+
+.inspector-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(249, 250, 251, 1);
+    min-height: 48px;
+}
+
+.dark .inspector-header {
+    border-bottom-color: rgba(64, 64, 64, 1);
+    background: #0a0a0a;
+}
+
+.inspector-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgba(107, 114, 128, 1);
+}
+
+.dark .inspector-title {
+    color: rgba(156, 163, 175, 1);
+}
+
+
+.inspector-content {
+    padding: 16px;
+    overflow-y: auto;
+    flex: 1;
+    font-size: 13px;
+}
+
+.inspector-section {
+    margin-bottom: 16px;
+}
+
+.inspector-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgba(107, 114, 128, 1);
+    margin-bottom: 8px;
+}
+
+.dark .inspector-section-title {
+    color: rgba(156, 163, 175, 1);
+}
+
+.inspector-value {
+    background: rgba(249, 250, 251, 1);
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 4px;
+    padding: 12px;
+    font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+    font-size: 12px;
+    color: rgba(31, 41, 55, 1);
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.dark .inspector-value {
+    background: #0a0a0a;
+    border-color: rgba(64, 64, 64, 1);
+    color: rgba(229, 231, 235, 1);
+}
+
+/* Resize Handle */
+.tab-resize-handle {
+    width: 4px;
+    background: transparent;
+    cursor: col-resize;
+    position: relative;
+    flex-shrink: 0;
+    transition: background-color 0.2s ease;
+    display: none;
+}
+
+.tab-resize-handle.visible {
+    display: block;
+}
+
+.tab-resize-handle:hover {
+    background: rgba(239, 68, 68, 0.5);
+}
+
+.tab-resize-handle:active {
+    background: rgba(239, 68, 68, 0.8);
+}
+
+/* Tree styles for hierarchy tab */
+.tree-node-tab {
+    padding: 6px 12px;
+    margin: 2px 0;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.1s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.tree-node-tab:hover {
+    background-color: rgba(243, 244, 246, 1);
+}
+
+.dark .tree-node-tab:hover {
+    background-color: rgba(64, 64, 64, 1);
+}
+
+.tree-node-tab.selected {
+    background-color: rgba(249, 250, 251, 1);
+    border: 2px solid rgba(220, 38, 38, 1);
+    border-radius: 4px;
+}
+
+.dark .tree-node-tab.selected {
+    background-color: rgba(64, 64, 64, 1);
+    border: 2px solid rgba(239, 68, 68, 1);
+}
+
+.tree-indent-tab {
+    margin-left: 16px;
+    border-left: 1px solid rgba(229, 231, 235, 1);
+    padding-left: 12px;
+}
+
+@media (max-width: 767px) {
+    .tree-indent-tab {
+        margin-left: 8px;
+        padding-left: 8px;
+    }
+}
+
+.dark .tree-indent-tab {
+    border-left-color: rgba(82, 82, 82, 1);
+}
+
+.node-name {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+}
+
+.hierarchy-ctrl-btn-tab {
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+    border: 1px solid rgba(209, 213, 219, 1);
+    background: white;
+    color: rgba(55, 65, 81, 1);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-weight: 500;
+    height: 32px;
+}
+
+.dark .hierarchy-ctrl-btn-tab {
+    border-color: rgba(82, 82, 82, 1);
+    background: rgba(64, 64, 64, 1);
+    color: rgba(229, 231, 235, 1);
+}
+
+.hierarchy-ctrl-btn-tab:hover {
+    background: rgba(243, 244, 246, 1);
+    border-color: rgba(156, 163, 175, 1);
+}
+
+.dark .hierarchy-ctrl-btn-tab:hover {
+    background: rgba(82, 82, 82, 1);
+}
+
+.hierarchy-btn-group {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.hierarchy-ctrl-btn-sm {
+    padding: 4px 8px;
+    font-size: 10px;
+    border-radius: 3px;
+    border: 1px solid rgba(209, 213, 219, 1);
+    background: white;
+    color: rgba(107, 114, 128, 1);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-weight: 500;
+    height: 24px;
+}
+
+.dark .hierarchy-ctrl-btn-sm {
+    border-color: rgba(82, 82, 82, 1);
+    background: rgba(64, 64, 64, 1);
+    color: rgba(156, 163, 175, 1);
+}
+
+.hierarchy-ctrl-btn-sm:hover {
+    background: rgba(243, 244, 246, 1);
+    border-color: rgba(156, 163, 175, 1);
+    color: rgba(55, 65, 81, 1);
+}
+
+.dark .hierarchy-ctrl-btn-sm:hover {
+    background: rgba(82, 82, 82, 1);
+    color: rgba(229, 231, 235, 1);
+}
+
+/* Filter Controls */
+.filter-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.filter-input {
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+    border: 1px solid rgba(209, 213, 219, 1);
+    background: white;
+    color: rgba(55, 65, 81, 1);
+    min-width: 200px;
+    height: 32px;
+    outline: none;
+    transition: border-color 0.15s ease;
+}
+
+.dark .filter-input {
+    border-color: rgba(82, 82, 82, 1);
+    background: rgba(64, 64, 64, 1);
+    color: rgba(229, 231, 235, 1);
+}
+
+.filter-input:focus {
+    border-color: rgba(239, 68, 68, 1);
+}
+
+.filter-input::placeholder {
+    color: rgba(156, 163, 175, 1);
+}
+
+.dark .filter-input::placeholder {
+    color: rgba(107, 114, 128, 1);
+}
+
+.filter-input-ns {
+    min-width: 160px;
+    max-width: 220px;
+}
+
+.namespace-filter {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    background: rgba(243, 244, 246, 0.5);
+    border: 1px solid rgba(209, 213, 219, 1);
+    border-radius: 4px;
+    padding-left: 6px;
+}
+
+.dark .namespace-filter {
+    background: rgba(55, 65, 81, 0.3);
+    border-color: rgba(82, 82, 82, 1);
+}
+
+.namespace-filter .filter-input {
+    border: none;
+    border-radius: 0 4px 4px 0;
+    background: white;
+    border-left: 1px solid rgba(209, 213, 219, 1);
+}
+
+.dark .namespace-filter .filter-input {
+    background: rgba(64, 64, 64, 1);
+    border-left-color: rgba(82, 82, 82, 1);
+}
+
+.filter-toggle {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    color: rgba(107, 114, 128, 1);
+    cursor: pointer;
+    user-select: none;
+    padding-right: 6px;
+}
+
+.dark .filter-toggle {
+    color: rgba(156, 163, 175, 1);
+}
+
+.filter-toggle input[type="checkbox"] {
+    width: 12px;
+    height: 12px;
+    cursor: pointer;
+    accent-color: rgba(107, 114, 128, 1);
+    margin: 0;
+}
+
+.dark .filter-toggle input[type="checkbox"] {
+    accent-color: rgba(156, 163, 175, 1);
+}
+
+.filter-toggle-label {
+    font-weight: 500;
+}
+
+/* Timeline Controls */
+.timeline-tab-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.timeline-controls-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: rgba(249, 250, 251, 1);
+    min-height: 48px;
+}
+
+.dark .timeline-controls-tab {
+    border-bottom-color: rgba(64, 64, 64, 1);
+    background: #111111;
+}
+
+.stream-graph-controls-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: rgba(249, 250, 251, 1);
+    min-height: 48px;
+}
+
+.dark .stream-graph-controls-tab {
+    border-bottom-color: rgba(64, 64, 64, 1);
+    background: #111111;
+}
+
+/* Hidden class for filtered items */
+.hierarchy-node.filtered-out,
+.timeline-bar.filtered-out {
+    display: none !important;
+}
+
+/* Highlight matched search text */
+.search-match {
+    background: rgba(254, 243, 199, 1);
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+.dark .search-match {
+    background: rgba(146, 64, 14, 0.5);
+}
+
+/* Result match indicator */
+.result-match-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    color: rgba(139, 92, 246, 1);
+    margin-right: 4px;
+    font-weight: 600;
+}
+
+.dark .result-match-badge {
+    color: rgba(167, 139, 250, 1);
+}
+
+.result-match {
+    background: rgba(237, 233, 254, 0.5) !important;
+    border-color: rgba(139, 92, 246, 0.5) !important;
+}
+
+.dark .result-match {
+    background: rgba(91, 33, 182, 0.2) !important;
+    border-color: rgba(139, 92, 246, 0.4) !important;
+}
+
+/* Hidden calls indicator */
+.hidden-calls-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: rgba(107, 114, 128, 0.8);
+    background: rgba(243, 244, 246, 0.5);
+    border-left: 2px dashed rgba(156, 163, 175, 0.5);
+    margin: 1px 0;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.hidden-calls-indicator:hover {
+    background: rgba(219, 234, 254, 0.6);
+    color: rgba(59, 130, 246, 0.9);
+}
+
+.dark .hidden-calls-indicator {
+    color: rgba(156, 163, 175, 0.8);
+    background: rgba(55, 65, 81, 0.3);
+    border-left-color: rgba(107, 114, 128, 0.5);
+}
+
+.dark .hidden-calls-indicator:hover {
+    background: rgba(59, 130, 246, 0.15);
+    color: rgba(147, 197, 253, 0.9);
+}
+
+.hidden-calls-dot {
+    font-weight: 600;
+    letter-spacing: 2px;
+}
+
+.hidden-calls-label {
+    font-style: italic;
+}
+
+/* Timeline hidden indicator */
+.timeline-hidden-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 12px;
+    font-size: 11px;
+    color: rgba(107, 114, 128, 0.8);
+    background: rgba(243, 244, 246, 0.5);
+    border-left: 2px dashed rgba(156, 163, 175, 0.5);
+    margin: 1px 0;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.timeline-hidden-indicator:hover {
+    background: rgba(219, 234, 254, 0.6);
+    color: rgba(59, 130, 246, 0.9);
+}
+
+.dark .timeline-hidden-indicator:hover {
+    background: rgba(59, 130, 246, 0.15);
+    color: rgba(147, 197, 253, 0.9);
+}
+
+/* Revealed (previously hidden) items - subtle dimming to distinguish */
+.timeline-bar.revealed-item {
+    opacity: 0.65;
+}
+
+.timeline-bar.revealed-item:hover {
+    opacity: 1;
+}
+
+.tree-node-wrapper.revealed-item {
+    opacity: 0.65;
+}
+
+.tree-node-wrapper.revealed-item:hover {
+    opacity: 1;
+}
+
+.dark .timeline-hidden-indicator {
+    color: rgba(156, 163, 175, 0.8);
+    background: rgba(55, 65, 81, 0.3);
+    border-left-color: rgba(107, 114, 128, 0.5);
+}
+
+/* Filter help tooltip */
+.filter-input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.filter-input-with-clear {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.filter-input-with-clear .filter-input {
+    padding-right: 28px;
+}
+
+.filter-clear-btn {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(156, 163, 175, 0.3);
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease;
+    padding: 0;
+    color: rgba(107, 114, 128, 1);
+}
+
+.filter-input-with-clear:hover .filter-clear-btn,
+.filter-input-with-clear .filter-input:focus ~ .filter-clear-btn,
+.filter-clear-btn.visible {
+    opacity: 1;
+}
+
+.filter-clear-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: rgba(239, 68, 68, 1);
+}
+
+.dark .filter-clear-btn {
+    background: rgba(107, 114, 128, 0.3);
+    color: rgba(156, 163, 175, 1);
+}
+
+.dark .filter-clear-btn:hover {
+    background: rgba(239, 68, 68, 0.3);
+    color: rgba(248, 113, 113, 1);
+}
+
+.filter-clear-btn svg {
+    width: 10px;
+    height: 10px;
+}
+
+.filter-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    font-weight: 600;
+    color: rgba(107, 114, 128, 0.8);
+    background: rgba(229, 231, 235, 0.8);
+    border-radius: 50%;
+    cursor: help;
+    position: relative;
+    flex-shrink: 0;
+}
+
+.dark .filter-help {
+    color: rgba(156, 163, 175, 0.9);
+    background: rgba(75, 85, 99, 0.6);
+}
+
+.filter-help:hover,
+.filter-help:focus {
+    color: rgba(59, 130, 246, 1);
+    background: rgba(219, 234, 254, 1);
+}
+
+.dark .filter-help:hover,
+.dark .filter-help:focus {
+    color: rgba(96, 165, 250, 1);
+    background: rgba(30, 58, 138, 0.6);
+}
+
+.filter-help-tooltip {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-top: 8px;
+    padding: 10px 12px;
+    min-width: 220px;
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.5;
+    color: rgba(55, 65, 81, 1);
+    background: white;
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 1000;
+    text-align: left;
+    white-space: normal;
+}
+
+.filter-help-tooltip-left {
+    left: auto;
+    right: 0;
+    transform: none;
+}
+
+.dark .filter-help-tooltip {
+    color: rgba(229, 231, 235, 1);
+    background: rgba(31, 41, 55, 1);
+    border-color: rgba(75, 85, 99, 1);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.filter-help:hover .filter-help-tooltip,
+.filter-help:focus .filter-help-tooltip {
+    display: block;
+}
+
+.filter-help-tooltip strong {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: rgba(17, 24, 39, 1);
+}
+
+.dark .filter-help-tooltip strong {
+    color: rgba(255, 255, 255, 1);
+}
+
+.filter-help-tooltip em {
+    display: block;
+    margin-top: 6px;
+    font-style: normal;
+    font-weight: 600;
+    color: rgba(107, 114, 128, 1);
+}
+
+.dark .filter-help-tooltip em {
+    color: rgba(156, 163, 175, 1);
+}
+
+.filter-help-tooltip code {
+    display: inline-block;
+    padding: 1px 4px;
+    margin-right: 2px;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    background: rgba(243, 244, 246, 1);
+    border-radius: 3px;
+    color: rgba(79, 70, 229, 1);
+}
+
+.dark .filter-help-tooltip code {
+    background: rgba(55, 65, 81, 1);
+    color: rgba(165, 180, 252, 1);
+}
+
+/* Mobile adjustments for filter controls */
+@media (max-width: 767px) {
+    .filter-controls {
+        gap: 8px;
+    }
+    .filter-input {
+        min-width: 100px;
+        font-size: 10px;
+        padding: 4px 8px;
+    }
+    .filter-input-ns {
+        min-width: 70px;
+        max-width: 100px;
+    }
+    .filter-toggle-label {
+        display: none;
+    }
+}
+
+/* Flow type pills */
+.flow-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 500;
+    border-radius: 3px;
+    margin-left: 6px;
+    white-space: nowrap;
+}
+
+.flow-pill-parallel {
+    background: rgba(59, 130, 246, 0.15);
+    color: rgba(59, 130, 246, 1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.dark .flow-pill-parallel {
+    background: rgba(59, 130, 246, 0.2);
+    color: rgba(147, 197, 253, 1);
+    border-color: rgba(59, 130, 246, 0.4);
+}
+
+.flow-pill-cond {
+    background: rgba(234, 179, 8, 0.15);
+    color: rgba(161, 98, 7, 1);
+    border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.dark .flow-pill-cond {
+    background: rgba(234, 179, 8, 0.2);
+    color: rgba(253, 224, 71, 1);
+    border-color: rgba(234, 179, 8, 0.4);
+}
+
+.flow-pill-cond-all {
+    background: rgba(249, 115, 22, 0.15);
+    color: rgba(194, 65, 12, 1);
+    border: 1px solid rgba(249, 115, 22, 0.3);
+}
+
+.dark .flow-pill-cond-all {
+    background: rgba(249, 115, 22, 0.2);
+    color: rgba(253, 186, 116, 1);
+    border-color: rgba(249, 115, 22, 0.4);
+}
+
+.flow-pill-match {
+    background: rgba(20, 184, 166, 0.15);
+    color: rgba(13, 148, 136, 1);
+    border: 1px solid rgba(20, 184, 166, 0.3);
+}
+
+.dark .flow-pill-match {
+    background: rgba(20, 184, 166, 0.2);
+    color: rgba(94, 234, 212, 1);
+    border-color: rgba(20, 184, 166, 0.4);
+}
+
+.flow-pill-match-all {
+    background: rgba(6, 182, 212, 0.15);
+    color: rgba(8, 145, 178, 1);
+    border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.dark .flow-pill-match-all {
+    background: rgba(6, 182, 212, 0.2);
+    color: rgba(103, 232, 249, 1);
+    border-color: rgba(6, 182, 212, 0.4);
+}
+
+.flow-pill-pipe {
+    background: rgba(139, 92, 246, 0.15);
+    color: rgba(109, 40, 217, 1);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.dark .flow-pill-pipe {
+    background: rgba(139, 92, 246, 0.2);
+    color: rgba(196, 181, 253, 1);
+    border-color: rgba(139, 92, 246, 0.4);
+}
+
+/* Inline flow pills have dashed border to distinguish from function flows */
+.flow-pill-inline {
+    border-style: dashed;
+    min-width: 20px;
+    text-align: center;
+    justify-content: center;
+    margin-left: 0;
+    margin-right: 6px;
+}
+
+/* Branch indicator pill for cond flows */
+.flow-pill-branch {
+    background: rgba(34, 197, 94, 0.15);
+    color: rgba(22, 101, 52, 1);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.dark .flow-pill-branch {
+    background: rgba(34, 197, 94, 0.2);
+    color: rgba(134, 239, 172, 1);
+    border-color: rgba(34, 197, 94, 0.4);
+}
+
+/* Predicate call in cond flow (the condition being checked) */
+.flow-pill-branch-pred {
+    background: rgba(234, 179, 8, 0.15);
+    color: rgba(161, 98, 7, 1);
+    border: 1px solid rgba(234, 179, 8, 0.3);
+    min-width: 20px;
+    text-align: center;
+    justify-content: center;
+    margin-left: 0;
+    margin-right: 6px;
+}
+
+.dark .flow-pill-branch-pred {
+    background: rgba(234, 179, 8, 0.2);
+    color: rgba(253, 224, 71, 1);
+    border-color: rgba(234, 179, 8, 0.4);
+}
+
+/* Result call in cond flow (the action when condition is true) */
+.flow-pill-branch-result {
+    background: rgba(34, 197, 94, 0.15);
+    color: rgba(22, 101, 52, 1);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    min-width: 20px;
+    text-align: center;
+    justify-content: center;
+    margin-left: 0;
+    margin-right: 6px;
+}
+
+.dark .flow-pill-branch-result {
+    background: rgba(34, 197, 94, 0.2);
+    color: rgba(134, 239, 172, 1);
+    border-color: rgba(34, 197, 94, 0.4);
+}
+
+/* Flow-specific left border colors for child calls */
+.flow-border-parallel {
+    border-left-color: rgba(59, 130, 246, 0.6) !important;
+}
+
+.flow-border-cond {
+    border-left-color: rgba(234, 179, 8, 0.6) !important;
+}
+
+.flow-border-match {
+    border-left-color: rgba(20, 184, 166, 0.6) !important;
+}
+
+.flow-border-pipe {
+    border-left-color: rgba(139, 92, 246, 0.6) !important;
+}
+</style>
+
+<!-- Tab Navigation -->
+<div class="observability-tabs">
+    <button class="tab-button active" data-tab="timeline">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+        </svg>
+        <span>Timeline</span>
+    </button>
+    <button class="tab-button" data-tab="hierarchy">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 6v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path>
+        </svg>
+        <span>Hierarchy</span>
+    </button>
+    <button class="tab-button" data-tab="stream-graph">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path>
+        </svg>
+        <span>Stream Graph</span>
+    </button>
+    <button class="tab-button" data-tab="files">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+        </svg>
+        <span>Files</span>
+    </button>
+    <button class="tab-button" data-tab="tasks">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path>
+        </svg>
+        <span>Tasks</span>
+    </button>
+
+    <!-- Inspector Toggle (aligned right) -->
+    <button id="inspector-toggle-btn" class="tab-button ml-auto" title="Value Inspector ON/OFF" style="margin-left: auto; margin-right: 0;">
+        <!-- OFF state: just outline with dividing line -->
+        <svg id="inspector-icon-off" class="tab-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <rect x="1" y="1" width="14" height="14" stroke-width="1.5" rx="1"></rect>
+            <line x1="10" y1="1" x2="10" y2="15" stroke-width="1.5"></line>
+        </svg>
+        <!-- ON state: filled right panel -->
+        <svg id="inspector-icon-on" class="tab-icon" fill="currentColor" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <rect x="1" y="1" width="14" height="14" fill="none" stroke-width="1.5" rx="1"></rect>
+            <rect x="10" y="1" width="5" height="14" fill="currentColor" rx="1"></rect>
+        </svg>
+    </button>
+</div>
+
+<!-- Tab Content Container -->
+<div class="flex-1 flex flex-row min-h-0">
+    <!-- Timeline Tab Content (Default) -->
+    <div id="tab-timeline" class="tab-content active" data-tab-content="timeline">
+        <div class="timeline-tab-view">
+            <!-- Filter Controls -->
+            <div class="timeline-controls-tab">
+                <div class="filter-controls">
+                    <div class="filter-input-wrapper">
+                        <div class="filter-input-with-clear">
+                            <input type="text" id="timeline-search" class="filter-input" placeholder="Search functions..." />
+                            <button type="button" class="filter-clear-btn" data-clear-for="timeline-search" title="Clear search">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <span class="filter-help" tabindex="0">?
+                            <span class="filter-help-tooltip">
+                                <strong>Search</strong><br>
+                                Searches function names and return values.<br><br>
+                                <em>Examples:</em><br>
+                                <code>stream</code> - functions with "stream"<br>
+                                <code>error</code> - errors in results<br>
+                                <code>"api_key"</code> - specific values
+                            </span>
+                        </span>
+                    </div>
+                    <div class="filter-input-wrapper">
+                        <div class="namespace-filter">
+                            <label class="filter-toggle">
+                                <input type="checkbox" id="timeline-exclude-toggle" checked />
+                                <span class="filter-toggle-label">Hide</span>
+                            </label>
+                            <input type="text" id="timeline-exclude-ns" class="filter-input filter-input-ns" placeholder="Exclude..." value="::hot, @flow" />
+                        </div>
+                        <span class="filter-help" tabindex="0">?
+                            <span class="filter-help-tooltip filter-help-tooltip-left">
+                                <strong>Exclusion Patterns</strong><br>
+                                Comma-separated list.<br><br>
+                                <em>Namespaces:</em><br>
+                                <code>::hot</code> - stdlib functions<br>
+                                <code>::my::ns</code> - custom namespace<br><br>
+                                <em>Flow constructs:</em><br>
+                                <code>@flow</code> - all constructs<br>
+                                <code>@cond</code> - conditionals<br>
+                                <code>@match</code> - match expressions<br>
+                                <code>@parallel</code> - parallel blocks<br>
+                                <code>@pipe</code> - pipe flows
+                            </span>
+                        </span>
+                    </div>
+                </div>
+            </div>
+            <!-- Timeline Content -->
+            <div class="timeline-view" id="timeline-view-container">
+                <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    Loading timeline...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Call Hierarchy Tab Content -->
+    <div id="tab-hierarchy" class="tab-content" data-tab-content="hierarchy">
+        <div class="hierarchy-tab-view">
+            <!-- Controls -->
+            <div class="hierarchy-controls-tab">
+                <div class="filter-controls">
+                    <div class="filter-input-wrapper">
+                        <div class="filter-input-with-clear">
+                            <input type="text" id="hierarchy-search" class="filter-input" placeholder="Search functions..." />
+                            <button type="button" class="filter-clear-btn" data-clear-for="hierarchy-search" title="Clear search">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <span class="filter-help" tabindex="0">?
+                            <span class="filter-help-tooltip">
+                                <strong>Search</strong><br>
+                                Searches function names and return values.<br><br>
+                                <em>Examples:</em><br>
+                                <code>stream</code> - functions with "stream"<br>
+                                <code>error</code> - errors in results<br>
+                                <code>"api_key"</code> - specific values
+                            </span>
+                        </span>
+                    </div>
+                    <div class="filter-input-wrapper">
+                        <div class="namespace-filter">
+                            <label class="filter-toggle">
+                                <input type="checkbox" id="hierarchy-exclude-toggle" checked />
+                                <span class="filter-toggle-label">Hide</span>
+                            </label>
+                            <input type="text" id="hierarchy-exclude-ns" class="filter-input filter-input-ns" placeholder="Exclude..." value="::hot, @flow" />
+                        </div>
+                        <span class="filter-help" tabindex="0">?
+                            <span class="filter-help-tooltip filter-help-tooltip-left">
+                                <strong>Exclusion Patterns</strong><br>
+                                Comma-separated list.<br><br>
+                                <em>Namespaces:</em><br>
+                                <code>::hot</code> - stdlib functions<br>
+                                <code>::my::ns</code> - custom namespace<br><br>
+                                <em>Flow constructs:</em><br>
+                                <code>@flow</code> - all constructs<br>
+                                <code>@cond</code> - conditionals<br>
+                                <code>@match</code> - match expressions<br>
+                                <code>@parallel</code> - parallel blocks<br>
+                                <code>@pipe</code> - pipe flows
+                            </span>
+                        </span>
+                    </div>
+                </div>
+                <div class="hierarchy-btn-group">
+                    <button id="expand-all-tab-btn" class="hierarchy-ctrl-btn-sm">Expand</button>
+                    <button id="collapse-all-tab-btn" class="hierarchy-ctrl-btn-sm">Collapse</button>
+                </div>
+            </div>
+
+            <!-- Tree -->
+            <div id="hierarchy-tree-tab" class="hierarchy-tree-tab">
+                <div class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">Loading hierarchy...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flow Graph Tab Content -->
+    <div id="tab-stream-graph" class="tab-content" data-tab-content="stream-graph">
+        <div class="stream-graph-controls-tab">
+            <div class="filter-controls">
+                    <div class="filter-input-wrapper">
+                        <div class="filter-input-with-clear">
+                            <input type="text" id="stream-graph-search" class="filter-input" placeholder="Search type, function, result..." />
+                            <button type="button" class="filter-clear-btn" data-clear-for="stream-graph-search" title="Clear search">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <span class="filter-help" tabindex="0">?
+                        <span class="filter-help-tooltip">
+                            <strong>Search</strong><br>
+                            Searches type, kind, function, status, and result.<br><br>
+                            <em>Examples:</em><br>
+                            <code>event</code> - event nodes<br>
+                            <code>chat:message</code> - event kind<br>
+                            <code>handle-chat</code> - function name<br>
+                            <code>succeeded</code> - by status<br>
+                            <code>aliens</code> - in result values
+                        </span>
+                    </span>
+                </div>
+            </div>
+        </div>
+        <div id="flow-graph-view-container" class="flex-1 p-6 md:p-6 p-3 overflow-auto">
+            <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                Loading stream graph...
+            </div>
+        </div>
+    </div>
+
+    <!-- Files Tab Content -->
+    <div id="tab-files" class="tab-content" data-tab-content="files">
+        <div id="files-view-container" class="flex-1 overflow-auto">
+            <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                Loading files...
+            </div>
+        </div>
+    </div>
+
+    <!-- Tasks Tab Content -->
+    <div id="tab-tasks" class="tab-content" data-tab-content="tasks">
+        <div id="tasks-view-container" class="flex-1 overflow-auto p-4">
+            <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                Loading tasks...
+            </div>
+        </div>
+    </div>
+
+    <!-- Resize Handle -->
+    <div id="tab-resize-handle" class="tab-resize-handle"></div>
+
+    <!-- Shared Value Inspector Panel -->
+    <div id="value-inspector-panel" class="value-inspector-panel">
+        <!-- Sticky inner wrapper that stays in view -->
+        <div class="inspector-sticky-wrapper">
+            <!-- Header -->
+            <div class="inspector-header">
+                <span class="inspector-title">Inspector</span>
+            </div>
+
+            <!-- Content -->
+            <div id="inspector-content" class="inspector-content">
+                <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    Select an item to view details
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Observability Tabs Manager - only define if not already defined (for htmx swaps)
+if (typeof window.ObservabilityTabs === 'undefined') {
+window.ObservabilityTabs = class ObservabilityTabs {
+    constructor(runId) {
+        this.runId = runId;
+        this.runDurationUs = null; // Will be loaded from run details
+        // Read tab from URL, default to 'timeline'
+        const urlParams = new URLSearchParams(window.location.search);
+        this.currentTab = urlParams.get('tab') || 'timeline';
+        // Read inspector state from URL
+        this.inspectorOpen = urlParams.get('inspector') === '1';
+        this.isResizing = false;
+        this.hierarchyData = null;
+        this.timelineData = null;
+        this.hierarchyBuildId = null;
+        this.callDataStatus = null;
+        this.callRetentionDays = null;
+        this.filesData = null;
+        this.expandedNodes = new Set();
+        this.selectedNode = null;
+
+        // Filter state - load from localStorage with defaults
+        // Default excludes: ::hot (stdlib), @flow (all lang constructs: serial, parallel, cond, cond-all)
+        const defaultExcludes = '::hot, @flow';
+        this.filters = {
+            hierarchy: {
+                search: '',
+                excludeEnabled: localStorage.getItem('filter_hierarchy_excludeEnabled') !== 'false',
+                excludeNamespaces: localStorage.getItem('filter_hierarchy_excludeNamespaces') || defaultExcludes
+            },
+            timeline: {
+                search: '',
+                excludeEnabled: localStorage.getItem('filter_timeline_excludeEnabled') !== 'false',
+                excludeNamespaces: localStorage.getItem('filter_timeline_excludeNamespaces') || defaultExcludes
+            }
+        };
+
+        // Track which hidden groups have been manually expanded (click to reveal)
+        this.revealedHiddenGroups = {
+            timeline: new Set(),
+            hierarchy: new Set()
+        };
+
+        // State tracking for each tab
+        this.tabState = {
+            timeline: { selectedItemId: null, selectedItemType: null },
+            hierarchy: { selectedNodeId: null, selectedNodeType: null },
+            'stream-graph': { selectedNodeId: null, selectedNodeType: null },
+            files: { selectedFileId: null },
+            tasks: {}
+        };
+
+        this.initializeElements();
+        this.initializeFilterElements();
+        this.initializeEventListeners();
+        this.initializeFilterListeners();
+        this.switchTab(this.currentTab); // Activate the correct tab on init
+
+        // Apply initial inspector state
+        this.applyInspectorState();
+
+        this.loadAllData();
+    }
+
+    initializeElements() {
+        this.tabButtons = document.querySelectorAll('.tab-button');
+        this.tabContents = document.querySelectorAll('.tab-content');
+        this.tabsContainer = document.querySelector('.observability-tabs');
+        this.inspector = document.getElementById('value-inspector-panel');
+        this.inspectorContent = document.getElementById('inspector-content');
+        this.inspectorToggleBtn = document.getElementById('inspector-toggle-btn');
+        this.resizeHandle = document.getElementById('tab-resize-handle');
+        this.hierarchyTree = document.getElementById('hierarchy-tree-tab');
+        this.timelineView = document.getElementById('timeline-view-container');
+        this.flowGraphView = document.getElementById('flow-graph-view-container');
+        this.filesView = document.getElementById('files-view-container');
+        this.tasksView = document.getElementById('tasks-view-container');
+    }
+
+    initializeEventListeners() {
+        // Tab switching
+        this.tabButtons.forEach(btn => {
+            // Skip the inspector toggle button
+            if (btn.id === 'inspector-toggle-btn') return;
+            btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
+        });
+
+        // Inspector toggle
+        this.inspectorToggleBtn.addEventListener('click', () => this.toggleInspector());
+
+        // Hierarchy controls
+        document.getElementById('expand-all-tab-btn')?.addEventListener('click', () => this.expandAllHierarchy());
+        document.getElementById('collapse-all-tab-btn')?.addEventListener('click', () => this.collapseAllHierarchy());
+
+        // Resize
+        this.resizeHandle.addEventListener('mousedown', (e) => this.startResize(e));
+        document.addEventListener('mousemove', (e) => this.resize(e));
+        document.addEventListener('mouseup', () => this.stopResize());
+    }
+
+    initializeFilterElements() {
+        // Hierarchy filter elements
+        this.hierarchySearchInput = document.getElementById('hierarchy-search');
+        this.hierarchyExcludeToggle = document.getElementById('hierarchy-exclude-toggle');
+        this.hierarchyExcludeNsInput = document.getElementById('hierarchy-exclude-ns');
+
+        // Timeline filter elements
+        this.timelineSearchInput = document.getElementById('timeline-search');
+        this.timelineExcludeToggle = document.getElementById('timeline-exclude-toggle');
+        this.timelineExcludeNsInput = document.getElementById('timeline-exclude-ns');
+
+        // Set initial values from state
+        if (this.hierarchyExcludeToggle) {
+            this.hierarchyExcludeToggle.checked = this.filters.hierarchy.excludeEnabled;
+        }
+        if (this.hierarchyExcludeNsInput) {
+            this.hierarchyExcludeNsInput.value = this.filters.hierarchy.excludeNamespaces;
+        }
+        if (this.timelineExcludeToggle) {
+            this.timelineExcludeToggle.checked = this.filters.timeline.excludeEnabled;
+        }
+        if (this.timelineExcludeNsInput) {
+            this.timelineExcludeNsInput.value = this.filters.timeline.excludeNamespaces;
+        }
+    }
+
+    initializeFilterListeners() {
+        // Hierarchy search - debounced
+        let hierarchySearchTimeout;
+        this.hierarchySearchInput?.addEventListener('input', (e) => {
+            clearTimeout(hierarchySearchTimeout);
+            hierarchySearchTimeout = setTimeout(() => {
+                this.filters.hierarchy.search = e.target.value.toLowerCase();
+                this.revealedHiddenGroups.hierarchy.clear();
+                this.renderHierarchy();
+            }, 150);
+        });
+
+        // Hierarchy exclude toggle
+        this.hierarchyExcludeToggle?.addEventListener('change', (e) => {
+            this.filters.hierarchy.excludeEnabled = e.target.checked;
+            localStorage.setItem('filter_hierarchy_excludeEnabled', e.target.checked);
+            this.revealedHiddenGroups.hierarchy.clear();
+            this.renderHierarchy();
+        });
+
+        // Hierarchy exclude namespaces
+        this.hierarchyExcludeNsInput?.addEventListener('input', (e) => {
+            this.filters.hierarchy.excludeNamespaces = e.target.value;
+            localStorage.setItem('filter_hierarchy_excludeNamespaces', e.target.value);
+            this.revealedHiddenGroups.hierarchy.clear();
+            this.renderHierarchy();
+        });
+
+        // Timeline search - debounced
+        let timelineSearchTimeout;
+        this.timelineSearchInput?.addEventListener('input', (e) => {
+            clearTimeout(timelineSearchTimeout);
+            timelineSearchTimeout = setTimeout(() => {
+                this.filters.timeline.search = e.target.value.toLowerCase();
+                this.revealedHiddenGroups.timeline.clear();
+                this.renderTimeline();
+            }, 150);
+        });
+
+        // Timeline exclude toggle
+        this.timelineExcludeToggle?.addEventListener('change', (e) => {
+            this.filters.timeline.excludeEnabled = e.target.checked;
+            localStorage.setItem('filter_timeline_excludeEnabled', e.target.checked);
+            this.revealedHiddenGroups.timeline.clear();
+            this.renderTimeline();
+        });
+
+        // Timeline exclude namespaces
+        this.timelineExcludeNsInput?.addEventListener('input', (e) => {
+            this.filters.timeline.excludeNamespaces = e.target.value;
+            localStorage.setItem('filter_timeline_excludeNamespaces', e.target.value);
+            this.revealedHiddenGroups.timeline.clear();
+            this.renderTimeline();
+        });
+
+        // Stream graph search
+        const streamGraphSearchInput = document.getElementById('stream-graph-search');
+        let streamGraphSearchTimeout;
+        streamGraphSearchInput?.addEventListener('input', (e) => {
+            clearTimeout(streamGraphSearchTimeout);
+            streamGraphSearchTimeout = setTimeout(() => {
+                if (typeof window.filterStreamGraph === 'function') {
+                    window.filterStreamGraph(e.target.value);
+                }
+            }, 150);
+            this.updateClearButtonVisibility(e.target);
+        });
+
+        // Clear button handlers
+        this.initializeClearButtons();
+    }
+
+    initializeClearButtons() {
+        // Add click handlers for all clear buttons
+        document.querySelectorAll('.filter-clear-btn').forEach(btn => {
+            const inputId = btn.dataset.clearFor;
+            const input = document.getElementById(inputId);
+            if (!input) return;
+
+            // Show/hide based on initial value
+            this.updateClearButtonVisibility(input);
+
+            // Update visibility on input
+            input.addEventListener('input', () => this.updateClearButtonVisibility(input));
+
+            // Clear on click
+            btn.addEventListener('click', () => {
+                input.value = '';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.focus();
+                this.updateClearButtonVisibility(input);
+            });
+        });
+    }
+
+    updateClearButtonVisibility(input) {
+        const btn = document.querySelector(`.filter-clear-btn[data-clear-for="${input.id}"]`);
+        if (btn) {
+            if (input.value.length > 0) {
+                btn.classList.add('visible');
+            } else {
+                btn.classList.remove('visible');
+            }
+        }
+    }
+
+    // Check if a function name should be filtered out
+    // Supports:
+    //   - Namespace prefixes: "::hot" matches functions starting with "::hot"
+    //   - Flow constructs: "@cond" matches flow type "cond", "@loop" matches "loop", etc.
+    // Returns: { filtered: boolean, matchType: 'name' | 'result' | null }
+    shouldFilterOut(name, filterType, flowType = null, result = null) {
+        const filter = this.filters[filterType];
+        if (!name) return { filtered: false, matchType: null };
+
+        // Check search filter - searches both name and result
+        if (filter.search) {
+            const searchLower = filter.search.toLowerCase();
+            const nameMatches = name.toLowerCase().includes(searchLower);
+
+            // Check if result matches (stringify for searching)
+            let resultMatches = false;
+            if (result !== null && result !== undefined) {
+                try {
+                    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+                    resultMatches = resultStr.toLowerCase().includes(searchLower);
+                } catch (e) {
+                    // Ignore stringify errors
+                }
+            }
+
+            if (!nameMatches && !resultMatches) {
+                return { filtered: true, matchType: null };
+            }
+
+            // Track what matched for UI feedback
+            const matchType = resultMatches ? 'result' : 'name';
+            // Continue to check exclusions, but remember the match type
+            return this.checkExclusions(name, filter, flowType, matchType);
+        }
+
+        return this.checkExclusions(name, filter, flowType, null);
+    }
+
+    // Helper to check namespace/flow exclusions
+    checkExclusions(name, filter, flowType, matchType) {
+        // All known flow types for @flow shorthand
+        const ALL_FLOW_TYPES = ['serial', 'parallel', 'cond', 'cond-all', 'match', 'match-all', 'pipe'];
+
+        // Check if this is an inline flow construct (synthetic name like <cond>, <parallel>)
+        // vs a user-defined function that happens to use a flow type
+        const isInlineFlowConstruct = name.startsWith('<') && name.endsWith('>');
+
+        if (filter.excludeEnabled && filter.excludeNamespaces) {
+            const excludePatterns = filter.excludeNamespaces.split(',').map(p => p.trim()).filter(p => p);
+            for (const pattern of excludePatterns) {
+                // Flow construct pattern: @cond, @parallel, etc.
+                // Only applies to INLINE flow constructs, not user-defined flow functions
+                if (pattern.startsWith('@')) {
+                    // Only filter inline flow constructs, not user functions
+                    if (!isInlineFlowConstruct) {
+                        continue;
+                    }
+
+                    const flowPattern = pattern.substring(1);
+
+                    // Special: @flow means all flow constructs
+                    if (flowPattern === 'flow') {
+                        if (flowType && ALL_FLOW_TYPES.includes(flowType)) {
+                            return { filtered: true, matchType: null };
+                        }
+                    } else if (flowType && flowType === flowPattern) {
+                        return { filtered: true, matchType: null };
+                    }
+                } else {
+                    // Namespace prefix pattern
+                    if (name.startsWith(pattern)) {
+                        return { filtered: true, matchType: null };
+                    }
+                }
+            }
+        }
+
+        return { filtered: false, matchType };
+    }
+
+    // Check if a node or any of its descendants match the filter
+    hasVisibleDescendants(node, filterType) {
+        const name = node.name || node.function_name || 'Unknown';
+        const flowType = node.flow?.type || null;
+        const result = node.return_value || null;
+        const filterResult = this.shouldFilterOut(name, filterType, flowType, result);
+        if (!filterResult.filtered) {
+            return true;
+        }
+        if (node.children && node.children.length > 0) {
+            return node.children.some(child => this.hasVisibleDescendants(child, filterType));
+        }
+        return false;
+    }
+
+    switchTab(tabName) {
+        // Update active tab button
+        this.tabButtons.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update active tab content
+        this.tabContents.forEach(content => {
+            if (content.dataset.tabContent === tabName) {
+                content.classList.add('active');
+            } else {
+                content.classList.remove('active');
+            }
+        });
+
+        this.currentTab = tabName;
+
+        // Update URL with tab parameter (without page reload)
+        const url = new URL(window.location);
+        url.searchParams.set('tab', tabName);
+        window.history.replaceState({}, '', url);
+
+        // Handle inspector state for the new tab
+        this.restoreOrClearInspector(tabName);
+    }
+
+    openInspector(content) {
+        // Check if mobile (inspector is hidden on mobile)
+        const isMobile = window.innerWidth < 768;
+
+        if (isMobile) {
+            // On mobile, show content in modal instead of side panel
+            this.showInspectorInModal(content);
+        } else {
+            // On desktop, use side panel
+            this.inspector.classList.add('open');
+            this.resizeHandle.classList.add('visible');
+            this.inspectorContent.innerHTML = content;
+            this.inspectorOpen = true;
+            this.updateInspectorState();
+
+            // Apply syntax highlighting to code blocks
+            if (typeof Prism !== 'undefined') {
+                const codeBlocks = this.inspectorContent.querySelectorAll('code.language-hot');
+                codeBlocks.forEach(block => Prism.highlightElement(block));
+            }
+        }
+    }
+
+    showInspectorInModal(content) {
+        // Create a temporary div to parse the HTML content
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = content;
+
+        // Extract all inspector sections and build rich HTML for modal
+        const sections = tempDiv.querySelectorAll('.inspector-section');
+        let modalHtml = '';
+
+        sections.forEach((section, index) => {
+            // Get all section titles and values
+            const titles = section.querySelectorAll('.inspector-section-title');
+            const values = section.querySelectorAll('.inspector-value');
+
+            titles.forEach((titleEl, i) => {
+                const title = titleEl.textContent.trim();
+                const valueEl = values[i];
+
+                if (valueEl) {
+                    // Clone the value element to manipulate it
+                    const valueClone = valueEl.cloneNode(true);
+
+                    // Remove hidden elements and expand buttons (we don't need them in modal)
+                    valueClone.querySelectorAll('[style*="display: none"], button, .absolute').forEach(el => el.remove());
+
+                    // Get the code element if it exists, otherwise get all text
+                    const codeElement = valueClone.querySelector('code');
+                    let valueText = '';
+                    let isCode = false;
+
+                    if (codeElement) {
+                        valueText = codeElement.textContent.trim();
+                        isCode = true;
+                    } else {
+                        valueText = valueClone.textContent.trim();
+                    }
+
+                    if (title && valueText) {
+                        const fieldId = 'modal-field-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                        const escapedValue = this.escapeHtml(valueText);
+
+                        modalHtml += `
+                            <div class="mb-4">
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">${this.escapeHtml(title)}</span>
+                                    <button onclick="navigator.clipboard.writeText(document.getElementById('${fieldId}').textContent).then(() => { this.innerHTML = '<svg class=\\'w-4 h-4 text-green-500\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\'></path></svg>'; setTimeout(() => { this.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\'></path></svg>'; }, 1500) })" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded" title="Copy to clipboard">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div id="${fieldId}" class="bg-gray-100 dark:bg-gray-800 rounded-lg p-3 font-mono text-sm text-gray-900 dark:text-gray-100 overflow-x-auto">
+                                    ${isCode ? `<pre class="whitespace-pre-wrap"><code class="language-hot">${escapedValue}</code></pre>` : `<span>${escapedValue}</span>`}
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+            });
+        });
+
+        if (modalHtml) {
+            this.showRichInspectorModal('Inspector', modalHtml);
+        }
+    }
+
+    showRichInspectorModal(title, htmlContent) {
+        // Create modal overlay
+        const modalOverlay = document.createElement('div');
+        modalOverlay.id = 'inspector-modal-overlay';
+        modalOverlay.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4';
+        modalOverlay.onclick = (e) => {
+            if (e.target === modalOverlay) {
+                modalOverlay.remove();
+            }
+        };
+
+        // Create modal content
+        modalOverlay.innerHTML = `
+            <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
+                <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${this.escapeHtml(title)}</h3>
+                    <button onclick="document.getElementById('inspector-modal-overlay').remove()" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="p-4 overflow-y-auto flex-1">
+                    ${htmlContent}
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modalOverlay);
+
+        // Apply syntax highlighting
+        if (typeof Prism !== 'undefined') {
+            const codeBlocks = modalOverlay.querySelectorAll('code.language-hot');
+            codeBlocks.forEach(block => Prism.highlightElement(block));
+        }
+    }
+
+    closeInspector() {
+        this.inspector.classList.remove('open');
+        this.resizeHandle.classList.remove('visible');
+        this.inspectorOpen = false;
+        this.updateInspectorState();
+    }
+
+    toggleInspector() {
+        if (this.inspectorOpen) {
+            this.closeInspector();
+        } else {
+            // Open inspector with current tab's state
+            this.restoreOrClearInspector(this.currentTab);
+            this.inspector.classList.add('open');
+            this.resizeHandle.classList.add('visible');
+            this.inspectorOpen = true;
+            this.updateInspectorState();
+        }
+    }
+
+    applyInspectorState() {
+        // Apply the initial state from URL
+        if (this.inspectorOpen) {
+            this.inspector.classList.add('open');
+            this.resizeHandle.classList.add('visible');
+            this.restoreOrClearInspector(this.currentTab);
+        } else {
+            this.inspector.classList.remove('open');
+            this.resizeHandle.classList.remove('visible');
+        }
+        this.updateToggleButtonAppearance();
+    }
+
+    updateInspectorState() {
+        // Update URL with inspector state
+        const url = new URL(window.location);
+        if (this.inspectorOpen) {
+            url.searchParams.set('inspector', '1');
+        } else {
+            url.searchParams.delete('inspector');
+        }
+        window.history.replaceState({}, '', url);
+        this.updateToggleButtonAppearance();
+    }
+
+    updateToggleButtonAppearance() {
+        // Update toggle button to show active/inactive state
+        const iconOn = document.getElementById('inspector-icon-on');
+        const iconOff = document.getElementById('inspector-icon-off');
+
+        if (this.inspectorOpen) {
+            this.inspectorToggleBtn.classList.add('active');
+            // Show ON icon (filled panel)
+            if (iconOn) iconOn.classList.remove('hidden');
+            if (iconOff) iconOff.classList.add('hidden');
+        } else {
+            this.inspectorToggleBtn.classList.remove('active');
+            // Show OFF icon (just line)
+            if (iconOn) iconOn.classList.add('hidden');
+            if (iconOff) iconOff.classList.remove('hidden');
+        }
+    }
+
+    restoreOrClearInspector(tabName) {
+        const state = this.tabState[tabName];
+
+        if (!state) {
+            this.showInspectorPrompt(tabName);
+            return;
+        }
+
+        // Restore state based on tab type
+        switch (tabName) {
+            case 'timeline':
+                if (state.selectedItemId) {
+                    // Re-fetch and display the selected timeline item
+                    this.restoreTimelineSelection(state.selectedItemId, state.selectedItemType);
+                } else {
+                    this.showInspectorPrompt(tabName);
+                }
+                break;
+
+            case 'hierarchy':
+                if (state.selectedNodeId) {
+                    // Re-display the selected hierarchy node
+                    this.restoreHierarchySelection(state.selectedNodeId, state.selectedNodeType);
+                } else {
+                    this.showInspectorPrompt(tabName);
+                }
+                break;
+
+            case 'stream-graph':
+                if (state.selectedNodeId) {
+                    // Restore run graph selection (if we stored it)
+                    this.restoreFlowSelection(state.selectedNodeId, state.selectedNodeType);
+                } else {
+                    this.showInspectorPrompt(tabName);
+                }
+                break;
+
+            default:
+                this.showInspectorPrompt(tabName);
+        }
+    }
+
+    showInspectorPrompt(tabName) {
+        const prompts = {
+            timeline: 'Click on a timeline item to view details',
+            hierarchy: 'Click on a call or flow to view details',
+            table: 'Click on a variable row to view details',
+            flow: 'Click on a run or event to view details',
+            files: 'Click on a file to view details'
+        };
+
+        const prompt = prompts[tabName] || 'Select an item to view details';
+
+        if (this.inspectorOpen) {
+            // Inspector is open, show prompt inside it
+            this.inspectorContent.innerHTML = `
+                <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    ${prompt}
+                </div>
+            `;
+        }
+        // If inspector is closed, do nothing - the default prompt will show when it opens
+    }
+
+    restoreTimelineSelection(itemId, itemType) {
+        // For now, just show a prompt since we don't have the item data cached
+        // In a full implementation, we could cache the item data
+        this.showInspectorPrompt('timeline');
+    }
+
+    restoreHierarchySelection(nodeId, nodeType) {
+        // For hierarchy, we can try to find the node in our cached data
+        if (!this.hierarchyData) {
+            this.showInspectorPrompt('hierarchy');
+            return;
+        }
+
+        // Search for the node in hierarchy data
+        const node = this.findNodeById(this.hierarchyData.tree, nodeId);
+        if (node) {
+            this.showNodeInInspector(node);
+        } else {
+            this.showInspectorPrompt('hierarchy');
+        }
+    }
+
+    async restoreFlowSelection(nodeId, nodeType) {
+        // Show the run or event in the inspector
+        if (nodeType === 'run') {
+            await this.showRunInInspector(nodeId);
+        } else if (nodeType === 'event') {
+            await this.showEventInInspector(nodeId);
+        } else {
+            this.showInspectorPrompt('stream-graph');
+        }
+    }
+
+    async showRunInInspector(runId) {
+        // Save state for stream-graph tab
+        this.tabState['stream-graph'].selectedNodeId = runId;
+        this.tabState['stream-graph'].selectedNodeType = 'run';
+
+        try {
+            const response = await fetch(`/data/runs/${runId}/json`);
+            if (!response.ok) {
+                console.error('Failed to fetch run data');
+                return;
+            }
+
+            const data = await response.json();
+
+            // Build the inspector content
+            let html = '<div class="inspector-section">';
+
+            // Run ID
+            html += '<div class="inspector-section-title">Run ID</div>';
+            html += '<div class="inspector-value font-mono text-xs break-all">';
+            html += this.escapeHtml(data.run_id);
+            html += '</div>';
+
+            // Function
+            if (data.event_fn) {
+                html += '<div class="inspector-section-title mt-4">Function</div>';
+                html += '<div class="inspector-value font-mono text-xs">';
+                html += '<code class="language-hot">' + this.escapeHtml(data.event_fn) + '</code>';
+                html += '</div>';
+            }
+
+            // Status
+            if (data.status) {
+                html += '<div class="inspector-section-title mt-4">Status</div>';
+                html += '<div class="inspector-value text-xs">';
+                const statusClass = data.status === 'succeeded' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                   data.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                   'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
+                const escapedStatus = this.escapeHtml(data.status);
+                html += `<span class="px-2 py-1 rounded-full ${statusClass}">${escapedStatus}</span>`;
+                html += '</div>';
+            }
+
+            // Duration
+            if (data.start_time && data.stop_time) {
+                const startTime = new Date(data.start_time);
+                const stopTime = new Date(data.stop_time);
+                const durationMs = stopTime - startTime;
+                const durationFormatted = this.formatDuration(durationMs * 1000); // Convert to microseconds
+
+                html += '<div class="inspector-section-title mt-4">Duration</div>';
+                html += '<div class="inspector-value font-mono text-xs">';
+                html += durationFormatted;
+                html += '</div>';
+            }
+
+            // Result
+            if (data.result) {
+                const resultHot = this.formatAsHotLiteral(data.result);
+                const resultJson = JSON.stringify(data.result, null, 2);
+                const resultId = 'result-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                const escapedResultHot = this.escapeHtml(resultHot);
+                const escapedResultJson = this.escapeHtml(resultJson);
+
+                html += '<div class="inspector-section-title mt-4">Result</div>';
+                html += '<div class="inspector-value font-mono text-xs">';
+                html += '<div class="relative">';
+                html += `<div id="${resultId}-hot" style="display: none;">${escapedResultHot}</div>`;
+                html += `<div id="${resultId}-json" style="display: none;">${escapedResultJson}</div>`;
+                html += `<button onclick="openContentModalWithFormats('Result', document.getElementById('${resultId}-hot').textContent, document.getElementById('${resultId}-json').textContent)" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full result">`;
+                html += '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">';
+                html += '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>';
+                html += '</svg>';
+                html += '</button>';
+                html += '<pre class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5"><code class="language-hot whitespace-pre-wrap max-h-60 overflow-auto">' + escapedResultHot + '</code></pre>';
+                html += '</div>';
+                html += '</div>';
+            }
+
+            html += '</div>';
+
+            // Check if mobile
+            const isMobile = window.innerWidth < 768;
+
+            if (isMobile) {
+                // On mobile, show in modal
+                this.showInspectorInModal(html);
+            } else {
+                // On desktop, show in side panel
+                this.inspector.classList.add('open');
+                this.resizeHandle.classList.add('visible');
+                this.inspectorOpen = true;
+                this.updateInspectorState();
+
+                this.inspectorContent.innerHTML = html;
+
+                // Apply syntax highlighting
+                if (typeof Prism !== 'undefined') {
+                    const codeBlocks = this.inspectorContent.querySelectorAll('code.language-hot');
+                    codeBlocks.forEach(block => Prism.highlightElement(block));
+                }
+            }
+        } catch (error) {
+            console.error('Error loading run data:', error);
+        }
+    }
+
+    async showEventInInspector(eventId) {
+        // Save state for stream-graph tab
+        this.tabState['stream-graph'].selectedNodeId = eventId;
+        this.tabState['stream-graph'].selectedNodeType = 'event';
+
+        try {
+            const response = await fetch(`/data/events/${eventId}/json`);
+            if (!response.ok) {
+                console.error('Failed to fetch event data');
+                return;
+            }
+
+            const data = await response.json();
+
+            // Build the inspector content
+            let html = '<div class="inspector-section">';
+
+            // Event ID
+            html += '<div class="inspector-section-title">Event ID</div>';
+            html += '<div class="inspector-value font-mono text-xs break-all">';
+            html += this.escapeHtml(data.event_id);
+            html += '</div>';
+
+            // Event Type
+            if (data.event_type) {
+                html += '<div class="inspector-section-title mt-4">Event Type</div>';
+                html += '<div class="inspector-value font-mono text-xs">';
+                html += this.escapeHtml(data.event_type);
+                html += '</div>';
+            }
+
+            // Event Time
+            if (data.event_time) {
+                html += '<div class="inspector-section-title mt-4">Event Time</div>';
+                html += '<div class="inspector-value font-mono text-xs">';
+                html += this.escapeHtml(data.event_time);
+                html += '</div>';
+            }
+
+            // Event Data
+            if (data.event_data) {
+                const eventDataHot = this.formatAsHotLiteral(data.event_data);
+                const eventDataJson = JSON.stringify(data.event_data, null, 2);
+                const eventDataId = 'event-data-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                const escapedEventDataHot = this.escapeHtml(eventDataHot);
+                const escapedEventDataJson = this.escapeHtml(eventDataJson);
+
+                html += '<div class="inspector-section-title mt-4">Event Data</div>';
+                html += '<div class="inspector-value font-mono text-xs">';
+                html += '<div class="relative">';
+                html += `<div id="${eventDataId}-hot" style="display: none;">${escapedEventDataHot}</div>`;
+                html += `<div id="${eventDataId}-json" style="display: none;">${escapedEventDataJson}</div>`;
+                html += `<button onclick="openContentModalWithFormats('Event Data', document.getElementById('${eventDataId}-hot').textContent, document.getElementById('${eventDataId}-json').textContent)" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full event data">`;
+                html += '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">';
+                html += '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>';
+                html += '</svg>';
+                html += '</button>';
+                html += '<pre class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5"><code class="language-hot whitespace-pre-wrap max-h-60 overflow-auto">' + escapedEventDataHot + '</code></pre>';
+                html += '</div>';
+                html += '</div>';
+            }
+
+            html += '</div>';
+
+            // Check if mobile
+            const isMobile = window.innerWidth < 768;
+
+            if (isMobile) {
+                // On mobile, show in modal
+                this.showInspectorInModal(html);
+            } else {
+                // On desktop, show in side panel
+                this.inspector.classList.add('open');
+                this.resizeHandle.classList.add('visible');
+                this.inspectorOpen = true;
+                this.updateInspectorState();
+
+                this.inspectorContent.innerHTML = html;
+
+                // Apply syntax highlighting
+                if (typeof Prism !== 'undefined') {
+                    const codeBlocks = this.inspectorContent.querySelectorAll('code.language-hot');
+                    codeBlocks.forEach(block => Prism.highlightElement(block));
+                }
+            }
+        } catch (error) {
+            console.error('Error loading event data:', error);
+        }
+    }
+
+    findNodeById(nodes, targetId) {
+        for (const node of nodes) {
+            if (node.id === targetId) {
+                return node;
+            }
+            if (node.children && node.children.length > 0) {
+                const found = this.findNodeById(node.children, targetId);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    scrollInspectorIntoView() {
+        // Use setTimeout to ensure DOM has fully updated and rendered
+        setTimeout(() => {
+            // Scroll to the tabs container at the top of the component
+            // This ensures the whole observability UI (tabs + inspector) is visible
+            if (this.tabsContainer) {
+                const tabsRect = this.tabsContainer.getBoundingClientRect();
+                const viewportTop = 0;
+
+                // If tabs are not at the top of viewport, scroll them into view
+                if (tabsRect.top < viewportTop) {
+                    this.tabsContainer.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start',  // Align tabs to top of viewport
+                        inline: 'nearest'
+                    });
+                }
+            }
+        }, 100);  // Small delay to ensure content is rendered
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    escapeAttribute(text) {
+        return this.escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    toggleSection(sectionName) {
+        const content = document.getElementById(`${sectionName}-content`);
+        const chevron = document.getElementById(`${sectionName}-chevron`);
+
+        if (content && chevron) {
+            if (content.classList.contains('hidden')) {
+                // Expand
+                content.classList.remove('hidden');
+                chevron.classList.remove('-rotate-90');
+            } else {
+                // Collapse
+                content.classList.add('hidden');
+                chevron.classList.add('-rotate-90');
+            }
+        }
+    }
+
+    async loadAllData() {
+        await Promise.all([
+            this.loadHierarchyData(),
+            this.loadTimelineData(),
+            this.loadFlowGraphData(),
+            this.loadFilesData(),
+            this.loadTasksData()
+        ]);
+    }
+
+    /**
+     * Generate a user-facing message for call data availability status.
+     * Returns an HTML string, or null if call data is available normally.
+     */
+    getCallDataStatusMessage(status, retentionDays, size) {
+        const py = size === 'sm' ? 'py-4' : 'py-8';
+        const textSize = size === 'sm' ? 'text-sm' : 'text-sm';
+        switch (status) {
+            case 'expired':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Call data is no longer available</p>
+                    <p class="text-xs mt-2">Your plan retains call data for ${retentionDays} day${retentionDays !== 1 ? 's' : ''}</p>
+                </div>`;
+            case 'not_included':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Call data is not included in your current plan</p>
+                    <p class="text-xs mt-2">Upgrade your plan to access call-level execution data</p>
+                </div>`;
+            case 'collecting':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Collecting call data&hellip;</p>
+                    <p class="text-xs mt-2">Call data will appear as the run executes</p>
+                </div>`;
+            case 'empty':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>No calls recorded</p>
+                    <p class="text-xs mt-2">This run completed without any tracked function calls</p>
+                </div>`;
+            default:
+                return null;
+        }
+    }
+
+    async loadHierarchyData() {
+        try {
+            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+
+            if (!response.ok) {
+                console.error('Hierarchy API error:', response.status, response.statusText);
+                this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">API Error: ${response.status}</div>`;
+                return;
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Store retention metadata
+                this.callDataStatus = result.call_data_status;
+                this.callRetentionDays = result.call_retention_days;
+                this.hierarchyBuildId = result.build_id || null;
+
+                // Check if call data is unavailable for a known reason
+                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'sm');
+                if (statusMsg) {
+                    this.hierarchyTree.innerHTML = statusMsg;
+                    return;
+                }
+
+                this.hierarchyData = result.data;
+                // Auto-expand all nodes on initial load
+                this.expandAllRecursive(this.hierarchyData.tree);
+                this.renderHierarchy();
+            } else {
+                const errorMsg = result.error || 'Unknown error';
+                console.error('Hierarchy load failed:', errorMsg);
+                this.hierarchyTree.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
+                    <p>No call hierarchy available</p>
+                    <p class="text-xs mt-2">This run may not have function call tracking enabled</p>
+                </div>`;
+            }
+        } catch (error) {
+            console.error('Error loading hierarchy:', error);
+            this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">
+                <p>Failed to load hierarchy</p>
+                <p class="text-xs mt-2">${error.message}</p>
+            </div>`;
+        }
+    }
+
+    async loadTimelineData() {
+        try {
+            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+
+            if (!response.ok) {
+                console.error('Timeline API error:', response.status, response.statusText);
+                this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`;
+                return;
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Store retention metadata (may already be set by hierarchy loader)
+                this.callDataStatus = result.call_data_status;
+                this.callRetentionDays = result.call_retention_days;
+                this.hierarchyBuildId = result.build_id || this.hierarchyBuildId;
+
+                // Check if call data is unavailable for a known reason
+                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'lg');
+                if (statusMsg) {
+                    this.timelineView.innerHTML = statusMsg;
+                    return;
+                }
+
+                this.timelineData = result.data;
+                this.renderTimeline();
+            } else {
+                const errorMsg = result.error || 'Unknown error';
+                console.error('Timeline load failed:', errorMsg);
+                this.timelineView.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    <p>No execution timeline available</p>
+                    <p class="text-xs mt-2">This run may not have function call tracking enabled</p>
+                </div>`;
+            }
+        } catch (error) {
+            console.error('Error loading timeline:', error);
+            this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
+                <p>Failed to load timeline</p>
+                <p class="text-xs mt-2">${error.message}</p>
+            </div>`;
+        }
+    }
+
+    async loadFlowGraphData() {
+        // Flow graph is already embedded in the page, just need to move it
+        const flowGraphSection = document.getElementById('run-flow-graph-section');
+        const flowGraphView = document.getElementById('flow-graph-view-container');
+
+        if (flowGraphSection && flowGraphView) {
+            const graphContainer = flowGraphSection.querySelector('#run-graph');
+            if (graphContainer) {
+                // Clone the graph container
+                const clonedGraph = document.createElement('div');
+                clonedGraph.id = 'run-graph-cloned';
+                clonedGraph.style.width = '100%';
+                clonedGraph.style.minHeight = '200px';
+
+                flowGraphView.innerHTML = '';
+                flowGraphView.appendChild(clonedGraph);
+
+                // Re-render the graph in the cloned container using shared rendering
+                const graphDataScript = document.getElementById('graph-data');
+                if (graphDataScript && typeof window.renderStreamGraph === 'function') {
+                    const graphDataJson = graphDataScript.textContent.trim();
+                    window.renderStreamGraph(clonedGraph.id, graphDataJson, 'showRunStreamNodeInspector');
+                } else {
+                    clonedGraph.innerHTML = '<div class="text-center text-gray-500 dark:text-gray-400 py-8">Graph data not available</div>';
+                }
+            }
+        }
+    }
+
+    async loadFilesData() {
+        try {
+            const response = await fetch(`/data/runs/${this.runId}/files`);
+
+            if (!response.ok) {
+                console.error('Files API error:', response.status, response.statusText);
+                this.filesView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`;
+                return;
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.filesData = result;
+                this.renderFiles();
+            } else {
+                const errorMsg = result.error || 'Unknown error';
+                console.error('Files load failed:', errorMsg);
+                this.filesView.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    <p>No files available</p>
+                </div>`;
+            }
+        } catch (error) {
+            console.error('Error loading files:', error);
+            this.filesView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
+                <p>Failed to load files</p>
+                <p class="text-xs mt-2">${error.message}</p>
+            </div>`;
+        }
+    }
+
+    async loadTasksData() {
+        try {
+            const response = await fetch(`/runs/${this.runId}/tasks-tab`);
+            if (!response.ok) {
+                this.tasksView.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">No tasks</div>`;
+                return;
+            }
+            const html = await response.text();
+            this.tasksView.innerHTML = html;
+            if (typeof applyFormatting === 'function') applyFormatting(this.tasksView);
+        } catch (error) {
+            this.tasksView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
+                <p>Failed to load tasks</p>
+                <p class="text-xs mt-2">${error.message}</p>
+            </div>`;
+        }
+    }
+
+    renderFiles() {
+        if (!this.filesData || !this.filesData.files || this.filesData.files.length === 0) {
+            this.filesView.innerHTML = `
+                <div class="flex items-center justify-center py-12">
+                    <div class="text-center py-8">
+                        <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Files</h3>
+                        <p class="text-gray-500 dark:text-gray-400">
+                            This run did not create or update any files.
+                        </p>
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        const files = this.filesData.files;
+        let html = `
+            <div class="overflow-auto">
+                <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-100 dark:bg-gray-700 sticky top-0">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Path</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Size</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider hidden md:table-cell">Type</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider hidden lg:table-cell">Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+        `;
+
+        files.forEach(file => {
+            const contentType = file.content_type || '-';
+            html += `
+                <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                    <td class="px-4 py-3 text-xs font-medium text-gray-900 dark:text-white">
+                        <div class="inline-flex items-center gap-2">
+                            <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-blue-600 dark:text-gray-500 dark:hover:text-blue-400 transition-colors" title="Download">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                                </svg>
+                            </a>
+                            <a href="/files/${file.file_id}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono">${this.escapeHtml(file.path)}</a>
+                        </div>
+                    </td>
+                    <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                        ${this.escapeHtml(file.size_formatted)}
+                    </td>
+                    <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300 hidden md:table-cell">
+                        ${contentType !== '-' ? `<span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">${this.escapeHtml(contentType)}</span>` : '<span class="text-gray-400 dark:text-gray-500 italic">-</span>'}
+                    </td>
+                    <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300 hidden lg:table-cell">
+                        ${this.escapeHtml(file.updated_at)}
+                    </td>
+                </tr>
+            `;
+        });
+
+        html += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+
+        // Add summary
+        const totalFiles = this.filesData.total;
+        html = `
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+                <span class="text-sm text-gray-600 dark:text-gray-400">
+                    <span class="font-medium text-gray-900 dark:text-white">${totalFiles}</span> file${totalFiles !== 1 ? 's' : ''} created or updated by this run
+                </span>
+            </div>
+        ` + html;
+
+        this.filesView.innerHTML = html;
+    }
+
+    renderTimeline() {
+        if (!this.timelineData || !this.timelineData.tree || this.timelineData.tree.length === 0) {
+            this.timelineView.innerHTML = '<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">No execution data found</div>';
+            return;
+        }
+
+        // Flatten the hierarchy into a timeline view
+        const items = this.flattenForTimeline(this.timelineData.tree);
+
+        // Calculate time bounds
+        const startTimes = items.map(i => new Date(i.start_time).getTime()).filter(t => !isNaN(t));
+        const minTime = Math.min(...startTimes);
+        const maxTime = Math.max(...items.map(i => {
+            if (!i.start_time || !i.duration_us) return minTime;
+            return new Date(i.start_time).getTime() + (i.duration_us / 1000); // Convert μs to ms
+        }));
+        const totalDuration = maxTime - minTime;
+
+        // Calculate execution time (from hierarchy data)
+        const executionTimeUs = this.timelineData.total_duration_us || 0;
+
+        // Get total duration from page header (includes queue wait)
+        const totalDurationUs = this.getRunDurationUs();
+
+        // Get execution time (stop - start, excludes queue wait)
+        const execTimeUs = this.getExecTimeUs();
+
+        // Get queue wait time (only for event-triggered runs)
+        const queueWaitUs = this.getQueueWaitUs();
+
+        // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
+        // Use execTimeUs (not totalDurationUs) since compilation is part of execution, not queue wait
+        const compilationTimeUs = Math.max(0, execTimeUs - executionTimeUs);
+
+        // Total time for visualization (same as totalDurationUs, which already includes queue wait)
+        const totalTimeUs = totalDurationUs;
+
+        let html = '<div class="timeline-view">';
+
+        // Add run summary at the top
+        if (totalDurationUs > 0) {
+            const hasQueueWait = queueWaitUs > 0;
+            const queueWaitPercent = hasQueueWait ? (queueWaitUs / totalTimeUs) * 100 : 0;
+            const compilationPercent = (compilationTimeUs / totalTimeUs) * 100;
+            const executionPercent = (executionTimeUs / totalTimeUs) * 100;
+
+            html += '<div class="run-summary">';
+            html += '<div class="run-summary-title">Duration: <span class="font-semibold">' + this.formatDuration(totalDurationUs) + '</span>';
+            if (hasQueueWait) {
+                html += ' <span class="text-gray-500 dark:text-gray-400 text-xs">(Run Time: ' + this.formatDuration(execTimeUs) + ')</span>';
+            }
+            html += '</div>';
+            html += '<div class="run-summary-legend">';
+            // Queue wait legend item (only show if there was queue wait)
+            if (hasQueueWait) {
+                html += '  <div class="run-summary-legend-item">';
+                html += '    <div class="run-summary-legend-box run-summary-legend-queue-wait"></div>';
+                html += '    <span class="run-summary-legend-label">Queue Wait:</span>';
+                html += '    <span class="run-summary-legend-value">' + this.formatDuration(queueWaitUs) + ' <span class="run-summary-percent">(' + queueWaitPercent.toFixed(1) + '%)</span></span>';
+                html += '  </div>';
+            }
+            html += '  <div class="run-summary-legend-item">';
+            html += '    <div class="run-summary-legend-box run-summary-legend-compilation"></div>';
+            html += '    <span class="run-summary-legend-label">Compilation & Loading:</span>';
+            html += '    <span class="run-summary-legend-value">' + this.formatDuration(compilationTimeUs) + ' <span class="run-summary-percent">(' + compilationPercent.toFixed(1) + '%)</span></span>';
+            html += '  </div>';
+            html += '  <div class="run-summary-legend-item">';
+            html += '    <div class="run-summary-legend-box run-summary-legend-execution"></div>';
+            html += '    <span class="run-summary-legend-label">Execution:</span>';
+            html += '    <span class="run-summary-legend-value">' + this.formatDuration(executionTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span>';
+            html += '  </div>';
+            html += '</div>';
+            html += '<div class="run-summary-combined-bar">';
+            // Ensure minimum 1px width for each section
+            const queueWaitWidth = hasQueueWait ? Math.max(1, queueWaitPercent) : 0;
+            const compilationWidth = Math.max(1, compilationPercent);
+            const executionWidth = Math.max(1, executionPercent);
+            // Normalize to 100%
+            const total = queueWaitWidth + compilationWidth + executionWidth;
+            const normalizedQueueWait = (queueWaitWidth / total) * 100;
+            const normalizedCompilation = (compilationWidth / total) * 100;
+            const normalizedExecution = (executionWidth / total) * 100;
+            if (hasQueueWait) {
+                html += '  <div class="run-summary-bar-segment run-summary-bar-queue-wait" style="width: ' + normalizedQueueWait.toFixed(2) + '%"></div>';
+            }
+            html += '  <div class="run-summary-bar-segment run-summary-bar-compilation" style="width: ' + normalizedCompilation.toFixed(2) + '%"></div>';
+            html += '  <div class="run-summary-bar-segment run-summary-bar-execution" style="width: ' + normalizedExecution.toFixed(2) + '%"></div>';
+            html += '</div>';
+            html += '</div>';
+        }
+
+        // Add time axis header
+        html += `<div class="timeline-axis">
+            <div class="timeline-axis-label">0μs</div>
+            <div class="timeline-axis-label" style="left: 25%">${this.formatDuration(totalDuration * 250)}</div>
+            <div class="timeline-axis-label" style="left: 50%">${this.formatDuration(totalDuration * 500)}</div>
+            <div class="timeline-axis-label" style="left: 75%">${this.formatDuration(totalDuration * 750)}</div>
+            <div class="timeline-axis-label" style="left: 100%">${this.formatDuration(totalDuration * 1000)}</div>
+        </div>`;
+
+        // Count visible items for "no results" message
+        let visibleCount = 0;
+        let firstResultMatch = null;
+        let hiddenCount = 0;
+        let hiddenItems = [];
+        let timelineGroupCounter = 0;
+
+        // Helper to flush a hidden group (either as indicator or revealed items)
+        const flushHiddenGroup = () => {
+            if (hiddenCount === 0) return;
+            const groupId = timelineGroupCounter++;
+            if (this.revealedHiddenGroups.timeline.has(groupId)) {
+                // Render the hidden items as revealed
+                for (const hiddenItem of hiddenItems) {
+                    html += this.renderTimelineItem(hiddenItem, minTime, totalDuration, 'revealed-item');
+                    visibleCount++;
+                }
+            } else {
+                html += this.renderTimelineHiddenIndicator(hiddenCount, groupId);
+            }
+            hiddenCount = 0;
+            hiddenItems = [];
+        };
+
+        items.forEach(item => {
+            // Apply filter (pass flow type for @cond, @loop, etc. filtering)
+            const flowType = item.flow?.type || null;
+            const result = item.node?.return_value || null;
+            const filterResult = this.shouldFilterOut(item.name, 'timeline', flowType, result);
+
+            if (filterResult.filtered) {
+                hiddenCount++;
+                hiddenItems.push(item);
+                return; // Skip this item
+            }
+
+            // Show hidden indicator before this visible item if there were hidden items
+            flushHiddenGroup();
+
+            // Track first result match
+            if (filterResult.matchType === 'result' && !firstResultMatch) {
+                firstResultMatch = item;
+            }
+
+            html += this.renderTimelineItem(item, minTime, totalDuration, '', filterResult);
+            visibleCount++;
+        });
+
+        // Show trailing hidden indicator if any
+        flushHiddenGroup();
+
+        // Show message if all items are filtered
+        if (visibleCount === 0 && items.length > 0) {
+            html += `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
+                All ${items.length} calls filtered out. Adjust filters to see more.
+            </div>`;
+            // Clear inspector since no items are visible
+            this.selectedNode = null;
+            this.showInspectorPrompt('timeline');
+        }
+        html += '</div>';
+
+        this.timelineView.innerHTML = html;
+        this.attachTimelineListeners();
+
+        // Auto-open inspector if we found a result match
+        if (firstResultMatch && this.filters.timeline.search) {
+            this.selectedNode = firstResultMatch.id;
+
+            // Find the full node data for the inspector
+            const node = firstResultMatch.node || this.findNodeInTimeline(firstResultMatch.id);
+            if (node) {
+                this.showNodeInInspector(node);
+            }
+
+            // Re-render to show selection
+            const savedMatch = firstResultMatch;
+            firstResultMatch = null;
+
+            // Update just the selected state without full re-render
+            this.timelineView.querySelectorAll('.timeline-bar').forEach(bar => {
+                if (bar.dataset.itemId === savedMatch.id) {
+                    bar.classList.add('selected');
+                }
+            });
+
+            // Scroll the matched item into view
+            setTimeout(() => {
+                const selectedEl = this.timelineView.querySelector(`[data-item-id="${savedMatch.id}"]`);
+                if (selectedEl) {
+                    selectedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }, 100);
+        }
+    }
+
+    flattenForTimeline(nodes, items = [], depth = 0) {
+        for (const node of nodes) {
+            items.push({
+                id: node.id,
+                type: node.type,
+                name: node.name || node.function_name || 'Unknown',
+                duration_us: node.duration_us || 0,
+                start_time: node.start_time,
+                depth: depth,  // Add depth for indentation
+                flow: node.flow,  // Include flow context for pills
+                node: node
+            });
+
+            if (node.children && node.children.length > 0) {
+                this.flattenForTimeline(node.children, items, depth + 1);
+            }
+        }
+        return items;
+    }
+
+    // Get cond flow prefix pill (? for predicate, => for result)
+    // Returns { html: string, extraIndent: number } for proper indentation
+    getCondPrefixInfo(flow) {
+        if (!flow || !flow.type) return { html: '', extraIndent: 0 };
+
+        const flowType = flow.type;
+        const isInline = flow.inline;
+        const branch = flow.branch;
+
+        // Only for cond/cond-all calls (not the inline block itself)
+        if ((flowType === 'cond' || flowType === 'cond-all') && !isInline) {
+            if (branch) {
+                // Inside a branch = result call (after =>)
+                // Extra indent since it's "under" the predicate
+                return {
+                    html: `<span class="flow-pill flow-pill-branch-result">=&gt;</span>`,
+                    extraIndent: 16
+                };
+            } else {
+                // Not in a branch yet = predicate/condition call
+                return {
+                    html: `<span class="flow-pill flow-pill-branch-pred">?</span>`,
+                    extraIndent: 0
+                };
+            }
+        }
+
+        // Match flows have branches but no predicate calls (pattern matching is internal)
+        if ((flowType === 'match' || flowType === 'match-all') && !isInline) {
+            if (branch) {
+                // Inside a branch = result call (after =>)
+                return {
+                    html: `<span class="flow-pill flow-pill-branch-result">=&gt;</span>`,
+                    extraIndent: 16
+                };
+            }
+        }
+
+        return { html: '', extraIndent: 0 };
+    }
+
+    // Generate flow pill HTML for suffix - only for function-level flows or inline flow blocks
+    // Child calls inside flows don't get pills, they get colored edges instead
+    getFlowPillHtml(flow) {
+        if (!flow || !flow.type) return '';
+
+        const flowType = flow.type;
+        const isInline = flow.inline;
+        const isFunctionFlow = flow.fn;
+        // For inline flows, add a visual distinction (dashed border)
+        const inlineClass = isInline ? ' flow-pill-inline' : '';
+
+        let pills = '';
+
+        // Only show flow type pills for:
+        // 1. Function-level flows (the function is defined as fn parallel, fn cond, etc.)
+        // 2. Inline flow blocks (parallel { }, cond { }, etc.)
+        // Child calls inside flows should NOT show the pill - they use colored edges instead
+        const showPill = isFunctionFlow || isInline;
+
+        if (!showPill) {
+            return pills; // No pill for child calls inside flows
+        }
+
+        switch (flowType) {
+            case 'parallel':
+                pills += `<span class="flow-pill flow-pill-parallel${inlineClass}">parallel</span>`;
+                break;
+            case 'cond':
+                pills += `<span class="flow-pill flow-pill-cond${inlineClass}">cond</span>`;
+                break;
+            case 'cond-all':
+                pills += `<span class="flow-pill flow-pill-cond-all${inlineClass}">cond-all</span>`;
+                break;
+            case 'match':
+                pills += `<span class="flow-pill flow-pill-match${inlineClass}">match</span>`;
+                break;
+            case 'match-all':
+                pills += `<span class="flow-pill flow-pill-match-all${inlineClass}">match-all</span>`;
+                break;
+            case 'pipe':
+                pills += `<span class="flow-pill flow-pill-pipe${inlineClass}">pipe</span>`;
+                break;
+        }
+        return pills;
+    }
+
+    // Get the left border color class based on flow context
+    getFlowBorderClass(flow) {
+        if (!flow || !flow.type) return '';
+
+        const flowType = flow.type;
+        const isInline = flow.inline;
+        const isFunctionFlow = flow.fn;
+
+        // Only apply colored borders to child calls (not the flow block itself)
+        if (isInline || isFunctionFlow) {
+            return ''; // The flow block itself uses default border
+        }
+
+        switch (flowType) {
+            case 'parallel':
+                return 'flow-border-parallel';
+            case 'cond':
+            case 'cond-all':
+                return 'flow-border-cond';
+            case 'match':
+            case 'match-all':
+                return 'flow-border-match';
+            case 'pipe':
+                return 'flow-border-pipe';
+            default:
+                return '';
+        }
+    }
+
+    // Check if a function name is an inline flow synthetic name
+    isInlineFlowName(name) {
+        return name && (name === '<parallel>' || name === '<cond>' || name === '<cond-all>' || name === '<match>' || name === '<match-all>' || name === '<pipe>');
+    }
+
+    // Get display name for timeline/hierarchy, handling inline flows specially
+    getDisplayName(node) {
+        const name = node.name || node.function_name || 'Unknown';
+        // For inline flows, don't show the synthetic name (the pill will indicate the flow type)
+        if (this.isInlineFlowName(name)) {
+            return ''; // Empty - the pill will show
+        }
+        return name;
+    }
+
+    getTimelineIcon(type) {
+        const icons = {
+            'call': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path></svg>',
+            'var': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path></svg>',
+            'flow': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>'
+        };
+        return icons[type] || icons['call'];
+    }
+
+    // Format a value as a Hot language literal (uses global function from app.js)
+    formatAsHotLiteral(value, indent = 0) {
+        return window.formatAsHotLiteral(value, indent);
+    }
+
+    formatDuration(us) {
+        if (!us || us === 0) return '0μs';
+
+        const totalMicros = Math.round(us);
+
+        // < 1000μs: show as microseconds
+        if (totalMicros < 1000) {
+            return `${totalMicros}μs`;
+        }
+
+        // < 1,000,000μs (1 second): show as milliseconds with one decimal
+        if (totalMicros < 1_000_000) {
+            const ms = Math.floor(totalMicros / 1000);
+            const usRemainder = totalMicros % 1000;
+            const decimal = Math.floor(usRemainder / 100);
+            return `${ms}.${decimal}ms`;
+        }
+
+        const totalSeconds = Math.floor(totalMicros / 1_000_000);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        // Has hours: "1h 30m 45s"
+        if (hours > 0) {
+            return `${hours}h ${minutes}m ${seconds}s`;
+        }
+
+        // Has minutes: "30m 45s"
+        if (minutes > 0) {
+            return `${minutes}m ${seconds}s`;
+        }
+
+        // >= 1s: show seconds with one decimal
+        return `${(totalMicros / 1_000_000).toFixed(1)}s`;
+    }
+
+    getRunDurationUs() {
+        // Get total duration (queue wait + execution) from data attribute
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const durationUs = durationContainer.dataset.durationUs;
+            if (durationUs) {
+                return parseInt(durationUs, 10);
+            }
+        }
+
+        // Fallback: parse from displayed text (less precise)
+        const headers = document.querySelectorAll('.grid > div > h3');
+        for (let h3 of headers) {
+            if (h3.textContent.trim().toLowerCase() === 'duration') {
+                const durationText = h3.nextElementSibling?.textContent.trim();
+                if (durationText) {
+                    return this.parseDurationToUs(durationText);
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    getExecTimeUs() {
+        // Get execution time only (stop - start) from data attribute
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const execTimeUs = durationContainer.dataset.execTimeUs;
+            if (execTimeUs) {
+                return parseInt(execTimeUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getQueueWaitUs() {
+        // Get queue wait time from data attribute (only for event-triggered runs)
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const queueWaitUs = durationContainer.dataset.queueWaitUs;
+            if (queueWaitUs && queueWaitUs !== '') {
+                return parseInt(queueWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    parseDurationToUs(durationStr) {
+        if (!durationStr) return 0;
+
+        // Remove any whitespace
+        durationStr = durationStr.trim();
+
+        // Try to match "1h 30m 45s" format
+        const hourMinSecMatch = durationStr.match(/^(\d+)h\s+(\d+)m\s+(\d+)s$/);
+        if (hourMinSecMatch) {
+            const hours = parseInt(hourMinSecMatch[1], 10);
+            const minutes = parseInt(hourMinSecMatch[2], 10);
+            const seconds = parseInt(hourMinSecMatch[3], 10);
+            return (hours * 3600 + minutes * 60 + seconds) * 1_000_000;
+        }
+
+        // Try to match "30m 45s" format
+        const minSecMatch = durationStr.match(/^(\d+)m\s+(\d+)s$/);
+        if (minSecMatch) {
+            const minutes = parseInt(minSecMatch[1], 10);
+            const seconds = parseInt(minSecMatch[2], 10);
+            return (minutes * 60 + seconds) * 1_000_000;
+        }
+
+        // Try to match "1h 30m" format (running time without seconds)
+        const hourMinMatch = durationStr.match(/^(\d+)h\s+(\d+)m$/);
+        if (hourMinMatch) {
+            const hours = parseInt(hourMinMatch[1], 10);
+            const minutes = parseInt(hourMinMatch[2], 10);
+            return (hours * 3600 + minutes * 60) * 1_000_000;
+        }
+
+        // Match simple patterns like "1.6s", "1.4ms", "426μs"
+        const simpleMatch = durationStr.match(/^([\d.]+)(s|ms|μs|us)$/);
+        if (!simpleMatch) return 0;
+
+        const value = parseFloat(simpleMatch[1]);
+        const unit = simpleMatch[2];
+
+        switch (unit) {
+            case 's':
+                return value * 1_000_000; // seconds to microseconds
+            case 'ms':
+                return value * 1000; // milliseconds to microseconds
+            case 'μs':
+            case 'us':
+                return value; // already microseconds
+            default:
+                return 0;
+        }
+    }
+
+    attachTimelineListeners() {
+        this.timelineView.querySelectorAll('.timeline-bar').forEach(bar => {
+            bar.addEventListener('click', (e) => {
+                const itemId = e.currentTarget.dataset.itemId;
+                const itemType = e.currentTarget.dataset.itemType;
+                this.selectTimelineItem(itemId, itemType);
+            });
+        });
+
+        // Click-to-reveal hidden group indicators
+        this.timelineView.querySelectorAll('.timeline-hidden-indicator[data-hidden-group]').forEach(indicator => {
+            indicator.addEventListener('click', (e) => {
+                const groupId = parseInt(e.currentTarget.dataset.hiddenGroup, 10);
+                this.revealedHiddenGroups.timeline.add(groupId);
+                this.renderTimeline();
+            });
+        });
+    }
+
+    selectTimelineItem(itemId, itemType) {
+        this.selectedNode = itemId;
+        this.renderTimeline();
+
+        // Find the node in the data
+        const node = this.findNodeInTimeline(itemId);
+        if (node) {
+            this.showNodeInInspector(node);
+        }
+    }
+
+    findNodeInTimeline(itemId) {
+        if (!this.timelineData || !this.timelineData.tree) return null;
+        return this.findNode(this.timelineData.tree, itemId);
+    }
+
+    renderHierarchy() {
+        if (!this.hierarchyData || !this.hierarchyData.tree || this.hierarchyData.tree.length === 0) {
+            this.hierarchyTree.innerHTML = '<div class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">No calls found</div>';
+            return;
+        }
+
+        // Reset first result match tracker and hidden group counter before rendering
+        this._firstResultMatch = null;
+        this._hierarchyGroupCounter = 0;
+
+        const html = this.renderHierarchyNodes(this.hierarchyData.tree, 0);
+
+        // Check if any nodes are visible after filtering
+        if (!html.trim()) {
+            const totalCalls = this.hierarchyData.total_calls || this.hierarchyData.tree.length;
+            this.hierarchyTree.innerHTML = `<div class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">
+                All ${totalCalls} calls filtered out. Adjust filters to see more.
+            </div>`;
+            // Clear inspector since no items are visible
+            this.selectedNode = null;
+            this.showInspectorPrompt('hierarchy');
+            return;
+        }
+
+        this.hierarchyTree.innerHTML = html;
+        this.attachHierarchyListeners();
+
+        // Auto-open inspector if we found a result match
+        if (this._firstResultMatch && this.filters.hierarchy.search) {
+            const match = this._firstResultMatch;
+            this.selectedNode = match.id;
+            this.showNodeInInspector(match.node);
+
+            // Re-render to show selection, but don't re-trigger this
+            const savedMatch = this._firstResultMatch;
+            this._firstResultMatch = null;
+            const updatedHtml = this.renderHierarchyNodes(this.hierarchyData.tree, 0);
+            this.hierarchyTree.innerHTML = updatedHtml;
+            this.attachHierarchyListeners();
+            this._firstResultMatch = savedMatch;
+
+            // Scroll the matched item into view
+            setTimeout(() => {
+                const selectedEl = this.hierarchyTree.querySelector(`[data-node-id="${match.id}"]`);
+                if (selectedEl) {
+                    selectedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }, 100);
+        }
+    }
+
+    renderHierarchyNodes(nodes, depth, hiddenCount = 0) {
+        let html = '';
+        let currentHiddenCount = hiddenCount;
+        let currentHiddenNodes = [];
+
+        // Helper to flush a hidden group
+        const flushHidden = () => {
+            if (currentHiddenCount === 0) return;
+            const groupId = this._hierarchyGroupCounter++;
+            if (this.revealedHiddenGroups.hierarchy.has(groupId)) {
+                for (const hiddenNode of currentHiddenNodes) {
+                    html += this.renderHierarchyNode(hiddenNode, depth, 'revealed-item');
+                }
+            } else {
+                html += this.renderHiddenIndicator(currentHiddenCount, depth, groupId);
+            }
+            currentHiddenCount = 0;
+            currentHiddenNodes = [];
+        };
+
+        for (const node of nodes) {
+            const name = node.name || node.function_name || 'Unknown';
+            const flowType = node.flow?.type || null;
+            const result = node.return_value || null;
+
+            const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, result);
+            const isFiltered = filterResult.filtered;
+            const hasVisibleChildren = node.children && node.children.length > 0 &&
+                node.children.some(child => this.hasVisibleDescendants(child, 'hierarchy'));
+
+            if (isFiltered && !hasVisibleChildren) {
+                // Completely hidden - count it
+                currentHiddenCount++;
+                currentHiddenNodes.push(node);
+                continue;
+            }
+
+            if (isFiltered && hasVisibleChildren) {
+                // This node is filtered but has visible children - skip this node, render children
+                currentHiddenCount++;
+                currentHiddenNodes.push(node);
+                // Recursively render children, passing accumulated hidden count
+                const childResult = this.renderHierarchyNodesWithHidden(node.children, depth, currentHiddenCount, currentHiddenNodes);
+                html += childResult.html;
+                currentHiddenCount = childResult.hiddenCount;
+                currentHiddenNodes = childResult.hiddenNodes;
+            } else {
+                // This node is visible - first show hidden indicator if needed
+                flushHidden();
+                html += this.renderHierarchyNode(node, depth);
+            }
+        }
+
+        // Show trailing hidden count if any
+        flushHidden();
+
+        return html;
+    }
+
+    renderHierarchyNodesWithHidden(nodes, depth, hiddenCount = 0, hiddenNodes = []) {
+        let html = '';
+        let currentHiddenCount = hiddenCount;
+        let currentHiddenNodes = [...hiddenNodes];
+
+        // Helper to flush a hidden group
+        const flushHidden = () => {
+            if (currentHiddenCount === 0) return;
+            const groupId = this._hierarchyGroupCounter++;
+            if (this.revealedHiddenGroups.hierarchy.has(groupId)) {
+                for (const hiddenNode of currentHiddenNodes) {
+                    html += this.renderHierarchyNode(hiddenNode, depth, 'revealed-item');
+                }
+            } else {
+                html += this.renderHiddenIndicator(currentHiddenCount, depth, groupId);
+            }
+            currentHiddenCount = 0;
+            currentHiddenNodes = [];
+        };
+
+        for (const node of nodes) {
+            const name = node.name || node.function_name || 'Unknown';
+            const flowType = node.flow?.type || null;
+            const result = node.return_value || null;
+
+            const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, result);
+            const isFiltered = filterResult.filtered;
+            const hasVisibleChildren = node.children && node.children.length > 0 &&
+                node.children.some(child => this.hasVisibleDescendants(child, 'hierarchy'));
+
+            if (isFiltered && !hasVisibleChildren) {
+                currentHiddenCount++;
+                currentHiddenNodes.push(node);
+                continue;
+            }
+
+            if (isFiltered && hasVisibleChildren) {
+                currentHiddenCount++;
+                currentHiddenNodes.push(node);
+                const childResult = this.renderHierarchyNodesWithHidden(node.children, depth, currentHiddenCount, currentHiddenNodes);
+                html += childResult.html;
+                currentHiddenCount = childResult.hiddenCount;
+                currentHiddenNodes = childResult.hiddenNodes;
+            } else {
+                flushHidden();
+                html += this.renderHierarchyNode(node, depth);
+            }
+        }
+
+        return { html, hiddenCount: currentHiddenCount, hiddenNodes: currentHiddenNodes };
+    }
+
+    renderHiddenIndicator(count, depth, groupId) {
+        const label = count === 1 ? '1 hidden call' : `${count} hidden calls`;
+        return `
+            <div class="hidden-calls-indicator tree-indent-tab" data-hidden-group="${groupId}" data-hidden-view="hierarchy" style="padding-left: ${depth * 16}px;" title="Click to reveal">
+                <span class="hidden-calls-dot">⋯</span>
+                <span class="hidden-calls-label">${label}</span>
+            </div>
+        `;
+    }
+
+    renderTimelineItem(item, minTime, totalDuration, extraClass = '', filterResult = null) {
+        const matchedOnResult = filterResult && filterResult.matchType === 'result';
+        const resultMatchClass = matchedOnResult ? 'result-match' : '';
+        const resultMatchBadge = matchedOnResult ? '<span class="result-match-badge" title="Search matched in return value">⮕</span>' : '';
+
+        const itemStartTime = new Date(item.start_time).getTime();
+        const offset = itemStartTime - minTime;
+        const leftPercent = totalDuration > 0 ? (offset / totalDuration) * 100 : 0;
+        const widthPercent = totalDuration > 0 ? ((item.duration_us / 1000) / totalDuration) * 100 : 1;
+
+        const isMobile = window.innerWidth < 768;
+        const condPrefix = this.getCondPrefixInfo(item.flow);
+        const flowPill = this.getFlowPillHtml(item.flow);
+        const flowBorderClass = this.getFlowBorderClass(item.flow);
+        const displayName = this.isInlineFlowName(item.name) ? '' : item.name;
+
+        const extraIndent = condPrefix.extraIndent;
+        const totalIndentPx = (item.depth * (isMobile ? 12 : 20)) + extraIndent;
+        const finalIndentStyle = totalIndentPx > 0 ? `margin-left: ${totalIndentPx}px; border-left: 2px solid rgba(239, 68, 68, 0.3);` : '';
+
+        return `
+            <div class="timeline-bar ${this.selectedNode === item.id ? 'selected' : ''} ${flowBorderClass} ${resultMatchClass} ${extraClass}"
+                 data-item-id="${item.id}" data-item-type="${item.type}"
+                 style="${finalIndentStyle}">
+                <div class="timeline-bar-header">
+                    <div class="timeline-bar-title">
+                        ${condPrefix.html}${displayName ? `<span>${displayName}</span>` : ''}${flowPill}
+                    </div>
+                    <div class="timeline-bar-duration">${resultMatchBadge}${this.formatDuration(item.duration_us)}</div>
+                </div>
+                <div class="timeline-bar-visual-container">
+                    <div class="timeline-bar-visual"
+                         style="left: ${leftPercent.toFixed(2)}%; width: ${Math.max(widthPercent, 0.5).toFixed(2)}%"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    renderTimelineHiddenIndicator(count, groupId) {
+        const label = count === 1 ? '1 hidden' : `${count} hidden`;
+        return `
+            <div class="timeline-hidden-indicator" data-hidden-group="${groupId}" data-hidden-view="timeline" title="Click to reveal">
+                <span class="hidden-calls-dot">⋯</span>
+                <span class="hidden-calls-label">${label}</span>
+            </div>
+        `;
+    }
+
+    renderHierarchyNode(node, depth, extraClass = '') {
+        const name = node.name || node.function_name || 'Unknown';
+        const flowType = node.flow?.type || null;
+        const result = node.return_value || null;
+
+        // Check if this node should be filtered out (already checked in renderHierarchyNodes, but needed for matchedOnResult)
+        const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, result);
+        const matchedOnResult = filterResult.matchType === 'result';
+
+        // Track if this is a result match for auto-opening inspector
+        if (matchedOnResult && !this._firstResultMatch) {
+            this._firstResultMatch = { id: node.id, type: node.type, node };
+        }
+
+        const hasChildren = node.children && node.children.length > 0;
+        const isExpanded = this.expandedNodes.has(node.id);
+        const isSelected = this.selectedNode === node.id;
+        const toggleIcon = hasChildren ? (isExpanded ? '▼' : '▶') : ' ';
+
+        const displayName = this.isInlineFlowName(name) ? '' : name;
+        const durationMs = node.duration_us || 0;
+        const durationBadge = durationMs > 0 ? `<span class="duration-badge">${this.formatDuration(durationMs)}</span>` : '';
+        const condPrefix = this.getCondPrefixInfo(node.flow);
+        const flowPill = this.getFlowPillHtml(node.flow);
+        const flowBorderClass = this.getFlowBorderClass(node.flow);
+
+        // Badge for result match
+        const resultMatchBadge = matchedOnResult ? '<span class="result-match-badge" title="Search matched in return value">⮕</span>' : '';
+
+        // Extra padding for cond result calls
+        const extraPadding = condPrefix.extraIndent > 0 ? `padding-left: ${condPrefix.extraIndent}px;` : '';
+
+        // Result match highlighting
+        const resultMatchClass = matchedOnResult ? 'result-match' : '';
+
+        return `
+            <div class="tree-node-wrapper ${extraClass}">
+                <div class="tree-node-tab ${depth > 0 ? 'tree-indent-tab' : ''} ${isSelected ? 'selected' : ''} ${flowBorderClass} ${resultMatchClass}"
+                     data-node-id="${node.id}"
+                     data-node-type="${node.type}"
+                     style="${extraPadding}">
+                    <span class="tree-toggle" data-node-id="${node.id}" style="width: 14px; cursor: ${hasChildren ? 'pointer' : 'default'}">${toggleIcon}</span>
+                    ${condPrefix.html}<span class="node-name" style="flex: 1" title="${name}">${displayName}${flowPill}</span>
+                    ${resultMatchBadge}${durationBadge}
+                </div>
+                ${hasChildren && isExpanded ? `
+                    <div class="tree-children">
+                        ${this.renderHierarchyNodes(node.children, depth + 1)}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    getHierarchyIcon(type) {
+        const icons = {
+            'call': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path></svg>',
+            'var': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path></svg>',
+            'flow': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>'
+        };
+        return icons[type] || icons['call'];
+    }
+
+    attachHierarchyListeners() {
+        // Toggle nodes
+        this.hierarchyTree.querySelectorAll('.tree-toggle').forEach(toggle => {
+            const nodeId = toggle.dataset.nodeId;
+            const node = this.findNode(this.hierarchyData.tree, nodeId);
+            if (node && node.children && node.children.length > 0) {
+                toggle.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.toggleHierarchyNode(nodeId);
+                });
+            }
+        });
+
+        // Select nodes
+        this.hierarchyTree.querySelectorAll('.tree-node-tab').forEach(node => {
+            node.addEventListener('click', (e) => {
+                const nodeId = e.currentTarget.dataset.nodeId;
+                this.selectHierarchyNode(nodeId);
+            });
+        });
+
+        // Click-to-reveal hidden group indicators
+        this.hierarchyTree.querySelectorAll('.hidden-calls-indicator[data-hidden-group]').forEach(indicator => {
+            indicator.addEventListener('click', (e) => {
+                const groupId = parseInt(e.currentTarget.dataset.hiddenGroup, 10);
+                this.revealedHiddenGroups.hierarchy.add(groupId);
+                this.renderHierarchy();
+            });
+        });
+    }
+
+    findNode(nodes, nodeId) {
+        for (const node of nodes) {
+            if (node.id === nodeId) return node;
+            if (node.children) {
+                const found = this.findNode(node.children, nodeId);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    toggleHierarchyNode(nodeId) {
+        if (this.expandedNodes.has(nodeId)) {
+            this.expandedNodes.delete(nodeId);
+        } else {
+            this.expandedNodes.add(nodeId);
+        }
+        this.renderHierarchy();
+    }
+
+    selectHierarchyNode(nodeId) {
+        this.selectedNode = nodeId;
+        this.renderHierarchy();
+
+        const node = this.findNode(this.hierarchyData.tree, nodeId);
+        if (node) {
+            this.showNodeInInspector(node);
+        }
+    }
+
+    showNodeInInspector(node) {
+        // Save state based on current tab
+        if (this.currentTab === 'hierarchy') {
+            this.tabState.hierarchy.selectedNodeId = node.id;
+            this.tabState.hierarchy.selectedNodeType = node.type;
+        } else if (this.currentTab === 'timeline') {
+            this.tabState.timeline.selectedItemId = node.id;
+            this.tabState.timeline.selectedItemType = node.type;
+        }
+
+        const escapedFunctionName = this.escapeHtml(node.function_name || node.name);
+        let content = `
+            <div class="inspector-section">
+                <div class="inspector-section-title">Function</div>
+                <div class="inspector-value font-mono text-xs">
+                    <code class="language-hot">${escapedFunctionName}</code>
+                </div>
+            </div>
+        `;
+
+        if (node.args !== undefined && node.args !== null) {
+            const argsHot = this.formatAsHotLiteral(node.args);
+            const argsJson = JSON.stringify(node.args, null, 2);
+            const argsId = 'args-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            const escapedArgsHot = this.escapeHtml(argsHot);
+            const escapedArgsJson = this.escapeHtml(argsJson);
+
+            // Detect file attachments in args
+            let argsAttachmentsHtml = '';
+            if (typeof window.findDataUrls === 'function') {
+                const argsDataUrls = window.findDataUrls(node.args);
+                if (argsDataUrls.length > 0) {
+                    argsAttachmentsHtml = window.renderFileAttachments(argsDataUrls, argsId);
+                }
+            }
+
+            content += `
+                <div class="inspector-section relative">
+                    <div class="inspector-section-title">Args</div>
+                    <div id="${argsId}-hot" style="display: none;">${escapedArgsHot}</div>
+                    <div id="${argsId}-json" style="display: none;">${escapedArgsJson}</div>
+                    <button onclick="openContentModalWithFormats('Args', document.getElementById('${argsId}-hot').textContent, document.getElementById('${argsId}-json').textContent)" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full args">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <div class="inspector-value font-mono text-xs">
+                        <pre class="whitespace-pre-wrap max-h-60 overflow-auto"><code class="language-hot">${escapedArgsHot}</code></pre>
+                    </div>
+                    ${argsAttachmentsHtml}
+                </div>
+            `;
+        }
+
+        if (node.return_value !== undefined && node.return_value !== null) {
+            const returnValueHot = this.formatAsHotLiteral(node.return_value);
+            const returnValueJson = JSON.stringify(node.return_value, null, 2);
+            const returnValueId = 'return-value-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            const escapedReturnValueHot = this.escapeHtml(returnValueHot);
+            const escapedReturnValueJson = this.escapeHtml(returnValueJson);
+
+            // Detect file attachments in return value
+            let returnValueAttachmentsHtml = '';
+            if (typeof window.findDataUrls === 'function') {
+                const returnValueDataUrls = window.findDataUrls(node.return_value);
+                if (returnValueDataUrls.length > 0) {
+                    returnValueAttachmentsHtml = window.renderFileAttachments(returnValueDataUrls, returnValueId);
+                }
+            }
+
+            content += `
+                <div class="inspector-section relative">
+                    <div class="inspector-section-title">Return Value</div>
+                    <div id="${returnValueId}-hot" style="display: none;">${escapedReturnValueHot}</div>
+                    <div id="${returnValueId}-json" style="display: none;">${escapedReturnValueJson}</div>
+                    <button onclick="openContentModalWithFormats('Return Value', document.getElementById('${returnValueId}-hot').textContent, document.getElementById('${returnValueId}-json').textContent)" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full return value">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <div class="inspector-value font-mono text-xs">
+                        <pre class="whitespace-pre-wrap max-h-60 overflow-auto"><code class="language-hot">${escapedReturnValueHot}</code></pre>
+                    </div>
+                    ${returnValueAttachmentsHtml}
+                </div>
+            `;
+        }
+
+        if (node.duration_us) {
+            content += `
+                <div class="inspector-section">
+                    <div class="inspector-section-title">Duration</div>
+                    <div class="inspector-value">${this.formatDuration(node.duration_us)}</div>
+                </div>
+            `;
+        }
+
+        if (node.file) {
+            const source = node.line ? `${node.file}:${node.line}` : node.file;
+            const sourceHtml = this.hierarchyBuildId ? `
+                    <button type="button"
+                            class="font-mono text-hot-red-600 dark:text-hot-red-400 hover:underline text-left"
+                            title="${this.escapeAttribute(source)}"
+                            data-source-build-id="${this.escapeAttribute(this.hierarchyBuildId)}"
+                            data-source-file="${this.escapeAttribute(node.file)}"
+                            ${node.line ? `data-source-line="${this.escapeAttribute(String(node.line))}"` : ''}
+                            data-source-title="${this.escapeAttribute(node.function_name || node.name || 'Source')}"
+                            onclick="openSourceBrowserFromElement(this)">
+                        ${this.escapeHtml(source)}
+                    </button>` : this.escapeHtml(source);
+            content += `
+                <div class="inspector-section">
+                    <div class="inspector-section-title">Source</div>
+                    <div class="inspector-value text-xs">${sourceHtml}</div>
+                </div>
+            `;
+        }
+
+        this.openInspector(content);
+    }
+
+    expandAllHierarchy() {
+        this.expandAllRecursive(this.hierarchyData.tree);
+        this.renderHierarchy();
+    }
+
+    expandAllRecursive(nodes) {
+        for (const node of nodes) {
+            if (node.children && node.children.length > 0) {
+                this.expandedNodes.add(node.id);
+                this.expandAllRecursive(node.children);
+            }
+        }
+    }
+
+    collapseAllHierarchy() {
+        this.expandedNodes.clear();
+        this.renderHierarchy();
+    }
+
+    startResize(e) {
+        this.isResizing = true;
+        e.preventDefault();
+    }
+
+    resize(e) {
+        if (!this.isResizing) return;
+
+        const containerWidth = this.inspector.parentElement.offsetWidth;
+        const inspectorLeft = this.inspector.getBoundingClientRect().left;
+        const newWidth = (this.inspector.parentElement.getBoundingClientRect().right - inspectorLeft) - (e.clientX - inspectorLeft);
+
+        const maxWidth = containerWidth * 0.6;
+        if (newWidth >= 250 && newWidth <= maxWidth) {
+            this.inspector.style.width = `${newWidth}px`;
+        }
+    }
+
+    stopResize() {
+        this.isResizing = false;
+    }
+}
+} // End of if (typeof ObservabilityTabs === 'undefined')
+
+// Initialize - only create new instance if not already exists
+document.addEventListener('DOMContentLoaded', () => {
+    const runId = window.__observabilityRunId || window.location.pathname.split('/')[2];
+    if (!window.observabilityTabs) {
+        window.observabilityTabs = new window.ObservabilityTabs(runId);
+    }
+});
+
+// Global function for stream graph to call when nodes are clicked
+window.showRunStreamNodeInspector = async function(id, nodeType, details) {
+    // Forward to the observability tabs' inspector
+    if (window.observabilityTabs) {
+        await window.observabilityTabs.restoreFlowSelection(id, nodeType);
+    } else {
+        console.error('observabilityTabs not initialized yet');
+    }
+};
+</script>

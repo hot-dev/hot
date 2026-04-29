@@ -1,0 +1,136 @@
+::tesseract::test ns
+meta ["test"]
+
+build-ocr-args ::tesseract/build-ocr-args
+build-version-args ::tesseract/build-version-args
+parse-ocr-output ::tesseract/parse-ocr-output
+format-output-suffix ::tesseract/format-output-suffix
+file-ext ::tesseract/file-ext
+join-args ::tesseract/join-args
+
+// ============================================================================
+// file-ext tests
+// ============================================================================
+
+test-file-ext-png
+meta ["test"] fn () {
+    assert-eq("png", file-ext("hot://uploads/scan.png"))
+}
+
+test-file-ext-nested-path
+meta ["test"] fn () {
+    assert-eq("jpg", file-ext("hot://users/9/img/photo.jpg"))
+}
+
+test-file-ext-multiple-dots
+meta ["test"] fn () {
+    assert-eq("gz", file-ext("archive.tar.gz"))
+}
+
+// ============================================================================
+// format-output-suffix tests
+// ============================================================================
+
+test-format-suffix-txt-default
+meta ["test"] fn () {
+    assert-eq("txt", format-output-suffix("txt"))
+}
+
+test-format-suffix-hocr
+meta ["test"] fn () {
+    assert-eq("hocr", format-output-suffix("hocr"))
+}
+
+test-format-suffix-tsv
+meta ["test"] fn () {
+    assert-eq("tsv", format-output-suffix("tsv"))
+}
+
+test-format-suffix-pdf
+meta ["test"] fn () {
+    assert-eq("pdf", format-output-suffix("pdf"))
+}
+
+// ============================================================================
+// build-ocr-args tests
+// ============================================================================
+
+test-ocr-args-minimal-txt
+meta ["test"] fn () {
+    args build-ocr-args("/tmp/in.png", "/tmp/out", null, null, null, "txt", null)
+    assert-eq(["/tmp/in.png", "/tmp/out", "txt"], args)
+}
+
+test-ocr-args-with-lang-psm-oem
+meta ["test"] fn () {
+    args build-ocr-args("/tmp/input.png", "/tmp/output", "eng", 3, 1, "txt", null)
+    assert-eq([
+        "/tmp/input.png", "/tmp/output",
+        "-l", "eng", "--psm", "3", "--oem", "1",
+        "txt",
+    ], args)
+}
+
+test-ocr-args-multi-language
+meta ["test"] fn () {
+    args build-ocr-args("/tmp/in.tif", "/tmp/base", "deu+eng", null, null, "txt", null)
+    assert(in("-l", args), "should have -l")
+    assert(in("deu+eng", args), "should list combined langs")
+}
+
+test-ocr-args-with-dpi
+meta ["test"] fn () {
+    args build-ocr-args("/tmp/a.png", "/tmp/b", null, null, null, "hocr", 300)
+    assert(in("--dpi", args), "should pass --dpi")
+    assert(in("300", args), "should pass dpi value")
+    assert-eq("hocr", last(args), "format should be last")
+}
+
+test-ocr-args-hocr-format
+meta ["test"] fn () {
+    args build-ocr-args("/tmp/page.png", "/tmp/page-out", "fra", 6, null, "hocr", null)
+    assert-eq("hocr", last(args))
+    assert(in("--psm", args))
+    assert(in("6", args))
+}
+
+test-join-args-ocr-roundtrip
+meta ["test"] fn () {
+    args build-ocr-args("/tmp/in.png", "/tmp/out", "eng", 3, 1, "txt", null)
+    joined join-args(args)
+    assert(not(contains(joined, "tesseract")), "join-args should not include executable name")
+    assert(starts-with(joined, "/tmp/in.png"), "should start with input path")
+    assert(ends-with(joined, "txt"), "should end with output format")
+}
+
+// ============================================================================
+// build-version-args tests
+// ============================================================================
+
+test-version-args
+meta ["test"] fn () {
+    args build-version-args()
+    assert-eq(["--version"], args)
+}
+
+// ============================================================================
+// parse-ocr-output tests
+// ============================================================================
+
+test-parse-ocr-output-txt-trims
+meta ["test"] fn () {
+    text parse-ocr-output("txt", "  hello world  \n")
+    assert-eq("hello world", text)
+}
+
+test-parse-ocr-output-tsv
+meta ["test"] fn () {
+    text parse-ocr-output("tsv", "col1\tcol2\n")
+    assert-eq("col1\tcol2", text)
+}
+
+test-parse-ocr-output-pdf-empty-text
+meta ["test"] fn () {
+    text parse-ocr-output("pdf", "some noise")
+    assert-eq("", text)
+}

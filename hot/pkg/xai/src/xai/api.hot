@@ -1,0 +1,142 @@
+::xai::api ns
+
+// Namespace alias for ctx module
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+http-request-stream ::hot::http/request-stream
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated HTTP request to the xAI API.
+
+    Automatically includes the Authorization header using the xai.api.key from context.
+    Additional headers can be provided to merge/override defaults. When a body is provided,
+    Content-Type is set to application/json and the body is serialized.
+
+    Supports 2 to 5 arguments: (method, url), (method, url, headers),
+    (method, url, headers, body), or (method, url, headers, body, api-key).
+
+    **Example**
+
+    ```hot
+    // Simple GET request
+    response request("GET", "https://api.x.ai/v1/models")
+
+    // POST with body
+    response request("POST", "https://api.x.ai/v1/responses", {}, {
+        model: "grok-3-mini",
+        input: "Hello"
+    })
+    ```
+    """,
+    ctx: {"xai.api.key": {}}
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default) — delegates to 5-arity
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("xai.api.key"))
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  default-headers {
+    Authorization: `Bearer ${api-key}`
+  }
+
+  cond {
+    or(eq(body, ""), is-null(body)) => {
+      final-headers {...default-headers, ...additional-headers}
+      ::hot::http/request(HttpRequest({
+        method,
+        url,
+        headers: final-headers
+      }))
+    }
+    => {
+      headers {...default-headers, Content-Type: "application/json"}
+      final-headers {...headers, ...additional-headers}
+      ::hot::http/request(HttpRequest({
+        method,
+        url,
+        headers: final-headers,
+        body: to-json(untype(body))
+      }))
+    }
+  }
+}
+
+request-stream
+meta {
+    doc: """
+    Make an authenticated streaming HTTP request to the xAI API.
+
+    Returns a StreamingHttpResponse with an iterator body for processing SSE events.
+    Automatically includes the Authorization header using the xai.api.key from context.
+
+    Supports 4 to 6 arguments: (method, url, headers, body),
+    (method, url, headers, body, format), or (method, url, headers, body, format, api-key).
+
+    **Example**
+
+    ```hot
+    response request-stream("POST", "https://api.x.ai/v1/responses", {}, {
+        model: "grok-3-mini",
+        input: "Hello",
+        stream: true
+    })
+
+    events collect(response.body)
+    // events is a Vec of SSE event objects
+    ```
+    """,
+    ctx: {"xai.api.key": {}}
+}
+fn
+(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, "sse")
+},
+// 5-arity: use ctx api key (default) — delegates to 6-arity
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, format, ::ctx/get("xai.api.key"))
+},
+// 6-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
+  default-headers {
+    Authorization: `Bearer ${api-key}`
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  ::hot::http/request-stream(HttpRequest({
+    method,
+    url,
+    headers: final-headers,
+    body: to-json(untype(body))
+  }), format)
+}

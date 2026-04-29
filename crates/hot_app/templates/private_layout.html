@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - hot.dev</title>
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/x-icon" href="{{ page_context.assets_prefix }}img/favicon.ico">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ page_context.assets_prefix }}img/favicon-16x16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ page_context.assets_prefix }}img/favicon-32x32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ page_context.assets_prefix }}img/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ page_context.assets_prefix }}img/android-chrome-192x192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="{{ page_context.assets_prefix }}img/android-chrome-512x512.png">
+    <link rel="manifest" href="{{ page_context.assets_prefix }}img/site.webmanifest">
+
+    <!-- Prevent flash by applying theme and sidebar state before page loads -->
+    <script>
+        // Default to dark mode unless user explicitly chose light
+        if (localStorage.getItem('theme') !== 'light') {
+            document.documentElement.classList.add('dark');
+        }
+
+        // Prevent sidebar flash on page load/refresh
+        // Mark html element so CSS can apply correct sidebar width immediately
+        const sidebarCollapsed = localStorage.getItem('sidebar-collapsed');
+        const isTablet = window.innerWidth >= 768 && window.innerWidth < 1024;
+        if (sidebarCollapsed === 'true' || (sidebarCollapsed === null && isTablet)) {
+            document.documentElement.classList.add('sidebar-collapsed-init');
+        }
+    </script>
+    <style>
+        /* Hide Alpine.js elements until initialized to prevent flash */
+        [x-cloak] { display: none !important; }
+
+        /* Apply sidebar collapsed state immediately to prevent flash */
+        html.sidebar-collapsed-init #sidebar {
+            width: 64px !important;
+        }
+        html.sidebar-collapsed-init #header-left-section {
+            width: 64px !important;
+        }
+        html.sidebar-collapsed-init .sidebar-text {
+            opacity: 0 !important;
+            width: 0 !important;
+            overflow: hidden !important;
+        }
+        html.sidebar-collapsed-init .sidebar-logo {
+            display: none !important;
+        }
+
+        /* Sidebar selected item - lighter red for dark mode, darker for light */
+        .sidebar-active {
+            color: #dc2626; /* red-600 for light mode */
+        }
+        .dark .sidebar-active {
+            color: #f87171; /* red-400 for dark mode */
+        }
+    </style>
+    <script src="{{ page_context.asset("js/htmx.min.js") }}" defer></script>
+    <script src="{{ page_context.asset("js/alpine.min.js") }}" defer></script>
+    <script src="{{ page_context.asset("js/echarts.min.js") }}" defer></script>
+
+    <!-- Prism.js for Hot syntax highlighting -->
+    <script src="{{ page_context.asset("js/prism.js") }}" defer></script>
+    <script src="{{ page_context.asset("js/prism-markdown.js") }}" defer></script>
+    <script src="{{ page_context.asset("js/prism-hot.js") }}" defer></script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ page_context.css_url }}">
+    <link rel="stylesheet" href="{{ page_context.asset("css/prism-hot-theme.css") }}" media="print" onload="this.media='all'">
+    <noscript><link rel="stylesheet" href="{{ page_context.asset("css/prism-hot-theme.css") }}"></noscript>
+    {% block head %}{% endblock %}
+</head>
+<body class="flex flex-col h-screen overflow-hidden bg-gray-50 dark:bg-gray-900 grid-bg">
+    <!-- Top Bar -->
+    <header class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 text-gray-800 dark:text-white py-1 px-6 flex justify-between items-center z-20 flex-shrink-0 border-b border-gray-200 dark:border-gray-800" style="backdrop-filter: blur(10px);">
+        <div class="flex items-center transition-all duration-300 ease-in-out" id="header-left-section" style="width: 240px;">
+            <!-- Sidebar toggle button — ml-[-6px] aligns with nav icons (px-4 + 2px border) -->
+            <button id="sidebar-toggle-button" aria-label="Toggle sidebar" class="ml-[-6px] mr-2 text-gray-800 dark:text-white focus:outline-none hover:text-red-600 dark:hover:text-red-400 transition-colors flex-shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+            </button>
+            <!-- Logo (shown when sidebar is open) -->
+            <div class="text-lg font-bold text-hot-red-500 flex items-center sidebar-logo">
+                <a href="/">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo-200w.webp" alt="hot.dev logo" class="h-8 w-auto block dark:hidden" width="200" height="54">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo_white-200w.webp" alt="hot.dev logo" class="h-8 w-auto hidden dark:block" width="200" height="54">
+                </a>
+            </div>
+        </div>
+        <div class="flex-1 flex items-center">
+            <!-- Logo (shown when sidebar is collapsed) - aligned with main content -->
+            <div class="text-lg font-bold text-hot-red-500 items-center main-logo hidden pl-4">
+                <a href="/">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo-200w.webp" alt="hot.dev logo" class="h-8 w-auto block dark:hidden" width="200" height="54">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo_white-200w.webp" alt="hot.dev logo" class="h-8 w-auto hidden dark:block" width="200" height="54">
+                </a>
+            </div>
+        </div>
+        <div class="flex items-center space-x-4">
+            <!-- Theme Toggle -->
+            <div class="flex flex-col items-center cursor-pointer" id="theme-toggle-container">
+                <div class="w-14 flex justify-between text-gray-300 text-[10px] mb-1 pointer-events-none">
+                    <span class="group relative inline-flex">
+                        <svg aria-label="Light" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
+                        <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Light</span>
+                    </span>
+                    <span class="group relative inline-flex">
+                        <svg aria-label="Dark" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
+                        <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Dark</span>
+                    </span>
+                </div>
+                <div class="relative pointer-events-none rounded-full">
+                    <div class="w-14 h-3 bg-gray-500 dark:bg-gray-700 rounded-full"></div>
+                    <div id="theme-thumb" class="absolute top-0 left-0 h-3 w-7 bg-white dark:bg-gray-300 rounded-full transition-transform duration-200 shadow-sm"></div>
+                </div>
+            </div>
+
+            <!-- User Menu Dropdown -->
+            <div class="relative" x-data="{ open: false }">
+                <button @click="open = !open" aria-label="User menu" class="flex items-center space-x-2 focus:outline-none">
+                    <div class="w-7 h-7 rounded-full bg-hot-red-500 flex items-center justify-center text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5" aria-hidden="true">
+                            <!-- Hot flame head with inner cutout -->
+                            <g transform="translate(4.5, -1) scale(0.0083)">
+                                <path fill-rule="evenodd" d="M 772.00,100.21 C 772.00,100.21 844.00,100.21 844.00,100.21 844.00,100.21 879.00,102.83 879.00,102.83 879.00,102.83 896.00,104.17 896.00,104.17 931.29,107.70 969.58,115.02 1004.00,123.63 1136.51,156.75 1258.01,222.93 1358.00,316.09 1358.00,316.09 1390.09,349.00 1390.09,349.00 1486.31,452.28 1551.12,567.98 1585.37,705.00 1595.81,746.74 1602.08,787.26 1606.17,830.00 1606.17,830.00 1608.09,853.00 1608.09,853.00 1608.09,853.00 1609.00,863.00 1609.00,863.00 1609.00,863.00 1609.00,935.00 1609.00,935.00 1609.00,935.00 1605.17,981.00 1605.17,981.00 1599.92,1035.20 1589.15,1087.97 1572.97,1140.00 1537.51,1254.09 1474.28,1361.66 1392.91,1449.00 1392.91,1449.00 1360.00,1481.09 1360.00,1481.09 1278.47,1557.05 1186.22,1615.87 1081.00,1653.31 1032.16,1670.69 972.42,1686.15 921.00,1692.72 921.00,1692.72 896.00,1695.17 896.00,1695.17 896.00,1695.17 844.00,1700.00 844.00,1700.00 844.00,1700.00 772.00,1700.00 772.00,1700.00 772.00,1700.00 762.00,1699.09 762.00,1699.09 762.00,1699.09 723.00,1695.17 723.00,1695.17 723.00,1695.17 697.00,1692.71 697.00,1692.71 639.95,1685.60 563.47,1664.60 510.00,1643.40 510.00,1643.40 460.00,1622.22 460.00,1622.22 431.89,1608.94 381.79,1578.84 358.00,1559.54 347.83,1551.29 338.25,1542.25 329.00,1533.00 295.17,1499.17 265.55,1458.30 243.22,1416.00 243.22,1416.00 232.58,1395.00 232.58,1395.00 208.61,1340.04 193.59,1291.40 190.96,1231.00 190.96,1231.00 190.00,1220.00 190.00,1220.00 190.00,1220.00 190.00,1204.00 190.00,1204.00 190.03,1182.32 195.83,1157.52 202.67,1137.00 215.88,1097.37 234.65,1063.15 256.95,1028.00 302.78,955.73 371.87,873.26 426.00,805.00 455.49,767.82 484.02,729.93 509.69,690.00 546.13,633.33 571.80,580.71 571.00,512.00 571.00,512.00 570.09,502.00 570.09,502.00 568.56,481.13 564.23,460.96 558.03,441.00 540.02,383.08 507.88,333.93 473.00,285.00 473.00,285.00 430.42,225.00 430.42,225.00 426.85,218.85 419.65,207.21 423.31,200.04 425.62,195.54 440.89,188.37 446.00,186.03 446.00,186.03 470.00,174.31 470.00,174.31 470.00,174.31 503.00,159.99 503.00,159.99 566.84,133.65 628.75,117.32 697.00,107.27 697.00,107.27 762.00,101.00 762.00,101.00 766.45,100.98 767.47,101.07 772.00,100.21 Z M 1031.00,1523.00 C 1038.83,1520.89 1057.18,1512.15 1065.00,1508.25 1089.30,1496.10 1112.25,1482.18 1134.00,1465.87 1162.55,1444.46 1190.32,1418.30 1212.11,1390.00 1246.14,1345.80 1270.57,1296.13 1284.11,1242.00 1304.93,1158.71 1295.69,1065.92 1262.58,987.00 1203.32,845.78 1077.90,746.14 932.00,705.58 897.21,695.90 861.08,689.53 825.00,687.96 825.00,687.96 814.00,687.00 814.00,687.00 814.00,687.00 774.00,687.00 774.00,687.00 774.00,687.00 762.00,687.91 762.00,687.91 762.00,687.91 737.00,689.93 737.00,689.93 737.00,689.93 719.00,692.13 719.00,692.13 716.80,692.48 713.59,692.88 712.69,695.30 711.58,698.31 715.19,705.27 716.64,708.00 716.64,708.00 736.42,740.00 736.42,740.00 755.61,770.80 780.56,814.88 781.00,852.00 781.15,864.86 780.29,875.73 775.91,888.00 766.85,913.40 746.30,934.11 727.00,952.09 705.02,972.56 681.75,991.28 658.00,1009.65 612.84,1044.59 566.46,1078.54 526.00,1119.00 503.13,1141.87 479.35,1169.20 468.05,1200.00 463.19,1213.25 459.17,1232.90 458.92,1247.00 458.92,1247.00 458.92,1256.00 458.92,1256.00 458.50,1259.47 457.92,1261.22 458.04,1265.00 458.04,1265.00 459.00,1277.00 459.00,1277.00 459.08,1292.39 462.38,1309.09 466.13,1324.00 471.84,1346.76 481.75,1370.87 493.80,1391.00 507.57,1414.00 521.94,1433.03 541.00,1452.00 548.17,1459.14 564.92,1473.15 574.00,1477.00 570.80,1462.97 566.17,1449.64 566.00,1435.00 566.00,1435.00 566.00,1420.00 566.00,1420.00 566.05,1390.46 580.74,1348.65 598.16,1325.00 611.50,1306.87 631.69,1290.34 650.00,1277.29 676.37,1258.50 704.62,1241.89 733.00,1226.30 761.80,1210.49 800.15,1189.61 826.00,1170.37 845.98,1155.49 860.58,1139.32 859.99,1113.00 859.69,1099.92 854.86,1084.95 849.72,1073.00 845.86,1064.03 840.22,1054.94 840.00,1045.00 840.00,1045.00 868.00,1043.00 868.00,1043.00 891.14,1042.96 914.20,1044.31 937.00,1048.61 1007.35,1061.88 1073.60,1098.89 1114.26,1159.00 1128.03,1179.37 1137.20,1199.66 1144.66,1223.00 1149.02,1236.65 1153.98,1263.79 1154.00,1278.00 1154.00,1278.00 1154.00,1303.00 1154.00,1303.00 1153.98,1318.28 1148.98,1344.12 1144.71,1359.00 1131.78,1404.03 1108.24,1445.27 1076.83,1480.00 1068.79,1488.89 1060.00,1497.80 1051.00,1505.72 1051.00,1505.72 1031.00,1523.00 1031.00,1523.00 Z"/>
+                            </g>
+                            <!-- Body silhouette -->
+                            <path d="M3.251 20.105a8.75 8.75 0 0 1 17.498 0 .75.75 0 0 1-.437.695A18.683 18.683 0 0 1 12 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 0 1-.437-.695Z" />
+                        </svg>
+                    </div>
+                    <span class="hidden lg:block text-sm">{{ page_context.user_name }}</span>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-4">
+                        <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+
+                <div x-cloak x-show="open" @click.away="open = false" id="user-dropdown" class="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                    <a href="/account" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                        Account
+                    </a>
+                    {% match page_context.current_org %}{% when Some with (org) %}
+                    <a href="/@{{ org.slug }}" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                        Organization
+                    </a>
+                    {% when None %}{% endmatch %}
+                    {% if !page_context.is_local_dev %}
+                    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+                    <form action="/signout" method="post">
+                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                            Sign Out
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Container for sidebar and main content -->
+    <div class="flex flex-1 overflow-hidden">
+        <!-- Mobile overlay backdrop -->
+        <div id="sidebar-mobile-overlay" class="md:hidden"></div>
+
+        <!-- Collapsible Sidebar -->
+        <aside id="sidebar" class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 border-r border-gray-200 dark:border-gray-800 transition-all duration-300 ease-in-out flex-shrink-0 overflow-hidden flex flex-col" style="backdrop-filter: blur(10px); width: 240px;">
+            <nav class="pt-2 pb-4 h-full overflow-y-auto custom-scrollbar flex flex-col">
+                <!-- Dashboard Link -->
+                <a href="/" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "dashboard" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Dashboard">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Dashboard</span>
+                </a>
+
+                <!-- Workflows Link -->
+                <a href="/workflows" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "workflows" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Workflows &amp; Agents">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.5L10.5 19l3 2.5" />
+                        <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Workflows &amp; Agents</span>
+                </a>
+
+                <!-- Runs Link -->
+                <a href="/runs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "runs" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Runs">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Runs</span>
+                </a>
+
+                <!-- Tasks Link -->
+                <a href="/tasks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "tasks" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Tasks">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <rect x="3" y="3" width="18" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.5 7.5v9l7.5-4.5-7.5-4.5z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Tasks</span>
+                </a>
+
+                <!-- Events Link -->
+                <a href="/events" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "events" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Events">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Events</span>
+                </a>
+
+                <!-- Streams Link -->
+                <a href="/streams" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "streams" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Streams">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Streams</span>
+                </a>
+
+                <!-- Files Link -->
+                <a href="/files" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "files" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Files">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Files</span>
+                </a>
+
+                <!-- Scheduled Runs Link -->
+                <a href="/schedules" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "schedules" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Scheduled Runs">
+                    <!-- Clock + play triangle composite -->
+                    <div class="relative w-6 h-6 flex-shrink-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                        </svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-[0.7rem] h-[0.7rem] absolute -bottom-0 -right-0 bg-gray-100 dark:bg-gray-800">
+                            <path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Scheduled Runs</span>
+                </a>
+
+                <!-- Event Handlers Link -->
+                <a href="/event-handlers" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "event_handlers" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Event Handlers">
+                    <!-- Sparkles + play triangle composite -->
+                    <div class="relative w-6 h-6 flex-shrink-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
+                        </svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-[0.7rem] h-[0.7rem] absolute -bottom-0 -right-0 bg-gray-100 dark:bg-gray-800">
+                            <path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Event Handlers</span>
+                </a>
+
+                <!-- MCP Services Link -->
+                <a href="/mcp" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "mcp_services" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="MCP Services">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">MCP Services</span>
+                </a>
+
+                <!-- Webhooks Link -->
+                <a href="/webhooks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "webhook_services" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Webhooks">
+                    <!-- Webhook icon (CC0, svgrepo.com/svg/361957/webhooks) -->
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="-65 -57 1144 1144" fill="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path d="M482 226h-1l-10 2q-33 4-64.5 18.5t-55.5 38.5q-41 37-57 91q-9 30-8 63t12 63q17 45 52 78l13 12l-83 135q-26-1-45 7q-30 13-45 40q-7 15-9 31t2 32q8 30 33 48q15 10 33 14.5t36 2t34.5-12.5t27.5-25q12-17 14.5-39t-5.5-41q-1-5-7-14l-3-6l118-192q6-9 8-14l-10-3q-9-2-13-4q-23-10-41.5-27.5t-28.5-39.5q-17-36-9-75q4-23 17-43t31-34q37-27 82-27q27-1 52.5 9.5t44.5 30.5q17 16 26.5 38.5t10.5 45.5q0 17-6 42l70 19l8 1q14-43 7-86q-4-33-19.5-63.5t-39.5-53.5q-42-42-103-56q-6-2-18-4l-14-2h-37zM500 350q-17 0-34 7t-30.5 20.5t-19.5 31.5q-8 20-4 44q3 18 14 34t28 25q24 15 56 13q3 4 5 8l112 191q3 6 6 9q27-26 58.5-35.5t65-3.5t58.5 26q32 25 43.5 61.5t0.5 73.5q-8 28-28.5 50t-48.5 33q-31 13-66.5 8.5t-63.5-24.5q-4-3-13-10l-5-6q-4 3-11 10l-47 46q23 23 52 38.5t61 21.5l22 4h39l28-5q64-13 110-60q22-22 36.5-50.5t19.5-59.5q5-36-2-71.5t-25-64.5t-44-51t-57-35q-34-14-70.5-16t-71.5 7l-17 5l-81-137q13-19 16-37q5-32-13-60q-16-25-44-35q-17-6-35-6zM218 614q-58 13-100 53q-47 44-61 105l-4 24v37l2 11q2 13 4 20q7 31 24.5 59t42.5 49q50 41 115 49q38 4 76-4.5t70-28.5q53-34 78-91q7-17 14-45q6-1 18 0l125 2q14 0 20 1q11 20 25 31t31.5 16t35.5 4q28-3 50-20q27-21 32-54q2-17-1.5-33t-13.5-30q-16-22-41-32q-17-7-35.5-6.5t-35.5 7.5q-28 12-43 37l-3 6q-14 0-42-1l-113-1q-15-1-43-1l-50-1l3 17q8 43-13 81q-14 27-40 45t-57 22q-35 6-70-7.5t-57-42.5q-28-35-27-79q1-37 23-69q13-19 32-32t41-19l9-3z"/>
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Webhooks</span>
+                </a>
+
+                <!-- Alerts Link -->
+                <a href="/settings/alerts/destinations" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "alerts" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Alerts">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Alerts</span>
+                </a>
+
+                <!-- Separator -->
+                <div class="my-3 mx-4 border-t border-gray-200 dark:border-gray-700"></div>
+
+                <!-- Projects Link -->
+                <a href="/projects" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "projects" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Projects">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 14.15v4.25c0 1.094-.787 2.036-1.872 2.18-2.087.277-4.216.42-6.378.42s-4.291-.143-6.378-.42c-1.085-.144-1.872-1.086-1.872-2.18v-4.25m16.5 0a2.18 2.18 0 00.75-1.661V8.706c0-1.081-.768-2.015-1.837-2.175a48.114 48.114 0 00-3.413-.387m4.5 8.006c-.194.165-.42.295-.673.38A23.978 23.978 0 0112 15.75c-2.648 0-5.195-.429-7.577-1.22a2.016 2.016 0 01-.673-.38m0 0A2.18 2.18 0 013 12.489V8.706c0-1.081.768-2.015 1.837-2.175a48.111 48.111 0 013.413-.387m7.5 0V5.25A2.25 2.25 0 0013.5 3h-3a2.25 2.25 0 00-2.25 2.25v.894m7.5 0a48.667 48.667 0 00-7.5 0M12 12.75h.008v.008H12v-.008z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Projects</span>
+                </a>
+
+                <!-- Context Variables Link -->
+                <a href="/contexts" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "contexts" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Context Variables">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5A1.125 1.125 0 0 0 12 9.375m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Context Variables</span>
+                </a>
+
+                <!-- Docs Link -->
+                <a href="/docs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "docs" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Documentation">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Docs</span>
+                </a>
+
+                <!-- Divider -->
+                <div class="border-t border-gray-200 dark:border-gray-700 mx-4 my-4"></div>
+
+                <!-- API Keys Link -->
+                <a href="/keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "keys" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="API Keys">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">API Keys</span>
+                </a>
+
+                <!-- Service Keys Link -->
+                <a href="/service-keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "service_keys" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Service Keys">
+                    <!-- Key with user badge icon -->
+                    <div class="relative w-6 h-6 flex-shrink-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+                        </svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-[0.55rem] h-[0.55rem] absolute -bottom-0 -right-0 bg-gray-100 dark:bg-gray-800">
+                            <path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.23 1.23 0 00.41 1.412A9.957 9.957 0 0010 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 00-13.074.003z" />
+                        </svg>
+                    </div>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Service Keys</span>
+                </a>
+
+                <!-- Domains Link -->
+                <a href="/domains" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "domains" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Domains">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Domains</span>
+                </a>
+
+                <!-- Footer at bottom of sidebar -->
+                <div class="mt-auto pt-3 px-4 pb-3 border-t border-gray-200 dark:border-gray-700 sidebar-text">
+                    <a href="{{ page_context.web_url }}" class="text-red-600 dark:text-red-400 hover:underline text-xs block mb-0.5">hot.dev</a>
+                    <p class="text-xs text-gray-600 dark:text-gray-400">&copy; {{ page_context.current_year }} Hot Dev, LLC</p>
+                </div>
+            </nav>
+        </aside>
+
+        <!-- Main Content Area -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+            <!-- Main Content -->
+            <main class="flex-1 overflow-y-auto px-4 pb-4 dark:text-gray-200 custom-scrollbar">
+        <!-- Global Notices -->
+        {% for notice in page_context.global_notices %}
+        <div class="mb-4 {{ notice.notice_type.bg_class() }} border rounded-lg px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center">
+                <svg class="h-5 w-5 {{ notice.notice_type.icon_class() }} mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <span class="text-sm {{ notice.notice_type.text_class() }}">
+                    {{ notice.message }}
+                </span>
+            </div>
+            {% if let Some(action_url) = &notice.action_url %}
+                {% if let Some(action_text) = &notice.action_text %}
+                <a href="{{ action_url }}" class="ml-4 text-sm font-medium {{ notice.notice_type.link_class() }} whitespace-nowrap">
+                    {{ action_text }}
+                </a>
+                {% endif %}
+            {% endif %}
+        </div>
+        {% endfor %}
+
+        <!-- Breadcrumb Bar (always rendered — contains org/env selectors + page breadcrumbs) -->
+        <nav class="flex flex-col md:flex-row mb-4 md:justify-between md:items-center sticky top-0 z-10 bg-white dark:bg-black py-2 -mx-4 px-4 border-b border-gray-200 dark:border-gray-700/50" aria-label="Breadcrumb" {% block sse_data_attrs %}{% endblock %}>
+            <div class="inline-flex items-center min-w-0">
+                <!-- Organization Selector -->
+                {% if page_context.user_orgs.len() > 0 %}
+                <div class="relative inline-flex items-center" x-data="{ open: false }">
+                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1">
+                        <span class="truncate max-w-[200px]">{% match page_context.current_org %}{% when Some with (org) %}{{ org.name }}{% when None %}Select Org{% endmatch %}</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
+                            <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                    <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                        {% for org in page_context.user_orgs %}
+                        <form action="/switch-org/{{ org.org_id }}" method="post">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-500 text-white hover:bg-hot-red-600 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                                <div class="flex items-center justify-between">
+                                    <div class="min-w-0">
+                                        <span class="truncate block">{{ org.name }}</span>
+                                        <span class="truncate block text-xs opacity-60 font-mono">@{{ org.slug }}</span>
+                                    </div>
+                                    {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    {% endif %}{% when None %}{% endmatch %}
+                                </div>
+                            </button>
+                        </form>
+                        {% endfor %}
+                        <div class="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+                        <a href="/orgs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                            <div class="flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                                    <path fill-rule="evenodd" d="M11.828 2.25c-.916 0-1.699.663-1.85 1.567l-.091.549a.798.798 0 0 1-.517.608 7.45 7.45 0 0 0-.478.198.798.798 0 0 1-.796-.064l-.453-.324a1.875 1.875 0 0 0-2.416.2l-.243.243a1.875 1.875 0 0 0-.2 2.416l.324.453a.798.798 0 0 1 .064.796 7.448 7.448 0 0 0-.198.478.798.798 0 0 1-.608.517l-.55.092a1.875 1.875 0 0 0-1.566 1.849v.344c0 .916.663 1.699 1.567 1.85l.549.091c.281.047.508.25.608.517.06.162.127.321.198.478a.798.798 0 0 1-.064.796l-.324.453a1.875 1.875 0 0 0 .2 2.416l.243.243c.648.648 1.67.733 2.416.2l.453-.324a.798.798 0 0 1 .796-.064c.157.071.316.137.478.198.267.1.47.327.517.608l.092.55c.15.903.932 1.566 1.849 1.566h.344c.916 0 1.699-.663 1.85-1.567l.091-.549a.798.798 0 0 1 .517-.608 7.52 7.52 0 0 0 .478-.198.798.798 0 0 1 .796.064l.453.324a1.875 1.875 0 0 0 2.416-.2l.243-.243c.648-.648.733-1.67.2-2.416l-.324-.453a.798.798 0 0 1-.064-.796c.071-.157.137-.316.198-.478.1-.267.327-.47.608-.517l.55-.091a1.875 1.875 0 0 0 1.566-1.85v-.344c0-.916-.663-1.699-1.567-1.85l-.549-.091a.798.798 0 0 1-.608-.517 7.507 7.507 0 0 0-.198-.478.798.798 0 0 1 .064-.796l.324-.453a1.875 1.875 0 0 0-.2-2.416l-.243-.243a1.875 1.875 0 0 0-2.416-.2l-.453.324a.798.798 0 0 1-.796.064 7.462 7.462 0 0 0-.478-.198.798.798 0 0 1-.517-.608l-.091-.55a1.875 1.875 0 0 0-1.85-1.566h-.344ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd" />
+                                </svg>
+                                Organizations
+                            </div>
+                        </a>
+                    </div>
+                </div>
+                {% else %}
+                <span class="text-lg font-semibold text-gray-700 dark:text-gray-300 px-1">{% match page_context.current_org %}{% when Some with (org) %}{{ org.name }}{% when None %}No Organization{% endmatch %}</span>
+                {% endif %}
+
+                <!-- Environment Selector (only on env-scoped pages) -->
+                {% if page_context.show_env_selector %}
+                <span class="text-lg text-gray-400 dark:text-gray-500 mx-1">/</span>
+                <div class="relative inline-flex items-center" x-data="{ open: false }">
+                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1">
+                        <span class="truncate max-w-[200px]">{% match page_context.current_env %}{% when Some with (env) %}{{ env.name }}{% when None %}Select Env{% endmatch %}</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
+                            <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                    <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                        {% for env in page_context.current_org_envs %}
+                        <form action="/envs/{{ env.env_id }}/switch" method="post">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-500 text-white hover:bg-hot-red-600 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                                <div class="flex items-center justify-between">
+                                    <span class="truncate">{{ env.name }}</span>
+                                    {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    {% endif %}{% when None %}{% endmatch %}
+                                </div>
+                            </button>
+                        </form>
+                        {% endfor %}
+                        <div class="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+                        <a href="/envs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                            <div class="flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                                    <path fill-rule="evenodd" d="M11.828 2.25c-.916 0-1.699.663-1.85 1.567l-.091.549a.798.798 0 0 1-.517.608 7.45 7.45 0 0 0-.478.198.798.798 0 0 1-.796-.064l-.453-.324a1.875 1.875 0 0 0-2.416.2l-.243.243a1.875 1.875 0 0 0-.2 2.416l.324.453a.798.798 0 0 1 .064.796 7.448 7.448 0 0 0-.198.478.798.798 0 0 1-.608.517l-.55.092a1.875 1.875 0 0 0-1.566 1.849v.344c0 .916.663 1.699 1.567 1.85l.549.091c.281.047.508.25.608.517.06.162.127.321.198.478a.798.798 0 0 1-.064.796l-.324.453a1.875 1.875 0 0 0 .2 2.416l.243.243c.648.648 1.67.733 2.416.2l.453-.324a.798.798 0 0 1 .796-.064c.157.071.316.137.478.198.267.1.47.327.517.608l.092.55c.15.903.932 1.566 1.849 1.566h.344c.916 0 1.699-.663 1.85-1.567l.091-.549a.798.798 0 0 1 .517-.608 7.52 7.52 0 0 0 .478-.198.798.798 0 0 1 .796.064l.453.324a1.875 1.875 0 0 0 2.416-.2l.243-.243c.648-.648.733-1.67.2-2.416l-.324-.453a.798.798 0 0 1-.064-.796c.071-.157.137-.316.198-.478.1-.267.327-.47.608-.517l.55-.091a1.875 1.875 0 0 0 1.566-1.85v-.344c0-.916-.663-1.699-1.567-1.85l-.549-.091a.798.798 0 0 1-.608-.517 7.507 7.507 0 0 0-.198-.478.798.798 0 0 1 .064-.796l.324-.453a1.875 1.875 0 0 0-.2-2.416l-.243-.243a1.875 1.875 0 0 0-2.416-.2l-.453.324a.798.798 0 0 1-.796.064 7.462 7.462 0 0 0-.478-.198.798.798 0 0 1-.517-.608l-.091-.55a1.875 1.875 0 0 0-1.85-1.566h-.344ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd" />
+                                </svg>
+                                Environments
+                            </div>
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Page Breadcrumb Items -->
+                {% if page_context.breadcrumbs.len() > 0 %}
+                <svg class="w-5 h-5 text-gray-400 dark:text-gray-500 flex-shrink-0 mx-0.5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+                </svg>
+                {% for item in page_context.breadcrumbs %}
+                    {% match item.link %}
+                        {% when Some with (link) %}
+                            <a href="{{ link }}" class="text-lg font-semibold text-gray-700 hover:text-blue-600 dark:text-gray-300 dark:hover:text-blue-400 transition-colors duration-200 px-1 truncate">
+                                {{ item.text }}
+                            </a>
+                        {% when None %}
+                            <span class="text-lg font-semibold text-gray-900 dark:text-white px-1 truncate" aria-current="page">
+                                {{ item.text }}
+                            </span>
+                    {% endmatch %}
+                    {% if !loop.last %}
+                        <svg class="w-5 h-5 text-gray-400 dark:text-gray-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+                        </svg>
+                    {% endif %}
+                {% endfor %}
+                {% endif %}
+            </div>
+            <div class="flex items-center justify-between md:justify-end gap-2 flex-shrink-0 w-full md:w-auto mt-1 md:mt-0">
+                <!-- SSE Status Indicator -->
+                {% block sse_status %}{% endblock %}
+                <!-- Docs Link (page-specific, links to hot.dev docs) -->
+                {% if let Some(docs_url) = page_context.docs_url() %}
+                <a href="{{ docs_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-blue-500 dark:text-gray-500 dark:hover:text-blue-400 transition-colors duration-200" title="Documentation">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                    </svg>
+                    <span>Docs</span>
+                </a>
+                {% endif %}
+            </div>
+        </nav>
+
+        {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="{{ page_context.asset("js/theme.js") }}" defer></script>
+
+    <style>
+        /* Enable native mobile pull-to-refresh */
+        body {
+            overscroll-behavior-y: auto;
+        }
+
+        /* Sidebar text visibility controlled by .collapsed class */
+        #sidebar:not(.collapsed) .sidebar-text {
+            display: inline-block !important;
+        }
+
+        #sidebar.collapsed .sidebar-text {
+            display: none !important;
+        }
+
+        /* UUID Display Styles */
+        .uuid-container {
+            font-family: 'Fira Code', monospace;
+        }
+
+        .uuid-display {
+            position: relative;
+            font-family: 'Fira Code', monospace;
+            letter-spacing: 0.02em;
+        }
+
+        .uuid-copy-btn {
+            opacity: 0;
+            transition: opacity 0.2s ease-in-out;
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 3px;
+        }
+
+        .uuid-container:hover .uuid-copy-btn {
+            opacity: 1;
+        }
+
+        .uuid-copy-btn:hover {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+
+        .dark .uuid-copy-btn:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Tooltip enhancement */
+        .uuid-display[title]:hover::after {
+            content: attr(title);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 4px 8px;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            border-radius: 4px;
+            font-size: 11px;
+            white-space: nowrap;
+            z-index: 1000;
+            pointer-events: none;
+            margin-bottom: 4px;
+        }
+
+        .dark .uuid-display[title]:hover::after {
+            background: rgba(255, 255, 255, 0.9);
+            color: black;
+        }
+
+        /* File Attachment Styles */
+        .file-attachments {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .file-attachment {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: rgba(243, 244, 246, 1);
+            border: 1px solid rgba(229, 231, 235, 1);
+            border-radius: 6px;
+            font-size: 12px;
+            transition: all 0.15s ease;
+        }
+
+        .dark .file-attachment {
+            background: rgba(55, 65, 81, 1);
+            border-color: rgba(75, 85, 99, 1);
+        }
+
+        .file-attachment:hover {
+            border-color: rgba(156, 163, 175, 1);
+        }
+
+        .dark .file-attachment:hover {
+            border-color: rgba(107, 114, 128, 1);
+        }
+
+        .file-attachment-thumbnail {
+            width: 40px;
+            height: 40px;
+            object-fit: cover;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: transform 0.15s ease;
+        }
+
+        .file-attachment-thumbnail:hover {
+            transform: scale(1.05);
+        }
+
+        .file-attachment-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .file-attachment-type {
+            font-weight: 500;
+            color: rgba(55, 65, 81, 1);
+        }
+
+        .dark .file-attachment-type {
+            color: rgba(229, 231, 235, 1);
+        }
+
+        .file-attachment-size {
+            color: rgba(107, 114, 128, 1);
+            font-size: 11px;
+        }
+
+        .dark .file-attachment-size {
+            color: rgba(156, 163, 175, 1);
+        }
+
+        .file-attachment-actions {
+            display: flex;
+            gap: 4px;
+        }
+
+        .file-attachment-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            border-radius: 4px;
+            color: rgba(107, 114, 128, 1);
+            background: rgba(255, 255, 255, 1);
+            border: 1px solid rgba(229, 231, 235, 1);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .dark .file-attachment-btn {
+            background: rgba(31, 41, 55, 1);
+            border-color: rgba(75, 85, 99, 1);
+            color: rgba(156, 163, 175, 1);
+        }
+
+        .file-attachment-btn:hover {
+            color: rgba(55, 65, 81, 1);
+            border-color: rgba(156, 163, 175, 1);
+        }
+
+        .dark .file-attachment-btn:hover {
+            color: rgba(229, 231, 235, 1);
+            border-color: rgba(107, 114, 128, 1);
+        }
+
+        /* Image Lightbox */
+        .image-lightbox {
+            position: fixed;
+            inset: 0;
+            z-index: 60;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.9);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+        }
+
+        .image-lightbox.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .image-lightbox-content {
+            max-width: 90vw;
+            max-height: 90vh;
+            position: relative;
+        }
+
+        .image-lightbox img {
+            max-width: 90vw;
+            max-height: 85vh;
+            object-fit: contain;
+            border-radius: 4px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .image-lightbox-close {
+            position: absolute;
+            top: -40px;
+            right: 0;
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            border-radius: 50%;
+            color: white;
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+
+        .image-lightbox-close:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .image-lightbox-actions {
+            position: absolute;
+            bottom: -44px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+        }
+
+        .image-lightbox-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+
+        .image-lightbox-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        /* File icon for non-image attachments */
+        .file-attachment-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(229, 231, 235, 1);
+            border-radius: 4px;
+            color: rgba(107, 114, 128, 1);
+        }
+
+        .dark .file-attachment-icon {
+            background: rgba(55, 65, 81, 1);
+            color: rgba(156, 163, 175, 1);
+        }
+
+    </style>
+
+    <!-- Stream Graph Shared JavaScript -->
+    <script src="{{ page_context.asset("js/stream-graph.js") }}" defer></script>
+
+    <!-- Agent Graph Visualization (dagre for layout, custom HTML+SVG rendering) -->
+    <script src="{{ page_context.asset("js/dagre.min.js") }}" defer></script>
+    <script src="{{ page_context.asset("js/agent-graph.js") }}" defer></script>
+
+    <!-- Core App Utilities -->
+    <script src="{{ page_context.asset("js/app.js") }}" defer></script>
+    <script>
+        // Initialize modal format from page context
+        if (typeof initModalFormat === 'function') {
+            initModalFormat('{{ page_context.value_format }}');
+        }
+    </script>
+
+    <!-- Content Modal for Full Display -->
+    <div id="content-modal" class="hidden fixed inset-0 z-50 overflow-auto bg-black/50 flex items-center justify-center p-4" onclick="closeContentModal(event)">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-6xl max-h-[90vh] flex flex-col" onclick="event.stopPropagation()">
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 id="content-modal-title" class="text-lg font-semibold text-gray-900 dark:text-white"></h3>
+                <div class="flex items-center gap-4">
+                    <!-- Format Toggle (visible when raw data is available) -->
+                    <div id="content-modal-format-toggle" class="hidden flex items-center gap-2">
+                        <span class="text-xs text-gray-500 dark:text-gray-400">Format:</span>
+                        <button id="content-modal-format-hot" onclick="switchModalFormat('hot')" class="px-2 py-1 text-xs rounded transition-colors">Hot</button>
+                        <button id="content-modal-format-json" onclick="switchModalFormat('json')" class="px-2 py-1 text-xs rounded transition-colors">JSON</button>
+                    </div>
+                    <!-- Copy Button -->
+                    <button id="content-modal-copy-btn" onclick="copyModalContent()" class="flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors" title="Copy to clipboard (Ctrl+C)">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                        </svg>
+                        <span id="content-modal-copy-text">Copy</span>
+                    </button>
+                    <button onclick="closeContentModal()" aria-label="Close modal" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1" title="Close">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <!-- Modal Content -->
+            <div class="flex-1 p-3 overflow-hidden flex flex-col">
+                <div class="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-700 flex-1 overflow-auto" style="max-height: 60vh;">
+                    <pre class="m-0"><code id="content-modal-body" class="language-hot text-sm whitespace-pre-wrap break-words"></code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Store raw data for format switching -->
+    <script id="content-modal-raw-data" type="application/json"></script>
+
+    <!-- Source Browser Modal -->
+    {% include "components/source_browser_modal.html" %}
+
+    <!-- Image Lightbox Modal -->
+    <div id="image-lightbox" class="image-lightbox" onclick="closeLightbox(event)">
+        <div class="image-lightbox-content" onclick="event.stopPropagation()">
+            <button class="image-lightbox-close" onclick="closeLightbox()" aria-label="Close lightbox" title="Close">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            </button>
+            <img id="lightbox-image" src="" alt="Preview">
+            <div class="image-lightbox-actions">
+                <button class="image-lightbox-btn" onclick="downloadLightboxImage()" title="Download">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                    Download
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Local Development Feature Restriction Modal -->
+    {% include "components/local_dev_notice_modal.html" %}
+
+    <!-- Reusable Confirm/Alert Modal -->
+    {% include "components/confirm_modal.html" %}
+
+    <!-- Global Formatting Functions -->
+    <script>
+    // Shorten UUID to last 12 hex characters (hyphens removed)
+    function truncateUuid(uuid) {
+        if (!uuid) return uuid;
+        const hex = uuid.replace(/-/g, '');
+        if (hex.length <= 12) return hex;
+        return hex.slice(-12);
+    }
+
+    // Format number with commas for thousands separator
+    function formatNumber(num) {
+        if (num === null || num === undefined) return '';
+        return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    }
+
+    // Initialize UUID displays - truncate and add tooltips
+    function initializeUuidDisplays(container) {
+        const root = container || document;
+        root.querySelectorAll('.uuid-display').forEach(el => {
+            if (el.title && el.textContent.trim().length <= 12) return;
+            const fullUuid = el.dataset.fullUuid || el.textContent.trim();
+            if (fullUuid && fullUuid.length > 12) {
+                el.textContent = truncateUuid(fullUuid);
+                el.title = fullUuid;
+            }
+        });
+    }
+
+    // Initialize copy buttons for UUIDs
+    function initializeCopyButtons(container) {
+        const root = container || document;
+        root.querySelectorAll('.uuid-copy-btn').forEach(btn => {
+            // Skip if already initialized
+            if (btn.dataset.copyInitialized) return;
+            btn.dataset.copyInitialized = 'true';
+
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const uuid = this.dataset.uuid;
+                if (uuid) {
+                    navigator.clipboard.writeText(uuid).then(() => {
+                        const originalTitle = this.title;
+                        this.title = 'Copied!';
+                        setTimeout(() => { this.title = originalTitle; }, 1000);
+                    });
+                }
+            });
+        });
+    }
+
+    // Format stat numbers in the UI
+    function formatStatNumbers(container) {
+        const root = container || document;
+        root.querySelectorAll('[data-stat-number]').forEach(el => {
+            const num = parseInt(el.dataset.statNumber, 10);
+            if (!isNaN(num)) {
+                el.textContent = formatNumber(num);
+            }
+        });
+    }
+
+    // Run all formatting on a container
+    function applyFormatting(container) {
+        initializeUuidDisplays(container);
+        initializeCopyButtons(container);
+        formatStatNumbers(container);
+        // Apply Prism syntax highlighting if available
+        if (typeof Prism !== 'undefined') {
+            const codeElements = (container || document).querySelectorAll('code.language-hot');
+            codeElements.forEach(el => Prism.highlightElement(el));
+        }
+    }
+
+    // Global HTMX afterSwap event listener - apply formatting to swapped content
+    document.body.addEventListener('htmx:afterSwap', function(event) {
+        applyFormatting(event.detail.target);
+    });
+
+    // Initial formatting on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        applyFormatting(document);
+    });
+    </script>
+</body>
+</html>
+</html>

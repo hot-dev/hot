@@ -1,0 +1,149 @@
+::hot::test::str ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+
+test-str-basic
+meta ["test"] fn () {
+
+    // Test split function
+    assert-eq(
+        ["a", "b", "c"],
+        split("a,b,c", ","),
+        "split(\"a,b,c\", \",\") returns [\"a\", \"b\", \"c\"]"
+    )
+    // Test join function
+    assert-eq(
+        "hello world rust",
+        join(["hello", "world", "rust"], " "),
+        "join([\"hello\", \"world\", \"rust\"], \" \") returns \"hello world rust\""
+    )
+    // Test length function
+    assert-eq(5, length("hello"), "length(\"hello\") returns 5")
+}
+
+test-str-trim
+meta ["test"] fn () {
+
+    // Test trim functions
+    assert-eq(
+        "hello world",
+        trim("  hello world  "),
+        "trim(\"  hello world  \") returns \"hello world\""
+    )
+    assert-eq(
+        "hello world  ",
+        trim-start("  hello world  "),
+        "trim-start(\"  hello world  \") returns \"hello world  \""
+    )
+    assert-eq(
+        "  hello world",
+        trim-end("  hello world  "),
+        "trim-end(\"  hello world  \") returns \"  hello world\""
+    )
+}
+
+test-str-transform
+meta ["test"] fn () {
+
+    // Test replace function
+    assert-eq(
+        "hello rust",
+        replace("hello world", "world", "rust"),
+        "replace(\"hello world\", \"world\", \"rust\") returns \"hello rust\""
+    )
+    // Test case conversion functions
+    assert-eq(
+        "hello world",
+        lowercase("HELLO WORLD"),
+        "lowercase(\"HELLO WORLD\") returns \"hello world\""
+    )
+    assert-eq(
+        "HELLO WORLD",
+        uppercase("hello world"),
+        "uppercase(\"hello world\") returns \"HELLO WORLD\""
+    )
+}
+
+test-str-predicates
+meta ["test"] fn () {
+
+    // Test is-empty function
+    assert(is-empty(""), "is-empty(\"\") returns true")
+    assert-eq(false, is-empty("not empty"), "is-empty(\"not empty\") returns false")
+    // Test is-blank function
+    assert(is-blank(" \t \n "), "is-blank(\" \t \n \") returns true")
+    assert-eq(false, is-blank("not blank"), "is-blank(\"not blank\") returns false")
+    // Test contains function
+    assert(contains("hello world", "world"), "contains(\"hello world\", \"world\") returns true")
+    assert-eq(
+        false,
+        contains("hello world", "rust"),
+        "contains(\"hello world\", \"rust\") returns false"
+    )
+    // Test starts-with function
+    assert(starts-with("hello world", "hello"), "starts-with(\"hello world\", \"hello\") returns true")
+    assert-eq(
+        false,
+        starts-with("hello world", "world"),
+        "starts-with(\"hello world\", \"world\") returns false"
+    )
+    // Test ends-with function
+    assert(ends-with("hello world", "world"), "ends-with(\"hello world\", \"world\") returns true")
+    assert-eq(
+        false,
+        ends-with("hello world", "hello"),
+        "ends-with(\"hello world\", \"hello\") returns false"
+    )
+}
+
+test-str-padding
+meta ["test"] fn () {
+
+    // Test pad-start function
+    assert-eq(
+        "*****hello",
+        pad-start("hello", 10, "*"),
+        "pad-start(\"hello\", 10, \"*\") returns \"*****hello\""
+    )
+    assert-eq(
+        "   hi",
+        pad-start("hi", 5),
+        "pad-start(\"hi\", 5) with default space padding returns \"   hi\""
+    )
+    assert-eq("hello", pad-start("hello", 5), "pad-start(\"hello\", 5) returns unchanged \"hello\"")
+    assert-eq("hello", pad-start("hello", -1), "pad-start(\"hello\", -1) returns unchanged \"hello\"")
+    // Test with numbers converted to strings
+    assert-eq("00042", pad-start(42, 5, "0"), "pad-start(42, 5, \"0\") returns \"00042\"")
+    // Test pad-end function
+    assert-eq(
+        "world*****",
+        pad-end("world", 10, "*"),
+        "pad-end(\"world\", 10, \"*\") returns \"world*****\""
+    )
+    assert-eq(
+        "bye   ",
+        pad-end("bye", 6),
+        "pad-end(\"bye\", 6) with default space padding returns \"bye   \""
+    )
+    assert-eq("world", pad-end("world", 5), "pad-end(\"world\", 5) returns unchanged \"world\"")
+    assert-eq("world", pad-end("world", -1), "pad-end(\"world\", -1) returns unchanged \"world\"")
+    // Test with boolean converted to string
+    assert-eq("true!!!!", pad-end(true, 8, "!"), "pad-end(true, 8, \"!\") returns \"true!!!!\"")
+    // Test with multi-character padding
+    assert-eq("xyxyxyhi", pad-start("hi", 8, "xy"), "pad-start(\"hi\", 8, \"xy\") returns \"xyxyxyhi\"")
+    assert-eq("goababa", pad-end("go", 7, "ab"), "pad-end(\"go\", 7, \"ab\") returns \"goababa\"")
+}
+
+test-str-templates
+meta ["test"] fn () {
+
+    // Test template string usage
+    abc "a,b,c"
+    delim ","
+    assert-eq(["a", "b", "c"], split(`${abc}`, `${delim}`), "split with template strings works")
+    hello "hello"
+    world "world"
+    assert-eq("hello,world", join([hello, world], delim), "join with template strings works")
+}

@@ -1,0 +1,15 @@
+::hot::test::http ns
+meta ["test"]
+
+request ::hot::http/request
+get ::hot::http/get
+post ::hot::http/post
+put ::hot::http/put
+delete ::hot::http/delete
+patch ::hot::http/patch
+
+// Example usage (these would be actual tests in a test environment)
+// test-http-get
+// meta ["test"] fn () {
+//     println(get("https://hot.dev"))
+// }

@@ -1,0 +1,258 @@
+::hot::test::type-dispatch ns
+meta ["test"]
+
+// Type-system declarations (`type`, `enum`, `->`) live at top level: arrows
+// mutate the global implementation registry, so a nested arrow would be a
+// hidden global side effect. Each test below uses a top-level (type, arrow)
+// pair declared in this same namespace.
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+Str ::hot::type/Str
+Int ::hot::type/Int
+Dec ::hot::type/Dec
+
+// ============================================================================
+// Test 1: Type-Based Function Dispatch
+// ============================================================================
+
+Circle type {
+    radius: Dec
+}
+
+Rectangle type {
+    width: Dec,
+    height: Dec
+}
+
+Circle -> Str fn (circle: Circle): Str {
+    area ::hot::math/mul(::hot::math/mul(circle.radius, circle.radius), 3.14159)
+    `Circle(r=${circle.radius}, area=${area})`
+}
+
+Rectangle -> Str fn (rect: Rectangle): Str {
+    area ::hot::math/mul(rect.width, rect.height)
+    `Rectangle(${rect.width}x${rect.height}, area=${area})`
+}
+
+test-type-dispatch
+meta ["test"] fn () {
+    circle Circle({radius: 5.0})
+    rectangle Rectangle({width: 4.0, height: 6.0})
+
+    circle_str Str(circle)
+    rect_str Str(rectangle)
+
+    assert(::hot::str/contains(circle_str, "Circle"), "Circle implementation should be used")
+    assert(::hot::str/contains(circle_str, "r=5"), "Circle should show radius")
+    assert(::hot::str/contains(rect_str, "Rectangle"), "Rectangle implementation should be used")
+    assert(::hot::str/contains(rect_str, "4.0x6.0"), "Rectangle should show dimensions")
+}
+
+// ============================================================================
+// Test 2: Arity vs Type Dispatch Priority
+// ============================================================================
+
+Container type {
+    value: Str
+}
+
+Container -> Str fn (container: Container): Str {
+    `Container[${container.value}]`
+}
+
+test-dispatch-priority
+meta ["test"] fn () {
+    container Container({value: "test"})
+    result Str(container)
+
+    assert-eq("Container[test]", result, "Type dispatch should take precedence")
+}
+
+// ============================================================================
+// Test 3: Multiple Signature Overloading
+// ============================================================================
+
+Coordinate type {
+    x: Int,
+    y: Int
+}
+
+Distance type {
+    value: Dec,
+    unit: Str
+}
+
+Coordinate -> Str fn (coord: Coordinate): Str {
+    `(${coord.x}, ${coord.y})`
+}
+
+Distance -> Str fn (dist: Distance): Str {
+    `${dist.value} ${dist.unit}`
+}
+
+test-signature-overloading
+meta ["test"] fn () {
+    coord Coordinate({x: 10, y: 20})
+    distance Distance({value: 5.5, unit: "km"})
+
+    coord_str Str(coord)
+    dist_str Str(distance)
+
+    assert-eq("(10, 20)", coord_str, "Coordinate conversion should work")
+    assert-eq("5.5 km", dist_str, "Distance conversion should work")
+}
+
+// ============================================================================
+// Test 4: Cross-Namespace Type Extensions
+// ============================================================================
+
+Account type {
+    id: Str,
+    balance: Dec
+}
+
+Account -> ::hot::type/Str fn (account: Account): Str {
+    `Account ${account.id}: $${account.balance}`
+}
+
+test-cross-namespace
+meta ["test"] fn () {
+    account Account({id: "ACC-123", balance: 1000.5})
+    account_str ::hot::type/Str(account)
+
+    assert-eq("Account ACC-123: $1000.5", account_str, "Cross-namespace extension should work")
+}
+
+// ============================================================================
+// Test 5: Chained Type Conversions
+// ============================================================================
+
+Measurement type {
+    value: Dec,
+    unit: Str
+}
+
+Measurement -> Str fn (m: Measurement): Str {
+    `${m.value} ${m.unit}`
+}
+
+Measurement -> Dec fn (m: Measurement): Dec {
+    m.value
+}
+
+test-chained-conversions
+meta ["test"] fn () {
+    measurement Measurement({value: 42.5, unit: "meters"})
+
+    as_str Str(measurement)
+    as_dec Dec(measurement)
+
+    assert-eq("42.5 meters", as_str, "Measurement to String should work")
+    assert-eq(42.5, as_dec, "Measurement to Dec should work")
+}
+
+// ============================================================================
+// Test 6: Conditional Implementation Logic
+// ============================================================================
+
+Status type {
+    code: Int,
+    message: Str
+}
+
+Status -> Str fn (status: Status): Str {
+    level cond {
+        ::hot::cmp/lt(status.code, 300) => { "INFO" }
+        ::hot::cmp/lt(status.code, 400) => { "WARN" }
+        ::hot::cmp/lt(status.code, 500) => { "ERROR" }
+        => { "CRITICAL" }
+    }
+    `[${level}] ${status.code}: ${status.message}`
+}
+
+test-conditional-logic
+meta ["test"] fn () {
+    success Status({code: 200, message: "OK"})
+    redirect Status({code: 301, message: "Moved"})
+    error Status({code: 404, message: "Not Found"})
+    server_error Status({code: 500, message: "Internal Error"})
+
+    success_str Str(success)
+    redirect_str Str(redirect)
+    error_str Str(error)
+    server_str Str(server_error)
+
+    assert-eq("[INFO] 200: OK", success_str, "Success status should be INFO")
+    assert-eq("[WARN] 301: Moved", redirect_str, "Redirect should be WARN")
+    assert-eq("[ERROR] 404: Not Found", error_str, "Client error should be ERROR")
+    assert-eq("[CRITICAL] 500: Internal Error", server_str, "Server error should be CRITICAL")
+}
+
+// ============================================================================
+// Test 7: Collection Integration
+// ============================================================================
+
+Item type {
+    id: Str,
+    name: Str
+}
+
+Item -> Str fn (item: Item): Str {
+    `${item.id}: ${item.name}`
+}
+
+test-collection-integration
+meta ["test"] fn () {
+    items [
+        Item({id: "A001", name: "Widget"}),
+        Item({id: "B002", name: "Gadget"}),
+        Item({id: "C003", name: "Tool"})
+    ]
+
+    item_strings ::hot::coll/map(items, (item) { Str(item) })
+
+    expected ["A001: Widget", "B002: Gadget", "C003: Tool"]
+    assert-eq(expected, item_strings, "Collection mapping with type dispatch should work")
+}
+
+// ============================================================================
+// Test 8: Recursive Type Implementations
+// ============================================================================
+
+Address type {
+    street: Str,
+    city: Str,
+    country: Str
+}
+
+Person type {
+    name: Str,
+    address: Address
+}
+
+Address -> Str fn (addr: Address): Str {
+    `${addr.street}, ${addr.city}, ${addr.country}`
+}
+
+Person -> Str fn (person: Person): Str {
+    `${person.name} at ${Str(person.address)}`
+}
+
+test-recursive-types
+meta ["test"] fn () {
+    address Address({
+            street: "123 Main St",
+            city: "Anytown",
+            country: "USA"
+        })
+
+    person Person({
+            name: "John Doe",
+            address: address
+        })
+
+    person_str Str(person)
+    expected "John Doe at 123 Main St, Anytown, USA"
+    assert-eq(expected, person_str, "Recursive type implementations should work")
+}

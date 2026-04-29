@@ -1,0 +1,1061 @@
+<!-- Event Detail Tabs Component -->
+<style>
+/* Tab Navigation */
+.event-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: white;
+    padding: 0 0 0 16px;
+}
+
+.dark .event-tabs {
+    background: #111111;
+    border-bottom-color: rgba(64, 64, 64, 1);
+}
+
+.event-tab-button {
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(107, 114, 128, 1);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Mobile adjustments */
+@media (max-width: 767px) {
+    .event-tab-button {
+        padding: 8px 10px;
+        font-size: 12px;
+    }
+
+    #event-inspector-toggle-btn {
+        display: none !important;
+    }
+
+    .responsive-table {
+        display: none !important;
+    }
+}
+
+.dark .event-tab-button {
+    color: rgba(156, 163, 175, 1);
+}
+
+.event-tab-button:hover {
+    color: rgba(239, 68, 68, 1);
+    background: rgba(254, 242, 242, 1);
+}
+
+.dark .event-tab-button:hover {
+    color: rgba(252, 165, 165, 1);
+    background: rgba(55, 65, 81, 0.5);
+}
+
+.event-tab-button.active {
+    color: rgba(239, 68, 68, 1);
+    border-bottom-color: rgba(239, 68, 68, 1);
+}
+
+.dark .event-tab-button.active {
+    color: rgba(252, 165, 165, 1);
+    border-bottom-color: rgba(239, 68, 68, 1);
+}
+
+.tab-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* Tab Content */
+.event-tab-content {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: auto;
+}
+
+.event-tab-content.active {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Stream Sub-tabs */
+.stream-sub-tabs {
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    background: rgba(249, 250, 251, 1);
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+}
+
+.dark .stream-sub-tabs {
+    background: rgba(31, 31, 31, 1);
+    border-bottom-color: rgba(64, 64, 64, 1);
+}
+
+.stream-sub-tab-button {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(107, 114, 128, 1);
+    background: white;
+    border: 1px solid rgba(209, 213, 219, 1);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.dark .stream-sub-tab-button {
+    color: rgba(156, 163, 175, 1);
+    background: #111111;
+    border-color: rgba(64, 64, 64, 1);
+}
+
+.stream-sub-tab-button:hover {
+    color: rgba(239, 68, 68, 1);
+    border-color: rgba(239, 68, 68, 1);
+    background: rgba(254, 242, 242, 1);
+}
+
+.dark .stream-sub-tab-button:hover {
+    color: rgba(252, 165, 165, 1);
+    border-color: rgba(239, 68, 68, 1);
+    background: rgba(55, 65, 81, 0.5);
+}
+
+.stream-sub-tab-button.active {
+    color: white;
+    background: rgba(239, 68, 68, 1);
+    border-color: rgba(239, 68, 68, 1);
+}
+
+.dark .stream-sub-tab-button.active {
+    color: white;
+    background: rgba(239, 68, 68, 1);
+    border-color: rgba(239, 68, 68, 1);
+}
+
+/* Stream Graph Container */
+.stream-graph-container {
+    display: none;
+}
+
+.stream-graph-container.active {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+/* Responsive table wrapper */
+.responsive-table {
+    overflow-x: auto;
+}
+
+/* Event Graph Search */
+.event-graph-search-controls {
+    background: white;
+}
+
+.dark .event-graph-search-controls {
+    background: #111111;
+    border-bottom-color: rgba(64, 64, 64, 1) !important;
+}
+
+.dark .event-graph-search-input {
+    background: rgba(64, 64, 64, 1) !important;
+    border-color: rgba(82, 82, 82, 1) !important;
+    color: rgba(229, 231, 235, 1) !important;
+}
+
+.dark .event-graph-search-input::placeholder {
+    color: rgba(156, 163, 175, 1);
+}
+
+.dark .event-graph-clear-btn {
+    color: rgba(156, 163, 175, 1) !important;
+}
+
+.dark .event-graph-search-controls .filter-help-tooltip {
+    background: #111111 !important;
+    border-color: rgba(64, 64, 64, 1) !important;
+    color: rgba(229, 231, 235, 1) !important;
+}
+</style>
+
+<!-- Tab Navigation -->
+<div class="event-tabs">
+    {% if stream_graphs.len() > 0 %}
+    <button class="event-tab-button active" data-tab="stream-graph">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path>
+        </svg>
+        Stream Graph
+    </button>
+    {% endif %}
+    <button class="event-tab-button {% if stream_graphs.len() == 0 %}active{% endif %}" data-tab="runs">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+        </svg>
+        Runs
+    </button>
+
+    <!-- Inspector Toggle (aligned right) -->
+    <div class="ml-auto flex items-center px-3">
+        <button id="event-inspector-toggle-btn" class="inline-flex items-center p-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors" title="Value Inspector ON/OFF">
+            <svg id="event-inspector-icon-off" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                <rect x="1" y="1" width="14" height="14" stroke-width="1.5" rx="1"></rect>
+                <line x1="10" y1="1" x2="10" y2="15" stroke-width="1.5"></line>
+            </svg>
+            <svg id="event-inspector-icon-on" class="w-4 h-4 hidden" fill="currentColor" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                <rect x="1" y="1" width="14" height="14" fill="none" stroke-width="1.5" rx="1"></rect>
+                <rect x="10" y="1" width="5" height="14" fill="currentColor" rx="1"></rect>
+            </svg>
+        </button>
+    </div>
+</div>
+
+<!-- Tab Contents -->
+<div class="flex-1 flex flex-row min-h-0">
+    <div class="flex-1 flex flex-col min-h-0">
+    <!-- Stream Graph Tab -->
+    {% if stream_graphs.len() > 0 %}
+    <div class="event-tab-content active" id="stream-graph-tab">
+        <!-- Stream Sub-tabs (only shown if multiple streams) -->
+        {% if stream_graphs.len() > 1 %}
+        <div class="stream-sub-tabs">
+            {% for stream_graph in stream_graphs %}
+            <button class="stream-sub-tab-button {% if loop.index0 == 0 %}active{% endif %}" data-stream-id="{{ stream_graph.stream_id }}">
+                Stream {{ stream_graph.stream_id_short }}
+            </button>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Search Controls -->
+        <div class="event-graph-search-controls" style="display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid rgba(229, 231, 235, 1);">
+            <div style="position: relative; display: flex; align-items: center; gap: 4px;">
+                <div style="position: relative; display: inline-flex; align-items: center;">
+                    <input type="text" id="event-detail-graph-search" class="event-graph-search-input" placeholder="Search type, function, result..." style="height: 32px; padding: 4px 28px 4px 10px; font-size: 12px; border: 1px solid rgba(209, 213, 219, 1); border-radius: 4px; min-width: 200px; background: white;" />
+                    <button type="button" class="event-graph-clear-btn" id="event-detail-graph-search-clear" title="Clear search" style="position: absolute; right: 6px; display: none; padding: 2px; background: none; border: none; cursor: pointer; color: rgba(156, 163, 175, 1);">
+                        <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                <span class="filter-help" tabindex="0" style="display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 10px; font-weight: 600; color: rgba(107, 114, 128, 0.8); background: rgba(229, 231, 235, 0.8); border-radius: 50%; cursor: help; position: relative;">?
+                    <span class="filter-help-tooltip" style="display: none; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 8px; padding: 10px 12px; min-width: 200px; font-size: 11px; font-weight: 400; line-height: 1.5; color: rgba(55, 65, 81, 1); background: white; border: 1px solid rgba(229, 231, 235, 1); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); z-index: 100; white-space: normal;">
+                        <strong>Search</strong><br>
+                        Searches type, kind, function, status, and result.<br><br>
+                        <em>Examples:</em><br>
+                        <code>event</code> - event nodes<br>
+                        <code>chat:message</code> - event kind<br>
+                        <code>succeeded</code> - by status
+                    </span>
+                </span>
+            </div>
+        </div>
+
+        <!-- Stream Graph Containers -->
+        {% for stream_graph in stream_graphs %}
+        <div class="stream-graph-container {% if loop.index0 == 0 %}active{% endif %} flex-1 p-6 overflow-auto" id="stream-graph-{{ stream_graph.stream_id }}" data-graph-json="{{ stream_graph.graph_data_json|escape }}">
+            <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                Loading stream graph...
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Runs Tab -->
+    <div class="event-tab-content {% if stream_graphs.len() == 0 %}active{% endif %}" id="runs-tab">
+        <!-- Desktop Table View -->
+        <div class="responsive-table hidden md:block">
+            <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-700 sticky top-0">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Run ID</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">FN</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Type</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Start</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Duration</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Result</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for run in event_runs %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222]">
+                        <td class="px-6 py-4 whitespace-nowrap text-xs font-mono">
+                            <div class="uuid-container inline-flex items-center gap-1">
+                                <a href="/runs/{{ run.run_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</a>
+                                <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.run_id }}" title="Copy {{ run.run_id }} to clipboard">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 text-xs">
+                            {% match run.event_fn %}
+                            {% when Some with (event_fn) %}
+                                <code class="language-hot text-gray-700 dark:text-gray-300 event-fn-code">{{ event_fn }}</code>
+                            {% when None %}
+                                <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            {% endmatch %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-xs">
+                            <div class="flex items-center gap-1">
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
+                                {% if run.is_retry %}
+                                    <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-xs">
+                            {% if run.status == "succeeded" %}
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                            {% else if run.status == "failed" %}
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                            {% else %}
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            {{ run.start_time_formatted }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                            {{ run.duration_formatted }}
+                        </td>
+                        <td class="px-6 py-4 text-xs">
+                            {% match run.result %}
+                            {% when Some with (result) %}
+                                <div class="flex items-center gap-2">
+                                    <button class="result-btn text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 cursor-pointer font-mono text-xs truncate max-w-xs flex-1 text-left"
+                                            onclick="window.showEventStreamNodeInspector('{{ run.run_id }}', 'run', {})"
+                                            title="Click to inspect">
+                                        <code class="language-hot truncate inline-block max-w-full">{{ result }}</code>
+                                    </button>
+                                    <button onclick="openContentModalWithFormats('Result', `{{ result|escape }}`, `{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            {% when None %}
+                                <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                            {% endmatch %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if event_runs.len() == 0 %}
+                    <tr>
+                        <td colspan="7" class="px-6 py-4 text-center text-xs text-gray-500 dark:text-gray-400">
+                            No runs found for this event.
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Mobile Card View -->
+        <div class="md:hidden p-4 overflow-auto">
+            <div class="space-y-4">
+                {% for run in event_runs %}
+                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+                    <div class="flex justify-between items-start mb-3">
+                        <div class="text-sm font-medium text-gray-900 dark:text-white">
+                            Run <div class="uuid-container inline-flex items-center gap-1">
+                                <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</span>
+                                <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.run_id }}" title="Copy {{ run.run_id }} to clipboard">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-600 dark:text-gray-400">Type:</span>
+                            <div class="flex items-center gap-1">
+                                <span class="text-gray-700 dark:text-gray-300">{{ run.run_type }}</span>
+                                {% if run.is_retry %}
+                                    <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">Status:</span>
+                            <span class="text-gray-700 dark:text-gray-300">
+                                {% if run.status == "succeeded" %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                                {% else if run.status == "failed" %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                                {% else %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.status }}</span>
+                                {% endif %}
+                            </span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">Start:</span>
+                            <span class="text-gray-700 dark:text-gray-300">{{ run.start_time_formatted }}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">Duration:</span>
+                            <span class="text-gray-700 dark:text-gray-300">{{ run.duration_formatted }}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-600 dark:text-gray-400">FN:</span>
+                            <span class="text-gray-700 dark:text-gray-300">
+                                {% match run.event_fn %}
+                                {% when Some with (event_fn) %}
+                                    <code class="language-hot text-xs">{{ event_fn }}</code>
+                                {% when None %}
+                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                {% endmatch %}
+                            </span>
+                        </div>
+                        {% match run.result %}
+                        {% when Some with (result) %}
+                        <div class="flex justify-between items-center gap-2">
+                            <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Result:</span>
+                            <div class="flex items-center justify-between gap-2 flex-1 min-w-0">
+                                <code class="language-hot text-gray-700 dark:text-gray-300 font-mono text-xs truncate">{{ result|truncate(length=30) }}</code>
+                                <button onclick="openContentModalWithFormats('Result', `{{ result|escape }}`, `{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}`)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        {% when None %}
+                        {% endmatch %}
+                    </div>
+
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                        <a href="/runs/{{ run.run_id }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all duration-200 font-medium">View Details</a>
+                    </div>
+                </div>
+                {% endfor %}
+                {% if event_runs.len() == 0 %}
+                <div class="text-center text-gray-500 dark:text-gray-400 py-8">
+                    No runs found for this event.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    </div>
+
+    <!-- Value Inspector Panel - Sticky container -->
+    <div id="event-value-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col relative" style="min-width: 20rem;">
+        <!-- Sticky inner wrapper that stays in view -->
+        <div class="sticky top-0 flex flex-col bg-white dark:bg-neutral-900" style="max-height: calc(100vh - 120px);">
+            <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+                <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
+                    <div class="text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider truncate" style="max-width: 12rem;">
+                        Value Inspector
+                    </div>
+                </div>
+                <div id="event-inspector-info" class="px-2 md:px-3 pb-1.5 text-xs text-gray-500 dark:text-gray-400 truncate" title="">
+                    <span class="font-medium" id="event-inspector-type-label"></span> <span id="event-inspector-id" class="font-mono"></span>
+                </div>
+            </div>
+            <div class="flex-1 p-2 md:p-3 pt-2 overflow-y-auto min-h-0">
+                <div id="event-inspector-content" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 font-mono text-xs overflow-auto scrollbar-always">
+                    <div class="text-gray-500 dark:text-gray-400 italic text-center py-4">
+                        Click on a result or event/run node to inspect its content here
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Inspector functionality
+let eventInspectorOpen = false;
+let currentEventInspectorData = null;
+
+function initializeEventInspector() {
+    const toggleBtn = document.getElementById('event-inspector-toggle-btn');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', toggleEventInspector);
+    }
+
+    // Check URL parameter for initial inspector state
+    const urlParams = new URLSearchParams(window.location.search);
+    const inspectorParam = urlParams.get('inspector');
+    if (inspectorParam === '1' && !eventInspectorOpen) {
+        toggleEventInspector();
+    }
+}
+
+function toggleEventInspector() {
+    const panel = document.getElementById('event-value-inspector-panel');
+    const iconOff = document.getElementById('event-inspector-icon-off');
+    const iconOn = document.getElementById('event-inspector-icon-on');
+
+    if (eventInspectorOpen) {
+        panel.classList.add('hidden');
+        iconOff.classList.remove('hidden');
+        iconOn.classList.add('hidden');
+        eventInspectorOpen = false;
+    } else {
+        panel.classList.remove('hidden');
+        iconOff.classList.add('hidden');
+        iconOn.classList.remove('hidden');
+        eventInspectorOpen = true;
+    }
+
+    // Update URL parameter
+    const url = new URL(window.location);
+    if (eventInspectorOpen) {
+        url.searchParams.set('inspector', '1');
+    } else {
+        url.searchParams.delete('inspector');
+    }
+    window.history.pushState({}, '', url);
+}
+
+function clearEventInspector() {
+    const idEl = document.getElementById('event-inspector-id');
+    const typeLabelEl = document.getElementById('event-inspector-type-label');
+    const contentEl = document.getElementById('event-inspector-content');
+
+    if (idEl) idEl.textContent = '';
+    if (typeLabelEl) typeLabelEl.textContent = '';
+    if (contentEl) {
+        contentEl.innerHTML = '<div class="text-gray-500 dark:text-gray-400 italic text-center py-4">Click on a result or data cell, or a node in the stream graph to inspect its content here</div>';
+    }
+
+    currentEventInspectorData = null;
+}
+
+// Global functions for stream graph to call
+window.showEventStreamNodeInspector = async function(nodeId, nodeType, details) {
+    const isMobile = window.innerWidth < 768;
+
+    // On mobile, show in modal instead of side panel
+    if (isMobile) {
+        // Fetch full data via API
+        let fullData = null;
+        if (nodeType === 'run') {
+            try {
+                const response = await fetch(`/data/runs/${nodeId}/json`);
+                if (response.ok) {
+                    fullData = await response.json();
+                }
+            } catch (e) {
+                console.error('Failed to fetch run data:', e);
+            }
+        } else if (nodeType === 'event') {
+            try {
+                const response = await fetch(`/data/events/${nodeId}/json`);
+                if (response.ok) {
+                    fullData = await response.json();
+                }
+            } catch (e) {
+                console.error('Failed to fetch event data:', e);
+            }
+        }
+
+        // Build rich HTML modal content
+        if (fullData) {
+            showRichEventInspectorModal(nodeType, nodeId, fullData);
+        }
+        return;
+    }
+
+    // Desktop: use side panel
+    const panel = document.getElementById('event-value-inspector-panel');
+    const idEl = document.getElementById('event-inspector-id');
+    const typeLabelEl = document.getElementById('event-inspector-type-label');
+    const contentEl = document.getElementById('event-inspector-content');
+
+    // Open inspector if not already open
+    if (!eventInspectorOpen) {
+        toggleEventInspector();
+    }
+
+    // Fetch full data via API
+    let fullData = null;
+    if (nodeType === 'run') {
+        try {
+            const response = await fetch(`/data/runs/${nodeId}/json`);
+            if (response.ok) {
+                fullData = await response.json();
+            }
+        } catch (e) {
+            console.error('Failed to fetch run data:', e);
+        }
+    } else if (nodeType === 'event') {
+        try {
+            const response = await fetch(`/data/events/${nodeId}/json`);
+            if (response.ok) {
+                fullData = await response.json();
+            }
+        } catch (e) {
+            console.error('Failed to fetch event data:', e);
+        }
+    }
+
+    // Update header
+    typeLabelEl.textContent = nodeType.toUpperCase();
+    idEl.textContent = nodeId;
+
+    // Display content
+    if (fullData) {
+        displayEventInspectorContent(fullData);
+    } else {
+        contentEl.textContent = JSON.stringify(details, null, 2);
+    }
+
+    currentEventInspectorData = fullData || details;
+};
+
+function displayEventInspectorContent(data) {
+    const contentEl = document.getElementById('event-inspector-content');
+
+    if (data === null || data === undefined) {
+        contentEl.innerHTML = '<pre class="text-gray-500 dark:text-gray-400 italic">null</pre>';
+        return;
+    }
+
+    // Check if this is a run or event based on the data structure
+    if (data.run_id) {
+        // Format run data with fields
+        let html = '<div class="space-y-3">';
+
+        // Function
+        if (data.event_fn) {
+            const escapedFn = escapeHtml(data.event_fn);
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Function</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100"><code class="language-hot">${escapedFn}</code></div>
+                </div>
+            `;
+        }
+
+        // Scope (project name)
+        if (data.project_name) {
+            const escapedProject = escapeHtml(data.project_name);
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Scope</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${escapedProject}</div>
+                </div>
+            `;
+        }
+
+        // Type
+        if (data.run_type) {
+            const escapedType = escapeHtml(data.run_type);
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Type</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
+                        <span class="px-2 py-1 rounded-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200">${escapedType}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Status
+        if (data.status) {
+            const statusClass = data.status === 'succeeded' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                               data.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                               'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
+            const escapedStatus = escapeHtml(data.status);
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Status</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
+                        <span class="px-2 py-1 rounded-full ${statusClass}">${escapedStatus}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Duration (calculate from start and stop times)
+        if (data.start_time && data.stop_time) {
+            const startTime = new Date(data.start_time);
+            const stopTime = new Date(data.stop_time);
+            const durationMs = stopTime - startTime;
+            const durationFormatted = formatEventDuration(durationMs);
+
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Duration</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${durationFormatted}</div>
+                </div>
+            `;
+        }
+
+        // Result
+        if (data.result) {
+            const resultHot = formatAsHotLiteral(data.result);
+            const resultJson = JSON.stringify(data.result, null, 2);
+            const resultId = 'result-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            const escapedResultHot = escapeHtml(resultHot);
+            const escapedResultJson = escapeHtml(resultJson);
+
+            html += `
+                <div class="relative">
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Result</div>
+                    <div id="${resultId}-hot" style="display: none;">${escapedResultHot}</div>
+                    <div id="${resultId}-json" style="display: none;">${escapedResultJson}</div>
+                    <button onclick="openContentModalWithFormats('Result', document.getElementById('${resultId}-hot').textContent, document.getElementById('${resultId}-json').textContent)" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full result">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100 max-h-40 overflow-auto"><code class="language-hot whitespace-pre-wrap">${escapedResultHot}</code></div>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        contentEl.innerHTML = html;
+
+    } else if (data.event_id) {
+        // Format event data with fields
+        let html = '<div class="space-y-3">';
+
+        // Event Type
+        if (data.event_type) {
+            const escapedEventType = escapeHtml(data.event_type);
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Event Type</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${escapedEventType}</div>
+                </div>
+            `;
+        }
+
+        // Event Time
+        if (data.event_time) {
+            const escapedEventTime = escapeHtml(data.event_time);
+            html += `
+                <div>
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Event Time</div>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${escapedEventTime}</div>
+                </div>
+            `;
+        }
+
+        // Event Data
+        if (data.event_data) {
+            const eventDataHot = formatAsHotLiteral(data.event_data);
+            const eventDataJson = JSON.stringify(data.event_data, null, 2);
+            const eventDataId = 'event-data-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            const escapedEventDataHot = escapeHtml(eventDataHot);
+            const escapedEventDataJson = escapeHtml(eventDataJson);
+            html += `
+                <div class="relative">
+                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Event Data</div>
+                    <div id="${eventDataId}-hot" style="display: none;">${escapedEventDataHot}</div>
+                    <div id="${eventDataId}-json" style="display: none;">${escapedEventDataJson}</div>
+                    <button onclick="openContentModalWithFormats('Event Data', document.getElementById('${eventDataId}-hot').textContent, document.getElementById('${eventDataId}-json').textContent)" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full event data">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100 max-h-60 overflow-auto"><code class="language-hot whitespace-pre-wrap">${escapedEventDataHot}</code></div>
+                </div>
+            `;
+        }
+
+        html += '</div>';
+        contentEl.innerHTML = html;
+
+    } else {
+        // Fallback: display as JSON
+        const formatted = JSON.stringify(data, null, 2);
+        const escapedFormatted = escapeHtml(formatted);
+        contentEl.innerHTML = `<pre class="whitespace-pre-wrap text-gray-900 dark:text-gray-100">${escapedFormatted}</pre>`;
+    }
+
+    // Apply syntax highlighting to any code blocks
+    if (typeof Prism !== 'undefined') {
+        contentEl.querySelectorAll('code.language-hot').forEach(el => {
+            Prism.highlightElement(el);
+        });
+    }
+}
+
+// Helper function to format duration for events
+function formatEventDuration(ms) {
+    if (ms < 1000) {
+        return `${Math.round(ms)}ms`;
+    } else if (ms < 60000) {
+        return `${(ms / 1000).toFixed(2)}s`;
+    } else {
+        const minutes = Math.floor(ms / 60000);
+        const seconds = Math.floor((ms % 60000) / 1000);
+        return `${minutes}m ${seconds}s`;
+    }
+}
+
+// Format a value as a Hot language literal (uses global version if available)
+// Format a value as a Hot language literal (uses global function from app.js)
+function formatAsHotLiteralLocal(value, indent = 0) {
+    return window.formatAsHotLiteral(value, indent);
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    initializeEventTabs();
+    initializeEventInspector();
+});
+
+function initializeEventTabs() {
+    const tabButtons = document.querySelectorAll('.event-tab-button');
+    const tabContents = document.querySelectorAll('.event-tab-content');
+
+    // Check URL parameter for initial tab
+    const urlParams = new URLSearchParams(window.location.search);
+    let initialTab = urlParams.get('tab');
+
+    // Default to stream-graph if available, otherwise runs
+    if (!initialTab) {
+        const streamGraphTab = document.getElementById('stream-graph-tab');
+        initialTab = streamGraphTab ? 'stream-graph' : 'runs';
+    }
+
+    // Activate initial tab
+    tabButtons.forEach(btn => btn.classList.remove('active'));
+    tabContents.forEach(content => content.classList.remove('active'));
+
+    const initialButton = document.querySelector(`.event-tab-button[data-tab="${initialTab}"]`);
+    const initialContent = document.getElementById(initialTab + '-tab');
+    if (initialButton && initialContent) {
+        initialButton.classList.add('active');
+        initialContent.classList.add('active');
+
+        if (initialTab === 'stream-graph') {
+            renderAllStreamGraphs();
+        }
+    }
+
+    tabButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const tabName = this.getAttribute('data-tab');
+
+            // Remove active class from all buttons and contents
+            tabButtons.forEach(btn => btn.classList.remove('active'));
+            tabContents.forEach(content => content.classList.remove('active'));
+
+            // Add active class to clicked button and corresponding content
+            this.classList.add('active');
+            document.getElementById(tabName + '-tab').classList.add('active');
+
+            // Update URL parameter
+            const url = new URL(window.location);
+            url.searchParams.set('tab', tabName);
+            window.history.pushState({}, '', url);
+
+            // Clear inspector when switching tabs
+            clearEventInspector();
+
+            // If switching to stream graph tab, render graphs
+            if (tabName === 'stream-graph') {
+                renderAllStreamGraphs();
+            }
+        });
+    });
+
+    // Initialize stream sub-tabs if they exist
+    const streamSubTabButtons = document.querySelectorAll('.stream-sub-tab-button');
+    if (streamSubTabButtons.length > 0) {
+        streamSubTabButtons.forEach(button => {
+            button.addEventListener('click', function() {
+                const streamId = this.getAttribute('data-stream-id');
+
+                // Update active sub-tab button
+                streamSubTabButtons.forEach(btn => btn.classList.remove('active'));
+                this.classList.add('active');
+
+                // Show corresponding stream graph
+                document.querySelectorAll('.stream-graph-container').forEach(container => {
+                    container.classList.remove('active');
+                });
+                const targetContainer = document.getElementById(`stream-graph-${streamId}`);
+                if (targetContainer) {
+                    targetContainer.classList.add('active');
+                    renderStreamGraphForContainer(targetContainer);
+                }
+            });
+        });
+    }
+}
+
+function renderAllStreamGraphs() {
+    // Render the currently active stream graph
+    const activeContainer = document.querySelector('.stream-graph-container.active');
+    if (activeContainer) {
+        renderStreamGraphForContainer(activeContainer);
+    }
+}
+
+function renderStreamGraphForContainer(container) {
+    // Check if already rendered
+    if (container.querySelector('.flex') || container.querySelector('.stream-tree')) return;
+
+    // Get graph data from data attribute
+    const graphDataJson = container.getAttribute('data-graph-json');
+    if (!graphDataJson) {
+        container.innerHTML = '<div class="text-center text-gray-500 dark:text-gray-400 py-8">No graph data available</div>';
+        return;
+    }
+
+    // Use shared rendering function from stream-graph.js with event-specific inspector callback
+    window.renderStreamGraph(container.id, graphDataJson, 'showEventStreamNodeInspector');
+}
+
+function initializeEventGraphSearch() {
+    const searchInput = document.getElementById('event-detail-graph-search');
+    const clearBtn = document.getElementById('event-detail-graph-search-clear');
+
+    if (!searchInput) return;
+
+    let searchTimeout;
+    searchInput.addEventListener('input', (e) => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+            if (typeof window.filterStreamGraph === 'function') {
+                window.filterStreamGraph(e.target.value);
+            }
+        }, 150);
+
+        // Show/hide clear button
+        if (clearBtn) {
+            clearBtn.style.display = e.target.value ? 'block' : 'none';
+        }
+    });
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            searchInput.value = '';
+            clearBtn.style.display = 'none';
+            if (typeof window.filterStreamGraph === 'function') {
+                window.filterStreamGraph('');
+            }
+        });
+    }
+
+    // Show clear button on hover if there's text
+    searchInput.addEventListener('mouseenter', () => {
+        if (searchInput.value && clearBtn) clearBtn.style.display = 'block';
+    });
+
+    // Help tooltip hover behavior
+    const helpIcon = searchInput.closest('.event-graph-search-controls')?.querySelector('.filter-help');
+    const helpTooltip = helpIcon?.querySelector('.filter-help-tooltip');
+    if (helpIcon && helpTooltip) {
+        helpIcon.addEventListener('mouseenter', () => helpTooltip.style.display = 'block');
+        helpIcon.addEventListener('mouseleave', () => helpTooltip.style.display = 'none');
+        helpIcon.addEventListener('focus', () => helpTooltip.style.display = 'block');
+        helpIcon.addEventListener('blur', () => helpTooltip.style.display = 'none');
+    }
+}
+
+// Initialize search on page load
+document.addEventListener('DOMContentLoaded', initializeEventGraphSearch);
+
+// Rich modal for mobile inspector
+function showRichEventInspectorModal(nodeType, id, fullData) {
+    let modalHtml = '';
+
+    // Helper to create a field with copy button
+    function createField(title, value, isCode = false) {
+        if (!value) return '';
+        const fieldId = 'modal-field-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        const escapedValue = escapeHtml(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+
+        return `
+            <div class="mb-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">${escapeHtml(title)}</span>
+                    <button onclick="navigator.clipboard.writeText(document.getElementById('${fieldId}').textContent).then(() => { this.innerHTML = '<svg class=\\'w-4 h-4 text-green-500\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M5 13l4 4L19 7\\'></path></svg>'; setTimeout(() => { this.innerHTML = '<svg class=\\'w-4 h-4\\' fill=\\'none\\' stroke=\\'currentColor\\' viewBox=\\'0 0 24 24\\'><path stroke-linecap=\\'round\\' stroke-linejoin=\\'round\\' stroke-width=\\'2\\' d=\\'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z\\'></path></svg>'; }, 1500) })" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded" title="Copy to clipboard">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div id="${fieldId}" class="bg-gray-100 dark:bg-gray-800 rounded-lg p-3 font-mono text-sm text-gray-900 dark:text-gray-100 overflow-x-auto">
+                    ${isCode ? `<pre class="whitespace-pre-wrap"><code class="language-hot">${escapedValue}</code></pre>` : `<span>${escapedValue}</span>`}
+                </div>
+            </div>
+        `;
+    }
+
+    // Add ID field
+    modalHtml += createField(nodeType.toUpperCase() + ' ID', id);
+
+    if (nodeType === 'run') {
+        if (fullData.event_fn) modalHtml += createField('Function', fullData.event_fn, true);
+        if (fullData.status) modalHtml += createField('Status', fullData.status);
+        if (fullData.start_time && fullData.stop_time) {
+            const startTime = new Date(fullData.start_time);
+            const stopTime = new Date(fullData.stop_time);
+            const durationMs = stopTime - startTime;
+            modalHtml += createField('Duration', durationMs + 'ms');
+        }
+        if (fullData.result) modalHtml += createField('Result', fullData.result, true);
+    } else if (nodeType === 'event') {
+        if (fullData.event_type) modalHtml += createField('Event Type', fullData.event_type);
+        if (fullData.event_time) modalHtml += createField('Event Time', fullData.event_time);
+        if (fullData.event_data) modalHtml += createField('Event Data', fullData.event_data, true);
+    }
+
+    // Create and show modal
+    const modalOverlay = document.createElement('div');
+    modalOverlay.id = 'event-inspector-modal-overlay';
+    modalOverlay.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4';
+    modalOverlay.onclick = (e) => {
+        if (e.target === modalOverlay) {
+            modalOverlay.remove();
+        }
+    };
+
+    modalOverlay.innerHTML = `
+        <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
+            <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Inspector</h3>
+                <button onclick="document.getElementById('event-inspector-modal-overlay').remove()" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-4 overflow-y-auto flex-1">
+                ${modalHtml}
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modalOverlay);
+
+    // Apply syntax highlighting
+    if (typeof Prism !== 'undefined') {
+        const codeBlocks = modalOverlay.querySelectorAll('code.language-hot');
+        codeBlocks.forEach(block => Prism.highlightElement(block));
+    }
+}
+
+</script>

@@ -1,0 +1,63 @@
+::openai::search ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+VectorStoreSearchResultContentObject type {
+    type: "text",
+    text: Str
+}
+
+VectorStoreSearchRequest type {
+    query: Any,
+    rewrite_query: Bool?,
+    max_num_results: Int?,
+    filters: Any?,
+    ranking_options: Map?
+}
+
+VectorStoreSearchResultsPage type {
+    object: "vector_store.search_results.page",
+    search_query: Vec<Str>,
+    data: Vec<VectorStoreSearchResultItem>,
+    has_more: Bool,
+    next_page: Str
+}
+
+// Custom key-value attributes for a vector store file (used for filtering)
+VectorStoreFileAttributes type Map
+
+VectorStoreSearchResultItem type {
+    file_id: Str,
+    filename: Str,
+    score: Dec,
+    attributes: VectorStoreFileAttributes,
+    content: Vec<VectorStoreSearchResultContentObject>
+}
+
+SearchVectorStoreRequest type {
+    query: Any,
+    rewrite_query: Bool?,
+    max_num_results: Int?,
+    filters: Any?,
+    ranking_options: Map?
+}
+
+SearchVectorStoreResponse type {
+    object: "vector_store.search_results.page",
+    search_query: Vec<Str>,
+    data: Vec<VectorStoreSearchResultItem>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+search-vector-store
+meta {
+    doc: """POST /vector_stores/{vector_store_id}/search - Search a vector store for relevant file content using semantic search."""
+}
+fn (vector-store-id: Str, request: SearchVectorStoreRequest): SearchVectorStoreResponse {
+  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}/search`, {}, request)
+  if(is-ok-response(response), SearchVectorStoreResponse(response.body), err(HttpError(response)))
+}

@@ -1,0 +1,125 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-5xl mx-auto px-4 py-6 lg:px-8">
+    <div class="text-center mb-8">
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Choose a Plan</h1>
+        <p class="text-gray-600 dark:text-gray-400 mt-2">Select a plan for <strong>{{ org.name }}</strong></p>
+    </div>
+
+    <!-- Billing Toggle -->
+    <div class="flex justify-center mb-8">
+        <div class="bg-gray-100 dark:bg-gray-800 rounded-lg p-1 flex">
+            <button onclick="setBilling('monthly')" id="btn-monthly" class="px-4 py-2 rounded-md text-sm font-medium transition-colors billing-btn bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow">
+                Monthly
+            </button>
+            <button onclick="setBilling('annual')" id="btn-annual" class="px-4 py-2 rounded-md text-sm font-medium transition-colors billing-btn text-gray-600 dark:text-gray-400">
+                Annual <span class="text-green-600 text-xs">(Save ~17%)</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Plans Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {% for p in plans %}
+        {% if let Some(pid) = p.plan_id.as_ref() %}
+        {% let is_current = current_plan_name.as_deref() == Some(p.plan_name.as_str()) %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg border {% if is_current %}border-green-400 dark:border-green-600 ring-2 ring-green-400 dark:ring-green-600{% elif p.plan_name.contains("Pro") %}border-gray-200 dark:border-gray-700 ring-2 ring-red-500{% else %}border-gray-200 dark:border-gray-700{% endif %} p-6 flex flex-col">
+            {% if is_current %}
+            <div class="text-center mb-2">
+                <span class="text-xs font-semibold uppercase tracking-wide text-green-600 dark:text-green-400">Current Plan</span>
+            </div>
+            {% elif p.plan_name.contains("Pro") %}
+            <div class="text-center mb-2">
+                <span class="text-xs font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">Most Popular</span>
+            </div>
+            {% endif %}
+
+            <h3 class="text-xl font-bold text-gray-900 dark:text-white text-center">{{ p.plan_name }}</h3>
+
+            <div class="text-center my-4 flex-1">
+                {% if p.base_price_monthly_cents == 0 %}
+                <span class="text-4xl font-bold text-gray-900 dark:text-white">Free</span>
+                {% else %}
+                <span class="text-4xl font-bold text-gray-900 dark:text-white price-monthly">${{ p.monthly_price_dollars() }}</span>
+                <span class="text-4xl font-bold text-gray-900 dark:text-white price-annual hidden">${{ p.annual_price_dollars() }}</span>
+                <span class="text-gray-500 period-monthly">/month</span>
+                <span class="text-gray-500 period-annual hidden">/year</span>
+                {% endif %}
+            </div>
+
+            {% if is_current %}
+            <span class="block w-full text-center py-3 px-4 rounded-md font-medium bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-default">
+                Current Plan
+            </span>
+            {% else %}
+            <a href="/@{{ org.slug }}/billing/checkout?plan={{ pid }}&billing=monthly"
+               class="plan-link block w-full text-center py-3 px-4 rounded-md font-medium transition-colors
+                      {% if p.plan_name.contains("Pro") %}bg-hot-red-500 hover:bg-hot-red-600 text-white{% else %}bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-900 dark:text-white{% endif %}"
+               data-plan-id="{{ pid }}">
+                {% match current_plan_sort_order %}
+                {% when Some with (current_sort_order) %}
+                    {% if p.sort_order > *current_sort_order %}
+                    Upgrade
+                    {% else if p.sort_order < *current_sort_order %}
+                    Downgrade
+                    {% else %}
+                    Select Plan
+                    {% endif %}
+                {% when None %}
+                    Select Plan
+                {% endmatch %}
+            </a>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+
+    <p class="text-center text-sm text-gray-500 dark:text-gray-400 mt-6">
+        View full plan details on our <a href="{{ page_context.pricing_url }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">pricing page</a>
+    </p>
+
+    <div class="text-center mt-6">
+        <a href="/@{{ org.slug }}/billing" class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300">
+            &larr; Back to Billing
+        </a>
+    </div>
+</div>
+
+<script>
+let currentBilling = 'monthly';
+
+function setBilling(period) {
+    currentBilling = period;
+
+    // Update toggle buttons
+    document.getElementById('btn-monthly').classList.toggle('bg-white', period === 'monthly');
+    document.getElementById('btn-monthly').classList.toggle('dark:bg-gray-700', period === 'monthly');
+    document.getElementById('btn-monthly').classList.toggle('text-gray-900', period === 'monthly');
+    document.getElementById('btn-monthly').classList.toggle('dark:text-white', period === 'monthly');
+    document.getElementById('btn-monthly').classList.toggle('shadow', period === 'monthly');
+    document.getElementById('btn-monthly').classList.toggle('text-gray-600', period !== 'monthly');
+    document.getElementById('btn-monthly').classList.toggle('dark:text-gray-400', period !== 'monthly');
+
+    document.getElementById('btn-annual').classList.toggle('bg-white', period === 'annual');
+    document.getElementById('btn-annual').classList.toggle('dark:bg-gray-700', period === 'annual');
+    document.getElementById('btn-annual').classList.toggle('text-gray-900', period === 'annual');
+    document.getElementById('btn-annual').classList.toggle('dark:text-white', period === 'annual');
+    document.getElementById('btn-annual').classList.toggle('shadow', period === 'annual');
+    document.getElementById('btn-annual').classList.toggle('text-gray-600', period !== 'annual');
+    document.getElementById('btn-annual').classList.toggle('dark:text-gray-400', period !== 'annual');
+
+    // Update prices
+    document.querySelectorAll('.price-monthly').forEach(el => el.classList.toggle('hidden', period !== 'monthly'));
+    document.querySelectorAll('.price-annual').forEach(el => el.classList.toggle('hidden', period !== 'annual'));
+    document.querySelectorAll('.period-monthly').forEach(el => el.classList.toggle('hidden', period !== 'monthly'));
+    document.querySelectorAll('.period-annual').forEach(el => el.classList.toggle('hidden', period !== 'annual'));
+
+    // Update links
+    document.querySelectorAll('.plan-link').forEach(link => {
+        const planId = link.dataset.planId;
+        link.href = `/@{{ org.slug }}/billing/checkout?plan=${planId}&billing=${period}`;
+    });
+}
+</script>
+{% endblock %}

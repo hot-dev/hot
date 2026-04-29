@@ -1,0 +1,252 @@
+::postmark::search ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+InboundMessageDetail type {
+    From: Str?,
+    FromName: Str?,
+    FromFull: Map?,
+    To: Str?,
+    ToFull: Vec<EmailNameAddressPair>?,
+    Cc: Str?,
+    CcFull: Vec<EmailNameAddressPair>?,
+    ReplyTo: Str?,
+    OriginalRecipient: Str?,
+    Subject: Str?,
+    Date: Str?,
+    MailboxHash: Str?,
+    Tag: Str?,
+    Attachments: AttachmentCollection?,
+    MessageID: Str?,
+    Status: Str?
+}
+
+OutboundSearchResponse type {
+    TotalCount: Int?,
+    Messages: Vec<OutboundMessageDetail>?
+}
+
+// List of email attachments. Each attachment has Name, Content (base64), and ContentType.
+AttachmentCollection type Vec<Map>
+
+EmailNameAddressPair type {
+    Name: Str?,
+    Email: Str?
+}
+
+InboundSearchResponse type {
+    TotalCount: Int?,
+    InboundMessages: Vec<InboundMessageDetail>?
+}
+
+OutboundMessageDetail type {
+    Tag: Str?,
+    MessageID: Str?,
+    To: Vec<EmailNameAddressPair>?,
+    Cc: Vec<EmailNameAddressPair>?,
+    Bcc: Vec<EmailNameAddressPair>?,
+    Recipients: Vec<Str>?,
+    ReceivedAt: Str?,
+    From: Str?,
+    Subject: Str?,
+    Attachments: AttachmentCollection?,
+    Status: Str?,
+    TrackOpens: Bool?,
+    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?
+}
+
+MessageOpenSearchResponse type {
+    TotalCount: Int?,
+    Opens: Vec<ExtendedMessageOpenEventInformation>?
+}
+
+ExtendedMessageOpenEventInformation type {
+    FirstOpen: Bool?,
+    Client: Map?,
+    OS: Map?,
+    Platform: Str?,
+    UserAgent: Str?,
+    Geo: Map?,
+    MessageID: Str?,
+    ReceivedAt: Str?,
+    Tag: Str?,
+    Recipient: Str?
+}
+
+MessageClickSearchResponse type {
+    TotalCount: Int?,
+    Clicks: Vec<ExtendedMessageClickEventInformation>?
+}
+
+ExtendedMessageClickEventInformation type {
+    ClickLocation: Str?,
+    Client: Map?,
+    OS: Map?,
+    Platform: Str?,
+    UserAgent: Str?,
+    OriginalLink: Str?,
+    Geo: Map?,
+    MessageID: Str?,
+    ReceivedAt: Str?,
+    Tag: Str?,
+    Recipient: Str?
+}
+
+SearchOutboundMessagesRequest type {
+  count: Str,
+  offset: Str,
+  recipient: Str,
+  fromemail: Str,
+  tag: Str,
+  status: Str,
+  todate: Str,
+  fromdate: Str
+}
+
+SearchOutboundMessagesResponse type {
+    TotalCount: Int?,
+    Messages: Vec<OutboundMessageDetail>?
+}
+
+
+outbound-message-search
+meta {
+    doc: """
+    Search outbound messages with filters for recipient, sender, tag, status, and date range.
+
+    **Example**
+
+    ```hot
+    response ::postmark::search/outbound-message-search(::postmark::search/SearchOutboundMessagesRequest({
+        count: "10",
+        offset: "0",
+        recipient: "",
+        fromemail: "",
+        tag: "",
+        status: "",
+        todate: "",
+        fromdate: ""
+    }))
+    response.TotalCount // => 42
+    response.Messages   // => [{MessageID: "...", Subject: "...", ...}]
+    ```
+    """
+}
+fn (request: SearchOutboundMessagesRequest): SearchOutboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&fromemail=${request.fromemail}&tag=${request.tag}&status=${request.status}&todate=${request.todate}&fromdate=${request.fromdate}`)
+  if(is-ok-response(response), SearchOutboundMessagesResponse(response.body), err(HttpError(response)))
+}
+
+SearchInboundMessagesRequest type {
+  count: Str,
+  offset: Str,
+  recipient: Str,
+  fromemail: Str,
+  subject: Str,
+  mailboxhash: Str,
+  tag: Str,
+  status: Str,
+  todate: Str,
+  fromdate: Str
+}
+
+SearchInboundMessagesResponse type {
+    TotalCount: Int?,
+    InboundMessages: Vec<InboundMessageDetail>?
+}
+
+
+inbound-message-search
+meta {
+    doc: """
+    Search inbound messages with filters for recipient, sender, subject, mailbox hash, tag, status, and date range.
+
+    **Example**
+
+    ```hot
+    response ::postmark::search/inbound-message-search(::postmark::search/SearchInboundMessagesRequest({
+        count: "10",
+        offset: "0",
+        recipient: "",
+        fromemail: "",
+        subject: "",
+        mailboxhash: "",
+        tag: "",
+        status: "",
+        todate: "",
+        fromdate: ""
+    }))
+    response.TotalCount // => 0
+    ```
+    """
+}
+fn (request: SearchInboundMessagesRequest): SearchInboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/inbound?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&fromemail=${request.fromemail}&subject=${request.subject}&mailboxhash=${request.mailboxhash}&tag=${request.tag}&status=${request.status}&todate=${request.todate}&fromdate=${request.fromdate}`)
+  if(is-ok-response(response), SearchInboundMessagesResponse(response.body), err(HttpError(response)))
+}
+
+SearchOpensForOutboundMessagesRequest type {
+  count: Str,
+  offset: Str,
+  recipient: Str,
+  tag: Str,
+  client-name: Str,
+  client-company: Str,
+  client-family: Str,
+  os-name: Str,
+  os-family: Str,
+  os-company: Str,
+  platform: Str,
+  country: Str,
+  region: Str,
+  city: Str
+}
+
+SearchOpensForOutboundMessagesResponse type {
+    TotalCount: Int?,
+    Opens: Vec<ExtendedMessageOpenEventInformation>?
+}
+
+
+opens-all-messages
+meta {
+    doc: """Search open events across all outbound messages with filters for recipient, tag, client, OS, platform, and geography."""
+}
+fn (request: SearchOpensForOutboundMessagesRequest): SearchOpensForOutboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/opens?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&tag=${request.tag}&client_name=${request.client-name}&client_company=${request.client-company}&client_family=${request.client-family}&os_name=${request.os-name}&os_family=${request.os-family}&os_company=${request.os-company}&platform=${request.platform}&country=${request.country}&region=${request.region}&city=${request.city}`)
+  if(is-ok-response(response), SearchOpensForOutboundMessagesResponse(response.body), err(HttpError(response)))
+}
+
+SearchClicksForOutboundMessagesRequest type {
+  count: Str,
+  offset: Str,
+  recipient: Str,
+  tag: Str,
+  client-name: Str,
+  client-company: Str,
+  client-family: Str,
+  os-name: Str,
+  os-family: Str,
+  os-company: Str,
+  platform: Str,
+  country: Str,
+  region: Str,
+  city: Str
+}
+
+SearchClicksForOutboundMessagesResponse type {
+    TotalCount: Int?,
+    Clicks: Vec<ExtendedMessageClickEventInformation>?
+}
+
+
+clicks-all-messages
+meta {
+    doc: """Search click events across all outbound messages with filters for recipient, tag, client, OS, platform, and geography."""
+}
+fn (request: SearchClicksForOutboundMessagesRequest): SearchClicksForOutboundMessagesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/clicks?count=${request.count}&offset=${request.offset}&recipient=${request.recipient}&tag=${request.tag}&client_name=${request.client-name}&client_company=${request.client-company}&client_family=${request.client-family}&os_name=${request.os-name}&os_family=${request.os-family}&os_company=${request.os-company}&platform=${request.platform}&country=${request.country}&region=${request.region}&city=${request.city}`)
+  if(is-ok-response(response), SearchClicksForOutboundMessagesResponse(response.body), err(HttpError(response)))
+}

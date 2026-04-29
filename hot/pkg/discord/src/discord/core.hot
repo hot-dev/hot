@@ -1,0 +1,3 @@
+::discord::core ns
+
+BASE_URL "https://discord.com/api/v10"

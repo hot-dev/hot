@@ -1,0 +1,278 @@
+::openai::retrieve ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+FineTuningJob type {
+    id: Str,
+    created_at: Int,
+    error: Map,
+    fine_tuned_model: Str,
+    finished_at: Int,
+    hyperparameters: Map,
+    model: Str,
+    object: "fine_tuning.job",
+    organization_id: Str,
+    result_files: Vec<Str>,
+    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    trained_tokens: Int,
+    training_file: Str,
+    validation_file: Str,
+    integrations: Vec?,
+    seed: Int,
+    estimated_finish: Int?,
+    method: FineTuneMethod?,
+    metadata: Metadata?
+}
+
+FineTuneSupervisedHyperparameters type {
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?
+}
+
+OpenAIFile type {
+    id: Str,
+    bytes: Int,
+    created_at: Int,
+    expires_at: Int?,
+    filename: Str,
+    object: "file",
+    purpose: "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data",
+    status: "uploaded" | "processed" | "error",
+    status_details: Str?
+}
+
+FineTuneReinforcementMethod type {
+    grader: Map,
+    hyperparameters: FineTuneReinforcementHyperparameters?
+}
+
+FineTuneDPOMethod type {
+    hyperparameters: FineTuneDPOHyperparameters?
+}
+
+FineTuneSupervisedMethod type {
+    hyperparameters: FineTuneSupervisedHyperparameters?
+}
+
+Batch type {
+    id: Str,
+    object: "batch",
+    endpoint: Str,
+    errors: Map?,
+    input_file_id: Str,
+    completion_window: Str,
+    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    output_file_id: Str?,
+    error_file_id: Str?,
+    created_at: Int,
+    in_progress_at: Int?,
+    expires_at: Int?,
+    finalizing_at: Int?,
+    completed_at: Int?,
+    failed_at: Int?,
+    expired_at: Int?,
+    cancelling_at: Int?,
+    cancelled_at: Int?,
+    request_counts: BatchRequestCounts?,
+    metadata: Metadata?
+}
+
+FineTuneReinforcementHyperparameters type {
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?,
+    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    compute_multiplier: Any?,
+    eval_interval: Any?,
+    eval_samples: Any?
+}
+
+FineTuneMethod type {
+    type: "supervised" | "dpo" | "reinforcement",
+    supervised: FineTuneSupervisedMethod?,
+    dpo: FineTuneDPOMethod?,
+    reinforcement: FineTuneReinforcementMethod?
+}
+
+Model type {
+    id: Str,
+    created: Int,
+    object: "model",
+    owned_by: Str
+}
+
+FineTuneDPOHyperparameters type {
+    beta: Any?,
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?
+}
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+BatchRequestCounts type {
+    total: Int,
+    completed: Int,
+    failed: Int
+}
+
+VectorStoreFileContentResponse type {
+    object: "vector_store.file_content.page",
+    data: Vec<Map>,
+    has_more: Bool,
+    next_page: Str
+}
+
+RetrieveBatchRequest type {
+  batch-id: Str
+}
+
+RetrieveBatchResponse type {
+    id: Str,
+    object: "batch",
+    endpoint: Str,
+    errors: Map?,
+    input_file_id: Str,
+    completion_window: Str,
+    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    output_file_id: Str?,
+    error_file_id: Str?,
+    created_at: Int,
+    in_progress_at: Int?,
+    expires_at: Int?,
+    finalizing_at: Int?,
+    completed_at: Int?,
+    failed_at: Int?,
+    expired_at: Int?,
+    cancelling_at: Int?,
+    cancelled_at: Int?,
+    request_counts: BatchRequestCounts?,
+    metadata: Metadata?
+}
+
+
+retrieve-batch
+meta {doc: """GET /batches/{batch_id} - Retrieve the status and details of a batch."""}
+fn (request: RetrieveBatchRequest): RetrieveBatchResponse {
+  response api-request("GET", `${::openai/BASE_URL}/batches/${request.batch-id}`)
+  if(is-ok-response(response), RetrieveBatchResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveFileRequest type {
+  file-id: Str
+}
+
+RetrieveFileResponse type {
+    id: Str,
+    bytes: Int,
+    created_at: Int,
+    expires_at: Int?,
+    filename: Str,
+    object: "file",
+    purpose: "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data",
+    status: "uploaded" | "processed" | "error",
+    status_details: Str?
+}
+
+
+retrieve-file
+meta {doc: """GET /files/{file_id} - Retrieve metadata about an uploaded file."""}
+fn (request: RetrieveFileRequest): RetrieveFileResponse {
+  response api-request("GET", `${::openai/BASE_URL}/files/${request.file-id}`)
+  if(is-ok-response(response), RetrieveFileResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveFineTuningJobRequest type {
+  fine-tuning-job-id: Str
+}
+
+RetrieveFineTuningJobResponse type {
+    id: Str,
+    created_at: Int,
+    error: Map,
+    fine_tuned_model: Str,
+    finished_at: Int,
+    hyperparameters: Map,
+    model: Str,
+    object: "fine_tuning.job",
+    organization_id: Str,
+    result_files: Vec<Str>,
+    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    trained_tokens: Int,
+    training_file: Str,
+    validation_file: Str,
+    integrations: Vec?,
+    seed: Int,
+    estimated_finish: Int?,
+    method: FineTuneMethod?,
+    metadata: Metadata?
+}
+
+
+retrieve-finetuning-job
+meta {
+    doc: """GET /fine_tuning/jobs/{fine_tuning_job_id} - Retrieve the status and details of a fine-tuning job."""
+}
+fn (request: RetrieveFineTuningJobRequest): RetrieveFineTuningJobResponse {
+  response api-request("GET", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}`)
+  if(is-ok-response(response), RetrieveFineTuningJobResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveModelRequest type {
+  model: Str
+}
+
+RetrieveModelResponse type {
+    id: Str,
+    created: Int,
+    object: "model",
+    owned_by: Str
+}
+
+
+retrieve-model
+meta {
+    doc: """
+    GET /models/{model} - Retrieve a specific model by ID.
+
+    For a more ergonomic API, see `::openai::models/get`.
+
+    **Example**
+
+    ```hot
+    model ::openai::retrieve/retrieve-model(RetrieveModelRequest({model: "gpt-4o"}))
+    model.id       // => "gpt-4o"
+    model.owned_by // => "system"
+    ```
+    """
+}
+fn (request: RetrieveModelRequest): RetrieveModelResponse {
+  response api-request("GET", `${::openai/BASE_URL}/models/${request.model}`)
+  if(is-ok-response(response), RetrieveModelResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveVectorStoreFileContentRequest type {
+  vector-store-id: Str,
+  file-id: Str
+}
+
+RetrieveVectorStoreFileContentResponse type {
+    object: "vector_store.file_content.page",
+    data: Vec<Map>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+retrieve-vector-store-file-content
+meta {
+    doc: """GET /vector_stores/{vector_store_id}/files/{file_id}/content - Retrieve vector store file content"""
+}
+fn (request: RetrieveVectorStoreFileContentRequest): RetrieveVectorStoreFileContentResponse {
+  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/files/${request.file-id}/content`)
+  if(is-ok-response(response), RetrieveVectorStoreFileContentResponse(response.body), err(HttpError(response)))
+}

@@ -1,0 +1,329 @@
+::supabase::db ns
+
+::api ::supabase::api
+
+// ============================================================================
+// Select (Read)
+// ============================================================================
+
+SelectRequest type {
+  table: Str,
+  select: Str?,
+  filters: Vec<Str>?,
+  order: Str?,
+  limit: Int?,
+  offset: Int?,
+  count: Str?,
+  single: Bool?
+}
+
+select
+meta {
+    doc: """
+Query rows from a table or view using PostgREST.
+
+`select` specifies columns (default `*`). Use `filters` for WHERE clauses (build with `::supabase::filters`). `order` uses PostgREST format like `"created_at.desc"`. Set `count` to `"exact"`, `"planned"`, or `"estimated"` for row counts. Set `single: true` to return a single object instead of an array.
+
+**Example**
+
+```hot
+::db ::supabase::db
+::f ::supabase::filters
+
+// Select all users
+users ::db/select(::db/SelectRequest({table: "users"}))
+
+// Filtered, ordered, paginated
+users ::db/select(::db/SelectRequest({
+  table: "users",
+  select: "id,name,email,posts(title)",
+  filters: [::f/gte("age", 18), ::f/eq("active", true)],
+  order: "created_at.desc",
+  limit: 10,
+  offset: 0
+}))
+
+// Single row
+user ::db/select(::db/SelectRequest({
+  table: "users",
+  filters: [::f/eq("id", "abc-123")],
+  single: true
+}))
+```
+"""
+}
+fn (request: SelectRequest): Any {
+  select-param or(request.select, "*")
+  path `/rest/v1/${request.table}?select=${select-param}`
+
+  filter-str if(is-some(request.filters),
+    concat("&", join(request.filters, "&")),
+    ""
+  )
+
+  order-str if(is-some(request.order), `&order=${request.order}`, "")
+  limit-str if(is-some(request.limit), `&limit=${request.limit}`, "")
+  offset-str if(is-some(request.offset), `&offset=${request.offset}`, "")
+
+  full-path `${path}${filter-str}${order-str}${limit-str}${offset-str}`
+
+  headers {}
+    |> assoc-some("Prefer", if(is-some(request.count), `count=${request.count}`, null))
+    |> assoc-some("Accept", if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null))
+
+  ::api/request("GET", full-path, headers, {})
+}
+
+// ============================================================================
+// Insert
+// ============================================================================
+
+InsertRequest type {
+  table: Str,
+  data: Any,
+  return: Bool?,
+  on-conflict: Str?,
+  count: Str?,
+  missing-as-default: Bool?
+}
+
+insert
+meta {
+    doc: """
+Insert one or more rows into a table. `data` can be a Map (single row) or Vec of Maps (multiple rows).
+
+Set `return: true` to get the inserted rows back (default: true). Set `on-conflict` to a column name to handle conflicts (e.g. upsert).
+
+**Example**
+
+```hot
+::db ::supabase::db
+
+// Single row
+row ::db/insert(::db/InsertRequest({
+  table: "users",
+  data: {name: "Alice", email: "alice@example.com"}
+}))
+
+// Multiple rows
+rows ::db/insert(::db/InsertRequest({
+  table: "users",
+  data: [
+    {name: "Alice", email: "alice@example.com"},
+    {name: "Bob", email: "bob@example.com"}
+  ]
+}))
+```
+"""
+}
+fn (request: InsertRequest): Any {
+  path `/rest/v1/${request.table}`
+
+  should-return or(request.return, true)
+  prefer-parts []
+  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
+  prefer-parts if(is-some(request.on-conflict), concat(prefer-parts, ["resolution=merge-duplicates"]), prefer-parts)
+  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+  prefer-parts if(and(is-some(request.missing-as-default), request.missing-as-default), concat(prefer-parts, ["missing=default"]), prefer-parts)
+
+  headers {Prefer: join(prefer-parts, ", ")}
+
+  on-conflict-param if(is-some(request.on-conflict), `?on_conflict=${request.on-conflict}`, "")
+  full-path `${path}${on-conflict-param}`
+
+  ::api/request("POST", full-path, headers, request.data)
+}
+
+// ============================================================================
+// Update
+// ============================================================================
+
+UpdateRequest type {
+  table: Str,
+  data: Map,
+  filters: Vec<Str>,
+  return: Bool?,
+  count: Str?
+}
+
+update
+meta {
+    doc: """
+Update rows matching the filters. `filters` is required to prevent accidental full-table updates.
+
+**Example**
+
+```hot
+::db ::supabase::db
+::f ::supabase::filters
+
+updated ::db/update(::db/UpdateRequest({
+  table: "users",
+  data: {name: "Alice Smith"},
+  filters: [::f/eq("id", "abc-123")]
+}))
+```
+"""
+}
+fn (request: UpdateRequest): Any {
+  if(is-empty(request.filters), fail("filters are required for update to prevent full-table updates"))
+
+  filter-str join(request.filters, "&")
+  path `/rest/v1/${request.table}?${filter-str}`
+
+  should-return or(request.return, true)
+  prefer-parts []
+  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
+  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+
+  headers {Prefer: join(prefer-parts, ", ")}
+
+  ::api/request("PATCH", path, headers, request.data)
+}
+
+// ============================================================================
+// Delete
+// ============================================================================
+
+DeleteRequest type {
+  table: Str,
+  filters: Vec<Str>,
+  return: Bool?,
+  count: Str?
+}
+
+delete
+meta {
+    doc: """
+Delete rows matching the filters. `filters` is required to prevent accidental full-table deletes.
+
+**Example**
+
+```hot
+::db ::supabase::db
+::f ::supabase::filters
+
+::db/delete(::db/DeleteRequest({
+  table: "users",
+  filters: [::f/eq("id", "abc-123")]
+}))
+```
+"""
+}
+fn (request: DeleteRequest): Any {
+  if(is-empty(request.filters), fail("filters are required for delete to prevent full-table deletes"))
+
+  filter-str join(request.filters, "&")
+  path `/rest/v1/${request.table}?${filter-str}`
+
+  should-return or(request.return, false)
+  prefer-parts []
+  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
+  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+
+  headers {Prefer: join(prefer-parts, ", ")}
+
+  ::api/request("DELETE", path, headers, {})
+}
+
+// ============================================================================
+// Upsert
+// ============================================================================
+
+UpsertRequest type {
+  table: Str,
+  data: Any,
+  on-conflict: Str?,
+  ignore-duplicates: Bool?,
+  return: Bool?,
+  count: Str?,
+  missing-as-default: Bool?
+}
+
+upsert
+meta {
+    doc: """
+Insert rows, updating on conflict. `on-conflict` specifies the conflict column(s). Set `ignore-duplicates: true` to skip conflicting rows instead of updating.
+
+**Example**
+
+```hot
+::db ::supabase::db
+
+::db/upsert(::db/UpsertRequest({
+  table: "products",
+  data: [{sku: "X1", name: "Widget", price: 10}],
+  on-conflict: "sku"
+}))
+```
+"""
+}
+fn (request: UpsertRequest): Any {
+  resolution if(and(is-some(request.ignore-duplicates), request.ignore-duplicates),
+    "resolution=ignore-duplicates",
+    "resolution=merge-duplicates"
+  )
+
+  should-return or(request.return, true)
+  prefer-parts []
+  prefer-parts concat(prefer-parts, [resolution])
+  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
+  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+  prefer-parts if(and(is-some(request.missing-as-default), request.missing-as-default), concat(prefer-parts, ["missing=default"]), prefer-parts)
+
+  headers {Prefer: join(prefer-parts, ", ")}
+
+  on-conflict-param if(is-some(request.on-conflict), `?on_conflict=${request.on-conflict}`, "")
+  path `/rest/v1/${request.table}${on-conflict-param}`
+
+  ::api/request("POST", path, headers, request.data)
+}
+
+// ============================================================================
+// RPC (Stored Procedures)
+// ============================================================================
+
+RpcRequest type {
+  fn-name: Str,
+  params: Map?,
+  count: Str?,
+  single: Bool?
+}
+
+rpc
+meta {
+    doc: """
+Call a Postgres function (RPC). Pass arguments in `params`.
+
+**Example**
+
+```hot
+::db ::supabase::db
+
+// Call a function
+result ::db/rpc(::db/RpcRequest({
+  fn-name: "add_them",
+  params: {a: 1, b: 2}
+}))
+// => 3
+
+// Table-valued function with single result
+user ::db/rpc(::db/RpcRequest({
+  fn-name: "get_user_by_email",
+  params: {user_email: "alice@example.com"},
+  single: true
+}))
+```
+"""
+}
+fn (request: RpcRequest): Any {
+  path `/rest/v1/rpc/${request.fn-name}`
+
+  headers {}
+    |> assoc-some("Prefer", if(is-some(request.count), `count=${request.count}`, null))
+    |> assoc-some("Accept", if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null))
+
+  body or(request.params, {})
+
+  ::api/request("POST", path, headers, body)
+}

@@ -1,0 +1,444 @@
+::telegram::messages ns
+
+api-request ::telegram::api/request
+
+// ============================================================================
+// Send Messages
+// ============================================================================
+
+SendMessageRequest type {
+  chat_id: Any,
+  text: Str,
+  parse_mode: Str?,
+  entities: Vec<Map>?,
+  link_preview_options: Map?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-message
+meta {
+    doc: """
+sendMessage - Send a text message to a chat. `chat_id` can be an integer ID or a string `@channel_username`. `parse_mode` can be "HTML", "Markdown", or "MarkdownV2".
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+response ::messages/send-message(::messages/SendMessageRequest({
+  chat_id: 123456789,
+  text: "Hello from Hot!"
+}))
+response.message_id  // => 42
+
+// With formatting
+response ::messages/send-message(::messages/SendMessageRequest({
+  chat_id: 123456789,
+  text: "<b>Bold</b> and <i>italic</i>",
+  parse_mode: "HTML"
+}))
+```
+"""
+}
+fn (request: SendMessageRequest): Map {
+  api-request("sendMessage", untype(request))
+}
+
+ForwardMessageRequest type {
+  chat_id: Any,
+  from_chat_id: Any,
+  message_id: Int,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  message_thread_id: Int?
+}
+
+forward-message
+meta {
+    doc: """forwardMessage - Forward a message from one chat to another. The forwarded message shows the original sender."""
+}
+fn (request: ForwardMessageRequest): Map {
+  api-request("forwardMessage", untype(request))
+}
+
+CopyMessageRequest type {
+  chat_id: Any,
+  from_chat_id: Any,
+  message_id: Int,
+  caption: Str?,
+  parse_mode: Str?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+copy-message
+meta {
+    doc: """copyMessage - Copy a message without the "Forwarded from" attribution. Returns the new message ID rather than the full message object."""
+}
+fn (request: CopyMessageRequest): Map {
+  api-request("copyMessage", untype(request))
+}
+
+EditMessageTextRequest type {
+  chat_id: Any?,
+  message_id: Int?,
+  inline_message_id: Str?,
+  text: Str,
+  parse_mode: Str?,
+  entities: Vec<Map>?,
+  link_preview_options: Map?,
+  reply_markup: Map?
+}
+
+edit-message-text
+meta {
+    doc: """
+editMessageText - Edit a text message. Provide either `chat_id` + `message_id` for regular messages, or `inline_message_id` for inline bot messages.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+::messages/edit-message-text(::messages/EditMessageTextRequest({
+  chat_id: 123456789,
+  message_id: 42,
+  text: "Updated message text"
+}))
+```
+"""
+}
+fn (request: EditMessageTextRequest): Any {
+  api-request("editMessageText", untype(request))
+}
+
+EditMessageCaptionRequest type {
+  chat_id: Any?,
+  message_id: Int?,
+  inline_message_id: Str?,
+  caption: Str?,
+  parse_mode: Str?,
+  caption_entities: Vec<Map>?,
+  reply_markup: Map?
+}
+
+edit-message-caption
+meta {
+    doc: """editMessageCaption - Edit the caption of a photo, video, document, or animation message."""
+}
+fn (request: EditMessageCaptionRequest): Any {
+  api-request("editMessageCaption", untype(request))
+}
+
+EditMessageReplyMarkupRequest type {
+  chat_id: Any?,
+  message_id: Int?,
+  inline_message_id: Str?,
+  reply_markup: Map?
+}
+
+edit-message-reply-markup
+meta {
+    doc: """editMessageReplyMarkup - Edit the reply markup (inline keyboard) of a message."""
+}
+fn (request: EditMessageReplyMarkupRequest): Any {
+  api-request("editMessageReplyMarkup", untype(request))
+}
+
+DeleteMessageRequest type {
+  chat_id: Any,
+  message_id: Int
+}
+
+delete-message
+meta {
+    doc: """deleteMessage - Delete a message. Bots can delete messages they sent, messages in private chats, and messages in groups/channels where they have delete permissions."""
+}
+fn (request: DeleteMessageRequest): Bool {
+  api-request("deleteMessage", untype(request))
+}
+
+DeleteMessagesRequest type {
+  chat_id: Any,
+  message_ids: Vec<Int>
+}
+
+delete-messages
+meta {
+    doc: """deleteMessages - Delete multiple messages at once (up to 100). Messages must be from the same chat and no older than 48 hours."""
+}
+fn (request: DeleteMessagesRequest): Bool {
+  api-request("deleteMessages", untype(request))
+}
+
+// ============================================================================
+// Media Messages
+// ============================================================================
+
+SendPhotoRequest type {
+  chat_id: Any,
+  photo: Str,
+  caption: Str?,
+  parse_mode: Str?,
+  has_spoiler: Bool?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-photo
+meta {
+    doc: """
+sendPhoto - Send a photo. `photo` can be a file_id (to resend), an HTTP URL, or a file path for upload.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+response ::messages/send-photo(::messages/SendPhotoRequest({
+  chat_id: 123456789,
+  photo: "https://example.com/image.jpg",
+  caption: "Check out this image!"
+}))
+```
+"""
+}
+fn (request: SendPhotoRequest): Map {
+  api-request("sendPhoto", untype(request))
+}
+
+SendDocumentRequest type {
+  chat_id: Any,
+  document: Str,
+  caption: Str?,
+  parse_mode: Str?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-document
+meta {
+    doc: """sendDocument - Send a document (file). `document` can be a file_id, HTTP URL, or file path. Files up to 50 MB."""
+}
+fn (request: SendDocumentRequest): Map {
+  api-request("sendDocument", untype(request))
+}
+
+SendVideoRequest type {
+  chat_id: Any,
+  video: Str,
+  duration: Int?,
+  width: Int?,
+  height: Int?,
+  caption: Str?,
+  parse_mode: Str?,
+  has_spoiler: Bool?,
+  supports_streaming: Bool?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-video
+meta {
+    doc: """sendVideo - Send a video. `video` can be a file_id, HTTP URL, or file path. Videos up to 50 MB."""
+}
+fn (request: SendVideoRequest): Map {
+  api-request("sendVideo", untype(request))
+}
+
+SendAudioRequest type {
+  chat_id: Any,
+  audio: Str,
+  caption: Str?,
+  parse_mode: Str?,
+  duration: Int?,
+  performer: Str?,
+  title: Str?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-audio
+meta {
+    doc: """sendAudio - Send an audio file (displayed as a music player). `audio` can be a file_id, HTTP URL, or file path. Up to 50 MB."""
+}
+fn (request: SendAudioRequest): Map {
+  api-request("sendAudio", untype(request))
+}
+
+SendVoiceRequest type {
+  chat_id: Any,
+  voice: Str,
+  caption: Str?,
+  parse_mode: Str?,
+  duration: Int?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-voice
+meta {
+    doc: """sendVoice - Send a voice message (OGG encoded with OPUS). Displayed as a waveform in the chat."""
+}
+fn (request: SendVoiceRequest): Map {
+  api-request("sendVoice", untype(request))
+}
+
+SendLocationRequest type {
+  chat_id: Any,
+  latitude: Dec,
+  longitude: Dec,
+  horizontal_accuracy: Dec?,
+  live_period: Int?,
+  heading: Int?,
+  proximity_alert_radius: Int?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-location
+meta {
+    doc: """sendLocation - Send a point on the map. Set `live_period` (60-86400 seconds) for a live location that updates."""
+}
+fn (request: SendLocationRequest): Map {
+  api-request("sendLocation", untype(request))
+}
+
+SendContactRequest type {
+  chat_id: Any,
+  phone_number: Str,
+  first_name: Str,
+  last_name: Str?,
+  vcard: Str?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-contact
+meta {
+    doc: """sendContact - Send a phone contact."""
+}
+fn (request: SendContactRequest): Map {
+  api-request("sendContact", untype(request))
+}
+
+SendPollRequest type {
+  chat_id: Any,
+  question: Str,
+  options: Vec<Map>,
+  is_anonymous: Bool?,
+  type: Str?,
+  allows_multiple_answers: Bool?,
+  correct_option_id: Int?,
+  explanation: Str?,
+  explanation_parse_mode: Str?,
+  open_period: Int?,
+  close_date: Int?,
+  is_closed: Bool?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-poll
+meta {
+    doc: """sendPoll - Send a poll. Each option in `options` is `{text: "Option text"}`. Set `type: "quiz"` for quiz mode with a `correct_option_id`."""
+}
+fn (request: SendPollRequest): Map {
+  api-request("sendPoll", untype(request))
+}
+
+SendDiceRequest type {
+  chat_id: Any,
+  emoji: Str?,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  reply_parameters: Map?,
+  reply_markup: Map?,
+  message_thread_id: Int?
+}
+
+send-dice
+meta {
+    doc: """sendDice - Send an animated dice/emoji. `emoji` can be a die, dart, basketball, football, bowling, or slot machine emoji. Default is die."""
+}
+fn (request: SendDiceRequest): Map {
+  api-request("sendDice", untype(request))
+}
+
+SendChatActionRequest type {
+  chat_id: Any,
+  action: Str,
+  message_thread_id: Int?
+}
+
+send-chat-action
+meta {
+    doc: """sendChatAction - Show a typing indicator or upload status. `action`: "typing", "upload_photo", "record_video", "upload_video", "record_voice", "upload_voice", "upload_document", "find_location", "record_video_note", "upload_video_note"."""
+}
+fn (request: SendChatActionRequest): Bool {
+  api-request("sendChatAction", untype(request))
+}
+
+// ============================================================================
+// Callback Queries
+// ============================================================================
+
+AnswerCallbackQueryRequest type {
+  callback_query_id: Str,
+  text: Str?,
+  show_alert: Bool?,
+  url: Str?,
+  cache_time: Int?
+}
+
+answer-callback-query
+meta {
+    doc: """
+answerCallbackQuery - Respond to a callback query from an inline keyboard button. Must be called even if no notification is needed. Set `show_alert: true` for a popup instead of a toast.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+::messages/answer-callback-query(::messages/AnswerCallbackQueryRequest({
+  callback_query_id: event.callback_query.id,
+  text: "Button pressed!"
+}))
+```
+"""
+}
+fn (request: AnswerCallbackQueryRequest): Bool {
+  api-request("answerCallbackQuery", untype(request))
+}

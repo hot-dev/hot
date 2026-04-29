@@ -1,0 +1,123 @@
+::hot::bool ns
+meta {doc: """Boolean logic and conditional functions."""}
+
+is-truthy
+meta {
+    core: true,
+    doc: """
+    Check if `value` is truthy (not false, null, or 0).
+
+    **Example**
+
+    ```hot
+    is-truthy(true)    // true
+    is-truthy(1)       // true
+    is-truthy("hi")  // true
+    is-truthy(false)   // false
+    is-truthy(null)    // false
+    ```
+    """
+}
+fn (value: Any): Bool {
+    call-lib(::hot::bool/is-truthy, [value])
+}
+
+if
+meta {
+    core: true,
+    doc: """
+    If `pred` is truthy, return `then`, otherwise return `else`. Arguments are lazy-evaluated.
+
+    **Example**
+
+    ```hot
+    if(true, "yes", "no")   // "yes"
+    if(false, "yes", "no")  // "no"
+
+    // Lazy evaluation prevents errors
+    x 0
+    if(eq(x, 0), "zero", div(10, x))  // "zero" - div never called
+    ```
+    """
+}
+fn
+cond (pred: Any, lazy then: Any): Any {
+    pred => { do then }
+},
+cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+    pred => { do then }
+    => { do else }
+}
+
+and
+meta {
+    core: true,
+    doc: """
+    Returns the first falsy value, or the last value if all are truthy. Short-circuits evaluation.
+
+    **Example**
+
+    ```hot
+    and(true, true)       // true
+    and(true, false)      // false
+    and(false, true)      // false
+    and(1, 2, 3)          // 3 (all truthy, returns last)
+    and(1, null, 3)       // null (first falsy)
+    ```
+    """
+}
+fn (x: Any, ...rest): Any {
+    cond {
+        not(is-truthy(x)) => { x }
+        is-empty(rest) => { x }
+        => { and(...rest) }
+    }
+}
+
+
+or
+meta {
+    core: true,
+    doc: """
+    Returns the first truthy value, or the last value if all are falsy. Short-circuits evaluation.
+
+    **Example**
+
+    ```hot
+    or(true, false)   // true
+    or(false, true)   // true
+    or(false, false)  // false
+    or(null, 0, 42)   // 42 (first truthy)
+    or(null, false)   // false (all falsy, returns last)
+    ```
+    """
+}
+fn (x: Any, ...rest): Any {
+    cond {
+        is-truthy(x) => { x }
+        is-empty(rest) => { x }
+        => { or(...rest) }
+    }
+}
+
+
+not
+meta {
+    core: true,
+    doc: """
+    Negate `x`. If `x` is truthy, return false, otherwise return true.
+
+    **Example**
+
+    ```hot
+    not(true)   // false
+    not(false)  // true
+    not(null)   // true
+    not(1)      // false
+    not(0)      // true
+    ```
+    """
+}
+fn (x: Any): Bool {
+    call-lib(::hot::bool/not, [x])
+}

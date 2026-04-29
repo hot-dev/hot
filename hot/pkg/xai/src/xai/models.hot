@@ -1,0 +1,104 @@
+::xai::models ns
+
+// ============================================================================
+// xAI Models API
+// https://docs.x.ai/api
+// ============================================================================
+
+api-request ::xai::api/request
+HttpError ::xai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types
+// ============================================================================
+
+Model type {
+    id: Str,
+    object: Str,
+    created: Int?,
+    owned_by: Str?
+}
+
+ModelsListResponse type {
+    object: Str,
+    data: Vec<Model>
+}
+
+// ============================================================================
+// API Functions
+// ============================================================================
+
+list
+meta {
+    doc: """
+    List available models from the xAI API.
+
+    Returns a ModelsListResponse containing a Vec of Model objects.
+
+    **Example**
+
+    ```hot
+    models list()
+    models.data // => [{id: "grok-3", object: "model", ...}, ...]
+
+    first-model first(models.data)
+    first-model.id // => "grok-3"
+    ```
+    """
+}
+fn (): ModelsListResponse | HttpError {
+    response api-request("GET", `${::xai/BASE_URL}/models`)
+    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    Retrieve details about a specific model by its ID.
+
+    Returns a Model with id, object, created, and owned_by fields.
+
+    **Example**
+
+    ```hot
+    model get("grok-3-mini")
+    model.id // => "grok-3-mini"
+    model.object // => "model"
+    ```
+    """
+}
+fn (model-id: Str): Model | HttpError {
+    response api-request("GET", `${::xai/BASE_URL}/models/${model-id}`)
+    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Available Models (as of 2026)
+// ============================================================================
+
+// Grok-4.1 - Latest models with vision support
+GROK_4_1_FAST_REASONING "grok-4-1-fast-reasoning"
+GROK_4_1_FAST_NON_REASONING "grok-4-1-fast-non-reasoning"
+
+// Grok-4 - Vision-capable models
+GROK_4_FAST_REASONING "grok-4-fast-reasoning"
+GROK_4_FAST_NON_REASONING "grok-4-fast-non-reasoning"
+GROK_4_0709 "grok-4-0709"
+
+// Grok Code
+GROK_CODE_FAST_1 "grok-code-fast-1"
+
+// Grok-3
+GROK_3 "grok-3"
+GROK_3_MINI "grok-3-mini"
+
+// Grok-2 (legacy)
+GROK_2_VISION "grok-2-vision-1212"
+
+// Image generation
+GROK_IMAGINE_IMAGE "grok-imagine-image"
+GROK_2_IMAGE "grok-2-image-1212"
+
+// Video generation
+GROK_IMAGINE_VIDEO "grok-imagine-video"

@@ -1,0 +1,1285 @@
+::hot::coll ns
+meta {doc: """Collection functions for Vec, Map, and Str manipulation."""}
+
+map
+meta {
+    core: true,
+    doc: """
+    Apply `func` to each element of `coll` and return a collection of results.
+
+    **Example**
+
+    ```hot
+    map([1, 2, 3], mul(%, 2))
+    // [2, 4, 6]
+
+    map({a: 1, b: 2}, (k, v) { add(v, 10) })
+    // [11, 12]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/map, [coll, func])
+}
+
+
+pmap
+meta {
+    core: true,
+    doc: """
+    Parallel map: apply `func` to each element of `coll` concurrently.
+
+    **Example**
+
+    ```hot
+    // Fetch multiple URLs in parallel
+    urls ["https://api.example.com/a", "https://api.example.com/b"]
+    pmap(urls, ::hot::http/get(%))
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/pmap, [coll, func])
+}
+
+
+map-indexed
+meta {
+    core: true,
+    doc: """
+    Map with indices: call `func(index, value)` for each element.
+
+    **Example**
+
+    ```hot
+    map-indexed(["a", "b", "c"], (i, x) { concat(i, ":", x) })
+    // ["0:a", "1:b", "2:c"]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/map-indexed, [coll, func])
+}
+
+
+filter
+meta {
+    core: true,
+    doc: """
+    Return elements of `coll` that satisfy `predicate`.
+
+    **Example**
+
+    ```hot
+    filter([1, 2, 3, 4, 5], gt(%, 2))
+    // [3, 4, 5]
+
+    filter({a: 1, b: 2, c: 3}, (k, v) { gt(v, 1) })
+    // [["b", 2], ["c", 3]]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, predicate: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/filter, [coll, predicate])
+}
+
+
+remove
+meta {
+    core: true,
+    doc: """
+    Remove elements of `coll` that satisfy `predicate`.
+
+    **Example**
+
+    ```hot
+    remove([1, 2, 3, 4, 5], gt(%, 3))
+    // [1, 2, 3]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, predicate: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/remove, [coll, predicate])
+}
+
+
+delete
+meta {
+    core: true,
+    doc: """
+    Delete key (or index) from collection.
+
+    **Example**
+
+    ```hot
+    delete([1, 2, 3], 1)          // [1, 3]
+    delete({a: 1, b: 2}, "a") // {b: 2}
+    delete("hello", 0)            // "ello"
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, key-or-index: Str | Int): Str | Vec | Map {
+    call-lib(::hot::coll/delete, [coll, key-or-index])
+}
+
+
+reduce
+meta {
+    core: true,
+    doc: """
+    Reduce `coll` using `reducer(acc, x)` starting with `initial`.
+    Supports early termination: return `reduced(value)` from the reducer
+    to stop iteration immediately and return `value`.
+
+    **Example**
+
+    ```hot
+    reduce([1, 2, 3, 4], (acc, x) { add(acc, x) }, 0)
+    // 10
+
+    reduce(["a", "b", "c"], (acc, x) { concat(acc, x) }, "")
+    // "abc"
+
+    // Short-circuit: stop when sum exceeds 5
+    reduce([1, 2, 3, 4, 5], (acc, x) {
+        total add(acc, x)
+        if(gt(total, 5), reduced(total), total)
+    }, 0)
+    // 6
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, reducer: Fn, initial: Any): Any {
+    call-lib(::hot::coll/reduce, [coll, reducer, initial])
+}
+
+
+concat
+meta {
+    core: true,
+    doc: """
+    Concatenate values of the same type (strings, vectors, or bytes).
+
+    **Example**
+
+    ```hot
+    concat([1, 2], [3, 4])        // [1, 2, 3, 4]
+    concat("Hello", " ", "World") // "Hello World"
+    concat(Bytes([1, 2]), Bytes([3, 4]))  // Bytes([1, 2, 3, 4])
+    ```
+    """
+}
+fn
+(a: Vec, b: Vec, ...rest: Vec): Vec {
+    call-lib(::hot::coll/concat, [a, b, ...rest])
+},
+(a: Str, b: Str, ...rest: Str): Str {
+    call-lib(::hot::coll/concat, [a, b, ...rest])
+},
+(a: Bytes, b: Bytes, ...rest: Bytes): Bytes {
+    call-lib(::hot::coll/concat, [a, b, ...rest])
+}
+
+
+length
+meta {
+    core: true,
+    doc: """
+    Return the number of elements in `coll`.
+
+    **Example**
+
+    ```hot
+    length([1, 2, 3])        // 3
+    length("hello")          // 5
+    length({a: 1, b: 2}) // 2
+    length(Bytes([1, 2, 3])) // 3
+    ```
+    """
+}
+fn (coll: Str | Vec | Map | Bytes): Int {
+    call-lib(::hot::coll/length, [coll])
+}
+
+
+get
+meta {
+    core: true,
+    doc: """
+    Get a value from `coll` by key or index.
+
+    For Map, looks up by key. For Vec, Str, and Bytes, looks up by 0-based index.
+    Returns `null` if not found (2-arity) or `not-found` value (3-arity).
+
+    **Example**
+
+    ```hot
+    // Map lookup
+    get({a: 1, b: 2}, "a")           // 1
+    get({a: 1}, "missing")              // null
+    get({a: 1}, "missing", "default")  // "default"
+
+    // Vec lookup
+    get([10, 20, 30], 1)                  // 20
+    get([10, 20], 5)                      // null
+    get([10, 20], 5, -1)                  // -1
+
+    // Str lookup (returns single character)
+    get("hello", 0)                       // "h"
+    get("hello", 10)                      // null
+
+    // Bytes lookup (returns byte as Int)
+    get(Bytes([65, 66, 67]), 0)           // 65
+    ```
+    """
+}
+fn
+(coll: Map | Vec | Str | Bytes, key: Any): Any {
+    call-lib(::hot::coll/get, [coll, key])
+},
+(coll: Map | Vec | Str | Bytes, key: Any, not-found: Any): Any {
+    call-lib(::hot::coll/get, [coll, key, not-found])
+}
+
+
+assoc
+meta {
+    core: true,
+    doc: """
+    Associate a key-value pair with a map, returning a new map.
+
+    Creates a new map with the key-value pair added or updated.
+    Useful for adding keys dynamically (when key is a variable).
+
+    **Example**
+
+    ```hot
+    assoc({a: 1}, "b", 2)           // {a: 1, b: 2}
+    assoc({a: 1}, "a", 42)          // {a: 42}
+
+    // Dynamic key
+    key "mykey"
+    assoc({}, key, "value")           // {mykey: "value"}
+    ```
+    """
+}
+fn (map: Map, key: Any, value: Any): Map {
+    call-lib(::hot::coll/assoc, [map, key, value])
+}
+
+
+assoc-some
+meta {
+    core: true,
+    doc: """
+    Associate a key-value pair with a map only if the value is not null.
+    Returns the map unchanged if the value is null. Pipe-friendly.
+
+    **Example**
+
+    ```hot
+    assoc-some({a: 1}, "b", 2)       // {a: 1, b: 2}
+    assoc-some({a: 1}, "b", null)    // {a: 1}
+
+    // Pipe-friendly for building maps with optional fields
+    {name: "Alice"}
+      |> assoc-some("email", user.email)
+      |> assoc-some("phone", user.phone)
+      |> assoc-some("age", user.age)
+    ```
+    """
+}
+fn (map: Map, key: Any, value: Any): Map {
+    if(is-some(value), assoc(map, key, value), map)
+}
+
+
+update
+meta {
+    core: true,
+    doc: """
+    Apply a function to the value at `key` in a map, returning a new map.
+    If the key doesn't exist, `func` receives `null`.
+
+    **Example**
+
+    ```hot
+    update({count: 1}, "count", add(%, 1))
+    // {count: 2}
+
+    update({name: "alice"}, "name", uppercase)
+    // {name: "ALICE"}
+
+    // Key doesn't exist — func receives null
+    update({}, "count", or(%, 0) |> add(1))
+    // {count: 1}
+
+    // Pipe-friendly
+    {hits: 0, name: "test"}
+      |> update("hits", add(%, 1))
+      |> update("name", uppercase)
+    // {hits: 1, name: "TEST"}
+    ```
+    """
+}
+fn (map: Map, key: Any, func: Fn): Map {
+    assoc(map, key, func(get(map, key)))
+}
+
+
+get-in
+meta {
+    core: true,
+    doc: """
+    Walk a path of keys through nested Maps/Vecs.
+
+    Returns the value at the nested path, or null (or a default) if any key is missing.
+
+    **Example**
+
+    ```hot
+    data {users: [{name: "Alice"}, {name: "Bob"}]}
+
+    get-in(data, ["users", 0, "name"])
+    // "Alice"
+
+    get-in(data, ["missing", "path"])
+    // null
+
+    get-in(data, ["missing"], "fallback")
+    // "fallback"
+
+    // Deeply nested config
+    config {db: {host: "localhost", port: 5432}}
+    get-in(config, ["db", "port"])
+    // 5432
+    ```
+    """
+}
+fn
+(coll: Map | Vec, path: Vec): Any {
+    call-lib(::hot::coll/get-in, [coll, path])
+},
+(coll: Map | Vec, path: Vec, default: Any): Any {
+    call-lib(::hot::coll/get-in, [coll, path, default])
+}
+
+
+assoc-in
+meta {
+    core: true,
+    doc: """
+    Immutably set a value at a nested path, creating intermediate maps as needed.
+
+    Returns a new structure with the value set at the given path.
+    Intermediate maps are created if they don't exist.
+
+    **Example**
+
+    ```hot
+    assoc-in({}, ["a", "b"], 1)
+    // {a: {b: 1}}
+
+    config {db: {host: "localhost", port: 5432}}
+    assoc-in(config, ["db", "port"], 5433)
+    // {db: {host: "localhost", port: 5433}}
+
+    // Preserves sibling keys
+    assoc-in({a: {b: 1, c: 2}}, ["a", "b"], 99)
+    // {a: {b: 99, c: 2}}
+    ```
+    """
+}
+fn (coll: Map | Vec, path: Vec, value: Any): Map | Vec {
+    call-lib(::hot::coll/assoc-in, [coll, path, value])
+}
+
+
+update-in
+meta {
+    core: true,
+    doc: """
+    Apply a function to the value at a nested path.
+
+    Like `assoc-in`, but instead of setting a value directly,
+    applies a function to the current value at the path.
+
+    **Example**
+
+    ```hot
+    update-in({a: {b: 1}}, ["a", "b"], add(%, 10))
+    // {a: {b: 11}}
+
+    config {db: {port: 5432, retries: 3}}
+    config |> update-in(["db", "retries"], add(%, 1))
+    // {db: {port: 5432, retries: 4}}
+    ```
+    """
+}
+fn (coll: Map | Vec, path: Vec, func: Fn): Map | Vec {
+    call-lib(::hot::coll/update-in, [coll, path, func])
+}
+
+
+merge
+meta {
+    core: true,
+    doc: """
+    Deep merge two maps. Values from `b` override `a`.
+
+    **Example**
+
+    ```hot
+    merge({a: 1, b: 2}, {b: 3, c: 4})
+    // {a: 1, b: 3, c: 4}
+
+    // Deep merge for nested maps
+    merge({x: {a: 1}}, {x: {b: 2}})
+    // {x: {a: 1, b: 2}}
+    ```
+    """
+}
+fn (a: Map, b: Map): Map {
+    call-lib(::hot::coll/merge, [a, b])
+}
+
+
+map-keys
+meta {
+    core: true,
+    doc: """
+    Apply a function to every key in a map, returning a new map with transformed keys.
+
+    **Example**
+
+    ```hot
+    map-keys({hello: 1, world: 2}, uppercase)
+    // {HELLO: 1, WORLD: 2}
+
+    map-keys({first_name: "Alice", last_name: "Smith"}, replace(%, "_", "-"))
+    // {first-name: "Alice", last-name: "Smith"}
+    ```
+    """
+}
+fn (m: Map, func: Fn): Map {
+    reduce(keys(m), (acc, k) { assoc(acc, func(k), get(m, k)) }, {})
+}
+
+
+map-vals
+meta {
+    core: true,
+    doc: """
+    Apply a function to every value in a map, returning a new map with transformed values.
+
+    **Example**
+
+    ```hot
+    map-vals({a: 1, b: 2, c: 3}, mul(%, 10))
+    // {a: 10, b: 20, c: 30}
+
+    map-vals({name: "alice", city: "paris"}, uppercase)
+    // {name: "ALICE", city: "PARIS"}
+
+    // Coerce all values to strings
+    map-vals({a: 1, b: true, c: null}, Str)
+    // {a: "1", b: "true", c: "null"}
+    ```
+    """
+}
+fn (m: Map, func: Fn): Map {
+    reduce(keys(m), (acc, k) { assoc(acc, k, func(get(m, k))) }, {})
+}
+
+
+filter-keys
+meta {
+    core: true,
+    doc: """
+    Return a new map keeping only entries where the key satisfies `predicate`.
+
+    **Example**
+
+    ```hot
+    filter-keys({name: "Alice", age: 30, email: "a@b.com"}, ne(%, "age"))
+    // {name: "Alice", email: "a@b.com"}
+
+    // Keep only keys starting with "db_"
+    config {db_host: "localhost", db_port: 5432, app_name: "myapp"}
+    filter-keys(config, starts-with(%, "db_"))
+    // {db_host: "localhost", db_port: 5432}
+    ```
+    """
+}
+fn (m: Map, predicate: Fn): Map {
+    reduce(keys(m), (acc, k) { if(predicate(k), assoc(acc, k, get(m, k)), acc) }, {})
+}
+
+
+filter-vals
+meta {
+    core: true,
+    doc: """
+    Return a new map keeping only entries where the value satisfies `predicate`.
+
+    **Example**
+
+    ```hot
+    filter-vals({a: 1, b: null, c: 3, d: null}, is-some)
+    // {a: 1, c: 3}
+
+    filter-vals({x: 10, y: -5, z: 20}, gt(%, 0))
+    // {x: 10, z: 20}
+
+    // Remove empty strings
+    filter-vals({name: "Alice", phone: "", email: "a@b.com"}, not(eq(%, "")))
+    // {name: "Alice", email: "a@b.com"}
+    ```
+    """
+}
+fn (m: Map, predicate: Fn): Map {
+    reduce(keys(m), (acc, k) { if(predicate(get(m, k)), assoc(acc, k, get(m, k)), acc) }, {})
+}
+
+
+first
+meta {
+    core: true,
+    doc: """
+    Return the first element of `coll`.
+
+    **Example**
+
+    ```hot
+    first([1, 2, 3])   // 1
+    first("hello")    // "h"
+    first([])          // null
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Any {
+    call-lib(::hot::coll/first, [coll])
+}
+
+
+last
+meta {
+    core: true,
+    doc: """
+    Return the last element of `coll`.
+
+    **Example**
+
+    ```hot
+    last([1, 2, 3])   // 3
+    last("hello")    // "o"
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Any {
+    call-lib(::hot::coll/last, [coll])
+}
+
+
+rest
+meta {
+    core: true,
+    doc: """
+    Return everything but the first element of `coll`.
+
+    **Example**
+
+    ```hot
+    rest([1, 2, 3])   // [2, 3]
+    rest("hello")    // "ello"
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/rest, [coll])
+}
+
+
+butlast
+meta {
+    core: true,
+    doc: """
+    Return everything but the last element of `coll`.
+
+    **Example**
+
+    ```hot
+    butlast([1, 2, 3])   // [1, 2]
+    butlast("hello")    // "hell"
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/butlast, [coll])
+}
+
+
+is-empty
+meta {
+    core: true,
+    doc: """
+    Return true if `coll` has no elements.
+
+    **Example**
+
+    ```hot
+    is-empty([])       // true
+    is-empty([1])      // false
+    is-empty("")       // true
+    is-empty({})       // true
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Bool {
+    call-lib(::hot::coll/is-empty, [coll])
+}
+
+
+partition
+meta {
+    core: true,
+    doc: """
+    Partition `coll`. Two arities:
+
+    - `partition(coll, size: Int)` - chunk `coll` into groups of `size`.
+    - `partition(coll, pred: Fn)` - split `coll` into `[matches, non-matches]`
+      according to a predicate.
+
+    **Example**
+
+    ```hot
+    partition([1, 2, 3, 4, 5], 2)
+    // [[1, 2], [3, 4], [5]]
+
+    partition([1, 2, 3, 4], (x) { eq(mod(x, 2), 0) })
+    // [[2, 4], [1, 3]]
+    ```
+    """
+}
+fn
+(coll: Str | Vec | Map, size: Int): Str | Vec | Map {
+    call-lib(::hot::coll/partition, [coll, size])
+},
+(coll: Vec, pred: Fn): Vec<Vec> {
+    call-lib(::hot::coll/partition, [coll, pred])
+}
+
+
+partition-by
+meta {
+    core: true,
+    doc: """
+    Partition `coll` into groups when the value of `func(x)` changes.
+
+    **Example**
+
+    ```hot
+    partition-by([1, 1, 2, 2, 3], %)
+    // [[1, 1], [2, 2], [3]]
+
+    partition-by(["a", "ab", "abc", "b"], length(%))
+    // [["a"], ["ab"], ["abc"], ["b"]]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/partition-by, [coll, func])
+}
+
+
+distinct
+meta {
+    core: true,
+    doc: """
+    Remove duplicate elements from `coll`.
+
+    **Example**
+
+    ```hot
+    distinct([1, 2, 2, 3, 3, 3])
+    // [1, 2, 3]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/distinct, [coll])
+}
+
+
+reverse
+meta {
+    core: true,
+    doc: """
+    Return `coll` with elements in reverse order.
+
+    **Example**
+
+    ```hot
+    reverse([1, 2, 3])   // [3, 2, 1]
+    reverse("hello")    // "olleh"
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/reverse, [coll])
+}
+
+
+sort
+meta {
+    core: true,
+    doc: """
+    Sort `coll` in ascending order.
+
+    **Example**
+
+    ```hot
+    sort([3, 1, 4, 1, 5, 9])
+    // [1, 1, 3, 4, 5, 9]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/sort, [coll])
+}
+
+
+sort-by
+meta {
+    core: true,
+    doc: """
+    Sort `coll` by keys derived from `func(x)`.
+
+    **Example**
+
+    ```hot
+    users [{name: "Bob", age: 30}, {name: "Alice", age: 25}]
+    sort-by(users, %.age)
+    // [{name: "Alice", age: 25}, {name: "Bob", age: 30}]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+    call-lib(::hot::coll/sort-by, [coll, func])
+}
+
+
+shuffle
+meta {
+    core: true,
+    doc: """
+    Return a new collection with elements of `coll` in random order.
+
+    **Example**
+
+    ```hot
+    shuffle([1, 2, 3, 4, 5])
+    // [3, 1, 5, 2, 4] (random order)
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/shuffle, [coll])
+}
+
+
+interleave
+meta {
+    core: true,
+    doc: """
+    Alternate elements from `a` and `b`.
+
+    **Example**
+
+    ```hot
+    interleave([1, 3, 5], [2, 4, 6])
+    // [1, 2, 3, 4, 5, 6]
+    ```
+    """
+}
+fn (a: Str | Vec | Map, b: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/interleave, [a, b])
+}
+
+
+interpose
+meta {
+    core: true,
+    doc: """
+    Insert `separator` between elements of `coll`.
+
+    **Example**
+
+    ```hot
+    interpose(["a", "b", "c"], ",")
+    // ["a", ",", "b", ",", "c"]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, separator: Any): Str | Vec | Map {
+    call-lib(::hot::coll/interpose, [coll, separator])
+}
+
+
+flatten
+meta {
+    core: true,
+    doc: """
+    Flatten nested collections by one level.
+
+    **Example**
+
+    ```hot
+    flatten([[1, 2], [3, [4, 5]], 6])
+    // [1, 2, 3, 4, 5, 6]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/flatten, [coll])
+}
+
+
+zipmap
+meta {
+    core: true,
+    doc: """
+    Create a map from keys in `a` and values in `b`.
+
+    **Example**
+
+    ```hot
+    zipmap(["a", "b", "c"], [1, 2, 3])
+    // {a: 1, b: 2, c: 3}
+    ```
+    """
+}
+fn (a: Vec, b: Vec): Map {
+    call-lib(::hot::coll/zipmap, [a, b])
+}
+
+
+index-by
+meta {
+    core: true,
+    doc: """
+    Index a collection by a key function, returning a map from key to element.
+    If multiple elements produce the same key, the last one wins.
+
+    **Example**
+
+    ```hot
+    users [
+      {id: 1, name: "Alice"},
+      {id: 2, name: "Bob"},
+      {id: 3, name: "Carol"}
+    ]
+
+    index-by(users, %.id)
+    // {1: {id: 1, name: "Alice"}, 2: {id: 2, name: "Bob"}, 3: {id: 3, name: "Carol"}}
+
+    // Quick lookup after indexing
+    by-id index-by(users, %.id)
+    get(by-id, 2).name  // "Bob"
+
+    // Index by a derived key
+    index-by(["apple", "banana", "cherry"], first)
+    // {a: "apple", b: "banana", c: "cherry"}
+    ```
+    """
+}
+fn (coll: Vec, func: Fn): Map {
+    reduce(coll, (acc, x) { assoc(acc, func(x), x) }, {})
+}
+
+
+group-by
+meta {
+    core: true,
+    doc: """
+    Group elements of a collection by a key function.
+    Returns a map from key to a vector of elements that produced that key.
+
+    **Example**
+
+    ```hot
+    orders [
+      {id: 1, status: "pending"},
+      {id: 2, status: "shipped"},
+      {id: 3, status: "pending"},
+      {id: 4, status: "delivered"},
+      {id: 5, status: "shipped"}
+    ]
+
+    group-by(orders, %.status)
+    // {
+    //   pending:   [{id: 1, ...}, {id: 3, ...}],
+    //   shipped:   [{id: 2, ...}, {id: 5, ...}],
+    //   delivered: [{id: 4, ...}]
+    // }
+
+    // Group numbers by even/odd
+    group-by([1, 2, 3, 4, 5, 6], if(eq(mod(%, 2), 0), "even", "odd"))
+    // {odd: [1, 3, 5], even: [2, 4, 6]}
+    ```
+    """
+}
+fn (coll: Vec, func: Fn): Map {
+    reduce(coll, (acc, x) {
+        k func(x)
+        existing get(acc, k, [])
+        assoc(acc, k, concat(existing, [x]))
+    }, {})
+}
+
+
+frequencies
+meta {
+    core: true,
+    doc: """
+    Count the number of occurrences of each element in a collection.
+    Returns a map from element to count.
+
+    **Example**
+
+    ```hot
+    frequencies(["a", "b", "a", "c", "a", "b"])
+    // {a: 3, b: 2, c: 1}
+
+    frequencies([1, 2, 2, 3, 3, 3])
+    // {1: 1, 2: 2, 3: 3}
+
+    // Count word occurrences
+    words split("the cat sat on the mat", " ")
+    frequencies(words)
+    // {the: 2, cat: 1, sat: 1, on: 1, mat: 1}
+    ```
+    """
+}
+fn (coll: Vec): Map {
+    reduce(coll, (acc, x) {
+        assoc(acc, x, add(get(acc, x, 0), 1))
+    }, {})
+}
+
+
+some
+meta {
+    core: true,
+    doc: """
+    Return true if any element of `coll` satisfies `predicate`.
+
+    **Example**
+
+    ```hot
+    some([1, 2, 3, 4], gt(%, 3))   // true
+    some([1, 2, 3], gt(%, 5))      // false
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, predicate: Fn): Bool {
+    call-lib(::hot::coll/some, [coll, predicate])
+}
+
+
+all
+meta {
+    core: true,
+    doc: """
+    Return true if all elements of `coll` satisfy `predicate`.
+
+    **Example**
+
+    ```hot
+    all([2, 4, 6], eq(mod(%, 2), 0))  // true (all even)
+    all([1, 2, 3], gt(%, 0))          // true (all positive)
+    all([1, 2, 3], gt(%, 2))          // false
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, predicate: Fn): Bool {
+    call-lib(::hot::coll/all, [coll, predicate])
+}
+
+
+find-first
+meta {
+    core: true,
+    doc: """
+    Return the first element of `coll` that satisfies `predicate`, or null if none match.
+    Short-circuits: stops iterating as soon as a match is found.
+
+    **Example**
+
+    ```hot
+    find-first([1, 2, 3, 4, 5], gt(%, 3))
+    // 4
+
+    find-first([1, 2, 3], gt(%, 10))
+    // null
+
+    // Find a user by email
+    users [{name: "Alice", email: "a@b.com"}, {name: "Bob", email: "b@b.com"}]
+    find-first(users, eq(%.email, "b@b.com"))
+    // {name: "Bob", email: "b@b.com"}
+
+    // With or for a default
+    or(find-first(items, %.featured), first(items))
+    ```
+    """
+}
+fn (coll: Vec, predicate: Fn): Any {
+    call-lib(::hot::coll/find_first, [coll, predicate])
+}
+
+
+Reduced
+meta {
+    core: true,
+    doc: """
+    Wrapper type that signals early termination from `reduce`.
+    When a reducer function returns `Reduced`, `reduce` stops iterating
+    and returns the unwrapped value. Use the `reduced` function to create.
+
+    **Fields**
+    - `value` - The final accumulator value to return
+    """
+}
+type {
+    value: Any
+}
+
+
+reduced
+meta {
+    core: true,
+    doc: """
+    Signal early termination from inside a `reduce`. When the reducer
+    returns `reduced(x)`, `reduce` immediately stops and returns `x`.
+    Similar to Clojure's `reduced`.
+
+    **Example**
+
+    ```hot
+    // Find first negative number via reduce (stops at -3)
+    reduce([1, 2, -3, 4, 5], (acc, x) {
+        if(lt(x, 0), reduced(x), acc)
+    }, null)
+    // -3
+
+    // Sum until total exceeds a threshold
+    reduce([10, 20, 30, 40], (total, x) {
+        new-total add(total, x)
+        if(gt(new-total, 50), reduced(new-total), new-total)
+    }, 0)
+    // 60
+
+    // Short-circuit search with accumulation
+    reduce(orders, (acc, order) {
+        if(eq(order.status, "urgent"), reduced(order), acc)
+    }, null)
+    ```
+    """
+}
+fn (value: Any): Reduced {
+    Reduced({value: value})
+}
+
+
+slice
+meta {
+    core: true,
+    doc: """
+    Return a subrange from `coll` from `start` (inclusive) to optional `end` (exclusive).
+
+    **Example**
+
+    ```hot
+    slice([1, 2, 3, 4, 5], 2)      // [3, 4, 5]
+    slice([1, 2, 3, 4, 5], 1, 4)   // [2, 3, 4]
+    slice("hello world", 0, 5)    // "hello"
+    slice(Bytes([1, 2, 3, 4, 5]), 1, 3)  // Bytes([2, 3])
+    ```
+    """
+}
+fn
+(coll: Str | Vec | Map | Bytes, start: Int): Str | Vec | Map | Bytes {
+    call-lib(::hot::coll/slice, [coll, start])
+},
+(coll: Str | Vec | Map | Bytes, start: Int, end: Int): Str | Vec | Map | Bytes {
+    call-lib(::hot::coll/slice, [coll, start, end])
+}
+
+
+keys
+meta {
+    core: true,
+    doc: """
+    Return the keys of a map or indices of a vector/string.
+
+    **Example**
+
+    ```hot
+    keys({a: 1, b: 2})   // ["a", "b"]
+    keys([10, 20, 30])        // [0, 1, 2]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/keys, [coll])
+}
+
+
+vals
+meta {
+    core: true,
+    doc: """
+    Return the values of a collection.
+
+    **Example**
+
+    ```hot
+    vals({a: 1, b: 2})   // [1, 2]
+    vals([10, 20, 30])        // [10, 20, 30]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map): Str | Vec | Map {
+    call-lib(::hot::coll/vals, [coll])
+}
+
+
+// Mapcat implementation - maps function over coll, then flattens results
+mapcat
+meta {
+    core: true,
+    doc: """
+    Map `f` over `coll` and concatenate the results.
+
+    **Example**
+
+    ```hot
+    mapcat([1, 2, 3], [%, mul(%, 10)])
+    // [1, 10, 2, 20, 3, 30]
+    ```
+    """
+}
+fn (coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
+    coll
+    |> map(f)
+    |> reduce((acc, x) { concat(acc, x) }, [])
+}
+
+
+range
+meta {
+    core: true,
+    doc: """
+    Generate a sequence from 0 to `end` (exclusive), or from `start` to `end` with optional `step`.
+
+    **Example**
+
+    ```hot
+    range(5)          // [0, 1, 2, 3, 4]
+    range(2, 7)       // [2, 3, 4, 5, 6]
+    range(0, 10, 2)   // [0, 2, 4, 6, 8]
+    range(10, 5, -1)  // [10, 9, 8, 7, 6]
+    ```
+    """
+}
+fn
+(end: Int | Dec): Vec<Int | Dec> {
+    call-lib(::hot::coll/range, [end])
+},
+(start: Int | Dec, end: Int | Dec): Vec<Int | Dec> {
+    call-lib(::hot::coll/range, [start, end])
+},
+(start: Int | Dec, end: Int | Dec, step: Int | Dec): Vec<Int | Dec> {
+    call-lib(::hot::coll/range, [start, end, step])
+}
+
+
+walk
+meta {
+    core: true,
+    doc: """
+    Walk through a data structure applying inner function to children, then outer function to result.
+
+    **Example**
+
+    ```hot
+    // Double all numbers in a nested structure
+    walk(
+        if(is-int(%), mul(%, 2), %),
+        %,
+        {a: [1, 2], b: 3}
+    )
+    // {a: [2, 4], b: 6}
+    ```
+    """
+}
+fn (inner: Fn, outer: Fn, form: Any): Any {
+    call-lib(::hot::coll/walk, [inner, outer, form])
+}
+
+
+prewalk
+meta {
+    core: true,
+    doc: """
+    Pre-order walk: apply function to each node before walking children.
+
+    **Example**
+
+    ```hot
+    prewalk(if(is-int(%), mul(%, 2), %), [1, [2, 3]])
+    // [2, [4, 6]]
+    ```
+    """
+}
+fn (f: Fn, form: Any): Any {
+    call-lib(::hot::coll/prewalk, [f, form])
+}
+
+
+postwalk
+meta {
+    core: true,
+    doc: """
+    Post-order walk: apply function to each node after walking children.
+
+    **Example**
+
+    ```hot
+    postwalk(if(is-int(%), mul(%, 2), %), [1, [2, 3]])
+    // [2, [4, 6]]
+    ```
+    """
+}
+fn (f: Fn, form: Any): Any {
+    call-lib(::hot::coll/postwalk, [f, form])
+}
+
+
+postwalk-replace
+meta {
+    core: true,
+    doc: """
+    Replace values in a structure based on a replacement map using post-order walk.
+
+    **Example**
+
+    ```hot
+    postwalk-replace({a: "x", b: "y"}, ["a", ["b", "c"]])
+    // ["x", ["y", "c"]]
+    ```
+    """
+}
+fn (replacement-map: Map, form: Any): Any {
+    call-lib(::hot::coll/postwalk-replace, [replacement-map, form])
+}

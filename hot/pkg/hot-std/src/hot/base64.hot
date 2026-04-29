@@ -1,0 +1,94 @@
+::hot::base64 ns
+meta {doc: """Base64 encoding and decoding functions."""}
+
+encode
+meta {
+    doc: """
+    Encode `data` byte array to a base64 string.
+
+    **Example**
+
+    ```hot
+    data [72, 101, 108, 108, 111]  // "Hello" as bytes
+    result encode(data)
+    // result = "SGVsbG8="
+    ```
+    """
+}
+fn (data: Bytes): Str {
+    call-lib(::hot::base64/encode, [data])
+}
+
+
+decode
+meta {
+    doc: """
+    Decode `s` base64 string to a byte array.
+
+    **Example**
+
+    ```hot
+    encoded "SGVsbG8="
+    bytes decode(encoded)
+    // bytes = [72, 101, 108, 108, 111]
+    ```
+    """
+}
+fn (s: Str): Bytes {
+    call-lib(::hot::base64/decode, [s])
+}
+
+
+is-valid
+meta {
+    doc: """
+    Check if string `s` is valid base64.
+
+    **Example**
+
+    ```hot
+    is-valid("SGVsbG8=")   // true
+    is-valid("not valid!") // false
+    ```
+    """
+}
+fn (s: Str): Bool {
+    call-lib(::hot::base64/is-valid, [s])
+}
+
+
+encode-url
+meta {
+    doc: """
+    Encode `data` to URL-safe base64 string (no padding).
+    Uses `-` and `_` instead of `+` and `/`. Safe for URLs and filenames.
+
+    **Example**
+
+    ```hot
+    encode-url("Hello+World/Test")
+    // "SGVsbG8rV29ybGQvVGVzdA"  (no = padding, - and _ chars)
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::base64/encode-url, [data])
+}
+
+
+decode-url
+meta {
+    doc: """
+    Decode URL-safe base64 string (with or without padding) to bytes.
+
+    **Example**
+
+    ```hot
+    decode-url("SGVsbG8")
+    // [72, 101, 108, 108, 111]
+    ```
+    """
+}
+fn (s: Str): Bytes {
+    call-lib(::hot::base64/decode-url, [s])
+}

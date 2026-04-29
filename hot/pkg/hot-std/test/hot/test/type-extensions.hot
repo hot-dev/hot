@@ -1,0 +1,261 @@
+::hot::test::type-extensions ns
+meta ["test"]
+
+// Type-system declarations (`type`, `enum`, `->`) live at top level: arrows
+// mutate the global implementation registry, so a nested arrow would be a
+// hidden global side effect. Each test below uses a top-level (type, arrow)
+// pair declared in this same namespace.
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+Str ::hot::type/Str
+Int ::hot::type/Int
+
+// ============================================================================
+// Test 1: Basic Type Extension Parsing — type only, no arrow
+// ============================================================================
+
+Point type {
+    x: Int,
+    y: Int
+}
+
+test_basic_parsing
+meta ["test"] fn () {
+    point Point({x: 10, y: 20})
+    assert-eq(10, point.x, "point.x should equal 10")
+    assert-eq(20, point.y, "point.y should equal 20")
+}
+
+// ============================================================================
+// Test 2: Single Type Implementation
+// ============================================================================
+
+Date type {
+    year: Int,
+    month: Int,
+    day: Int
+}
+
+Date -> Str fn (date: Date): Str {
+    `${date.year}-${date.month}-${date.day}`
+}
+
+test-single-implementation
+meta ["test"] fn () {
+    date Date({year: 2025, month: 8, day: 7})
+    date_str Str(date)
+    assert-eq("2025-8-7", date_str, "Date to String conversion should work")
+}
+
+// ============================================================================
+// Test 3: Multiple Type Implementations
+// ============================================================================
+
+Person type {
+    name: Str,
+    age: Int
+}
+
+Product type {
+    name: Str,
+    price: Dec
+}
+
+Person -> Str fn (person: Person): Str {
+    `${person.name} (${person.age})`
+}
+
+Product -> Str fn (product: Product): Str {
+    `${product.name}: $${product.price}`
+}
+
+test-multiple-implementations
+meta ["test"] fn () {
+    person Person({name: "Alice", age: 30})
+    product Product({name: "Widget", price: 19.99})
+
+    person_str Str(person)
+    product_str Str(product)
+
+    assert-eq("Alice (30)", person_str, "Person to String should work")
+    assert-eq("Widget: $19.99", product_str, "Product to String should work")
+}
+
+// ============================================================================
+// Test 4: Core Type Extensions
+// ============================================================================
+
+Score type {
+    value: Int
+}
+
+Score -> Int fn (score: Score): Int {
+    score.value
+}
+
+test-core-type-extensions
+meta ["test"] fn () {
+    score Score({value: 85})
+    score_int Int(score)
+
+    assert-eq(85, score_int, "Score to Int conversion should work")
+}
+
+// ============================================================================
+// Test 5: Multiple Target Types
+// ============================================================================
+
+Temperature type {
+    celsius: Dec
+}
+
+Temperature -> Str fn (temp: Temperature): Str {
+    `${temp.celsius}°C`
+}
+
+Temperature -> Int fn (temp: Temperature): Int {
+    ::hot::math/round(temp.celsius)
+}
+
+test-multiple-targets
+meta ["test"] fn () {
+    temp Temperature({celsius: 23.7})
+    println(`temp: ${temp}`)
+    temp_str Str(temp)
+    temp_int Int(temp)
+
+    println(`temp_str: ${temp_str}`)
+    println(`temp_int: ${temp_int}`)
+
+    assert-eq("23.7°C", temp_str, "Temperature to String should work")
+    assert-eq(24, temp_int, "Temperature to Int should work")
+}
+
+// ============================================================================
+// Test 6: Property Access with $val
+// ============================================================================
+
+User type {
+    username: Str,
+    email: Str,
+    settings: Map
+}
+
+test-property-access
+meta ["test"] fn () {
+    user User({
+            username: "johndoe",
+            email: "john@example.com",
+            settings: {theme: "dark", notifications: true}
+        })
+
+    // Test direct property access (should work with $val traversal)
+    assert-eq("johndoe", user.username, "user.username should work")
+    assert-eq("john@example.com", user.email, "user.email should work")
+
+    // Test nested property access
+    theme user.settings.theme
+    assert-eq("dark", theme, "user.settings.theme should work")
+}
+
+// ============================================================================
+// Test 7: Complex Type Implementation
+// ============================================================================
+
+Order type {
+    id: Str,
+    items: Vec,
+    total: Dec,
+    customer: Str
+}
+
+Order -> Str fn (order: Order): Str {
+    item_count ::hot::coll/length(order.items)
+    `Order ${order.id}: ${item_count} items for ${order.customer} ($${order.total})`
+}
+
+test-complex-implementation
+meta ["test"] fn () {
+    order Order({
+            id: "ORD-001",
+            items: ["widget", "gadget", "tool"],
+            total: 49.99,
+            customer: "Jane Smith"
+        })
+
+    order_str Str(order)
+    expected "Order ORD-001: 3 items for Jane Smith ($49.99)"
+    assert-eq(expected, order_str, "Complex Order to String should work")
+}
+
+// ============================================================================
+// Test 8: Fallback Behavior — exercises core Str without any custom arrow
+// ============================================================================
+
+test-fallback-behavior
+meta ["test"] fn () {
+    // Test that regular string conversion still works
+    regular_string "hello world"
+    converted_string Str(regular_string)
+    assert-eq("hello world", converted_string, "Regular string conversion should work")
+
+    // Test with numbers
+    number 42
+    number_string Str(number)
+    assert-eq("42", number_string, "Number to string conversion should work")
+
+    // Test with boolean
+    bool_val true
+    bool_string Str(bool_val)
+    assert-eq("true", bool_string, "Boolean to string conversion should work")
+}
+
+// ============================================================================
+// Test 9: Template String Integration
+// ============================================================================
+
+Event type {
+    name: Str,
+    date: Str
+}
+
+Event -> Str fn (event: Event): Str {
+    `${event.name} on ${event.date}`
+}
+
+test-template-integration
+meta ["test"] fn () {
+    event Event({name: "Conference", date: "2025-08-07"})
+
+    // Test in template strings
+    message `Attending: ${event}`
+    expected "Attending: Conference on 2025-08-07"
+    assert-eq(expected, message, "Template string integration should work")
+}
+
+// ============================================================================
+// Test 10: Edge Cases and Error Handling
+// ============================================================================
+
+Config type {
+    name: Str,
+    debug: Bool
+}
+
+Config -> Str fn (config: Config): Str {
+    debug_str if(config.debug, "DEBUG", "PROD")
+    `${config.name} [${debug_str}]`
+}
+
+test-edge-cases
+meta ["test"] fn () {
+    config_debug Config({name: "MyApp", debug: true})
+    config_prod Config({name: "MyApp", debug: false})
+
+    debug_str Str(config_debug)
+    prod_str Str(config_prod)
+
+    assert-eq("MyApp [DEBUG]", debug_str, "Debug config should work")
+    assert-eq("MyApp [PROD]", prod_str, "Production config should work")
+}

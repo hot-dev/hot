@@ -1,0 +1,128 @@
+::hot::test::math ns
+meta ["test"]
+
+// Note: All math functions (is-zero, is-pos, is-neg, add, sub, mul, div, mod, pow,
+// ceil, floor, round, rand, rand-int), type predicates (is-int, is-dec), and
+// assert, assert-eq are all core functions - no aliasing needed
+
+test-is-zero-is-pos-is-neg
+meta ["test"] fn () {
+    assert-eq(true, is-zero(0), "is-zero(0) should return true")
+    assert-eq(false, is-zero(1), "is-zero(1) should return false")
+    assert-eq(true, is-pos(1), "is-pos(1) should return true")
+    assert-eq(false, is-pos(0), "is-pos(0) should return false")
+    assert-eq(true, is-neg(-1), "is-neg(-1) should return true")
+    assert-eq(false, is-neg(0), "is-neg(0) should return false")
+}
+
+test-add
+meta ["test"] fn () {
+    assert-eq(1, add(0, 1), "add(0, 1) should return 1")
+    assert-eq(0, add(0, 0), "add(0, 0) should return 0")
+    assert-eq(-1, add(0, -1), "add(0, -1) should return -1")
+    assert-eq(1, add(1, 0), "add(1, 0) should return 1")
+    assert-eq(0, add(-1, 1), "add(-1, 1) should return 0")
+    assert-eq(-2, add(-1, -1), "add(-1, -1) should return -2")
+    assert-eq(1.5, add(0.5, 1), "add(0.5, 1) should return 1.5")
+    assert-eq(2.5, add(1.5, 1), "add(1.5, 1) should return 2.5")
+    assert-eq(3.0, add(1.5, 1.5), "add(1.5, 1.5) should return 3.0")
+}
+
+test-sub
+meta ["test"] fn () {
+    assert-eq(1, sub(2, 1), "sub(2, 1) should return 1")
+    assert-eq(0, sub(0, 0), "sub(0, 0) should return 0")
+    assert-eq(-1, sub(0, 1), "sub(0, 1) should return -1")
+    assert-eq(1, sub(1, 0), "sub(1, 0) should return 1")
+    assert-eq(-2, sub(-1, 1), "sub(-1, 1) should return -2")
+    assert-eq(0.5, sub(1.5, 1), "sub(1.5, 1) should return 0.5")
+    assert-eq(-0.5, sub(1, 1.5), "sub(1, 1.5) should return -0.5")
+    assert-eq(0.0, sub(1.5, 1.5), "sub(1.5, 1.5) should return 0.0")
+}
+
+test-mul
+meta ["test"] fn () {
+    assert-eq(2, mul(2, 1), "mul(2, 1) should return 2")
+    assert-eq(0, mul(0, 0), "mul(0, 0) should return 0")
+    assert-eq(0, mul(0, 1), "mul(0, 1) should return 0")
+    assert-eq(0, mul(1, 0), "mul(1, 0) should return 0")
+    assert-eq(-1, mul(-1, 1), "mul(-1, 1) should return -1")
+    assert-eq(1.5, mul(1.5, 1), "mul(1.5, 1) should return 1.5")
+    assert-eq(2.25, mul(1.5, 1.5), "mul(1.5, 1.5) should return 2.25")
+    assert-eq(-1.5, mul(-1.5, 1), "mul(-1.5, 1) should return -1.5")
+}
+
+test-div
+meta ["test"] fn () {
+    assert-eq(2, div(2, 1), "div(2, 1) should return 2")
+    assert-eq(0, div(0, 1), "div(0, 1) should return 0")
+    assert-eq(-1, div(-1, 1), "div(-1, 1) should return -1")
+    assert-eq(1.5, div(3, 2), "div(3, 2) should return 1.5")
+    assert-eq(0.5, div(1, 2), "div(1, 2) should return 0.5")
+    assert-eq(2.0, div(3, 1.5), "div(3, 1.5) should return 2.0")
+}
+
+test-mod
+meta ["test"] fn () {
+    assert-eq(0, mod(2, 1), "mod(2, 1) should return 0")
+    assert-eq(0, mod(0, 1), "mod(0, 1) should return 0")
+    assert-eq(0, mod(-1, 1), "mod(-1, 1) should return 0")
+    assert-eq(0.5, mod(2.5, 1), "mod(2.5, 1) should return 0.5")
+    assert-eq(0.2, mod(1.2, 1), "mod(1.2, 1) should return 0.2")
+    assert-eq(0.0, mod(2.0, 1), "mod(2.0, 1) should return 0.0")
+}
+
+test-pow
+meta ["test"] fn () {
+    assert-eq(1, pow(1, 0), "pow(1, 0) should return 1")
+    assert-eq(1, pow(1, 1), "pow(1, 1) should return 1")
+    assert-eq(1, pow(1, 2), "pow(1, 2) should return 1")
+    assert-eq(1, pow(1, 3), "pow(1, 3) should return 1")
+    assert-eq(1, pow(1, 4), "pow(1, 4) should return 1")
+    assert-eq(1, pow(1, 5), "pow(1, 5) should return 1")
+    assert-eq(2.25, pow(1.5, 2), "pow(1.5, 2) should return 2.25")
+    assert-eq(3.375, pow(1.5, 3), "pow(1.5, 3) should return 3.375")
+    assert-eq(1.0, pow(2.0, 0), "pow(2.0, 0) should return 1.0")
+}
+
+test-ceil
+meta ["test"] fn () {
+    assert-eq(5, ceil(5), "ceil(5) should return 5")
+    assert-eq(3, ceil(2.3), "ceil(2.3) should return 3")
+    assert-eq(2, ceil(2.0), "ceil(2.0) should return 2")
+    assert-eq(-2, ceil(-2.3), "ceil(-2.3) should return -2")
+    assert-eq(3, ceil(2.1), "ceil(2.1) should return 3")
+}
+
+test-floor
+meta ["test"] fn () {
+    assert-eq(5, floor(5), "floor(5) should return 5")
+    assert-eq(2, floor(2.3), "floor(2.3) should return 2")
+    assert-eq(2, floor(2.0), "floor(2.0) should return 2")
+    assert-eq(-3, floor(-2.3), "floor(-2.3) should return -3")
+    assert-eq(2, floor(2.9), "floor(2.9) should return 2")
+}
+
+test-round
+meta ["test"] fn () {
+    assert-eq(5, round(5), "round(5) should return 5")
+    assert-eq(2, round(2.3), "round(2.3) should return 2")
+    assert-eq(3, round(2.5), "round(2.5) should return 3")
+    assert-eq(3, round(2.7), "round(2.7) should return 3")
+    assert-eq(-2, round(-2.3), "round(-2.3) should return -2")
+    assert-eq(2, round(2.0), "round(2.0) should return 2")
+}
+
+test-rand
+meta ["test"] fn () {
+    // Test rand() returns a decimal (basic type check)
+    assert(is-dec(rand()), "rand() should return a decimal")
+    // Test rand(n) with positive integer
+    assert(is-dec(rand(10)), "rand(10) should return a decimal")
+    // Test rand(n) with positive decimal
+    assert(is-dec(rand(5.5)), "rand(5.5) should return a decimal")
+    // Test rand-int() returns an integer
+    assert(is-int(rand-int()), "rand-int() should return an integer")
+    // Test rand-int(n) with positive integer
+    assert(is-int(rand-int(10)), "rand-int(10) should return an integer")
+}

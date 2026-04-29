@@ -1,0 +1,258 @@
+::twilio::calls ns
+
+api-request ::twilio::api/request
+HttpError ::twilio::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+::ctx ::hot::ctx
+
+account-url fn (): Str {
+  `${::twilio::core/BASE_URL}/Accounts/${::ctx/get("twilio.account.sid")}`
+}
+
+// ============================================================================
+// Calls
+// ============================================================================
+
+CreateCallRequest type {
+  To: Str,
+  From: Str,
+  Url: Str?,
+  Twiml: Str?,
+  ApplicationSid: Str?,
+  Method: Str?,
+  FallbackUrl: Str?,
+  FallbackMethod: Str?,
+  StatusCallback: Str?,
+  StatusCallbackEvent: Vec<Str>?,
+  StatusCallbackMethod: Str?,
+  SendDigits: Str?,
+  Timeout: Int?,
+  Record: Bool?,
+  RecordingChannels: Str?,
+  RecordingStatusCallback: Str?,
+  MachineDetection: Str?,
+  MachineDetectionTimeout: Int?,
+  AsyncAmd: Bool?,
+  AsyncAmdStatusCallback: Str?,
+  Trim: Str?,
+  CallerId: Str?
+}
+
+CreateCallResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  from: Str?,
+  status: Str?,
+  start_time: Str?,
+  end_time: Str?,
+  duration: Str?,
+  price: Str?,
+  price_unit: Str?,
+  direction: Str?,
+  answered_by: Str?,
+  forwarded_from: Str?,
+  caller_name: Str?,
+  uri: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  phone_number_sid: Str?
+}
+
+create-call
+meta {
+    ctx: {"twilio.account.sid": {required: true}, "twilio.auth.token": {required: true}},
+    doc: """
+POST /Accounts/{AccountSid}/Calls.json - Initiate an outbound phone call. Provide either `Url` (TwiML endpoint), `Twiml` (inline TwiML), or `ApplicationSid`.
+
+**Example: Call with TwiML URL**
+
+```hot
+::calls ::twilio::calls
+
+response ::calls/create-call(::calls/CreateCallRequest({
+  To: "+15558675310",
+  From: "+15017122661",
+  Url: "https://example.com/twiml/greeting.xml"
+}))
+response.sid     // => "CA..."
+response.status  // => "queued"
+```
+
+**Example: Call with inline TwiML**
+
+```hot
+response ::calls/create-call(::calls/CreateCallRequest({
+  To: "+15558675310",
+  From: "+15017122661",
+  Twiml: "<Response><Say>Hello from Hot!</Say></Response>"
+}))
+```
+"""
+}
+fn (request: CreateCallRequest): CreateCallResponse {
+  body {
+    To: request.To,
+    From: request.From,
+    Url: request.Url,
+    Twiml: request.Twiml,
+    ApplicationSid: request.ApplicationSid,
+    Method: request.Method,
+    FallbackUrl: request.FallbackUrl,
+    FallbackMethod: request.FallbackMethod,
+    StatusCallback: request.StatusCallback,
+    StatusCallbackMethod: request.StatusCallbackMethod,
+    SendDigits: request.SendDigits,
+    Timeout: request.Timeout,
+    Record: request.Record,
+    RecordingChannels: request.RecordingChannels,
+    RecordingStatusCallback: request.RecordingStatusCallback,
+    MachineDetection: request.MachineDetection,
+    MachineDetectionTimeout: request.MachineDetectionTimeout,
+    AsyncAmd: request.AsyncAmd,
+    AsyncAmdStatusCallback: request.AsyncAmdStatusCallback,
+    Trim: request.Trim,
+    CallerId: request.CallerId
+  }
+
+  response api-request("POST", `${account-url()}/Calls.json`, {}, body)
+  if(is-ok-response(response), CreateCallResponse(response.body), err(HttpError(response)))
+}
+
+GetCallRequest type {
+  sid: Str
+}
+
+GetCallResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  from: Str?,
+  status: Str?,
+  start_time: Str?,
+  end_time: Str?,
+  duration: Str?,
+  price: Str?,
+  price_unit: Str?,
+  direction: Str?,
+  answered_by: Str?,
+  forwarded_from: Str?,
+  caller_name: Str?,
+  uri: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  phone_number_sid: Str?
+}
+
+get-call
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}/Calls/{Sid}.json - Get details of a specific call. Returns status, duration, price, and timestamps.
+
+**Example**
+
+```hot
+::calls ::twilio::calls
+
+response ::calls/get-call(::calls/GetCallRequest({
+  sid: "CA1234567890abcdef1234567890abcdef"
+}))
+response.status    // => "completed"
+response.duration  // => "30"
+```
+"""
+}
+fn (request: GetCallRequest): GetCallResponse {
+  response api-request("GET", `${account-url()}/Calls/${request.sid}.json`)
+  if(is-ok-response(response), GetCallResponse(response.body), err(HttpError(response)))
+}
+
+ListCallsRequest type {
+  To: Str?,
+  From: Str?,
+  Status: Str?,
+  StartTime: Str?,
+  EndTime: Str?,
+  PageSize: Int?,
+  Page: Int?
+}
+
+ListCallsResponse type {
+  calls: Vec<Map>?,
+  end: Int?,
+  first_page_uri: Str?,
+  next_page_uri: Str?,
+  page: Int?,
+  page_size: Int?,
+  previous_page_uri: Str?,
+  start: Int?,
+  uri: Str?
+}
+
+list-calls
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """GET /Accounts/{AccountSid}/Calls.json - List calls. Filter by `To`, `From`, `Status`, or date range. Supports pagination."""
+}
+fn (request: ListCallsRequest): ListCallsResponse {
+  response api-request("GET", `${account-url()}/Calls.json?To=${or(request.To, "")}&From=${or(request.From, "")}&Status=${or(request.Status, "")}&StartTime=${or(request.StartTime, "")}&EndTime=${or(request.EndTime, "")}&PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  if(is-ok-response(response), ListCallsResponse(response.body), err(HttpError(response)))
+}
+
+UpdateCallRequest type {
+  sid: Str,
+  Url: Str?,
+  Method: Str?,
+  Status: Str?,
+  FallbackUrl: Str?,
+  FallbackMethod: Str?,
+  StatusCallback: Str?,
+  StatusCallbackMethod: Str?,
+  Twiml: Str?
+}
+
+UpdateCallResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  from: Str?,
+  status: Str?,
+  date_updated: Str?
+}
+
+update-call
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """POST /Accounts/{AccountSid}/Calls/{Sid}.json - Update a live call. Set `Status: "completed"` to hang up, or provide a new `Url`/`Twiml` to redirect the call."""
+}
+fn (request: UpdateCallRequest): UpdateCallResponse {
+  body {
+    Url: request.Url,
+    Method: request.Method,
+    Status: request.Status,
+    FallbackUrl: request.FallbackUrl,
+    FallbackMethod: request.FallbackMethod,
+    StatusCallback: request.StatusCallback,
+    StatusCallbackMethod: request.StatusCallbackMethod,
+    Twiml: request.Twiml
+  }
+
+  response api-request("POST", `${account-url()}/Calls/${request.sid}.json`, {}, body)
+  if(is-ok-response(response), UpdateCallResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCallRequest type {
+  sid: Str
+}
+
+delete-call
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """DELETE /Accounts/{AccountSid}/Calls/{Sid}.json - Delete a call record. The call log is permanently removed."""
+}
+fn (request: DeleteCallRequest): Bool {
+  response api-request("DELETE", `${account-url()}/Calls/${request.sid}.json`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}

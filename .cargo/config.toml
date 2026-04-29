@@ -1,0 +1,24 @@
+[build]
+# Use more parallel jobs for faster builds
+jobs = 16
+
+[target.x86_64-unknown-linux-gnu]
+# Use faster linker on Linux
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-apple-darwin]
+# Use native macOS linker (lld not supported on macOS)
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[net]
+# Faster network settings for dependency downloads
+retry = 2
+git-fetch-with-cli = true
+
+[registries.crates-io]
+# Use sparse index for faster dependency resolution
+index = "sparse+https://index.crates.io/"
+
+[env]
+# Set SQLX_OFFLINE to false to disable offline checking until queries can be prepared
+SQLX_OFFLINE = { value = "false", force = true }

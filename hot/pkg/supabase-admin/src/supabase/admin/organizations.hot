@@ -1,0 +1,94 @@
+::supabase::admin::organizations ns
+
+::api ::supabase::admin::api
+
+// ============================================================================
+// Organization CRUD
+// ============================================================================
+
+list-organizations
+meta {
+    doc: """
+List all organizations the authenticated user belongs to.
+
+**Example**
+
+```hot
+::orgs ::supabase::admin::organizations
+
+orgs ::orgs/list-organizations()
+// => [{id: "org-123", name: "My Team", ...}, ...]
+```
+"""
+}
+fn (): Vec<Map> {
+  ::api/request("GET", "/organizations")
+}
+
+get-organization
+meta {
+    doc: """Get details for a specific organization by slug."""
+}
+fn (slug: Str): Map {
+  ::api/request("GET", `/organizations/${slug}`)
+}
+
+CreateOrganizationRequest type {
+  name: Str
+}
+
+create-organization
+meta {
+    doc: """
+Create a new organization.
+
+**Example**
+
+```hot
+::orgs ::supabase::admin::organizations
+
+org ::orgs/create-organization(::orgs/CreateOrganizationRequest({
+  name: "My New Team"
+}))
+org.id  // => "org-abc-123"
+```
+"""
+}
+fn (request: CreateOrganizationRequest): Map {
+  ::api/request("POST", "/organizations", {}, untype(request))
+}
+
+// ============================================================================
+// Members
+// ============================================================================
+
+list-members
+meta {
+    doc: """
+List members of an organization.
+
+**Example**
+
+```hot
+::orgs ::supabase::admin::organizations
+
+members ::orgs/list-members("my-org-slug")
+// => [{user_id: "...", user_name: "...", role_name: "Owner", ...}, ...]
+```
+"""
+}
+fn (slug: Str): Vec<Map> {
+  ::api/request("GET", `/organizations/${slug}/members`)
+}
+
+// ============================================================================
+// Projects
+// ============================================================================
+
+list-organization-projects
+meta {
+    doc: """List all projects belonging to an organization."""
+}
+fn (slug: Str): Vec<Map> {
+  ::api/request("GET", `/organizations/${slug}/projects`)
+}

@@ -1,0 +1,3 @@
+::postmark ns
+
+BASE_URL "https://api.postmarkapp.com"

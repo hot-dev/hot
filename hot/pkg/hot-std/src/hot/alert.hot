@@ -1,0 +1,83 @@
+::hot::alert ns
+meta {
+    doc: """Alert publishing for sending notifications to configured destinations."""
+}
+
+Alert type {
+    channel: Str,
+    data: Map
+}
+fn (channel: Str, data: Map): Alert {
+    Alert({channel, data})
+}
+
+alert
+meta {
+    core: true,
+    doc: """
+    Send an alert on a channel with optional data.
+
+    Alerts are used to notify users or external systems about important events.
+    The alert will be recorded in history, and if any subscriptions match the
+    channel pattern, notifications will be delivered to configured destinations
+    (email, Slack, PagerDuty, webhooks).
+
+    **Arguments**
+    - `channel`: String - The alert channel name (e.g., "payment:failed", "deploy:custom")
+    - `data`: Map (optional) - Additional data to include with the alert
+
+    **Returns**
+    - Result with alert ID on success, or error message on failure
+
+    **Example**
+
+    ```hot
+    // Send a simple alert
+    alert("user:high-value-signup", {
+        "user_id": user.id,
+        "plan": "enterprise",
+        "value": 50000
+    })
+
+    // Send an alert for a custom deployment step
+    alert("deploy:database-migration", {
+        "migration": "add_users_table",
+        "status": "completed",
+        "duration_ms": 1523
+    })
+
+    // Send using an Alert value
+    a Alert("deploy:rollback", {"reason": "health check failed"})
+    alert(a)
+    ```
+
+    **Channel Naming**
+    Use a colon-separated naming convention: `category:event`
+    - `payment:failed` - Payment processing failed
+    - `user:created` - New user signed up
+    - `deploy:rollback` - Deployment was rolled back
+    - `custom:my-event` - Custom application events
+
+    **Subscriptions**
+    To receive alerts, create subscriptions in the Hot Cloud dashboard:
+    1. Create a destination (email, Slack, etc.)
+    2. Create a channel pattern to match your alert names
+    3. Create a subscription linking the channel to the destination
+
+    **Local Development**
+    Alerts are a Hot Cloud feature. In local dev (`hot dev` / `hot run`),
+    `alert` is a no-op that returns a success result so your code continues
+    without error. Alerts are only delivered when running in a deployed
+    environment.
+
+    """
+}
+fn (alert-val: Alert) {
+    call-lib(::hot::alert/alert, [alert-val.channel, alert-val.data])
+},
+(channel: Str, data: Map) {
+    call-lib(::hot::alert/alert, [channel, data])
+},
+(channel: Str) {
+    call-lib(::hot::alert/alert, [channel, {}])
+}

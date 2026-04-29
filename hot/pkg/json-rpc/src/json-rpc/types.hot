@@ -1,0 +1,126 @@
+::json-rpc::types ns
+meta {doc: """JSON-RPC 2.0 message types and standard error codes."""}
+
+// ============================================================================
+// Message Types
+// ============================================================================
+
+Request
+meta {
+    doc: """
+A JSON-RPC 2.0 request message. Contains a unique id for response correlation.
+
+Use `::json-rpc::client/request` to build requests with auto-generated ids.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+req ::rpc/request("tools/list", {})
+// req => {jsonrpc: "2.0", id: "<uuid>", method: "tools/list", params: {}}
+```
+"""
+}
+type {
+  jsonrpc: Str,
+  id: Str,
+  method: Str,
+  params: Map?
+}
+
+Notification
+meta {
+    doc: """
+A JSON-RPC 2.0 notification message. Has no id and expects no response.
+
+Use `::json-rpc::client/notification` to build notification messages.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+notif ::rpc/notification("notifications/initialized", null)
+// notif => {jsonrpc: "2.0", method: "notifications/initialized", params: null}
+```
+"""
+}
+type {
+  jsonrpc: Str,
+  method: Str,
+  params: Map?
+}
+
+Error
+meta {
+    doc: """
+A JSON-RPC 2.0 error object with code, message, and optional data.
+
+Standard error codes are defined as constants: `PARSE_ERROR` (-32700),
+`INVALID_REQUEST` (-32600), `METHOD_NOT_FOUND` (-32601),
+`INVALID_PARAMS` (-32602), `INTERNAL_ERROR` (-32603).
+
+**Example**
+
+```hot
+::types ::json-rpc::types
+error ::types/Error({code: -32601, message: "Method not found", data: null})
+error.code    // => -32601
+error.message // => "Method not found"
+```
+"""
+}
+type {
+  code: Int,
+  message: Str,
+  data: Any?
+}
+
+Response
+meta {
+    doc: """
+A JSON-RPC 2.0 response message. Contains either a result or an error.
+
+Use `::json-rpc::client/parse-response` to convert raw response maps into
+this type, which automatically returns err() for error responses.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+response ::rpc/send(url, headers, req)
+response.jsonrpc // => "2.0"
+response.result  // => {serverInfo: {...}, ...} (on success)
+response.error   // => null (on success) or Error (on failure)
+```
+"""
+}
+type {
+  jsonrpc: Str,
+  id: Str?,
+  result: Any?,
+  error: Error?
+}
+
+// ============================================================================
+// Standard Error Codes
+// ============================================================================
+
+PARSE_ERROR
+meta {doc: """Invalid JSON was received by the server (-32700)."""}
+-32700
+
+INVALID_REQUEST
+meta {doc: """The JSON sent is not a valid Request object (-32600)."""}
+-32600
+
+METHOD_NOT_FOUND
+meta {doc: """The method does not exist or is not available (-32601)."""}
+-32601
+
+INVALID_PARAMS
+meta {doc: """Invalid method parameters (-32602)."""}
+-32602
+
+INTERNAL_ERROR
+meta {doc: """Internal JSON-RPC error (-32603)."""}
+-32603

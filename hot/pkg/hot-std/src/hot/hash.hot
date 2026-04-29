@@ -1,0 +1,120 @@
+::hot::hash ns
+meta {
+    doc: """Cryptographic hash functions. All functions return hex-encoded strings by default."""
+}
+
+sha256
+meta {
+    core: true,
+    doc: """
+    SHA-256 cryptographic hash. Returns hex-encoded 64-character string.
+
+    **Example**
+
+    ```hot
+    sha256("hello")
+    // "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+    sha256("hello world")
+    // "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hash/sha256, [data])
+}
+
+
+sha384
+meta {
+    doc: """
+    SHA-384 cryptographic hash. Returns hex-encoded 96-character string.
+
+    **Example**
+
+    ```hot
+    sha384("hello")
+    // 96-character hex string
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hash/sha384, [data])
+}
+
+
+sha512
+meta {
+    doc: """
+    SHA-512 cryptographic hash. Returns hex-encoded 128-character string.
+
+    **Example**
+
+    ```hot
+    sha512("hello")
+    // 128-character hex string
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hash/sha512, [data])
+}
+
+
+blake3
+meta {
+    core: true,
+    doc: """
+    BLAKE3 cryptographic hash. Fast, modern hash function. Returns hex-encoded 64-character string.
+
+    **Example**
+
+    ```hot
+    blake3("hello")
+    // 64-character hex string
+
+    // BLAKE3 is faster than SHA-256 for large inputs
+    blake3(file-contents)
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hash/blake3, [data])
+}
+
+
+sha1
+meta {
+    doc: """
+    SHA-1 hash (legacy). Use only for compatibility with existing systems like GitHub webhooks.
+    NOT recommended for new security applications.
+
+    **Example**
+
+    ```hot
+    // Verify GitHub webhook signature
+    sha1(payload)
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hash/sha1, [data])
+}
+
+
+md5
+meta {
+    doc: """
+    MD5 hash (legacy). Use only for checksums or compatibility. NOT secure for cryptographic purposes.
+
+    **Example**
+
+    ```hot
+    md5("hello")
+    // "5d41402abc4b2a76b9719d911017c592"
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hash/md5, [data])
+}

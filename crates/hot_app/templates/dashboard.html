@@ -1,0 +1,2016 @@
+{% extends "private_layout.html" %}
+
+{% block sse_data_attrs %}data-sse-mode="auto"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
+{% block content %}
+<!-- Alpine.js Dashboard State Management - Must be defined before use -->
+<script>
+{% raw %}
+document.addEventListener('alpine:init', () => {
+    Alpine.data('dashboardFilters', () => ({
+        selectedProject: null,
+        timeRange: 'P1D',
+        timeUnit: 'hour',  // Auto-selected based on timeRange
+{% endraw %}
+        projects: {{ projects_json|safe }},
+{% raw %}
+
+        // Auto-select appropriate time unit based on time range
+        getDefaultTimeUnit(range) {
+            switch(range) {
+                case 'PT24H':  // Last 24 hours
+                case 'P1D':
+                    return 'hour';
+                case 'P7D':    // Last 7 days
+                case 'P30D':   // Last 30 days
+                    return 'day';
+                case 'P90D':   // Last 90 days
+                case 'all':
+                    return 'month';
+                default:
+                    return 'day';
+            }
+        },
+
+        setTimeRange(range, displayText) {
+            this.timeRange = range;
+            // Auto-update time unit based on range
+            this.timeUnit = this.getDefaultTimeUnit(range);
+        },
+
+        getProjectName(projectId) {
+            const project = this.projects.find(p => p.project_id === projectId);
+            return project ? project.name : 'Unknown';
+        },
+
+        getTimeUnitLabel() {
+            switch(this.timeUnit) {
+                case 'hour':
+                    return 'Hourly';
+                case 'day':
+                    return 'Daily';
+                case 'month':
+                    return 'Monthly';
+                default:
+                    return 'Daily';
+            }
+        },
+
+        updateFilters() {
+            // Trigger dashboard data refresh
+            if (typeof refreshDashboardData === 'function') {
+                refreshDashboardData();
+            }
+        }
+    }));
+});
+{% endraw %}
+</script>
+
+<div>
+    {% if success_message != "" %}
+    <div class="mb-6 p-4 bg-green-100 border border-green-400 text-green-700 dark:bg-green-900/20 dark:border-green-700 dark:text-green-300 rounded-md">
+        <div class="flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+            </svg>
+            {{ success_message }}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Create Organization Banner (for users with no org) -->
+    {% include "components/create_org_banner.html" %}
+
+    <!-- Getting Started (empty state for new users with no projects) -->
+    <div id="getting-started-container">
+        {% include "components/getting_started.html" %}
+    </div>
+
+    <!-- ========================================
+         UNIFIED DASHBOARD FILTERS
+         ======================================== -->
+    <div class="mb-6">
+        {% include "components/dashboard_filters.html" %}
+    </div>
+
+    <!-- ========================================
+         HERO METRICS (Key Performance Indicators)
+         ======================================== -->
+    <div class="mb-4">
+        {% include "components/dashboard_hero_metrics.html" %}
+    </div>
+
+    <!-- ========================================
+         ISSUES BANNER (Alert when failures exist)
+         ======================================== -->
+    <div class="mb-6">
+        {% include "components/dashboard_issues_banner.html" %}
+    </div>
+
+    <!-- ========================================
+         AGENT HEALTH (Deployed Agents Overview)
+         Loaded async via /dashboard/widgets/agent-health. Container is empty
+         on first paint; the widget either fills it with the agent table or
+         leaves it empty (when there are no agents in the time window).
+         ======================================== -->
+    <div id="agent-health-container" class="mb-6"></div>
+
+    <!-- ========================================
+         ACTIVITY OVERVIEW (Charts)
+         ======================================== -->
+    <div class="mb-6">
+        {% include "components/dashboard_activity_overview.html" %}
+    </div>
+
+    <!-- ========================================
+         QUICK ISSUES (Failed Runs & Unhandled Events)
+         ======================================== -->
+    <div class="mb-6">
+        {% include "components/dashboard_quick_issues.html" %}
+    </div>
+
+</div>
+
+<!-- JavaScript for Dashboard -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script>
+{% raw %}
+// ============================================
+// Dashboard Data Management
+// ============================================
+// SSE refresh callback - used by the SSE status indicator component
+window.sseRefreshCallback = function() {
+    refreshDashboardData();
+};
+
+// ECharts instances
+window.activityTimelineChart = null;
+window.runTypeTimelineChart = null;
+window.streamActivityTimelineChart = null;
+window.streamCompositionChart = null;
+window.eventActivityTimelineChart = null;
+window.eventTypeTimelineChart = null;
+window.taskActivityTimelineChart = null;
+window.taskCusTimelineChart = null;
+
+// Selected stream for flow visualization
+let selectedStreamId = null;
+let availableStreams = [];
+
+// ============================================
+// Helper Functions
+// ============================================
+function buildFilterParams() {
+    const filters = Alpine.$data(document.querySelector('[x-data="dashboardFilters"]'));
+    const params = new URLSearchParams();
+
+    if (filters.selectedProject) {
+        params.append('project_id', filters.selectedProject);
+    }
+    if (filters.timeRange) {
+        params.append('time_range', filters.timeRange);
+    }
+    if (filters.timeUnit) {
+        params.append('time_unit', filters.timeUnit);
+    }
+
+    return params.toString();
+}
+
+function getFilterDescription() {
+    const filters = Alpine.$data(document.querySelector('[x-data="dashboardFilters"]'));
+    const timeRangeLabels = {
+        'P1D': 'the last 24 hours',
+        'P7D': 'the last 7 days',
+        'P30D': 'the last 30 days',
+        'P90D': 'the last 90 days',
+        'all': 'all time'
+    };
+    return timeRangeLabels[filters.timeRange] || 'the selected period';
+}
+
+// truncateUuid is now defined globally in private_layout.html
+
+// Helper function to detect if we're in dark mode
+function isDarkMode() {
+    return document.documentElement.classList.contains('dark');
+}
+
+// Helper function to get text color based on theme
+function getTextColor() {
+    return isDarkMode() ? '#ffffff' : '#1f2937';
+}
+
+// Helper function to get secondary text color based on theme
+function getSecondaryTextColor() {
+    return isDarkMode() ? '#9ca3af' : '#6b7280';
+}
+
+// Helper function to get axis line color based on theme
+function getAxisLineColor() {
+    return isDarkMode() ? '#4b5563' : '#d1d5db';
+}
+
+// Helper function to get split line color based on theme
+function getSplitLineColor() {
+    return isDarkMode() ? '#374151' : '#e5e7eb';
+}
+
+// Helper: split a series so the last segment is drawn with a dotted line
+// to visually indicate partial/incomplete measurement for the current period
+function splitLastSegmentDotted(seriesConfig) {
+    const data = seriesConfig.data;
+    if (!data || data.length < 2) return [seriesConfig];
+
+    // Solid series: all points, but last value is null to break the line
+    const solidData = data.slice(0, -1).concat([null]);
+
+    // Dotted series: only the last two points (the connecting segment)
+    const dottedData = new Array(data.length).fill(null);
+    dottedData[data.length - 2] = data[data.length - 2];
+    dottedData[data.length - 1] = data[data.length - 1];
+
+    return [{
+        ...seriesConfig,
+        data: solidData,
+        markPoint: undefined
+    }, {
+        ...seriesConfig,
+        name: '__partial__' + seriesConfig.name,
+        data: dottedData,
+        smooth: false,
+        lineStyle: {
+            ...(seriesConfig.lineStyle || {}),
+            type: [2, 3]   // 2px dash, 3px gap — dotted pattern
+        }
+    }];
+}
+
+// Helper: tooltip formatter that deduplicates solid/partial series and labels partial periods
+function formatPartialTooltip(params, totalPoints) {
+    if (!params || params.length === 0) return '';
+    const isLastPoint = params[0].dataIndex === totalPoints - 1;
+    let result = params[0].axisValue;
+    if (isLastPoint) {
+        result += ' <span style="color: ' + getSecondaryTextColor() + '">(partial)</span>';
+    }
+    result += '<br/>';
+    const seen = new Set();
+    params.forEach(param => {
+        const displayName = param.seriesName.replace(/^__partial__/, '');
+        if (!seen.has(displayName) && param.value != null) {
+            seen.add(displayName);
+            result += `${param.marker} ${displayName}: ${param.value}<br/>`;
+        }
+    });
+    return result;
+}
+
+// ============================================
+// Data Fetching Functions
+// ============================================
+// Cache for previous data to use if refresh fails
+let previousHeroData = null;
+let previousActivityData = null;
+let previousRunTypeData = null;
+let previousStreamActivityData = null;
+let previousStreamCompositionData = null;
+let previousEventActivityData = null;
+let previousEventTypeData = null;
+let previousTaskActivityData = null;
+let previousTaskCusData = null;
+
+async function updateHeroMetrics() {
+    try {
+        const params = buildFilterParams();
+
+        // Fetch stream metrics (now includes all counts)
+        const streamResponse = await fetch(`/data/stream-metrics?${params}`);
+        if (!streamResponse.ok) throw new Error(`Stream metrics fetch failed: ${streamResponse.status}`);
+        const streamData = await streamResponse.json();
+
+        // Cache the successful data
+        previousHeroData = { streamData };
+
+        // Update UI with new data
+        updateHeroMetricsUI(streamData);
+
+        // Update status distribution chart with the same data
+        updateStatusDistributionChart(streamData);
+
+    } catch (error) {
+        console.error('Error updating hero metrics:', error);
+        // Use previous data if available
+        if (previousHeroData) {
+            updateHeroMetricsUI(previousHeroData.streamData);
+            updateStatusDistributionChart(previousHeroData.streamData);
+        }
+    }
+}
+
+// Format number with commas for thousands separator
+function formatNumber(num) {
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function updateHeroMetricsUI(streamData) {
+    // Update Runs (first panel)
+    const runsTotal = document.querySelector('#hero-runs-total');
+    if (runsTotal) {
+        const totalRuns = streamData.total_runs ?? 0;
+        runsTotal.innerHTML = `${formatNumber(totalRuns)} <span class="text-2xl font-semibold text-blue-600 dark:text-blue-400">Runs</span>`;
+    }
+
+    // Handle run status counts from streamData
+    const runningCount = streamData.running_count ?? 0;
+    const succeededCount = streamData.succeeded_count ?? 0;
+    const failedCount = streamData.failed_count ?? 0;
+    const cancelledCount = streamData.cancelled_count ?? 0;
+
+    // Update run status counts
+    const runsRunning = document.querySelector('#hero-runs-running');
+    if (runsRunning) runsRunning.textContent = `${formatNumber(runningCount)} Running`;
+
+    const runsSucceeded = document.querySelector('#hero-runs-succeeded');
+    if (runsSucceeded) runsSucceeded.textContent = `${formatNumber(succeededCount)} Succeeded`;
+
+    const runsFailed = document.querySelector('#hero-runs-failed');
+    if (runsFailed) runsFailed.textContent = `${formatNumber(failedCount)} Failed`;
+
+    const runsCancelled = document.querySelector('#hero-runs-cancelled');
+    if (runsCancelled) runsCancelled.textContent = `${formatNumber(cancelledCount)} Cancelled`;
+
+    // Update Events (second panel)
+    const eventsTotal = document.querySelector('#hero-events-total');
+    if (eventsTotal) {
+        const eventCount = streamData.total_events ?? 0;
+        eventsTotal.innerHTML = `${formatNumber(eventCount)} <span class="text-2xl font-semibold text-green-600 dark:text-green-400">Events</span>`;
+    }
+
+    // Update event status counts
+    const eventsHandled = document.querySelector('#hero-events-handled');
+    if (eventsHandled) {
+        const handledCount = streamData.handled_events ?? 0;
+        eventsHandled.textContent = `${formatNumber(handledCount)} Handled`;
+    }
+    const eventsUnhandled = document.querySelector('#hero-events-unhandled');
+    if (eventsUnhandled) {
+        const totalEvents = streamData.total_events ?? 0;
+        const handledCount = streamData.handled_events ?? 0;
+        const unhandledCount = Math.max(0, totalEvents - handledCount);
+        eventsUnhandled.textContent = `${formatNumber(unhandledCount)} Unhandled`;
+    }
+
+    // Update Tasks
+    const tasksTotal = document.querySelector('#hero-tasks-total');
+    if (tasksTotal) {
+        const count = streamData.total_tasks ?? 0;
+        tasksTotal.innerHTML = `${formatNumber(count)} <span class="text-xl font-semibold text-pink-600 dark:text-pink-400">Tasks</span>`;
+    }
+    const tasksRunning = document.querySelector('#hero-tasks-running');
+    if (tasksRunning) tasksRunning.textContent = `${formatNumber(streamData.tasks_running ?? 0)} Running`;
+    const tasksCompleted = document.querySelector('#hero-tasks-completed');
+    if (tasksCompleted) tasksCompleted.textContent = `${formatNumber(streamData.tasks_completed ?? 0)} Completed`;
+    const tasksFailed = document.querySelector('#hero-tasks-failed');
+    if (tasksFailed) tasksFailed.textContent = `${formatNumber(streamData.tasks_failed ?? 0)} Failed`;
+    const tasksCus = document.querySelector('#hero-tasks-cus');
+    if (tasksCus) tasksCus.textContent = `${formatNumber(streamData.total_cus ?? 0)} Compute Unit Seconds (CUS)`;
+
+    // Update Streams (third panel)
+    const streamsTotal = document.querySelector('#hero-streams-total');
+    if (streamsTotal) {
+        const count = streamData.total_streams ?? 0;
+        streamsTotal.innerHTML = `${formatNumber(count)} <span class="text-2xl font-semibold text-purple-600 dark:text-purple-400">Streams</span>`;
+    }
+
+    // Update Issues Banner
+    const bannerFailedRuns = streamData.failed_count ?? 0;
+    const bannerFailedTasks = streamData.tasks_failed ?? 0;
+    const bannerTotalEvents = streamData.total_events ?? 0;
+    const bannerHandledEvents = streamData.handled_events ?? 0;
+    const bannerUnhandled = Math.max(0, bannerTotalEvents - bannerHandledEvents);
+    const bannerTotal = bannerFailedRuns + bannerFailedTasks + bannerUnhandled;
+
+    const issuesBanner = document.getElementById('issues-banner');
+    if (issuesBanner) {
+        issuesBanner.classList.toggle('hidden', bannerTotal === 0);
+    }
+
+    const bannerFailedRunsEl = document.getElementById('issues-banner-failed-runs');
+    if (bannerFailedRunsEl) {
+        bannerFailedRunsEl.classList.toggle('hidden', bannerFailedRuns === 0);
+        bannerFailedRunsEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> ${formatNumber(bannerFailedRuns)} Failed Runs`;
+    }
+    const bannerFailedTasksEl = document.getElementById('issues-banner-failed-tasks');
+    if (bannerFailedTasksEl) {
+        bannerFailedTasksEl.classList.toggle('hidden', bannerFailedTasks === 0);
+        bannerFailedTasksEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-pink-500"></span> ${formatNumber(bannerFailedTasks)} Failed Tasks`;
+    }
+    const bannerUnhandledEl = document.getElementById('issues-banner-unhandled');
+    if (bannerUnhandledEl) {
+        bannerUnhandledEl.classList.toggle('hidden', bannerUnhandled === 0);
+        bannerUnhandledEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-orange-500"></span> ${formatNumber(bannerUnhandled)} Unhandled Events`;
+    }
+}
+
+async function updateActivityTimeline() {
+    try {
+        const params = buildFilterParams();
+
+        const response = await fetch(`/data/status-chart-data?${params}`);
+        if (!response.ok) throw new Error(`Activity timeline fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        // Cache successful data
+        previousActivityData = data;
+
+        // Update the chart
+        updateActivityTimelineChart(data);
+
+    } catch (error) {
+        console.error('Error updating activity timeline:', error);
+        // Use previous data if available
+        if (previousActivityData) {
+            updateActivityTimelineChart(previousActivityData);
+        }
+    }
+}
+
+function updateActivityTimelineChart(data) {
+    if (!window.activityTimelineChart) {
+        const chartDom = document.getElementById('activityTimelineChart');
+        if (chartDom) {
+            window.activityTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.activityTimelineChart) {
+        // Check if there's any data
+        const hasData = data.dates && data.dates.length > 0 &&
+                       data.series && data.series.some(s => s.data && s.data.some(v => v > 0));
+
+        if (!hasData) {
+            const option = {
+                title: {
+                    text: `No activity data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                xAxis: { show: false },
+                yAxis: { show: false },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.activityTimelineChart.setOption(option, true);
+        } else {
+            // Define colors for status series (running, succeeded, failed, cancelled)
+            const statusColors = {
+                'running': '#3b82f6',    // blue
+                'succeeded': '#10b981',  // green
+                'failed': '#ef4444',     // red
+                'cancelled': '#6b7280'   // grey
+            };
+
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: {
+                        type: 'cross'
+                    },
+                    formatter: function(params) {
+                        return formatPartialTooltip(params, data.dates.length);
+                    }
+                },
+                legend: {
+                    data: data.series.map(s => s.name),
+                    top: 0,
+                    textStyle: {
+                        color: getTextColor()
+                    }
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '15%',
+                    top: '10%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    boundaryGap: false,
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45,
+                        fontSize: 10,
+                        color: getTextColor(),
+                        formatter: function(value, index) {
+                            // Mark the last label (current hour) with an asterisk
+                            return index === data.dates.length - 1 ? value + '*' : value;
+                        }
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    axisLabel: {
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: getSplitLineColor()
+                        }
+                    }
+                },
+                series: data.series.flatMap(s => splitLastSegmentDotted({
+                    name: s.name,
+                    type: 'line',
+                    smooth: 0.2,
+                    emphasis: {
+                        focus: 'series'
+                    },
+                    data: s.data,
+                    itemStyle: {
+                        color: statusColors[s.name.toLowerCase()] || '#6b7280'
+                    }
+                }))
+            };
+            window.activityTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+// ============================================
+// Run Type Distribution Timeline
+// ============================================
+
+async function updateRunTypeTimeline() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/run-type-data?${params}`);
+        if (!response.ok) throw new Error(`Run type data fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        // Cache successful data
+        previousRunTypeData = data;
+
+        // Update the chart
+        updateRunTypeTimelineChart(data);
+
+    } catch (error) {
+        console.error('Error updating run type timeline:', error);
+        // Use previous data if available
+        if (previousRunTypeData) {
+            updateRunTypeTimelineChart(previousRunTypeData);
+        }
+    }
+}
+
+function updateRunTypeTimelineChart(data) {
+    if (!window.runTypeTimelineChart) {
+        const chartDom = document.getElementById('runTypeTimelineChart');
+        if (chartDom) {
+            window.runTypeTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.runTypeTimelineChart) {
+        const hasData = data.dates && data.dates.length > 0 &&
+                       data.series && data.series.length > 0 &&
+                       data.series.some(s => s.data && s.data.some(v => v > 0));
+
+        if (!hasData) {
+            const option = {
+                title: {
+                    text: `No run type data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                xAxis: { show: false },
+                yAxis: { show: false },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.runTypeTimelineChart.setOption(option, true);
+        } else {
+            // Define colors for different run types
+            const runTypeColors = {
+                'call': '#3b82f6',    // blue
+                'event': '#10b981',   // green
+                'schedule': '#8b5cf6', // purple
+                'run': '#f59e0b',     // amber
+                'eval': '#ec4899',    // pink
+                'repl': '#06b6d4'     // cyan
+            };
+
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: {
+                        type: 'cross',
+                        label: {
+                            backgroundColor: '#6a7985'
+                        }
+                    },
+                    formatter: function(params) {
+                        return formatPartialTooltip(params, data.dates.length);
+                    }
+                },
+                legend: {
+                    data: data.series.map(s => s.name),
+                    textStyle: {
+                        color: getTextColor()
+                    },
+                    top: 10
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '15%',
+                    top: '15%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    boundaryGap: false,
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45,
+                        fontSize: 10,
+                        color: getTextColor(),
+                        formatter: function(value, index) {
+                            // Mark the last label (current period) with an asterisk
+                            return index === data.dates.length - 1 ? value + '*' : value;
+                        }
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    axisLabel: {
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: getSplitLineColor()
+                        }
+                    }
+                },
+                series: data.series.flatMap(s => splitLastSegmentDotted({
+                    name: s.name,
+                    type: 'line',
+                    smooth: 0.2,
+                    emphasis: {
+                        focus: 'series'
+                    },
+                    itemStyle: {
+                        color: runTypeColors[s.name] || '#6b7280'
+                    },
+                    data: s.data
+                }))
+            };
+            window.runTypeTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+function updateStatusDistributionChart(data) {
+    if (!window.statusDistributionChart) {
+        const chartDom = document.getElementById('statusDistributionChart');
+        if (chartDom) {
+            window.statusDistributionChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.statusDistributionChart) {
+        // Only include statuses that have counts > 0
+        // Handle both field name formats: with and without _count suffix
+        const pieData = [
+            { value: data.running_count || data.running || 0, name: 'Running', itemStyle: { color: '#3b82f6' } },
+            { value: data.succeeded_count || data.succeeded || 0, name: 'Succeeded', itemStyle: { color: '#10b981' } },
+            { value: data.failed_count || data.failed || 0, name: 'Failed', itemStyle: { color: '#ef4444' } },
+            { value: data.cancelled_count || data.cancelled || 0, name: 'Cancelled', itemStyle: { color: '#6b7280' } }
+        ].filter(item => item.value > 0);
+
+        // Show "No Data" message if all counts are 0
+        if (pieData.length === 0) {
+            const option = {
+                title: {
+                    text: `No run data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.statusDistributionChart.setOption(option, true);
+        } else {
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'item',
+                    formatter: '{a} <br/>{b}: {c} ({d}%)'
+                },
+                legend: {
+                    top: 0,
+                    textStyle: {
+                        color: getTextColor()
+                    }
+                },
+                series: [
+                    {
+                        name: 'Run Status',
+                        type: 'pie',
+                        radius: ['40%', '70%'],
+                        center: ['60%', '50%'],
+                        avoidLabelOverlap: false,
+                        itemStyle: {
+                            borderRadius: 10,
+                            borderColor: isDarkMode() ? '#1f2937' : '#ffffff',
+                            borderWidth: 2
+                        },
+                        label: {
+                            show: true,
+                            position: 'outside',
+                            formatter: '{b}: {c} ({d}%)',
+                            color: getTextColor(),
+                            fontSize: 12
+                        },
+                        emphasis: {
+                            label: {
+                                show: true,
+                                fontSize: 16,
+                                fontWeight: 'bold',
+                                color: getTextColor()
+                            }
+                        },
+                        labelLine: {
+                            show: true,
+                            lineStyle: {
+                                color: getAxisLineColor()
+                            }
+                        },
+                        data: pieData
+                    }
+                ]
+            };
+            window.statusDistributionChart.setOption(option, true);
+        }
+    }
+}
+
+// ============================================
+// Stream Visualization Functions
+// ============================================
+async function updateStreamActivityTimeline() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/stream-activity-timeline?${params}`);
+        if (!response.ok) throw new Error(`Stream activity timeline fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousStreamActivityData = data;
+        updateStreamActivityTimelineChart(data);
+
+    } catch (error) {
+        console.error('Error updating stream activity timeline:', error);
+        if (previousStreamActivityData) {
+            updateStreamActivityTimelineChart(previousStreamActivityData);
+        }
+    }
+}
+
+function updateStreamActivityTimelineChart(data) {
+    if (!window.streamActivityTimelineChart) {
+        const chartDom = document.getElementById('streamActivityTimelineChart');
+        if (chartDom) {
+            window.streamActivityTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.streamActivityTimelineChart) {
+        const hasData = data.dates && data.dates.length > 0 && data.count && data.count.some(v => v > 0);
+
+        if (!hasData) {
+            const option = {
+                title: {
+                    text: `No stream data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                xAxis: { show: false },
+                yAxis: { show: false },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.streamActivityTimelineChart.setOption(option, true);
+        } else {
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return formatPartialTooltip(params, data.dates.length);
+                    }
+                },
+                grid: {
+                    left: '10%',
+                    right: '4%',
+                    bottom: '10%',
+                    top: '10%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45,
+                        fontSize: 10,
+                        color: getTextColor(),
+                        formatter: function(value, index) {
+                            return index === data.dates.length - 1 ? value + '*' : value;
+                        }
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Streams Created',
+                    nameTextStyle: {
+                        color: getTextColor()
+                    },
+                    nameGap: 10,
+                    axisLabel: {
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: getSplitLineColor()
+                        }
+                    }
+                },
+                series: splitLastSegmentDotted({
+                    name: 'Streams',
+                    type: 'line',
+                    smooth: 0.2,
+                    data: data.count,
+                    itemStyle: {
+                        color: '#8b5cf6'
+                    },
+                    areaStyle: {
+                        color: {
+                            type: 'linear',
+                            x: 0,
+                            y: 0,
+                            x2: 0,
+                            y2: 1,
+                            colorStops: [{
+                                offset: 0, color: 'rgba(139, 92, 246, 0.3)'
+                            }, {
+                                offset: 1, color: 'rgba(139, 92, 246, 0.05)'
+                            }]
+                        }
+                    }
+                })
+            };
+            window.streamActivityTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+async function updateStreamComposition() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/stream-composition?${params}`);
+        if (!response.ok) throw new Error(`Stream composition fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousStreamCompositionData = data;
+        updateStreamCompositionChart(data);
+
+    } catch (error) {
+        console.error('Error updating stream composition:', error);
+        if (previousStreamCompositionData) {
+            updateStreamCompositionChart(previousStreamCompositionData);
+        }
+    }
+}
+
+function updateStreamCompositionChart(data) {
+    if (!window.streamCompositionChart) {
+        const chartDom = document.getElementById('streamCompositionChart');
+        if (chartDom) {
+            window.streamCompositionChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.streamCompositionChart) {
+        const hasData = data.dates && data.dates.length > 0 &&
+                       ((data.avg_runs && data.avg_runs.some(v => v > 0)) ||
+                        (data.avg_events && data.avg_events.some(v => v > 0)));
+
+        if (!hasData) {
+            const option = {
+                title: {
+                    text: `No stream composition data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                xAxis: { show: false },
+                yAxis: [{ show: false }, { show: false }],
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.streamCompositionChart.setOption(option, true);
+        } else {
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return formatPartialTooltip(params, data.dates.length);
+                    }
+                },
+                legend: {
+                    data: ['Avg Runs per Stream', 'Avg Events per Stream'],
+                    bottom: 0,
+                    textStyle: {
+                        color: getTextColor()
+                    }
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '15%',
+                    top: '10%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45,
+                        fontSize: 10,
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    nameTextStyle: {
+                        color: getTextColor()
+                    },
+                    axisLabel: {
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: getSplitLineColor()
+                        }
+                    }
+                },
+                series: [
+                    {
+                        name: 'Avg Runs per Stream',
+                        type: 'line',
+                        smooth: 0.1,
+                        data: data.avg_runs,
+                        itemStyle: {
+                            color: '#10b981'
+                        }
+                    },
+                    {
+                        name: 'Avg Events per Stream',
+                        type: 'line',
+                        smooth: 0.1,
+                        data: data.avg_events,
+                        itemStyle: {
+                            color: '#f59e0b'
+                        }
+                    }
+                ].flatMap(s => splitLastSegmentDotted(s))
+            };
+            window.streamCompositionChart.setOption(option, true);
+        }
+    }
+}
+
+// ============================================
+// Event Visualization Functions
+// ============================================
+async function updateEventActivityTimeline() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/event-activity-timeline?${params}`);
+        if (!response.ok) throw new Error(`Event activity timeline fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousEventActivityData = data;
+        updateEventActivityTimelineChart(data);
+
+    } catch (error) {
+        console.error('Error updating event activity timeline:', error);
+        if (previousEventActivityData) {
+            updateEventActivityTimelineChart(previousEventActivityData);
+        }
+    }
+}
+
+function updateEventActivityTimelineChart(data) {
+    if (!window.eventActivityTimelineChart) {
+        const chartDom = document.getElementById('eventActivityTimelineChart');
+        if (chartDom) {
+            window.eventActivityTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.eventActivityTimelineChart) {
+        const hasData = data.dates && data.dates.length > 0 && data.series && data.series.length > 0 &&
+                        data.series.some(s => s.data && s.data.some(v => v > 0));
+
+        if (!hasData) {
+            const option = {
+                title: {
+                    text: `No event data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                xAxis: { show: false },
+                yAxis: { show: false },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.eventActivityTimelineChart.setOption(option, true);
+        } else {
+            const seriesConfig = data.series.flatMap((series, index) => splitLastSegmentDotted({
+                name: series.name,
+                type: 'line',
+                smooth: 0.2,
+                data: series.data,
+                itemStyle: {
+                    color: series.name === 'Handled' ? '#10b981' : '#f59e0b'
+                },
+                lineStyle: {
+                    width: 2
+                },
+                emphasis: {
+                    focus: 'series'
+                },
+                markPoint: index === 0 ? {
+                    data: [{
+                        coord: [data.dates.length - 1, series.data[series.data.length - 1]],
+                        symbol: 'circle',
+                        symbolSize: 8,
+                        itemStyle: {
+                            color: getSecondaryTextColor(),
+                            borderColor: '#fff',
+                            borderWidth: 2
+                        },
+                        label: {
+                            show: false
+                        }
+                    }]
+                } : undefined
+            }));
+
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return formatPartialTooltip(params, data.dates.length);
+                    }
+                },
+                legend: {
+                    data: data.series.map(s => s.name),
+                    top: 0,
+                    textStyle: {
+                        color: getTextColor()
+                    }
+                },
+                grid: {
+                    left: '10%',
+                    right: '4%',
+                    bottom: '10%',
+                    top: '15%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45,
+                        fontSize: 10,
+                        color: getTextColor(),
+                        formatter: function(value, index) {
+                            return index === data.dates.length - 1 ? value + '*' : value;
+                        }
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Events',
+                    nameTextStyle: {
+                        color: getTextColor()
+                    },
+                    nameGap: 10,
+                    axisLabel: {
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: getSplitLineColor()
+                        }
+                    }
+                },
+                series: seriesConfig
+            };
+            window.eventActivityTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+async function updateEventTypeTimeline() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/event-type-timeline?${params}`);
+        if (!response.ok) throw new Error(`Event type timeline fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousEventTypeData = data;
+        updateEventTypeTimelineChart(data);
+
+    } catch (error) {
+        console.error('Error updating event type timeline:', error);
+        if (previousEventTypeData) {
+            updateEventTypeTimelineChart(previousEventTypeData);
+        }
+    }
+}
+
+function updateEventTypeTimelineChart(data) {
+    if (!window.eventTypeTimelineChart) {
+        const chartDom = document.getElementById('eventTypeTimelineChart');
+        if (chartDom) {
+            window.eventTypeTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.eventTypeTimelineChart) {
+        const hasData = data.dates && data.dates.length > 0 && data.series && data.series.length > 0 &&
+                        data.series.some(s => s.data && s.data.some(v => v > 0));
+
+        if (!hasData) {
+            const option = {
+                title: {
+                    text: `No event type data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                xAxis: { show: false },
+                yAxis: { show: false },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.eventTypeTimelineChart.setOption(option, true);
+        } else {
+            // Dynamic colors for event types
+            const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+
+            const seriesConfig = data.series.map((series, index) => ({
+                name: series.name,
+                type: 'line',
+                smooth: 0.2,
+                data: series.data,
+                itemStyle: {
+                    color: colors[index % colors.length]
+                },
+                lineStyle: {
+                    width: 2
+                },
+                emphasis: {
+                    focus: 'series'
+                }
+            }));
+
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        const isLastPoint = params[0].dataIndex === data.dates.length - 1;
+                        let result = params[0].axisValue;
+                        if (isLastPoint) {
+                            result += ' <span style="color: ' + getSecondaryTextColor() + '">(partial)</span>';
+                        }
+                        result += '<br/>';
+                        params.forEach(param => {
+                            result += `${param.marker} ${param.seriesName}: ${param.value}<br/>`;
+                        });
+                        return result;
+                    }
+                },
+                legend: {
+                    data: data.series.map(s => s.name),
+                    top: 0,
+                    textStyle: {
+                        color: getTextColor()
+                    },
+                    type: 'scroll'
+                },
+                grid: {
+                    left: '10%',
+                    right: '4%',
+                    bottom: '10%',
+                    top: '15%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45,
+                        fontSize: 10,
+                        color: getTextColor(),
+                        formatter: function(value, index) {
+                            return index === data.dates.length - 1 ? value + '*' : value;
+                        }
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Events',
+                    nameTextStyle: {
+                        color: getTextColor()
+                    },
+                    nameGap: 10,
+                    axisLabel: {
+                        color: getTextColor()
+                    },
+                    axisLine: {
+                        lineStyle: {
+                            color: getAxisLineColor()
+                        }
+                    },
+                    splitLine: {
+                        lineStyle: {
+                            color: getSplitLineColor()
+                        }
+                    }
+                },
+                series: seriesConfig
+            };
+            window.eventTypeTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+async function updateEventHandlingStatus() {
+    try {
+        const response = await fetch(`/data/event-handling-status`);
+        if (!response.ok) throw new Error(`Event handling status fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousEventHandlingData = data;
+        updateEventHandlingStatusChart(data);
+
+    } catch (error) {
+        console.error('Error updating event handling status:', error);
+        if (previousEventHandlingData) {
+            updateEventHandlingStatusChart(previousEventHandlingData);
+        }
+    }
+}
+
+function updateEventHandlingStatusChart(data) {
+    if (!window.eventHandlingStatusChart) {
+        const chartDom = document.getElementById('eventHandlingStatusChart');
+        if (chartDom) {
+            window.eventHandlingStatusChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.eventHandlingStatusChart) {
+        const total = (data.handled || 0) + (data.unhandled || 0);
+
+        if (total === 0) {
+            const option = {
+                title: {
+                    text: `No event data for ${getFilterDescription()}`,
+                    left: 'center',
+                    top: 'center',
+                    textStyle: {
+                        color: getSecondaryTextColor(),
+                        fontSize: 14
+                    }
+                },
+                series: [],
+                legend: { show: false },
+                tooltip: { show: false }
+            };
+            window.eventHandlingStatusChart.setOption(option, true);
+        } else {
+            const option = {
+                title: {
+                    show: false
+                },
+                tooltip: {
+                    trigger: 'item',
+                    formatter: '{a} <br/>{b}: {c} ({d}%)'
+                },
+                legend: {
+                    top: 0,
+                    textStyle: {
+                        color: getTextColor()
+                    }
+                },
+                series: [
+                    {
+                        name: 'Event Status',
+                        type: 'pie',
+                        radius: ['40%', '70%'],
+                        center: ['60%', '50%'],
+                        avoidLabelOverlap: false,
+                        itemStyle: {
+                            borderRadius: 10,
+                            borderColor: isDarkMode() ? '#1f2937' : '#ffffff',
+                            borderWidth: 2
+                        },
+                        label: {
+                            show: true,
+                            position: 'outside',
+                            formatter: '{b}: {c} ({d}%)',
+                            color: getTextColor(),
+                            fontSize: 12
+                        },
+                        emphasis: {
+                            label: {
+                                show: true,
+                                fontSize: 16,
+                                fontWeight: 'bold',
+                                color: getTextColor()
+                            }
+                        },
+                        labelLine: {
+                            show: true,
+                            lineStyle: {
+                                color: getAxisLineColor()
+                            }
+                        },
+                        data: [
+                            {
+                                value: data.handled || 0,
+                                name: 'Handled',
+                                itemStyle: { color: '#10b981' } // green
+                            },
+                            {
+                                value: data.unhandled || 0,
+                                name: 'Unhandled',
+                                itemStyle: { color: '#f59e0b' } // amber
+                            }
+                        ]
+                    }
+                ]
+            };
+            window.eventHandlingStatusChart.setOption(option, true);
+        }
+    }
+}
+
+// ============================================
+// Task Activity Timeline
+// ============================================
+async function updateTaskActivityTimeline() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/task-activity-timeline?${params}`);
+        if (!response.ok) throw new Error(`Task activity timeline fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousTaskActivityData = data;
+        updateTaskActivityTimelineChart(data);
+    } catch (error) {
+        console.error('Error updating task activity timeline:', error);
+        if (previousTaskActivityData) {
+            updateTaskActivityTimelineChart(previousTaskActivityData);
+        }
+    }
+}
+
+function updateTaskActivityTimelineChart(data) {
+    if (!window.taskActivityTimelineChart) {
+        const chartDom = document.getElementById('taskActivityTimelineChart');
+        if (chartDom) {
+            window.taskActivityTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.taskActivityTimelineChart) {
+        const hasData = data.dates && data.dates.length > 0 &&
+                       data.series && data.series.some(s => s.data && s.data.some(v => v > 0));
+
+        if (!hasData) {
+            const option = {
+                title: { text: `No task activity data for ${getFilterDescription()}`, left: 'center', top: 'center', textStyle: { color: getSecondaryTextColor(), fontSize: 14 } },
+                series: [], legend: { show: false }, tooltip: { show: false }, xAxis: { show: false }, yAxis: { show: false }
+            };
+            window.taskActivityTimelineChart.setOption(option, true);
+        } else {
+            const statusColors = {
+                'completed': '#10b981',
+                'failed': '#ef4444',
+                'running': '#3b82f6',
+                'queued': '#8b5cf6'
+            };
+
+            const allSeries = [];
+            (data.series || []).forEach(s => {
+                const config = {
+                    name: s.name,
+                    type: 'line',
+                    smooth: 0.2,
+                    data: s.data,
+                    itemStyle: { color: statusColors[s.name] || '#6b7280' },
+                    lineStyle: { width: 2 },
+                    emphasis: { focus: 'series' }
+                };
+                splitLastSegmentDotted(config).forEach(seg => allSeries.push(seg));
+            });
+
+            const option = {
+                title: { show: false },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        return formatPartialTooltip(params, data.dates.length);
+                    }
+                },
+                legend: {
+                    data: (data.series || []).map(s => s.name),
+                    top: 0,
+                    textStyle: { color: getTextColor() },
+                    type: 'scroll'
+                },
+                grid: { left: '10%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: { rotate: 45, fontSize: 10, color: getTextColor(), formatter: function(v, i) { return i === data.dates.length - 1 ? v + '*' : v; } },
+                    axisLine: { lineStyle: { color: getAxisLineColor() } }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Tasks',
+                    nameTextStyle: { color: getTextColor() },
+                    nameGap: 10,
+                    axisLabel: { color: getTextColor() },
+                    axisLine: { lineStyle: { color: getAxisLineColor() } },
+                    splitLine: { lineStyle: { color: getSplitLineColor() } }
+                },
+                series: allSeries
+            };
+            window.taskActivityTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+// ============================================
+// Task CUS Timeline
+// ============================================
+async function updateTaskCusTimeline() {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/task-cus-timeline?${params}`);
+        if (!response.ok) throw new Error(`Task CUS timeline fetch failed: ${response.status}`);
+        const data = await response.json();
+
+        previousTaskCusData = data;
+        updateTaskCusTimelineChart(data);
+    } catch (error) {
+        console.error('Error updating task CUS timeline:', error);
+        if (previousTaskCusData) {
+            updateTaskCusTimelineChart(previousTaskCusData);
+        }
+    }
+}
+
+function updateTaskCusTimelineChart(data) {
+    if (!window.taskCusTimelineChart) {
+        const chartDom = document.getElementById('taskCusTimelineChart');
+        if (chartDom) {
+            window.taskCusTimelineChart = echarts.init(chartDom);
+        }
+    }
+
+    if (window.taskCusTimelineChart) {
+        const hasData = data.dates && data.dates.length > 0 &&
+                       data.cus && data.cus.some(v => v > 0);
+
+        if (!hasData) {
+            const option = {
+                title: { text: `No CUS data for ${getFilterDescription()}`, left: 'center', top: 'center', textStyle: { color: getSecondaryTextColor(), fontSize: 14 } },
+                series: [], legend: { show: false }, tooltip: { show: false }, xAxis: { show: false }, yAxis: { show: false }
+            };
+            window.taskCusTimelineChart.setOption(option, true);
+        } else {
+            const barConfig = {
+                name: 'CUS',
+                type: 'bar',
+                data: data.cus,
+                itemStyle: { color: '#f59e0b', borderRadius: [4, 4, 0, 0] },
+                emphasis: { focus: 'series' }
+            };
+
+            const option = {
+                title: { show: false },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        if (!params || params.length === 0) return '';
+                        const isLastPoint = params[0].dataIndex === data.dates.length - 1;
+                        let result = params[0].axisValue;
+                        if (isLastPoint) result += ' <span style="color: ' + getSecondaryTextColor() + '">(partial)</span>';
+                        result += '<br/>';
+                        params.forEach(p => {
+                            if (p.value != null) result += `${p.marker} ${p.seriesName}: ${formatNumber(p.value)}<br/>`;
+                        });
+                        return result;
+                    }
+                },
+                grid: { left: '10%', right: '4%', bottom: '10%', top: '10%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: { rotate: 45, fontSize: 10, color: getTextColor(), formatter: function(v, i) { return i === data.dates.length - 1 ? v + '*' : v; } },
+                    axisLine: { lineStyle: { color: getAxisLineColor() } }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'Compute Unit Seconds (CUS)',
+                    nameTextStyle: { color: getTextColor() },
+                    nameGap: 10,
+                    axisLabel: { color: getTextColor() },
+                    axisLine: { lineStyle: { color: getAxisLineColor() } },
+                    splitLine: { lineStyle: { color: getSplitLineColor() } }
+                },
+                series: [barConfig]
+            };
+            window.taskCusTimelineChart.setOption(option, true);
+        }
+    }
+}
+
+// ============================================
+// Quick Issues Functions
+// ============================================
+async function updateQuickIssues() {
+    // Run sequentially to avoid hammering the server on small machines.
+    await updateFailedRuns();
+    await updateFailedTasks();
+    await updateUnhandledEvents();
+}
+
+async function fetchWidgetHtml(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Widget fetch failed: ${response.status}`);
+    return response.text();
+}
+
+async function updateFailedRuns() {
+    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
+    if (!filtersElement) return;
+    const filters = Alpine.$data(filtersElement);
+    if (!filters) return;
+
+    const params = new URLSearchParams();
+    if (filters.selectedProject) params.append('project', filters.selectedProject);
+    if (filters.timeRange) params.append('time_range', filters.timeRange);
+
+    const container = document.getElementById('failed-runs-container');
+    if (container) {
+        try {
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/failed-runs?${params.toString()}`);
+            applyFormatting(container);
+        } catch (e) {
+            console.error('Failed to load failed runs widget:', e);
+        }
+    }
+}
+
+async function updateFailedTasks() {
+    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
+    if (!filtersElement) return;
+    const filters = Alpine.$data(filtersElement);
+    if (!filters) return;
+
+    const params = new URLSearchParams();
+    if (filters.selectedProject) params.append('project', filters.selectedProject);
+    if (filters.timeRange) params.append('time_range', filters.timeRange);
+
+    const container = document.getElementById('failed-tasks-container');
+    if (container) {
+        try {
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/failed-tasks?${params.toString()}`);
+            applyFormatting(container);
+        } catch (e) {
+            console.error('Failed to load failed tasks widget:', e);
+        }
+    }
+}
+
+async function updateUnhandledEvents() {
+    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
+    if (!filtersElement) return;
+    const filters = Alpine.$data(filtersElement);
+    if (!filters) return;
+
+    const params = new URLSearchParams();
+    if (filters.selectedProject) params.append('project', filters.selectedProject);
+    if (filters.timeRange) params.append('time_range', filters.timeRange);
+
+    const container = document.getElementById('unhandled-events-container');
+    if (container) {
+        try {
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/unhandled-events?${params.toString()}`);
+            applyFormatting(container);
+        } catch (e) {
+            console.error('Failed to load unhandled events widget:', e);
+        }
+    }
+}
+
+// ============================================
+// Getting Started Empty State (hides when projects exist)
+// ============================================
+async function updateGettingStarted() {
+    const container = document.getElementById('getting-started-container');
+    if (container) {
+        try {
+            container.innerHTML = await fetchWidgetHtml('/dashboard/widgets/getting-started');
+            applyFormatting(container);
+        } catch (e) {
+            console.error('Failed to load getting started widget:', e);
+        }
+    }
+}
+
+// ============================================
+// Agent Health (hides when no agent runs in window)
+// ============================================
+async function updateAgentHealth() {
+    const container = document.getElementById('agent-health-container');
+    if (container) {
+        try {
+            container.innerHTML = await fetchWidgetHtml('/dashboard/widgets/agent-health');
+            applyFormatting(container);
+        } catch (e) {
+            console.error('Failed to load agent health widget:', e);
+        }
+    }
+}
+
+// ============================================
+// Chart Skeleton Helper
+// ============================================
+// Removes the pulsing skeleton overlay sitting on top of a chart container.
+// Called once per chart after its first successful render so the skeleton
+// fades to actual chart content. Safe to call repeatedly (no-op once gone).
+function hideChartSkeleton(chartId) {
+    const chartDom = document.getElementById(chartId);
+    if (!chartDom) return;
+    const skeleton = chartDom.parentElement &&
+        chartDom.parentElement.querySelector('[data-chart-skeleton]');
+    if (skeleton) skeleton.remove();
+}
+
+// ============================================
+// Main Refresh Function
+// ============================================
+// Sequential queue: loading 12+ panels in parallel causes a request storm
+// that can overwhelm dev servers and low-resource machines. We fire queries
+// one-by-one, ordered by visible importance so users see the most valuable
+// data first (hero metrics, issues, then charts). Each panel runs its own
+// try/catch, so a single failure won't stop the rest of the pipeline.
+//
+// The dashboard handler renders a bare shell with pulsing skeletons; this
+// queue is what actually fills the page. For chart tasks we also strip the
+// skeleton overlay once the task completes so each chart fades from
+// pulsing-placeholder → real chart in order, giving a clear progress cue.
+async function refreshDashboardData() {
+    const tasks = [
+        // Top-of-page KPIs + issues banner data (highest priority).
+        { name: 'hero metrics', run: updateHeroMetrics },
+        // Empty-state widget; controls whether Getting Started is shown.
+        { name: 'getting started', run: updateGettingStarted },
+        // Deployed agents overview (was previously SSR-only).
+        { name: 'agent health', run: updateAgentHealth },
+        // Actionable issues — failed runs / tasks / unhandled events.
+        { name: 'quick issues', run: updateQuickIssues },
+        // Activity charts, in the order they appear on the page.
+        { name: 'activity timeline', run: updateActivityTimeline, chartId: 'activityTimelineChart' },
+        { name: 'run type timeline', run: updateRunTypeTimeline, chartId: 'runTypeTimelineChart' },
+        { name: 'stream activity', run: updateStreamActivityTimeline, chartId: 'streamActivityTimelineChart' },
+        { name: 'stream composition', run: updateStreamComposition, chartId: 'streamCompositionChart' },
+        { name: 'event activity', run: updateEventActivityTimeline, chartId: 'eventActivityTimelineChart' },
+        { name: 'event type timeline', run: updateEventTypeTimeline, chartId: 'eventTypeTimelineChart' },
+        { name: 'task activity', run: updateTaskActivityTimeline, chartId: 'taskActivityTimelineChart' },
+        { name: 'task CUS timeline', run: updateTaskCusTimeline, chartId: 'taskCusTimelineChart' },
+    ];
+
+    for (const task of tasks) {
+        try {
+            await task.run();
+        } catch (error) {
+            console.error(`Error refreshing ${task.name}:`, error);
+        }
+        // Always remove the skeleton, even on failure: the chart will show
+        // an empty/no-data state from the cached previous data, and a
+        // permanent pulse would imply we're still loading.
+        if (task.chartId) hideChartSkeleton(task.chartId);
+    }
+
+    // Resize charts after data refresh to ensure proper rendering.
+    setTimeout(resizeAllCharts, 100);
+}
+
+// ============================================
+// Chart Resize Helper
+// ============================================
+function resizeAllCharts() {
+    const charts = [
+        'activityTimelineChart',
+        'runTypeTimelineChart',
+        'statusDistributionChart',
+        'streamActivityTimelineChart',
+        'streamCompositionChart',
+        'eventActivityTimelineChart',
+        'eventTypeTimelineChart',
+        'taskActivityTimelineChart',
+        'taskCusTimelineChart'
+    ];
+    charts.forEach(name => {
+        if (window[name]) window[name].resize();
+    });
+}
+
+
+// UUID Display Initialization is now handled globally in private_layout.html
+
+// ============================================
+// Fullscreen Chart Functionality
+// ============================================
+window.openFullscreen = function(chartId, title) {
+    const chartElement = document.getElementById(chartId);
+    if (!chartElement) {
+        console.error(`Chart element not found: ${chartId}`);
+        return;
+    }
+
+    // Create fullscreen modal
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-75';
+    modal.innerHTML = `
+        <div class="relative w-11/12 h-5/6 bg-white dark:bg-gray-800 rounded-lg shadow-2xl p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-xl font-semibold text-gray-900 dark:text-white">${title}</h3>
+                <button onclick="window.closeFullscreenChart()" class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-6 h-6">
+                        <path fill-rule="evenodd" d="M5.47 5.47a.75.75 0 011.06 0L12 10.94l5.47-5.47a.75.75 0 111.06 1.06L13.06 12l5.47 5.47a.75.75 0 11-1.06 1.06L12 13.06l-5.47 5.47a.75.75 0 01-1.06-1.06L10.94 12 5.47 6.53a.75.75 0 010-1.06z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div id="fullscreen-chart" class="w-full" style="height: calc(100% - 60px);"></div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Initialize chart in fullscreen
+    setTimeout(() => {
+        const fullscreenChartDom = document.getElementById('fullscreen-chart');
+        if (fullscreenChartDom) {
+            const fullscreenChart = echarts.init(fullscreenChartDom);
+
+            // Get the current chart's options and apply to fullscreen chart
+            const sourceChart = window[chartId];
+            if (sourceChart) {
+                const options = sourceChart.getOption();
+                fullscreenChart.setOption(options);
+
+                // Resize after a moment to ensure proper sizing
+                setTimeout(() => fullscreenChart.resize(), 100);
+            } else {
+                console.error(`Source chart not found: ${chartId}`);
+            }
+
+            // Store reference for cleanup
+            window.currentFullscreenChart = fullscreenChart;
+        }
+    }, 100);
+
+    // Close on escape key
+    const escapeHandler = (e) => {
+        if (e.key === 'Escape') {
+            window.closeFullscreenChart();
+            document.removeEventListener('keydown', escapeHandler);
+        }
+    };
+    document.addEventListener('keydown', escapeHandler);
+
+    // Close on click outside
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            window.closeFullscreenChart();
+        }
+    });
+};
+
+window.closeFullscreenChart = function() {
+    // Clean up chart instance
+    if (window.currentFullscreenChart) {
+        window.currentFullscreenChart.dispose();
+        window.currentFullscreenChart = null;
+    }
+
+    // Remove modal
+    const modal = document.querySelector('.fixed.inset-0.z-50');
+    if (modal) {
+        modal.remove();
+    }
+};
+
+// ============================================
+// Initialization
+// ============================================
+document.addEventListener('DOMContentLoaded', () => {
+    // UUID displays are now initialized globally in private_layout.html
+
+    // Apply Prism syntax highlighting to any initially rendered code elements
+    // Use setTimeout to ensure Alpine.js has finished rendering
+    setTimeout(() => {
+        if (typeof Prism !== 'undefined') {
+            const codeElements = document.querySelectorAll('code.language-hot');
+            codeElements.forEach(el => Prism.highlightElement(el));
+        }
+    }, 100);
+
+    // Initial data load
+    refreshDashboardData();
+
+    // Handle window resize for charts
+    window.addEventListener('resize', resizeAllCharts);
+
+    // Watch for theme changes (dark/light mode toggle)
+    const themeObserver = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                // Re-render charts with updated colors
+                if (previousActivityData) {
+                    updateActivityTimelineChart(previousActivityData);
+                }
+                if (previousRunTypeData) {
+                    updateRunTypeTimelineChart(previousRunTypeData);
+                }
+                if (previousHeroData && previousHeroData.streamData) {
+                    updateStatusDistributionChart(previousHeroData.streamData);
+                }
+                if (previousStreamActivityData) {
+                    updateStreamActivityTimelineChart(previousStreamActivityData);
+                }
+                if (previousStreamCompositionData) {
+                    updateStreamCompositionChart(previousStreamCompositionData);
+                }
+                if (previousEventActivityData) {
+                    updateEventActivityTimelineChart(previousEventActivityData);
+                }
+                if (previousEventTypeData) {
+                    updateEventTypeTimelineChart(previousEventTypeData);
+                }
+                if (previousTaskActivityData) {
+                    updateTaskActivityTimelineChart(previousTaskActivityData);
+                }
+                if (previousTaskCusData) {
+                    updateTaskCusTimelineChart(previousTaskCusData);
+                }
+            }
+        });
+    });
+
+    // Observe the <html> element for class changes (dark mode toggle)
+    themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['class']
+    });
+
+});
+
+// HTMX afterSwap formatting is now handled globally in private_layout.html
+{% endraw %}
+</script>
+{% endblock %}

@@ -1,0 +1,118 @@
+::supabase::integration::db ns
+meta ["test"]
+
+::db ::supabase::db
+::f ::supabase::filters
+
+SUPABASE_TEST_TABLE ::hot::env/get("SUPABASE_TEST_TABLE", "")
+
+test-insert-select-update-delete
+meta ["test"]
+fn () {
+  assert(SUPABASE_TEST_TABLE, "Set SUPABASE_TEST_TABLE in .env (e.g. 'test_items')")
+
+  unique-id random-string(8)
+
+  // Step 1: Insert
+  inserted ::db/insert(::db/InsertRequest({
+    table: SUPABASE_TEST_TABLE,
+    data: {name: `hot-test-${unique-id}`, value: 42}
+  }))
+
+  assert(not(is-empty(inserted)), "insert should return the created row")
+  row first(inserted)
+  assert(row.id, "inserted row should have an id")
+  assert-eq(`hot-test-${unique-id}`, row.name, "name should match")
+
+  // Step 2: Select
+  selected ::db/select(::db/SelectRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/eq("id", row.id)],
+    single: true
+  }))
+
+  assert-eq(row.id, selected.id, "selected row id should match")
+  assert-eq(42, selected.value, "value should be 42")
+
+  // Step 3: Update
+  updated ::db/update(::db/UpdateRequest({
+    table: SUPABASE_TEST_TABLE,
+    data: {value: 99},
+    filters: [::f/eq("id", row.id)]
+  }))
+
+  assert-eq(99, first(updated).value, "updated value should be 99")
+
+  // Step 4: Delete
+  ::db/delete(::db/DeleteRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/eq("id", row.id)]
+  }))
+
+  // Verify deletion
+  verify ::db/select(::db/SelectRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/eq("id", row.id)]
+  }))
+  assert(is-empty(verify), "row should be deleted")
+}
+
+test-upsert
+meta ["test"]
+fn () {
+  assert(SUPABASE_TEST_TABLE, "Set SUPABASE_TEST_TABLE in .env")
+
+  unique-id random-string(8)
+
+  // Insert via upsert
+  ::db/upsert(::db/UpsertRequest({
+    table: SUPABASE_TEST_TABLE,
+    data: {name: `upsert-test-${unique-id}`, value: 1},
+    on-conflict: "name"
+  }))
+
+  // Verify
+  rows ::db/select(::db/SelectRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/eq("name", `upsert-test-${unique-id}`)]
+  }))
+  assert-eq(1, length(rows), "should have 1 row")
+
+  // Clean up
+  ::db/delete(::db/DeleteRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/eq("name", `upsert-test-${unique-id}`)]
+  }))
+}
+
+test-filters
+meta ["test"]
+fn () {
+  assert(SUPABASE_TEST_TABLE, "Set SUPABASE_TEST_TABLE in .env")
+
+  unique-id random-string(8)
+
+  // Insert test data
+  ::db/insert(::db/InsertRequest({
+    table: SUPABASE_TEST_TABLE,
+    data: [
+      {name: `filter-a-${unique-id}`, value: 10},
+      {name: `filter-b-${unique-id}`, value: 20},
+      {name: `filter-c-${unique-id}`, value: 30}
+    ]
+  }))
+
+  // Test gte filter
+  results ::db/select(::db/SelectRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/ilike("name", `filter-*-${unique-id}`), ::f/gte("value", 20)],
+    order: "value.asc"
+  }))
+  assert-eq(2, length(results), "should match 2 rows with value >= 20")
+
+  // Clean up
+  ::db/delete(::db/DeleteRequest({
+    table: SUPABASE_TEST_TABLE,
+    filters: [::f/ilike("name", `filter-*-${unique-id}`)]
+  }))
+}

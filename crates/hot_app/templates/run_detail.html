@@ -1,0 +1,1342 @@
+{% extends "private_layout.html" %}
+
+{% block sse_data_attrs %}data-sse-mode="auto" data-sse-filter-run="{{ run_id }}"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
+{% block content %}
+{% let run_id_x = run_id %}
+
+    {% match run %}
+    {% when Some with (r) %}
+    <!-- Single Header Bar with all run info - polls when running -->
+    <div id="run-detail-header"
+         class="rounded-t-lg p-4 sm:p-6 backdrop-blur-sm border border-b-0 border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white"
+         {% if !r.is_completed %}
+         hx-get="/runs/{{ r.run_id }}"
+         hx-trigger="every 5s"
+         hx-select="#run-detail-header"
+         hx-swap="outerHTML"
+         {% endif %}>
+        <!-- Row 1: Identity & Status -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <!-- Run ID -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Run ID</h3>
+                <p class="text-sm text-gray-900 dark:text-white break-all">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ r.run_id }}" title="{{ r.run_id }}">{{ r.run_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ r.run_id }}" title="Copy {{ r.run_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </p>
+            </div>
+
+            <!-- Stream ID -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Stream ID</h3>
+                <p class="text-sm text-gray-900 dark:text-white break-all">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <a href="/streams/{{ r.stream_id }}" class="uuid-display uuid-link font-mono font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300" data-full-uuid="{{ r.stream_id }}" title="{{ r.stream_id }}">{{ r.stream_id|shortuuid }}</a>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ r.stream_id }}" title="Copy {{ r.stream_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </p>
+            </div>
+
+            <!-- Run Type -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Type</h3>
+                <div class="flex items-center gap-2">
+                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ r.run_type }}</span>
+                    {% if r.is_retry %}
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">retry #{{ r.retry_attempt }}</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Status -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Status</h3>
+                <div class="flex items-center gap-2">
+                    {% if r.status == "pending_retry" %}
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending_retry</span>
+                        <span class="text-xs text-gray-500 dark:text-gray-400">(attempt {{ r.retry_attempt }})</span>
+                    {% else if r.status == "running" %}
+                        <span class="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                            <span class="relative flex h-2 w-2">
+                                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                                <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                            </span>
+                            running
+                        </span>
+                    {% else if r.is_completed %}
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ r.status }}</span>
+                    {% else %}
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">{{ r.status }}</span>
+                    {% endif %}
+                    {% if r.retry_attempt > 0 && r.status != "pending_retry" %}
+                        <span class="text-xs text-gray-500 dark:text-gray-400">(retry attempt {{ r.retry_attempt }})</span>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 2: Timing Information -->
+        <div id="run-duration-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 {% if r.queued_at.is_some() %}lg:grid-cols-6{% else %}lg:grid-cols-4{% endif %} gap-4 mt-4 pt-4 border-t border-gray-200 dark:border-gray-700" data-duration-us="{{ r.duration_us }}" data-exec-time-us="{{ r.exec_time_us }}" data-queue-wait-us="{% match r.queue_wait_us %}{% when Some with (us) %}{{ us }}{% when None %}{% endmatch %}">
+            {% if r.queued_at.is_some() %}
+            <!-- Event Time (only for event-triggered runs) -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Event Time</h3>
+                <p class="text-xs font-semibold">{% match r.queued_at_formatted %}{% when Some with (t) %}{{ t }}{% when None %}{% endmatch %}</p>
+            </div>
+
+            <!-- Queue Wait -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Queue Wait</h3>
+                <p class="text-xs font-semibold text-yellow-600 dark:text-yellow-400">{% match r.queue_wait_formatted %}{% when Some with (t) %}{{ t }}{% when None %}{% endmatch %}</p>
+            </div>
+            {% endif %}
+
+            <!-- Run Start -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Run Start</h3>
+                <p class="text-xs font-semibold">{{ r.start_time_formatted }}</p>
+            </div>
+
+            <!-- Run Stop -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Run Stop</h3>
+                <p class="text-xs font-semibold">
+                    {% if r.is_completed %}
+                        {{ r.stop_time_formatted }}
+                    {% else %}
+                        <span class="text-gray-600 dark:text-gray-400">Running</span>
+                    {% endif %}
+                </p>
+            </div>
+
+            {% if r.queued_at.is_some() %}
+            <!-- Run Time (execution only) -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Run Time</h3>
+                <p class="text-xs font-semibold">{{ r.exec_time_formatted }}</p>
+            </div>
+            {% endif %}
+
+            <!-- Duration (total time) -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Duration</h3>
+                <p class="text-xs font-semibold">{{ r.duration_formatted }}</p>
+            </div>
+        </div>
+
+        <!-- Access Attribution -->
+        {% include "components/access_attribution.html" %}
+
+        <!-- Action Buttons -->
+        {% if r.is_completed && r.event_id.is_some() %}
+        <div class="mt-4 flex gap-2">
+            {% if r.status == "failed" %}
+            <button
+                onclick="retryRun('{{ r.run_id }}')"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-300 dark:hover:bg-red-800 transition-colors"
+                title="Retry this failed run in the same stream">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Retry
+            </button>
+            {% endif %}
+            <button
+                onclick="rerunRun('{{ r.run_id }}')"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800 transition-colors"
+                title="Re-run this function in a new stream">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Re-Run
+            </button>
+        </div>
+        {% endif %}
+
+        <!-- FN and Result Section (side by side) -->
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- FN Section (if present) -->
+            {% match r.event_fn %}
+            {% when Some with (event_fn) %}
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">FN</h3>
+                <div class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700">
+                    <code class="language-hot text-xs">{{ event_fn }}</code>
+                </div>
+            </div>
+            {% when None %}
+            {% endmatch %}
+
+            <!-- Result Section (if present) -->
+            {% match r.result %}
+            {% when Some with (result) %}
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Result</h3>
+                <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700" style="max-height: 9rem; overflow-y: auto;">
+                    <button onclick="openResultWithFormats()" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-gray-100 dark:bg-gray-800" title="View full result">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <pre><code class="language-hot text-xs whitespace-pre-wrap">{{ result }}</code></pre>
+                </div>
+                <!-- File attachments container (populated by JS) -->
+                <div id="result-file-attachments"></div>
+                <!-- Store both formats for toggle support -->
+                <script type="application/json" id="result-data-hot">{{ result|escape }}</script>
+                {% match r.result_json %}
+                {% when Some with (result_json) %}
+                <script type="application/json" id="result-data-json">{{ result_json|escape }}</script>
+                {% when None %}
+                {% endmatch %}
+            </div>
+            {% when None %}
+            {% endmatch %}
+        </div>
+
+        <!-- Retry Of Section (if this is a retry) -->
+        {% if r.is_retry %}
+        {% match r.origin_run_id %}
+        {% when Some with (origin_id) %}
+        <div class="mt-4">
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Retry Of</h3>
+            <div class="bg-red-50 dark:bg-red-900/20 rounded-lg p-2 border border-red-200 dark:border-red-800">
+                <div class="flex items-center gap-2">
+                    <span class="text-red-700 dark:text-red-300 text-xs">This is retry #{{ r.retry_attempt }} of</span>
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <a href="/runs/{{ origin_id }}" class="uuid-display uuid-link font-mono text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300" data-full-uuid="{{ origin_id }}" title="{{ origin_id }}">{{ origin_id|shortuuid }}</a>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ origin_id }}" title="Copy {{ origin_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% when None %}
+        {% endmatch %}
+        {% endif %}
+    </div>
+
+    {% if let Some(task_id) = associated_task_id %}
+    <div class="border-x border-gray-200 dark:border-gray-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+        <div class="flex items-center gap-2 text-sm text-amber-800 dark:text-amber-200">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0">
+                <path fill-rule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-7-4a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM9 9a.75.75 0 0 0 0 1.5h.253a.25.25 0 0 1 .244.304l-.459 2.066A1.75 1.75 0 0 0 10.747 15H11a.75.75 0 0 0 0-1.5h-.253a.25.25 0 0 1-.244-.304l.459-2.066A1.75 1.75 0 0 0 9.253 9H9Z" clip-rule="evenodd" />
+            </svg>
+            <span>This is a task execution run.</span>
+            <a href="/tasks/{{ task_id }}" class="font-medium underline hover:text-amber-900 dark:hover:text-amber-100">View Task &rarr;</a>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Run Node Graph Section - Now hidden, moved to tabs -->
+    <div id="run-flow-graph-section" style="display: none;">
+        <div id="graph-container" class="transition-all duration-300">
+            <div id="run-graph" style="width: 100%; height: 400px; min-height: 200px;"></div>
+        </div>
+    </div>
+
+    <!-- Hidden script to pass graph data safely -->
+    <script type="application/json" id="graph-data">{{ graph_data_json|safe }}</script>
+
+    <!-- Main Content Area with integrated Value Inspector -->
+    <div class="w-full rounded-b-lg backdrop-blur-sm border border-t-0 border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white flex flex-col">
+        <!-- Content area with tabs and inspector -->
+        {% include "components/run_detail_tabs.html" %}
+
+        <!-- Note: Value Inspector is now integrated in run_detail_tabs.html -->
+        <div style="display: none;">
+            <!-- Old Value Inspector (kept for reference during migration) -->
+            <div id="value-inspector-old" class="hidden flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col" style="min-width: 20rem; width: 33%;">
+                <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+                    <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
+                        <div class="text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider truncate" style="max-width: 8rem;">
+                            Value Inspector
+                        </div>
+                    </div>
+
+                    <div id="value-panel-type" class="px-2 md:px-3 pb-1.5 text-xs text-gray-500 dark:text-gray-400 truncate" title=""></div>
+                </div>
+
+                <!-- Scrollable content area -->
+                <div class="flex-1 p-2 md:p-3 pt-0 overflow-hidden min-h-0">
+                    <div id="value-panel-content" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 font-mono text-xs overflow-auto scrollbar-always h-full">
+                        <div class="text-gray-500 dark:text-gray-400 italic text-center py-4">
+                            Click on a value or meta cell to inspect its content here
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div> <!-- Close hidden old value inspector -->
+    </div>
+
+    {% when None %}
+    <!-- Run Not Found -->
+    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+        <div class="p-6 text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 dark:bg-red-900 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-red-600 dark:text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Run Not Found</h3>
+            <p class="text-gray-500 dark:text-gray-400 mb-4">
+                The requested run could not be found. It may have been deleted or the ID is incorrect.
+            </p>
+            <a href="/runs" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                Back to Runs
+            </a>
+        </div>
+    </div>
+    {% endmatch %}
+
+<style>
+.row-selected {
+    background-color: rgba(249, 250, 251, 1) !important;
+    border-left: 3px solid #ef4444;
+}
+.dark .row-selected {
+    background-color: rgba(64, 64, 64, 1) !important;
+}
+.clickable-row td {
+    cursor: pointer;
+}
+.clickable-row:hover {
+    background-color: rgba(107, 114, 128, 0.1) !important;
+}
+.dark .clickable-row:hover {
+    background-color: rgba(107, 114, 128, 0.15) !important;
+}
+.value-cell {
+    position: relative;
+    z-index: 1;
+}
+.value-cell:hover {
+    transform: scale(1.02);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    transition: all 0.15s ease-in-out;
+}
+
+/* Mobile responsive styles */
+@media (max-width: 640px) {
+    .overflow-x-auto {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    table {
+        min-width: 300px;
+    }
+}
+
+/* Prevent horizontal scrolling when inspector is open */
+.value-inspector-open .overflow-x-auto {
+    overflow-x: hidden;
+}
+
+.value-inspector-open table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+.value-inspector-open td, .value-inspector-open th {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Custom scrollbar styling */
+.overflow-auto {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e0 #f7fafc;
+}
+
+.dark .overflow-auto {
+    scrollbar-color: #4a5568 #2d3748;
+}
+
+.overflow-auto::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.overflow-auto::-webkit-scrollbar-track {
+    background: #f7fafc;
+    border-radius: 4px;
+}
+
+.dark .overflow-auto::-webkit-scrollbar-track {
+    background: #2d3748;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb {
+    background: #cbd5e0;
+    border-radius: 4px;
+}
+
+.dark .overflow-auto::-webkit-scrollbar-thumb {
+    background: #4a5568;
+}
+
+.overflow-auto::-webkit-scrollbar-thumb:hover {
+    background: #a0aec0;
+}
+
+.dark .overflow-auto::-webkit-scrollbar-thumb:hover {
+    background: #718096;
+}
+
+/* Always visible scrollbars */
+.scrollbar-always {
+    overflow: auto !important;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e0 #f7fafc;
+    /* Force scrollbars to always be visible */
+    scrollbar-gutter: stable both-edges;
+}
+
+.dark .scrollbar-always {
+    scrollbar-color: #4a5568 #2d3748;
+}
+
+.scrollbar-always::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+    /* Force scrollbars to always appear */
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.scrollbar-always::-webkit-scrollbar:vertical {
+    width: 14px;
+}
+
+.scrollbar-always::-webkit-scrollbar:horizontal {
+    height: 14px;
+}
+
+.scrollbar-always::-webkit-scrollbar-track {
+    background: #e2e8f0;
+    border-radius: 7px;
+    border: 1px solid #cbd5e0;
+}
+
+.dark .scrollbar-always::-webkit-scrollbar-track {
+    background: #374151;
+    border-color: #4b5563;
+}
+
+.scrollbar-always::-webkit-scrollbar-thumb {
+    background: #94a3b8;
+    border-radius: 7px;
+    border: 2px solid #e2e8f0;
+    min-height: 30px;
+    min-width: 30px;
+}
+
+.dark .scrollbar-always::-webkit-scrollbar-thumb {
+    background: #6b7280;
+    border-color: #374151;
+}
+
+.scrollbar-always::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+.dark .scrollbar-always::-webkit-scrollbar-thumb:hover {
+    background: #9ca3af;
+}
+
+.scrollbar-always::-webkit-scrollbar-corner {
+    background: #e2e8f0;
+}
+
+.dark .scrollbar-always::-webkit-scrollbar-corner {
+    background: #374151;
+}
+
+/* Force scrollbar to always render */
+.scrollbar-always {
+    /* Create artificial content to force scrollbar presence */
+    background-image:
+        linear-gradient(transparent 0%, transparent 100%);
+    background-repeat: no-repeat;
+    background-position:
+        calc(100% - 7px) 0,
+        0 calc(100% - 7px);
+}
+
+/* Ensure sticky headers have solid backgrounds */
+thead.sticky {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+}
+
+thead th {
+    background-color: rgb(243 244 246); /* bg-gray-100 */
+    position: relative;
+}
+
+.dark thead th {
+    background-color: #2a2a2a;
+}
+
+/* Ellipsis at the start instead of end */
+.ellipsis-start {
+    direction: rtl;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ellipsis-start * {
+    direction: ltr;
+    unicode-bidi: bidi-override;
+}
+</style>
+
+<script>
+// UUID Display helper functions (truncateUuid, initializeUuidDisplays, initializeCopyButtons)
+// are now defined globally in private_layout.html
+
+// Helper to open result modal with both formats
+function openResultWithFormats() {
+    const hotEl = document.getElementById('result-data-hot');
+    const jsonEl = document.getElementById('result-data-json');
+    const hotContent = hotEl ? hotEl.textContent : '';
+    const jsonContent = jsonEl ? jsonEl.textContent : hotContent;
+    openContentModalWithFormats('Result', hotContent, jsonContent);
+}
+
+// Parse URL parameters
+function getUrlParams() {
+    const urlParams = new URLSearchParams(window.location.search);
+    return {
+        page: urlParams.get('p') || '1',
+        raw: urlParams.get('raw') === '1',
+        inspect: urlParams.get('inspect') === '1'
+    };
+}
+
+// Update URL parameters
+function updateUrlParams(params) {
+    const url = new URL(window.location);
+    Object.keys(params).forEach(key => {
+        if (params[key] === null || params[key] === false || params[key] === '' || params[key] === '1') {
+            if (params[key] === null || params[key] === false || params[key] === '' || (key === 'p' && params[key] === '1')) {
+                url.searchParams.delete(key);
+            } else {
+                url.searchParams.set(key, params[key]);
+            }
+        }
+    });
+    window.history.replaceState({}, '', url);
+}
+
+// Update pagination links with current state
+function updatePaginationLinks() {
+    const params = getUrlParams();
+    const paginationLinks = document.querySelectorAll('.pagination-link');
+
+    paginationLinks.forEach(link => {
+        const url = new URL(link.href);
+
+        // Preserve raw state
+        if (params.raw) {
+            url.searchParams.set('raw', '1');
+        } else {
+            url.searchParams.delete('raw');
+        }
+
+        // Preserve inspector state
+        if (params.inspect) {
+            url.searchParams.set('inspect', '1');
+        } else {
+            url.searchParams.delete('inspect');
+        }
+
+        link.href = url.toString();
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const params = getUrlParams();
+
+    // Initialize UUID displays and copy buttons
+    initializeUuidDisplays();
+    initializeCopyButtons();
+
+    // Apply syntax highlighting to code elements
+    if (typeof Prism !== 'undefined') {
+        document.querySelectorAll('code.language-hot').forEach(el => {
+            Prism.highlightElement(el);
+        });
+    }
+
+    // Listen for htmx swaps on the run-detail-header for auto-refresh
+    document.body.addEventListener('htmx:afterSettle', function(event) {
+        // Check if this request was for the run-detail-header (polling refresh)
+        const requestPath = event.detail.pathInfo?.requestPath || '';
+        const isRunDetailRequest = /^\/runs\/[0-9a-f-]+$/.test(requestPath);
+
+        if (isRunDetailRequest) {
+            initializeRunDetailHeaderAfterSwap();
+        }
+    });
+
+    // Detect and display file attachments in result
+    const resultJsonEl = document.getElementById('result-data-json');
+    const resultAttachmentsContainer = document.getElementById('result-file-attachments');
+    if (resultJsonEl && resultAttachmentsContainer && typeof window.findDataUrls === 'function') {
+        try {
+            const resultJson = JSON.parse(resultJsonEl.textContent);
+            const dataUrls = window.findDataUrls(resultJson);
+            if (dataUrls.length > 0) {
+                resultAttachmentsContainer.innerHTML = window.renderFileAttachments(dataUrls, 'result');
+            }
+        } catch (e) {
+            // Result is not valid JSON, skip attachment detection
+        }
+    }
+
+    // Restore checkbox state from URL
+    const showRawCheckbox = document.getElementById('show-raw-values');
+    if (showRawCheckbox) {
+        showRawCheckbox.checked = params.raw;
+    }
+
+    // Restore inspector state from URL
+    if (params.inspect) {
+        showValueInspector();
+    }
+
+    // Truncate displayed values to 100 characters
+    truncatePreviewValues();
+
+    // Apply initial processing based on checkbox state
+    updateTableCellDisplays();
+
+    // Update pagination links with current state
+    updatePaginationLinks();
+
+    // Add event listener for the raw values checkbox
+    if (showRawCheckbox) {
+        showRawCheckbox.addEventListener('change', function() {
+            // Trigger HTMX request to refresh table with new raw state
+            refreshTableWithRawState(showRawCheckbox.checked);
+
+            // Re-display the current value with updated processing if inspector is open
+            const currentVarId = showRawCheckbox.getAttribute('data-current-var-id');
+            const currentType = showRawCheckbox.getAttribute('data-current-type');
+            if (currentVarId && currentType) {
+                fetchAndShowFullValue(currentVarId, currentType);
+            }
+        });
+    }
+
+    // Use event delegation to handle clicks on rows
+    document.addEventListener('click', function(e) {
+        // Check if any part of a clickable row was clicked
+            const row = e.target.closest('.clickable-row');
+        if (row) {
+            const varId = row.getAttribute('data-var-id');
+
+            // Check if we're in a tab (Table tab of observability tabs)
+            const isInTab = e.target.closest('#table-view-container');
+
+            if (isInTab && window.observabilityTabs) {
+                // Use tabs' Value Inspector - show both meta and value
+                window.observabilityTabs.showVarInInspector(varId);
+            } else {
+                // Use original Value Inspector - show value by default
+            showValueInspector();
+            highlightRow(row);
+                fetchAndShowFullValue(varId, 'value');
+            }
+        }
+    });
+});
+
+function showValueInspector() {
+    const valueInspector = document.getElementById('value-inspector');
+    const tableSection = document.getElementById('table-section');
+    const resizeHandle = document.getElementById('inspector-resize-handle');
+    if (valueInspector) {
+        valueInspector.classList.remove('hidden');
+        adjustColumnVisibility(true);
+
+        // Trigger HTMX request to refresh table with inspect=1
+        refreshTableWithInspectorState(true);
+
+        // Show resize handle
+        if (resizeHandle) {
+            resizeHandle.classList.add('visible');
+        }
+    }
+    if (tableSection) {
+        tableSection.classList.add('value-inspector-open');
+    }
+}
+
+function hideValueInspector() {
+    const valueInspector = document.getElementById('value-inspector');
+    const tableSection = document.getElementById('table-section');
+    const resizeHandle = document.getElementById('inspector-resize-handle');
+    if (valueInspector) {
+        valueInspector.classList.add('hidden');
+        adjustColumnVisibility(false);
+
+        // Trigger HTMX request to refresh table with inspect=0
+        refreshTableWithInspectorState(false);
+
+        // Hide resize handle
+        if (resizeHandle) {
+            resizeHandle.classList.remove('visible');
+        }
+    }
+    if (tableSection) {
+        tableSection.classList.remove('value-inspector-open');
+    }
+
+    // Clear row selections
+    document.querySelectorAll('tr.row-selected').forEach(row => {
+        row.classList.remove('row-selected');
+    });
+}
+
+function adjustColumnVisibility(inspectorOpen) {
+    // When inspector is open, hide more columns to prevent horizontal scrolling
+    const columnsToHide = [
+        'start-time-col',
+        'stop-time-col',
+        'location-col',
+        'namespace-col'
+    ];
+
+    const columnsToHideOnSmaller = [
+        'duration-col',
+        'meta-col'
+    ];
+
+    if (inspectorOpen) {
+        // When inspector is open, hide more columns
+        columnsToHide.forEach(className => {
+            document.querySelectorAll(`.${className}`).forEach(element => {
+                element.classList.add('hidden');
+                element.classList.remove('table-cell');
+            });
+        });
+
+        // On smaller screens, hide even more
+        if (window.innerWidth < 1280) { // Less than xl breakpoint
+            columnsToHideOnSmaller.forEach(className => {
+                document.querySelectorAll(`.${className}`).forEach(element => {
+                    element.classList.add('hidden');
+                    element.classList.remove('table-cell');
+                });
+            });
+        }
+    } else {
+        // When inspector is closed, restore original responsive classes
+        restoreOriginalColumnClasses();
+    }
+}
+
+function restoreOriginalColumnClasses() {
+    // Restore original Tailwind responsive classes
+    const columnMappings = {
+        'start-time-col': 'hidden xl:table-cell',
+        'stop-time-col': 'hidden xl:table-cell',
+        'duration-col': 'hidden xl:table-cell',
+        'location-col': 'hidden xl:table-cell',
+        'namespace-col': 'hidden xl:table-cell',
+        'meta-col': 'hidden xl:table-cell'
+    };
+
+    Object.entries(columnMappings).forEach(([className, responsiveClass]) => {
+        document.querySelectorAll(`.${className}`).forEach(element => {
+            // Clear all visibility classes first
+            element.classList.remove('hidden', 'table-cell', 'sm:table-cell', 'md:table-cell', 'lg:table-cell', 'xl:table-cell', '2xl:table-cell');
+            // Apply original responsive classes
+            responsiveClass.split(' ').forEach(cls => element.classList.add(cls));
+        });
+    });
+}
+
+// Handle window resize to adjust column visibility
+window.addEventListener('resize', function() {
+    const valueInspector = document.getElementById('value-inspector');
+    const inspectorOpen = valueInspector && !valueInspector.classList.contains('hidden');
+    if (inspectorOpen) {
+        adjustColumnVisibility(true);
+    }
+});
+
+function highlightRow(selectedRow) {
+    // Remove highlight from all rows
+    document.querySelectorAll('tr.row-selected').forEach(row => {
+        row.classList.remove('row-selected');
+    });
+
+    // Add highlight to the selected row
+    if (selectedRow) {
+        selectedRow.classList.add('row-selected');
+    }
+}
+
+function truncatePreviewValues() {
+    const metaPreviews = document.querySelectorAll('.meta-preview');
+    const valPreviews = document.querySelectorAll('.val-preview');
+
+    [...metaPreviews, ...valPreviews].forEach(span => {
+        const text = span.textContent;
+        // Store original text for later processing
+        span.setAttribute('data-original', text);
+
+        if (text && text.length > 100) {
+            span.textContent = text.substring(0, 100) + '...';
+            span.parentElement.title = 'Click to view full content';
+        }
+    });
+}
+
+function updateTableCellDisplays() {
+    const metaPreviews = document.querySelectorAll('.meta-preview');
+    const valPreviews = document.querySelectorAll('.val-preview');
+    const showRaw = shouldShowRaw();
+
+    [...metaPreviews, ...valPreviews].forEach(span => {
+        const originalText = span.getAttribute('data-original');
+        if (!originalText) return;
+
+        let displayText = originalText;
+
+        // Apply processing if not showing raw values
+        if (!showRaw) {
+            displayText = formatValue(originalText);
+        }
+
+        // Apply truncation
+        if (displayText && displayText.length > 100) {
+            span.textContent = displayText.substring(0, 100) + '...';
+            span.parentElement.title = 'Click to view full content';
+        } else {
+            span.textContent = displayText;
+            span.parentElement.title = 'Click to view full content';
+        }
+    });
+}
+
+// Format values for pretty display (non-raw mode)
+function formatValue(jsonString) {
+    try {
+        let parsedData = JSON.parse(jsonString);
+
+        // Apply unwrapping
+        parsedData = recursiveUnwrap(parsedData);
+
+        // Check if it's a function after unwrapping
+        const formattedFunction = formatFunction(parsedData);
+        if (formattedFunction) {
+            return formattedFunction;
+        }
+
+        // For other types, return JSON or string representation
+        if (typeof parsedData === 'object') {
+            return JSON.stringify(parsedData);
+        } else {
+            return String(parsedData);
+        }
+    } catch (e) {
+        // If parsing fails, keep original text
+        return jsonString;
+    }
+}
+
+// Format function values as "fn (arg1, arg2)" instead of JSON
+function formatFunction(data) {
+    // Check if this is a function structure after unwrapping
+    if (data && typeof data === 'object' && data.Fn && Array.isArray(data.Fn)) {
+        const definitions = data.Fn;
+
+        if (definitions.length === 1) {
+            const def = definitions[0];
+            if (def && def.args && Array.isArray(def.args)) {
+                if (def.args.length === 0) {
+                    return 'fn ()';
+                } else {
+                    const argNames = def.args.map(arg => extractArgName(arg));
+                    return `fn (${argNames.join(', ')})`;
+                }
+            }
+        } else if (definitions.length > 1) {
+            const signatures = definitions.map(def => {
+                if (def && def.args && Array.isArray(def.args)) {
+                    if (def.args.length === 0) {
+                        return '()';
+                    } else {
+                        const argNames = def.args.map(arg => extractArgName(arg));
+                        return `(${argNames.join(', ')})`;
+                    }
+                }
+                return '()';
+            });
+            return `fn ${signatures.join(', ')}`;
+        }
+    }
+
+    return null; // Not a function
+}
+
+// Extract argument name from complex argument structure
+function extractArgName(arg) {
+    // Handle Ref -> VarRef -> Var -> sym -> String structure
+    if (arg && arg.Ref && arg.Ref.VarRef && arg.Ref.VarRef.Var && arg.Ref.VarRef.Var.sym) {
+        if (arg.Ref.VarRef.Var.sym.String) {
+            return arg.Ref.VarRef.Var.sym.String;
+        }
+        if (typeof arg.Ref.VarRef.Var.sym === 'string') {
+            return arg.Ref.VarRef.Var.sym;
+        }
+    }
+
+    // Handle direct sym structure
+    if (arg && arg.sym) {
+        if (arg.sym.String) {
+            return arg.sym.String;
+        }
+        if (arg.sym.sym) {
+            return arg.sym.sym;
+        }
+        if (typeof arg.sym === 'string') {
+            return arg.sym;
+        }
+    }
+
+    // Handle simple string case
+    if (typeof arg === 'string') {
+        return arg;
+    }
+
+    // Fallback
+    return 'arg';
+}
+
+async function fetchAndShowFullValue(varId, type) {
+    const content = document.getElementById('value-panel-content');
+    const typeIndicator = document.getElementById('value-panel-type');
+    const showRawCheckbox = document.getElementById('show-raw-values');
+
+    // Store current variable info for checkbox updates
+    if (showRawCheckbox) {
+        showRawCheckbox.setAttribute('data-current-var-id', varId);
+        showRawCheckbox.setAttribute('data-current-type', type);
+    }
+
+    // Show loading state
+    content.innerHTML = '<div class="text-gray-500 dark:text-gray-400 italic text-center py-4">Loading...</div>';
+    typeIndicator.textContent = 'Loading...';
+    typeIndicator.title = 'Loading...';
+
+    try {
+        const response = await fetch(`/vars/${varId}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch variable details');
+        }
+
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Unknown error');
+        }
+
+        const value = type === 'meta' ? data.meta : data.value;
+        // Pass the formatted_value to the display function
+        showInValuePanel(value, type, data, data.formatted_value);
+    } catch (error) {
+        content.innerHTML = `<div class="text-red-500 dark:text-red-500">Error loading data: ${error.message}</div>`;
+        typeIndicator.textContent = 'Error';
+        typeIndicator.title = `Error: ${error.message}`;
+    }
+}
+
+// Helper functions for unwrapping values
+function unwrapHotResult(obj) {
+    if (obj && typeof obj === 'object' && obj['$type']) {
+        // New variant format: { $type: "::hot::type/Result.Ok", $val: value }
+        if (obj['$type'] === '::hot::type/Result.Ok' && obj['$val'] !== undefined) {
+            return obj['$val'];
+        }
+        if (obj['$type'] === '::hot::type/Result.Err' && obj['$val'] !== undefined) {
+            return { error: obj['$val'] };
+        }
+    }
+    return obj;
+}
+
+function unwrapBox(obj) {
+    if (obj && typeof obj === 'object' && obj['$box'] !== undefined) {
+        return obj['$box'];
+    }
+    return obj;
+}
+
+function recursiveUnwrap(obj) {
+    if (obj && typeof obj === 'object') {
+        // Try unwrapping hot result first
+        obj = unwrapHotResult(obj);
+
+        // Then try unwrapping box
+        obj = unwrapBox(obj);
+
+        // Recursively unwrap nested objects and arrays
+        if (Array.isArray(obj)) {
+            return obj.map(recursiveUnwrap);
+        } else if (typeof obj === 'object' && obj !== null) {
+            const unwrapped = {};
+            for (const key in obj) {
+                if (obj.hasOwnProperty(key)) {
+                    unwrapped[key] = recursiveUnwrap(obj[key]);
+                }
+            }
+            return unwrapped;
+        }
+    }
+    return obj;
+}
+
+function shouldShowRaw() {
+    const showRawCheckbox = document.getElementById('show-raw-values');
+    return showRawCheckbox && showRawCheckbox.checked;
+}
+
+function refreshTableWithInspectorState(inspectorOpen) {
+    // Get current state from URL
+    const urlState = getUrlParams();
+    const currentPage = urlState.page;
+    const rawMode = urlState.raw;
+    const runId = window.location.pathname.split('/')[2]; // Extract run ID from path
+
+    // Build URL with parameters
+    const params = new URLSearchParams();
+    params.set('p', currentPage);
+    if (rawMode) {
+        params.set('raw', '1');
+    }
+    if (inspectorOpen) {
+        params.set('inspect', '1');
+    }
+
+    const tableUrl = `/runs/${runId}/table?${params.toString()}`;
+
+    // Update browser URL
+    const newUrl = `/runs/${runId}?${params.toString()}`;
+    window.history.pushState({}, '', newUrl);
+
+    // Make HTMX request to refresh table
+    htmx.ajax('GET', tableUrl, {
+        target: '#variables-table-container',
+        swap: 'innerHTML'
+    });
+}
+
+function refreshTableWithRawState(rawMode) {
+    // Get current state from URL
+    const urlState = getUrlParams();
+    const currentPage = urlState.page;
+    const inspectorOpen = !document.getElementById('value-inspector')?.classList.contains('hidden');
+    const runId = window.location.pathname.split('/')[2]; // Extract run ID from path
+
+    // Build URL with parameters
+    const params = new URLSearchParams();
+    params.set('p', currentPage);
+    if (rawMode) {
+        params.set('raw', '1');
+    }
+    if (inspectorOpen) {
+        params.set('inspect', '1');
+    }
+
+    const tableUrl = `/runs/${runId}/table?${params.toString()}`;
+
+    // Update browser URL
+    const newUrl = `/runs/${runId}?${params.toString()}`;
+    window.history.pushState({}, '', newUrl);
+
+    // Make HTMX request to refresh table
+    htmx.ajax('GET', tableUrl, {
+        target: '#variables-table-container',
+        swap: 'innerHTML'
+    });
+}
+
+function showInValuePanel(data, type, varData = null, formattedValue = null) {
+    const content = document.getElementById('value-panel-content');
+    const typeIndicator = document.getElementById('value-panel-type');
+
+    // Build variable info first (top of box)
+    let variableInfo = '';
+    if (varData) {
+        variableInfo = `Var: ${varData.var} | ${type.toUpperCase()}`;
+    } else {
+        variableInfo = type.toUpperCase();
+    }
+
+    if (data === null || data === undefined) {
+        content.innerHTML = '<div class="text-gray-500 dark:text-gray-400 italic">null</div>';
+        typeIndicator.textContent = variableInfo;
+        typeIndicator.title = variableInfo;
+        return;
+    }
+
+    let processedData = data;
+    let displayText = '';
+
+    try {
+        // Parse data to object if it's a string
+        if (typeof data === 'string') {
+            try {
+                processedData = JSON.parse(data);
+            } catch (e) {
+                // If not JSON, keep as string
+                processedData = data;
+            }
+        }
+
+        // Extract runtime_value if this is an enriched value structure
+        if (processedData && typeof processedData === 'object' &&
+            processedData.runtime_value !== undefined &&
+            processedData.metadata !== undefined) {
+            // This is an enriched value, extract just the runtime_value
+            processedData = processedData.runtime_value;
+        }
+
+        // Apply processing based on raw mode
+        if (shouldShowRaw()) {
+            // Raw mode: show original JSON
+            if (typeof processedData === 'object') {
+                displayText = JSON.stringify(processedData, null, 2);
+            } else {
+                displayText = String(processedData);
+            }
+        } else {
+            // Pretty mode: use server-formatted value if available
+            if (formattedValue && type === 'value') {
+                // Use the formatted Hot code from the server
+                displayText = formattedValue;
+            } else {
+                // Fall back to client-side formatting
+            processedData = recursiveUnwrap(processedData);
+
+            // Check if it's a function
+            const formattedFunction = formatFunction(processedData);
+            if (formattedFunction) {
+                displayText = formattedFunction;
+            } else if (typeof processedData === 'object') {
+                displayText = JSON.stringify(processedData, null, 2);
+            } else {
+                displayText = String(processedData);
+                }
+            }
+        }
+    } catch (e) {
+        // If processing fails, display as plain text
+        displayText = String(data);
+    }
+
+    content.innerHTML = `<pre class="whitespace-pre-wrap text-gray-900 dark:text-gray-100">${displayText}</pre>`;
+
+    typeIndicator.textContent = variableInfo;
+    typeIndicator.title = variableInfo; // For truncated text tooltip
+}
+
+// Initialize Run Graph (graph rendering is now handled by RunDetailTabs.loadFlowGraphData)
+document.addEventListener('DOMContentLoaded', function() {
+    initializeGraphToggle();
+});
+
+function initializeGraphToggle() {
+    const toggleButton = document.getElementById('toggle-graph');
+    const toggleText = document.getElementById('toggle-text');
+    const toggleIcon = document.getElementById('toggle-icon');
+    const graphContainer = document.getElementById('graph-container');
+
+    if (!toggleButton || !graphContainer) return;
+
+    toggleButton.addEventListener('click', function() {
+        const isHidden = graphContainer.style.display === 'none';
+
+        if (isHidden) {
+            graphContainer.style.display = 'block';
+            toggleText.textContent = 'Hide';
+            toggleIcon.style.transform = 'rotate(0deg)';
+        } else {
+            graphContainer.style.display = 'none';
+            toggleText.textContent = 'Show';
+            toggleIcon.style.transform = 'rotate(-90deg)';
+        }
+    });
+}
+
+// Retry a failed run (same stream, with retry context)
+async function retryRun(runId) {
+    const confirmed = await showConfirm(
+        'Retry Run',
+        'Retry this failed run?',
+        null,
+        { confirmText: 'Retry', type: 'warning' }
+    );
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch(`/runs/${runId}/retry`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            // Redirect to the new run
+            window.location.href = `/runs/${data.run_id}`;
+        } else {
+            await showAlert('Retry Failed', `Failed to retry: ${data.error}`, 'error');
+        }
+    } catch (e) {
+        await showAlert('Error', `Error: ${e.message}`, 'error');
+    }
+}
+
+// Re-run any completed run (new stream, no retry context)
+async function rerunRun(runId) {
+    const confirmed = await showConfirm(
+        'Re-run Function',
+        'Re-run this function in a new stream?',
+        null,
+        { confirmText: 'Re-run', type: 'info' }
+    );
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch(`/runs/${runId}/rerun`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            // Redirect to the new run
+            window.location.href = `/runs/${data.run_id}`;
+        } else {
+            await showAlert('Re-run Failed', `Failed to re-run: ${data.error}`, 'error');
+        }
+    } catch (e) {
+        await showAlert('Error', `Error: ${e.message}`, 'error');
+    }
+}
+
+// Re-initialize header elements after htmx polling swap
+function initializeRunDetailHeaderAfterSwap() {
+    // Re-apply syntax highlighting to header elements (FN, Result)
+    if (typeof Prism !== 'undefined') {
+        document.querySelectorAll('#run-detail-header code.language-hot').forEach(el => {
+            Prism.highlightElement(el);
+        });
+    }
+
+    // Re-initialize UUID displays in header (if the function exists)
+    if (typeof initializeUuidDisplays === 'function') {
+        initializeUuidDisplays();
+    }
+
+    // Re-initialize copy buttons (if the function exists)
+    if (typeof initializeCopyButtons === 'function') {
+        initializeCopyButtons();
+    }
+
+    // Re-detect file attachments in result
+    const resultJsonEl = document.getElementById('result-data-json');
+    const resultAttachmentsContainer = document.getElementById('result-file-attachments');
+    if (resultJsonEl && resultAttachmentsContainer && typeof window.findDataUrls === 'function') {
+        try {
+            const resultJson = JSON.parse(resultJsonEl.textContent);
+            const dataUrls = window.findDataUrls(resultJson);
+            if (dataUrls.length > 0) {
+                resultAttachmentsContainer.innerHTML = window.renderFileAttachments(dataUrls, 'result');
+            }
+        } catch (e) {
+            // Result is not valid JSON, skip attachment detection
+        }
+    }
+
+    // Refresh tabs data (timeline, hierarchy, etc.) using existing instance
+    if (window.observabilityTabs) {
+        // Save current selection state before refresh
+        const selectedNode = window.observabilityTabs.selectedNode;
+        const currentTab = window.observabilityTabs.currentTab;
+        const inspectorOpen = window.observabilityTabs.inspectorOpen;
+
+        // Clear cached data to force fresh fetch
+        window.observabilityTabs.hierarchyData = null;
+        window.observabilityTabs.timelineData = null;
+        window.observabilityTabs.filesData = null;
+
+        // Reload all data and re-render current tab
+        if (typeof window.observabilityTabs.loadAllData === 'function') {
+            window.observabilityTabs.loadAllData().then(() => {
+                // Force re-render of current tab after data loads
+                if (currentTab === 'timeline' && window.observabilityTabs.renderTimeline) {
+                    window.observabilityTabs.renderTimeline();
+                } else if (currentTab === 'hierarchy' && window.observabilityTabs.renderHierarchy) {
+                    window.observabilityTabs.renderHierarchy();
+                }
+
+                // Restore inspector state if an item was selected
+                if (selectedNode && inspectorOpen) {
+                    // Find and refresh the inspector with the selected node's updated data
+                    const node = window.observabilityTabs.findNodeInHierarchy
+                        ? window.observabilityTabs.findNodeInHierarchy(selectedNode)
+                        : null;
+                    if (node && window.observabilityTabs.showNodeInInspector) {
+                        window.observabilityTabs.showNodeInInspector(node);
+                    }
+                }
+            });
+        }
+    }
+}
+</script>
+
+<style>
+.run-graph-node-selected {
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.5) !important;
+    border-color: rgba(239, 68, 68, 1) !important;
+}
+</style>
+
+<script>
+// SSE refresh callback - used by the SSE status indicator component
+window.sseRefreshCallback = function() {
+    // Trigger HTMX refresh of the run header
+    htmx.trigger('#run-detail-header', 'htmx:load');
+};
+</script>
+
+{% endblock %}

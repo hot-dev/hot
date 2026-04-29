@@ -1,0 +1,196 @@
+::hot::test::xml ns
+meta ["test"]
+
+// =============================================================================
+// XML Module Tests
+// =============================================================================
+
+::xml ::hot::xml
+
+// Test from-xml parsing
+test-from-xml-basic
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<person id='123'><name>Alice</name></person>")
+    assert-eq("person", xml.tag, "root tag should be 'person'")
+    assert-eq("123", xml.attrs.id, "id attribute should be '123'")
+    assert(is-vec(xml.content), "content should be a Vec")
+}
+
+// Test from-xml with self-closing tag
+test-from-xml-self-closing
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<item id='1'/>")
+    assert-eq("item", xml.tag, "tag should be 'item'")
+    assert-eq("1", xml.attrs.id, "id attribute should be '1'")
+}
+
+// Test from-xml with multiple attributes
+test-from-xml-attributes
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<div class='container' id='main' data-value='42'></div>")
+    assert-eq("div", xml.tag, "tag should be 'div'")
+    assert-eq("container", xml.attrs.class, "class attribute")
+    assert-eq("main", xml.attrs.id, "id attribute")
+    assert-eq("42", xml.attrs["data-value"], "data-value attribute")
+}
+
+// Test to-xml serialization
+test-to-xml-basic
+meta ["test"]
+fn () {
+    xml ::xml/Xml({
+        tag: "item",
+        attrs: {},
+        content: ["Hello"]
+    })
+    result ::xml/to-xml(xml)
+    assert-eq("<item>Hello</item>", result, "should serialize simple element")
+}
+
+// Test to-xml with attributes
+test-to-xml-attributes
+meta ["test"]
+fn () {
+    xml ::xml/Xml({
+        tag: "item",
+        attrs: {"id": "123"},
+        content: ["Value"]
+    })
+    result ::xml/to-xml(xml)
+    assert(contains(result, "id=\"123\""), "should include id attribute")
+    assert(contains(result, "<item"), "should have item tag")
+    assert(contains(result, "Value"), "should have content")
+}
+
+// Test roundtrip parsing and serialization
+test-xml-roundtrip
+meta ["test"]
+fn () {
+    original "<root><child>text</child></root>"
+    xml ::xml/from-xml(original)
+    serialized ::xml/to-xml(xml)
+    reparsed ::xml/from-xml(serialized)
+
+    assert-eq("root", reparsed.tag, "roundtrip should preserve tag")
+}
+
+// Test child() helper
+test-child
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<root><item>A</item><item>B</item><other>C</other></root>")
+
+    item ::xml/child(xml, "item")
+    assert(not(is-null(item)), "should find first item")
+    assert-eq("item", item.tag, "tag should be 'item'")
+    assert-eq("A", ::xml/text(item), "text should be 'A'")
+
+    other ::xml/child(xml, "other")
+    assert(not(is-null(other)), "should find other")
+    assert-eq("C", ::xml/text(other), "text should be 'C'")
+
+    missing ::xml/child(xml, "missing")
+    assert(is-null(missing), "missing child should return null")
+}
+
+// Test children() helper
+test-children
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<root><item>A</item><item>B</item><item>C</item><other>X</other></root>")
+
+    items ::xml/children(xml, "item")
+    assert-eq(3, length(items), "should find 3 items")
+    assert-eq("A", ::xml/text(items[0]), "first item text")
+    assert-eq("B", ::xml/text(items[1]), "second item text")
+    assert-eq("C", ::xml/text(items[2]), "third item text")
+
+    others ::xml/children(xml, "other")
+    assert-eq(1, length(others), "should find 1 other")
+
+    missing ::xml/children(xml, "missing")
+    assert-eq(0, length(missing), "missing should return empty Vec")
+}
+
+// Test text() helper
+test-text
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<name>Alice</name>")
+    assert-eq("Alice", ::xml/text(xml), "simple text content")
+}
+
+// Test text() with mixed content
+test-text-mixed
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<p>Hello <b>World</b>!</p>")
+    txt ::xml/text(xml)
+    // text() returns direct text content only, not nested element text
+    assert(contains(txt, "Hello"), "should contain 'Hello'")
+    // Nested element text is accessed via child
+    b ::xml/child(xml, "b")
+    assert-eq("World", ::xml/text(b), "nested b should contain 'World'")
+}
+
+// Test attr() helper
+test-attr
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<item id='123' status='active' count='5'/>")
+
+    assert-eq("123", ::xml/attr(xml, "id"), "id attribute")
+    assert-eq("active", ::xml/attr(xml, "status"), "status attribute")
+    assert-eq("5", ::xml/attr(xml, "count"), "count attribute")
+    assert(is-null(::xml/attr(xml, "missing")), "missing attribute should be null")
+}
+
+// Test at() navigation helper
+test-at
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<root><user><profile><name>Alice</name></profile></user></root>")
+
+    // Navigate to nested element
+    name ::xml/at(xml, ["user", "profile", "name"])
+    assert(not(is-null(name)), "should find nested name element")
+    assert-eq("Alice", ::xml/text(name), "name text should be 'Alice'")
+
+    // Navigate to intermediate element
+    profile ::xml/at(xml, ["user", "profile"])
+    assert(not(is-null(profile)), "should find profile element")
+    assert-eq("profile", profile.tag, "tag should be 'profile'")
+
+    // Missing path should return null
+    missing ::xml/at(xml, ["user", "missing", "path"])
+    assert(is-null(missing), "missing path should return null")
+}
+
+// Test with CDATA content (if supported)
+test-nested-structure
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<list><item id='1'>First</item><item id='2'>Second</item></list>")
+
+    items ::xml/children(xml, "item")
+    assert-eq(2, length(items), "should have 2 items")
+
+    first-id ::xml/attr(items[0], "id")
+    assert-eq("1", first-id, "first item id")
+
+    second-text ::xml/text(items[1])
+    assert-eq("Second", second-text, "second item text")
+}
+
+// Test XML with namespaces (basic support)
+test-namespaced-xml
+meta ["test"]
+fn () {
+    xml ::xml/from-xml("<soap:Envelope xmlns:soap='http://schemas.xmlsoap.org/soap/envelope/'><soap:Body>Content</soap:Body></soap:Envelope>")
+
+    // Should parse without error
+    assert-eq("soap:Envelope", xml.tag, "should preserve namespace prefix in tag")
+}

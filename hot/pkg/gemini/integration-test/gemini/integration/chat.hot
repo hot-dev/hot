@@ -1,0 +1,145 @@
+::gemini::integration::chat ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Gemini GenerateContent (Chat) API
+// =============================================================================
+// These tests require GEMINI_API_KEY to be set in context
+
+// -----------------------------------------------------------------------------
+// Basic Generation Tests
+// -----------------------------------------------------------------------------
+
+test-generate-simple
+meta ["test"]
+fn () {
+    response ::gemini::chat/generate("gemini-2.0-flash", ::gemini::chat/GenerateContentRequest({
+        contents: [::gemini::chat/Content({
+            role: "user",
+            parts: [::gemini::chat/Part({text: "Say 'Hello, Hot!' and nothing else."})]
+        })],
+        generationConfig: ::gemini::chat/GenerationConfig({maxOutputTokens: 50})
+    }))
+
+    assert(response.candidates, "Response should have candidates")
+    assert(gt(length(response.candidates), 0), "Should have at least one candidate")
+
+    first-candidate first(response.candidates)
+    assert(first-candidate.content, "Candidate should have content")
+    assert(first-candidate.content.parts, "Content should have parts")
+}
+
+test-generate-with-system-instruction
+meta ["test"]
+fn () {
+    response ::gemini::chat/generate("gemini-2.0-flash", ::gemini::chat/GenerateContentRequest({
+        contents: [::gemini::chat/Content({
+            role: "user",
+            parts: [::gemini::chat/Part({text: "What is 2+2? Reply with just the number."})]
+        })],
+        systemInstruction: ::gemini::chat/Content({
+            role: "user",
+            parts: [::gemini::chat/Part({text: "You are a helpful math assistant. Always respond with just the answer."})]
+        }),
+        generationConfig: ::gemini::chat/GenerationConfig({maxOutputTokens: 50})
+    }))
+
+    assert(response.candidates, "Response should have candidates")
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Tests
+// -----------------------------------------------------------------------------
+
+test-generate-stream
+meta ["test"]
+fn () {
+    response ::gemini::chat/generate-stream("gemini-2.0-flash", ::gemini::chat/GenerateContentRequest({
+        contents: [::gemini::chat/Content({
+            role: "user",
+            parts: [::gemini::chat/Part({text: "Count from 1 to 3."})]
+        })],
+        generationConfig: ::gemini::chat/GenerationConfig({maxOutputTokens: 50})
+    }))
+
+    assert-eq(200, response.status, "Should get 200 status")
+    assert(response.body, "Should have body iterator")
+
+    // Collect events and verify we got some
+    events collect(response.body)
+    assert(gt(length(events), 0), "Should receive streaming events")
+}
+
+// -----------------------------------------------------------------------------
+// Multi-turn Conversation Tests
+// -----------------------------------------------------------------------------
+
+test-generate-multi-turn
+meta ["test"]
+fn () {
+    response ::gemini::chat/generate("gemini-2.0-flash", ::gemini::chat/GenerateContentRequest({
+        contents: [
+            ::gemini::chat/Content({
+                role: "user",
+                parts: [::gemini::chat/Part({text: "My name is Alice."})]
+            }),
+            ::gemini::chat/Content({
+                role: "model",
+                parts: [::gemini::chat/Part({text: "Nice to meet you, Alice!"})]
+            }),
+            ::gemini::chat/Content({
+                role: "user",
+                parts: [::gemini::chat/Part({text: "What is my name?"})]
+            })
+        ],
+        generationConfig: ::gemini::chat/GenerationConfig({maxOutputTokens: 100})
+    }))
+
+    assert(response.candidates, "Response should have candidates")
+}
+
+// -----------------------------------------------------------------------------
+// Parameter Tests
+// -----------------------------------------------------------------------------
+
+test-generate-with-temperature
+meta ["test"]
+fn () {
+    response ::gemini::chat/generate("gemini-2.0-flash", ::gemini::chat/GenerateContentRequest({
+        contents: [::gemini::chat/Content({
+            role: "user",
+            parts: [::gemini::chat/Part({text: "What is the capital of France?"})]
+        })],
+        generationConfig: ::gemini::chat/GenerationConfig({
+            maxOutputTokens: 50,
+            temperature: 0.0
+        })
+    }))
+
+    assert(response.candidates, "Response should have candidates")
+}
+
+// -----------------------------------------------------------------------------
+// Helper Function Tests
+// -----------------------------------------------------------------------------
+
+test-user-content-helper
+meta ["test"]
+fn () {
+    content ::gemini::chat/user-content("Hello world")
+
+    // Role is a literal union type, check the content structure
+    assert(content.role, "Should have role")
+    assert(content.parts, "Should have parts")
+    assert-eq(1, length(content.parts), "Should have one part")
+    assert-eq("Hello world", first(content.parts).text, "Text should match")
+}
+
+test-model-content-helper
+meta ["test"]
+fn () {
+    content ::gemini::chat/model-content("Hello back")
+
+    assert(content.role, "Should have role")
+    assert(content.parts, "Should have parts")
+}

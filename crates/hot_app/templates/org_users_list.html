@@ -1,0 +1,411 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            Manage organization users and permissions
+        </p>
+
+        {% include "org_tabs.html" %}
+    </div>
+
+    <!-- Action bar: seat usage + invite/upgrade CTA -->
+    {% if is_admin %}
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-6">
+        <div class="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
+            {% match team_members_limit %}
+                {% when Some with (limit) %}
+                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ team_members_used }}</span>
+                    /
+                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ limit }}</span>
+                    members used
+                    {% if team_members_at_limit %}
+                        <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                            Limit reached
+                        </span>
+                    {% endif %}
+                    <div class="text-xs text-gray-500 dark:text-gray-500 mt-0.5">
+                        Includes active members and pending invites.
+                    </div>
+                {% when None %}
+                    <span class="font-medium text-gray-900 dark:text-gray-100">{{ team_members_used }}</span>
+                    members
+                    <span class="ml-1 text-gray-500 dark:text-gray-500">(unlimited on this plan)</span>
+            {% endmatch %}
+        </div>
+        <div class="flex items-center justify-end">
+            {% if team_members_at_limit %}
+                {# At-limit CTA: replace the Invite button entirely with an Upgrade link.
+                   Don't render this in local dev — the local dev org is its own
+                   self-contained world and doesn't have a real billing flow to
+                   send people to. #}
+                {% if !page_context.is_local_dev %}
+                <a href="/@{{ org.slug }}/billing/checkout"
+                   class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200"
+                   title="Your plan's team-member limit has been reached. Upgrade to invite more.">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                    </svg>
+                    <span class="hidden sm:inline">Upgrade plan to invite more</span>
+                    <span class="sm:hidden">Upgrade</span>
+                </a>
+                {% else %}
+                <span class="text-xs text-gray-500 dark:text-gray-500">
+                    Local dev org has reached its team-member limit.
+                </span>
+                {% endif %}
+            {% else if page_context.is_local_dev %}
+                <button type="button" data-local-dev-restricted class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200 cursor-pointer">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                    </svg>
+                    <span class="hidden sm:inline">Invite User</span>
+                    <span class="sm:hidden">Invite</span>
+                </button>
+            {% else %}
+                <a href="/@{{ org.slug }}/users/invite" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                    </svg>
+                    <span class="hidden sm:inline">Invite User</span>
+                    <span class="sm:hidden">Invite</span>
+                </a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+            <!-- Desktop Table View -->
+            <div class="hidden md:block bg-white dark:bg-gray-900 rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 mb-6">
+                {% if org_users.len() > 0 %}
+                <div class="overflow-x-auto">
+                    <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead class="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">User</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Role</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden lg:table-cell">Joined</th>
+                                {% if is_admin %}
+                                <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
+                                {% endif %}
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                            {% for user in org_users %}
+                            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex items-center">
+                                        <div class="flex-shrink-0 h-10 w-10">
+                                            <div class="h-10 w-10 rounded-full bg-hot-red-500 flex items-center justify-center text-white font-semibold text-sm">
+                                                {% match user.name %}
+                                                    {% when Some with (name) %}
+                                                        {{ name.chars().take(2).collect::<String>().to_uppercase() }}
+                                                    {% when None %}
+                                                        {{ user.email.chars().take(2).collect::<String>().to_uppercase() }}
+                                                {% endmatch %}
+                                            </div>
+                                        </div>
+                                        <div class="ml-4">
+                                            <div class="text-sm font-medium text-gray-900 dark:text-white">
+                                                {% match user.name %}
+                                                    {% when Some with (name) %}
+                                                        {{ name }}
+                                                    {% when None %}
+                                                        {{ user.email }}
+                                                {% endmatch %}
+                                            </div>
+                                            <div class="text-sm text-gray-500 dark:text-gray-400">{{ user.email }}</div>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full {% if user.org_user_role_id == 2 %}bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200{% else %}bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200{% endif %}">
+                                        {{ user.role_name }}
+                                    </span>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    {% if user.active %}
+                                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Active</span>
+                                    {% else %}
+                                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">Inactive</span>
+                                    {% endif %}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400 hidden lg:table-cell">
+                                    {{ user.created_at_formatted }}
+                                </td>
+                                {% if is_admin %}
+                                <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
+                                    <a href="/@{{ org.slug }}/users/{{ user.user_id }}/edit" class="text-blue-600 hover:text-blue-700 mr-4">Edit</a>
+                                </td>
+                                {% endif %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-6 text-center">
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
+                        </svg>
+                    </div>
+                    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Users</h3>
+                    <p class="text-gray-500 dark:text-gray-400 mb-4">
+                        This organization doesn't have any users yet.
+                    </p>
+                    {% if is_admin && !team_members_at_limit %}
+                    <a href="/@{{ org.slug }}/users/invite" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                        Invite First User
+                    </a>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Mobile Cards View -->
+            <div class="md:hidden space-y-3">
+                {% if org_users.len() > 0 %}
+                    {% for user in org_users %}
+                    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4 hover:shadow-md transition-shadow">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center">
+                                <div class="flex-shrink-0 h-10 w-10">
+                                    <div class="h-10 w-10 rounded-full bg-hot-red-500 flex items-center justify-center text-white font-semibold text-sm">
+                                        {% match user.name %}
+                                            {% when Some with (name) %}
+                                                {{ name.chars().take(2).collect::<String>().to_uppercase() }}
+                                            {% when None %}
+                                                {{ user.email.chars().take(2).collect::<String>().to_uppercase() }}
+                                        {% endmatch %}
+                                    </div>
+                                </div>
+                                <div class="ml-3">
+                                    <div class="text-sm font-medium text-gray-900 dark:text-white">
+                                        {% match user.name %}
+                                            {% when Some with (name) %}
+                                                {{ name }}
+                                            {% when None %}
+                                                {{ user.email }}
+                                        {% endmatch %}
+                                    </div>
+                                    <div class="text-xs text-gray-500 dark:text-gray-400">{{ user.email }}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2">
+                            <div class="flex items-center justify-between text-xs">
+                                <span class="text-gray-500 dark:text-gray-400">Role:</span>
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full {% if user.org_user_role_id == 2 %}bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200{% else %}bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200{% endif %}">
+                                    {{ user.role_name }}
+                                </span>
+                            </div>
+
+                            <div class="flex items-center justify-between text-xs">
+                                <span class="text-gray-500 dark:text-gray-400">Status:</span>
+                                {% if user.active %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Active</span>
+                                {% else %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">Inactive</span>
+                                {% endif %}
+                            </div>
+
+                            <div class="flex items-center justify-between text-xs">
+                                <span class="text-gray-500 dark:text-gray-400">Joined:</span>
+                                <span class="text-gray-900 dark:text-white">{{ user.created_at_formatted }}</span>
+                            </div>
+                        </div>
+
+                        {% if is_admin %}
+                        <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+                            <a href="/@{{ org.slug }}/users/{{ user.user_id }}/edit" class="text-xs font-medium text-blue-600 hover:text-blue-700">Edit User →</a>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                {% else %}
+                <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 text-center">
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
+                        </svg>
+                    </div>
+                    <h3 class="text-base font-medium text-gray-900 dark:text-white mb-2">No Users</h3>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                        This organization doesn't have any users yet.
+                    </p>
+                    {% if is_admin && !team_members_at_limit %}
+                    <a href="/@{{ org.slug }}/users/invite" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                        Invite First User
+                    </a>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Pagination -->
+            {% if has_prev_page || has_next_page %}
+            <div class="mt-4 sm:mt-6">
+                <div class="flex items-center justify-between">
+                    <div class="flex-1 flex justify-between sm:hidden">
+                        {% if has_prev_page %}
+                        <a href="/@{{ org.slug }}/users?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
+                        {% endif %}
+                        {% if has_next_page %}
+                        <a href="/@{{ org.slug }}/users?p={{ current_page_num + 1 }}" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
+                        {% endif %}
+                    </div>
+                    <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                        <div>
+                            <p class="text-sm text-gray-700 dark:text-gray-300">
+                                Showing <span class="font-medium">{{ org_users.len() }}</span> of <span class="font-medium">{{ total_users }}</span> users
+                            </p>
+                        </div>
+                        <div>
+                            <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                                {% if has_prev_page %}
+                                <a href="/@{{ org.slug }}/users?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                    <span class="sr-only">Previous</span>
+                                    <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
+                                    </svg>
+                                </a>
+                                {% endif %}
+
+                                {% for page_num in start_page..=end_page %}
+                                {% if page_num == current_page_num %}
+                                <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                                {% else %}
+                                <a href="/@{{ org.slug }}/users?p={{ page_num }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
+                                {% endif %}
+                                {% endfor %}
+
+                                {% if has_next_page %}
+                                <a href="/@{{ org.slug }}/users?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                    <span class="sr-only">Next</span>
+                                    <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                                    </svg>
+                                </a>
+                                {% endif %}
+                            </nav>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Pending Invites -->
+            {% if is_admin && pending_invites.len() > 0 %}
+            <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+                <div class="p-4 sm:p-6 border-b border-gray-200 dark:border-gray-800">
+                    <h2 class="text-lg font-semibold">Pending Invites</h2>
+                    <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Users who have been invited but haven't joined yet</p>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead class="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Email</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Role</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Invited</th>
+                                <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Expires</th>
+                                <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                            {% for invite in pending_invites %}
+                            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-medium text-gray-900 dark:text-white">{{ invite.email }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200">
+                                        {{ invite.role_name }}
+                                    </span>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    {% if invite.is_expired %}
+                                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">Expired</span>
+                                    {% else %}
+                                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">{{ invite.status }}</span>
+                                    {% endif %}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                                    {{ invite.created_at_formatted }}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                                    {{ invite.expires_at_formatted }}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
+                                    <button onclick="copyInviteLink('{{ invite.invite_code }}')"
+                                            class="text-blue-600 hover:text-blue-700 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                                            title="Copy invite link">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                        </svg>
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+        function copyInviteLink(inviteCode) {
+            const baseUrl = window.location.origin;
+            const inviteUrl = `${baseUrl}/invite?code=${inviteCode}`;
+
+            // Use the modern clipboard API if available
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(inviteUrl).then(function() {
+                    showCopySuccess();
+                }, function(err) {
+                    console.error('Failed to copy invite link: ', err);
+                });
+            } else {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = inviteUrl;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '-999999px';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+
+                try {
+                    document.execCommand('copy');
+                    showCopySuccess();
+                } catch (err) {
+                    console.error('Failed to copy invite link: ', err);
+                }
+
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function showCopySuccess() {
+            // Create a temporary toast notification
+            const toast = document.createElement('div');
+            toast.className = 'fixed bottom-4 right-4 bg-green-500 text-white px-4 py-2 rounded-md shadow-lg z-50';
+            toast.textContent = 'Invite link copied to clipboard!';
+            document.body.appendChild(toast);
+
+            setTimeout(() => {
+                document.body.removeChild(toast);
+            }, 3000);
+        }
+    </script>
+{% endblock %}

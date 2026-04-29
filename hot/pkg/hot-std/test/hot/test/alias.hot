@@ -1,0 +1,304 @@
+::hot::test::alias ns
+meta ["test"]
+
+// ============================================================================
+// Comprehensive Alias Tests
+// Tests all types of aliases at both namespace-level and function-body level:
+// 1. Function aliases (regular fn)
+// 2. Type constructor aliases (type fn)
+// 3. Type aliases (for enum types, used in construction and match)
+//
+// NOTE: Individual enum variant aliases (e.g., `MyOk ::hot::type/Result.Ok`)
+// are NOT supported. Instead, alias the enum TYPE and use Type.Variant syntax:
+//   Result ::hot::type/Result
+//   success Result.Ok(42)
+//   match value { Result.Ok => ... }
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Namespace-Level Aliases
+// ----------------------------------------------------------------------------
+
+// Function alias - reference to a regular function
+str-upper ::hot::str/uppercase
+str-lower ::hot::str/lowercase
+math-add ::hot::math/add
+math-mul ::hot::math/mul
+
+// Type constructor alias - reference to a type with constructor function
+MyStr ::hot::type/Str
+MyInt ::hot::type/Int
+
+// Type alias for enum - alias the TYPE, then use Type.Variant
+Result ::hot::type/Result
+
+// ----------------------------------------------------------------------------
+// Tests for Namespace-Level Aliases
+// ----------------------------------------------------------------------------
+
+test-function-alias-namespace-level
+meta ["test"]
+fn () {
+    // Test function alias defined at namespace level
+    result str-upper("hello")
+    assert-eq("HELLO", result, "Function alias should work at namespace level")
+
+    // Test math function aliases
+    sum math-add(10, 20)
+    assert-eq(30, sum, "Math add alias should work")
+
+    product math-mul(5, 6)
+    assert-eq(30, product, "Math mul alias should work")
+}
+
+test-type-constructor-alias-namespace-level
+meta ["test"]
+fn () {
+    // Test type constructor alias (Str, Int are type fn constructors)
+    str-result MyStr(42)
+    assert-eq("42", str-result, "Type constructor alias should work for Str")
+
+    // Int rounds (not truncates)
+    int-result MyInt(3.7)
+    assert-eq(4, int-result, "Type constructor alias should work for Int")
+}
+
+test-enum-type-alias-construction
+meta ["test"]
+fn () {
+    // Use the type alias with .Variant syntax for construction
+    success Result.Ok(42)
+    failure Result.Err("error message")
+
+    // Verify the types are correct
+    assert-eq("::hot::type/Result.Ok", success.$type, "Result.Ok should create correct type")
+    assert-eq("::hot::type/Result.Err", failure.$type, "Result.Err should create correct type")
+
+    // Verify the values
+    assert-eq(42, success.$val, "Ok value should be accessible")
+    assert-eq("error message", failure.$val, "Err value should be accessible")
+}
+
+test-type-alias-in-match-namespace-level
+meta ["test"]
+fn () {
+    // Test type alias in match expression with .Variant syntax
+    success Result.Ok(100)
+
+    result match success {
+        Result.Ok => { success }
+        Result.Err => { 0 }
+    }
+
+    assert-eq(100, result, "Type alias should work in match expressions")
+}
+
+test-type-alias-type-level-match
+meta ["test"]
+fn () {
+    // Test type-level matching (matches ANY variant of the type)
+    success Result.Ok(42)
+    failure Result.Err("oops")
+
+    // Type-level match - matches any Result variant
+    result1 match success {
+        Result => { "is a result" }
+        => { "not a result" }
+    }
+
+    result2 match failure {
+        Result => { "is a result" }
+        => { "not a result" }
+    }
+
+    assert-eq("is a result", result1, "Type-level match should work for Ok")
+    assert-eq("is a result", result2, "Type-level match should work for Err")
+}
+
+// ----------------------------------------------------------------------------
+// Tests for Function-Body-Level Aliases
+// ----------------------------------------------------------------------------
+
+test-function-alias-in-function
+meta ["test"]
+fn () {
+    // Define function alias inside function body
+    my-upper ::hot::str/uppercase
+    my-lower ::hot::str/lowercase
+
+    upper-result my-upper("test")
+    lower-result my-lower("TEST")
+
+    assert-eq("TEST", upper-result, "Function alias in function body should work (upper)")
+    assert-eq("test", lower-result, "Function alias in function body should work (lower)")
+}
+
+test-type-constructor-alias-in-function
+meta ["test"]
+fn () {
+    // Define type constructor alias inside function body
+    LocalStr ::hot::type/Str
+    LocalInt ::hot::type/Int
+    LocalDec ::hot::type/Dec
+
+    str-val LocalStr(123)
+    int-val LocalInt(45.9)  // Int rounds (not truncates)
+    dec-val LocalDec(78)
+
+    assert-eq("123", str-val, "Type constructor alias in function body should work (Str)")
+    assert-eq(46, int-val, "Type constructor alias in function body should work (Int)")
+    assert-eq(78.0, dec-val, "Type constructor alias in function body should work (Dec)")
+}
+
+test-type-alias-in-match-in-function
+meta ["test"]
+fn () {
+    // Type aliases for match must be at namespace level because
+    // the compiler needs to resolve them during compilation.
+    // Function-local type aliases are not visible to the match compiler.
+    // Use namespace-level Result alias instead.
+
+    value Result.Ok("matched")
+
+    result match value {
+        Result.Ok => { value }
+        Result.Err => { "error" }
+    }
+
+    assert-eq("matched", result, "Namespace-level type alias should work in match within function")
+}
+
+// ----------------------------------------------------------------------------
+// Combined/Complex Alias Tests
+// ----------------------------------------------------------------------------
+
+test-mixed-aliases-complex
+meta ["test"]
+fn () {
+    // Use multiple alias types together
+    my-add ::hot::math/add
+    my-mul ::hot::math/mul
+    ToString ::hot::type/Str
+    to-upper ::hot::str/uppercase
+
+    // Calculate something using function alias
+    number my-add(my-mul(3, 4), 5)  // (3 * 4) + 5 = 17
+
+    // Convert to string using type constructor alias
+    str-num ToString(number)
+
+    // Transform string using function alias
+    upper-str to-upper(str-num)
+
+    // Wrap in result using type alias with .Variant
+    final-result Result.Ok(upper-str)
+
+    assert-eq("::hot::type/Result.Ok", final-result.$type, "Complex mixed aliases should work")
+    assert-eq("17", final-result.$val, "Complex calculation with aliases should be correct")
+}
+
+test-alias-chaining
+meta ["test"]
+fn () {
+    // Test that aliases can reference other aliases indirectly
+    base-fn ::hot::str/uppercase
+
+    // Call the aliased function
+    result base-fn("chained")
+    assert-eq("CHAINED", result, "Aliased function should work correctly")
+}
+
+test-alias-with-user-defined-function
+meta ["test"]
+fn () {
+    // Create a local function and use it
+    helper fn (x: Int): Int { mul(x, 2) }
+
+    // Test that user-defined functions work
+    doubled helper(21)
+
+    assert-eq(42, doubled, "User-defined function should work")
+}
+
+// ----------------------------------------------------------------------------
+// Enum Type Pattern Tests
+// ----------------------------------------------------------------------------
+
+test-enum-direct-and-aliased-variants
+meta ["test"]
+fn () {
+    // Both direct and aliased construction should work
+    direct-ok Result.Ok("direct")
+
+    // Both should produce the same type
+    assert-eq("::hot::type/Result.Ok", direct-ok.$type, "Direct variant should have correct type")
+
+    // Both should be usable in match expressions
+    result match direct-ok {
+        Result.Ok => { direct-ok }
+        Result.Err => { "error" }
+    }
+
+    assert-eq("direct", result, "Direct variant should match correctly")
+}
+
+test-result-helper-functions
+meta ["test"]
+fn () {
+    // The ::hot::type namespace also provides ok() and err() helper functions
+    // which are the idiomatic way to create Result values
+    ok-helper ::hot::type/ok
+    err-helper ::hot::type/err
+
+    success ok-helper(42)
+    failure err-helper("something went wrong")
+
+    assert-eq("::hot::type/Result.Ok", success.$type, "ok() helper should create Result.Ok")
+    assert-eq("::hot::type/Result.Err", failure.$type, "err() helper should create Result.Err")
+}
+
+// ----------------------------------------------------------------------------
+// Namespace Alias in Function Body Tests
+// ----------------------------------------------------------------------------
+
+test-namespace-alias-in-function-body
+meta ["test"]
+fn () {
+    ::env ::hot::env
+
+    home ::env/get("HOME", "/default")
+    assert(is-str(home), "Namespace alias inside function body should resolve")
+}
+
+test-multiple-namespace-aliases-in-function-body
+meta ["test"]
+fn () {
+    ::env ::hot::env
+    ::b64 ::hot::base64
+
+    home ::env/get("HOME", "/fallback")
+    encoded ::b64/encode-url("hello")
+    assert(is-str(home), "First namespace alias should work")
+    assert(is-str(encoded), "Second namespace alias should work")
+}
+
+test-namespace-alias-scoping
+meta ["test"]
+fn () {
+    ::b64 ::hot::base64
+    encoded ::b64/encode-url("scoped")
+    decoded ::b64/decode-url(encoded)
+    assert-eq(Bytes("scoped"), decoded, "Namespace alias should scope correctly within function")
+}
+
+test-namespace-alias-mixed-with-var-alias
+meta ["test"]
+fn () {
+    ::env ::hot::env
+    my-upper ::hot::str/uppercase
+
+    home ::env/get("HOME", "/default")
+    upper my-upper("mixed")
+    assert(is-str(home), "Namespace alias should work alongside var aliases")
+    assert-eq("MIXED", upper, "Var alias should work alongside namespace aliases")
+}

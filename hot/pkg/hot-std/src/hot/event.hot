@@ -1,0 +1,60 @@
+::hot::event ns
+meta {doc: """Event publishing for triggering handlers."""}
+
+Stream ::hot::stream/Stream
+Env ::hot::info/Env
+
+Event type {
+    type: Str,
+    data: Any
+}
+fn (event-type: Str, event-data: Any): Event {
+    Event({type: event-type, data: event-data})
+}
+
+EventDetail type {
+    id: Uuid,
+    type: Str,
+    time: ::hot::time/Instant
+}
+
+EventInfo type {
+    event: EventDetail,
+    stream: Stream,
+    env: Env
+}
+
+send
+meta {
+    core: true,
+    doc: """
+    Publish an event with `event-type` and `event-data`. Handlers listening for this event type will be invoked.
+
+    Returns an `EventInfo` containing details about the published event, stream, and environment.
+
+    **Example**
+
+    ```hot
+    // Publish a user creation event
+    info send("user:created", {"id": "123", "email": "alice@example.com"})
+    info.event.id       // UUID of the published event
+    info.event.type     // "user:created"
+    info.event.time     // Instant when the event was published
+    info.stream.id      // UUID of the stream
+    info.env.id         // UUID of the environment
+
+    // Handler that responds to this event (in another file)
+    // on-user-created meta {"on-event": "user:created"}
+    // fn (event) { send-welcome-email(event.data.email) }
+    ```
+    """
+}
+fn (event: Event): EventInfo {
+    call-lib(::hot::event/send, [event.type, event.data])
+},
+(event-type: Str): EventInfo {
+    call-lib(::hot::event/send, [event-type, {}])
+},
+(event-type: Str, event-data: Any): EventInfo {
+    call-lib(::hot::event/send, [event-type, event-data])
+}

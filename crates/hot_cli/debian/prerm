@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+# prerm script for hot (no-op for now)
+
+exit 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+

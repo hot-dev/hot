@@ -1,0 +1,810 @@
+::hot::type ns
+meta {doc: """Type checking, conversion, and built-in type constructors."""}
+
+is-type
+meta {
+    core: true,
+    doc: """
+    Return true if `value` conforms to `type-ref`.
+
+    **Example**
+
+    ```hot
+    is-type("hello", Str)  // true
+    is-type(42, Int)        // true
+    is-type([1, 2], Vec)    // true
+    is-type("hello", Int)  // false
+
+    // Works with pipes
+    my-value |> is-type(Str)
+    ```
+
+    For custom types, use `is-type` with the type name:
+
+    ```hot
+    Point type { x: Int, y: Int }
+    p Point({x: 1, y: 2})
+    is-type(p, Point)  // true
+    ```
+
+    Works with Result types without triggering auto-unwrap:
+
+    ```hot
+    result err("oops")
+    is-type(result, Result)  // true
+    ```
+    """
+}
+fn (lazy val, type-ref) {
+    call-lib(::hot::type/is-type, [val, type-ref])
+}
+
+
+Str
+meta {
+    core: true,
+    doc: """
+    String type. Convert any value to a string.
+
+    **Example**
+
+    ```hot
+    Str(42)         // "42"
+    Str(true)       // "true"
+    Str([1, 2, 3])  // "[1, 2, 3]"
+    ```
+    """
+}
+type fn (value: Any): Str {
+    call-lib(::hot::type/Str, [value])
+}
+
+
+Int
+meta {
+    core: true,
+    doc: """
+    Integer type. Convert numeric values to integer (truncates decimals).
+
+    **Example**
+
+    ```hot
+    Int(42)      // 42
+    Int(3.7)     // 3
+    Int(-2.9)    // -2
+    ```
+    """
+}
+type fn (value: Int | Dec): Int {
+    call-lib(::hot::type/Int, [value])
+}
+
+
+Dec
+meta {
+    core: true,
+    doc: """
+    Decimal type (256-bit precision). Convert numeric values to decimal.
+
+    **Example**
+
+    ```hot
+    Dec(42)         // 42.0
+    Dec(3.14159)    // 3.14159
+    div(Dec(1), 3)  // 0.333... (high precision)
+    ```
+    """
+}
+type fn (value: Int | Dec): Dec {
+    call-lib(::hot::type/Dec, [value])
+}
+
+
+Bool
+meta {
+    core: true,
+    doc: """
+    Boolean type. Convert any value to boolean (truthiness).
+
+    **Example**
+
+    ```hot
+    Bool(1)       // true
+    Bool(0)       // false
+    Bool("")      // false
+    Bool("hi")    // true
+    Bool(null)    // false
+    ```
+    """
+}
+type fn (value: Any): Bool {
+    call-lib(::hot::type/Bool, [value])
+}
+
+
+Null
+meta {
+    core: true,
+    doc: """
+    Null type. Represents absence of a value.
+
+    **Example**
+
+    ```hot
+    Null()       // null
+    eq(n, null)  // check for null
+    ```
+    """
+}
+type fn (): Null { call-lib(::hot::type/Null, []) }
+
+
+Vec
+meta {
+    core: true,
+    doc: """
+    Vector (array) type. Convert value to a vector.
+
+    **Example**
+
+    ```hot
+    Vec("abc")     // ["a", "b", "c"]
+    Vec({"a": 1})  // [["a", 1]]
+    ```
+    """
+}
+type fn (value: Any): Vec<Any> {
+    call-lib(::hot::type/Vec, [value])
+}
+
+
+Map
+meta {
+    core: true,
+    doc: """
+    Map (object) type. Convert value to a map.
+
+    **Example**
+
+    ```hot
+    Map([["a", 1], ["b", 2]])  // {"a": 1, "b": 2}
+    ```
+    """
+}
+type fn (value: Any): Map<Any, Any> {
+    call-lib(::hot::type/Map, [value])
+}
+
+
+Byte
+meta {
+    core: true,
+    doc: """
+    Single byte type (0-255).
+
+    **Example**
+
+    ```hot
+    b Byte(65)   // ASCII 'A'
+    Int(b)       // 65
+    ```
+    """
+}
+type fn (value: Byte): Byte {
+    call-lib(::hot::type/Byte, [value])
+}
+
+
+Bytes
+meta {
+    core: true,
+    doc: """
+    Byte array type for binary data.
+
+    **Example**
+
+    ```hot
+    data Bytes([72, 105])  // "Hi" as bytes
+    ::hot::base64/encode(data)  // "SGk="
+    ```
+    """
+}
+type fn (value: Bytes): Bytes {
+    call-lib(::hot::type/Bytes, [value])
+}
+
+
+Namespace
+meta {
+    core: true,
+    doc: """
+    Namespace reference type.
+
+    **Example**
+
+    ```hot
+    ns Namespace("::hot::str")
+    // Reference to the ::hot::str namespace
+    ```
+    """
+}
+type fn (value: Str | Namespace): Namespace {
+    call-lib(::hot::type/Namespace, [value])
+}
+
+
+Var
+meta {
+    core: true,
+    doc: """
+    Variable reference type.
+
+    **Example**
+
+    ```hot
+    v Var("my-var")
+    // Reference to a variable by name
+    ```
+    """
+}
+type fn (value: Str | Var): Var {
+    call-lib(::hot::type/Var, [value])
+}
+
+
+Fn
+meta {
+    core: true,
+    doc: """
+    Function reference type.
+
+    **Example**
+
+    ```hot
+    f Fn("add")    // Reference to add function
+    f(1, 2)         // 3
+    ```
+    """
+}
+type fn (value: Str | Fn): Fn {
+    call-lib(::hot::type/Fn, [value])
+}
+
+
+Any
+meta {
+    core: true,
+    doc: """
+    Any type. Accepts any value (no type constraint).
+
+    **Example**
+
+    ```hot
+    // Any is used in function signatures to accept any type
+    process fn (value: Any): Str { Str(value) }
+    ```
+    """
+}
+type fn (value: Any): Any {
+    call-lib(::hot::type/Any, [value])
+}
+
+
+is-str
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Str.
+
+    **Example**
+
+    ```hot
+    is-str("hello")  // true
+    is-str(42)       // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Str) }
+
+
+is-int
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is an Int.
+
+    **Example**
+
+    ```hot
+    is-int(42)     // true
+    is-int(3.14)   // false
+    is-int("42")   // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Int) }
+
+
+is-bool
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Bool.
+
+    **Example**
+
+    ```hot
+    is-bool(true)   // true
+    is-bool(false)  // true
+    is-bool(1)      // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Bool) }
+
+
+is-dec
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Dec.
+
+    **Example**
+
+    ```hot
+    is-dec(3.14)   // true
+    is-dec(42)     // false (Int, not Dec)
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Dec) }
+
+
+is-null
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is Null.
+
+    **Example**
+
+    ```hot
+    is-null(null)    // true
+    is-null(false)   // false
+    is-null("")      // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Null) }
+
+
+is-some
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is not Null.
+
+    **Example**
+
+    ```hot
+    is-some("hello")  // true
+    is-some(0)        // true
+    is-some(null)     // false
+    ```
+    """
+}
+fn (value: Any): Bool { not(is-null(value)) }
+
+
+is-vec
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Vec.
+
+    **Example**
+
+    ```hot
+    is-vec([1, 2, 3])  // true
+    is-vec([])         // true
+    is-vec({"a": 1})   // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Vec) }
+
+
+is-map
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Map.
+
+    **Example**
+
+    ```hot
+    is-map({"a": 1})  // true
+    is-map({})        // true
+    is-map([1, 2])    // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Map) }
+
+
+is-byte
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Byte.
+
+    **Example**
+
+    ```hot
+    is-byte(255)  // depends on context
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Byte) }
+
+
+is-bytes
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Bytes.
+
+    **Example**
+
+    ```hot
+    data read-file-bytes("file.bin")
+    is-bytes(data)  // true
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Bytes) }
+
+
+is-namespace
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Namespace.
+
+    **Example**
+
+    ```hot
+    is-namespace(Namespace("::hot::str"))  // true
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Namespace) }
+
+
+is-var
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Var.
+
+    **Example**
+
+    ```hot
+    is-var(Var("::hot::str/split"))  // true
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Var) }
+
+
+is-fn
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Fn.
+
+    **Example**
+
+    ```hot
+    is-fn(::hot::math/add)  // true
+    is-fn("add")            // false
+    is-fn(%)                 // true (lambda)
+    ```
+    """
+}
+    fn (value: Any): Bool { is-type(value, Fn) }
+
+
+is-any
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is Any (always true).
+
+    **Example**
+
+    ```hot
+    is-any("anything")  // true
+    is-any(null)        // true
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Any) }
+
+
+untype
+meta {
+    core: true,
+    doc: """
+    Transform Hot typed structures to simple Val structures by removing $type and $val metadata.
+
+    **Example**
+
+    ```hot
+    // Given a typed structure
+    user User({"name": "Alice"})
+
+    // Remove type wrapper
+    untype(user)  // {"name": "Alice"}
+    ```
+    """
+}
+fn (form: Any): Any {
+    call-lib(::hot::type/untype, [form])
+}
+
+
+// Result type and functions (for success/error return values)
+// Result is a variant union with Ok and Err variants
+
+Result
+meta {
+    core: true,
+    doc: """
+    A enum (variant union) type representing either success (`Ok`) or failure (`Err`).
+
+    **Example**
+
+    ```hot
+    success Result.Ok(42)
+    failure Result.Err("Something went wrong")
+
+    success  // 42
+    failure  // "Something went wrong"
+
+    is-ok(success)   // true
+    is-err(failure)  // true
+
+    // Or use the convenience functions:
+    success ok(42)
+    failure err("Something went wrong")
+    ```
+    """
+}
+enum {
+  Ok(Any),
+  Err(Any)
+}
+
+ok
+meta {
+    core: true,
+    doc: """
+    Wrap `value` in a successful Result.Ok variant.
+
+    **Example**
+
+    ```hot
+    ok(42)           // {$type: "::hot::type/Result.Ok", $val: 42}
+    ok("success")    // {$type: "::hot::type/Result.Ok", $val: "success"}
+
+    result ok(get-user(id))
+    if(is-ok(result), result.$val, "not found")
+    ```
+    """
+}
+fn (value: Any): Result {
+    Result.Ok(value)
+}
+
+
+err
+meta {
+    core: true,
+    doc: """
+    Wrap `value` in an error Result.Err variant.
+
+    **Example**
+
+    ```hot
+    err("Not found")           // {$type: "::hot::type/Result.Err", $val: "Not found"}
+    err({"code": 404})         // {$type: "::hot::type/Result.Err", $val: {"code": 404}}
+
+    if(eq(user, null), err("User not found"), ok(user))
+    ```
+    """
+}
+fn (value: Any): Result {
+    Result.Err(value)
+}
+
+
+is-ok
+meta {
+    core: true,
+    doc: """
+    Return true if `result` is ok (has a success value).
+
+    **Example**
+
+    ```hot
+    is-ok(Result.Ok(42))            // true
+    is-ok(Result.Err("failed"))     // false
+
+    result safe-divide(10, 2)
+    if(is-ok(result), result.$val, 0)
+    ```
+    """
+}
+fn (lazy result: Any): Bool {
+    call-lib(::hot::type/is-ok, [result])
+}
+
+
+is-err
+meta {
+    core: true,
+    doc: """
+    Return true if `result` is an error.
+
+    **Example**
+
+    ```hot
+    is-err(Result.Err("failed"))    // true
+    is-err(Result.Ok(42))           // false
+
+    result fetch-data()
+    if(is-err(result), println(result.$val), process(result.$val))
+    ```
+    """
+}
+fn (lazy result: Any): Bool {
+    call-lib(::hot::type/is-err, [result])
+}
+
+
+if-ok
+meta {
+    core: true,
+    doc: """
+    If result is Ok, apply function or use value. If Err, pass through unchanged.
+
+    When the second argument is a function, it's called with the Ok value.
+    When it's a plain value, it replaces the Ok value.
+
+    **Example**
+
+    ```hot
+    ok(1) |> if-ok(add(%, 10))
+    // Ok(11)
+
+    ok(1) |> if-ok("replaced")
+    // Ok("replaced")
+
+    err("bad") |> if-ok(add(%, 10))
+    // Err("bad") — passes through unchanged
+    ```
+    """
+}
+fn (lazy result, handler) {
+    call-lib(::hot::type/if-ok, [result, handler])
+}
+
+
+if-err
+meta {
+    core: true,
+    doc: """
+    If result is Err, apply function or use value. If Ok, pass through unchanged.
+
+    When the second argument is a function, it's called with the Err value.
+    When it's a plain value, it replaces the Err (recovering to Ok).
+
+    **Example**
+
+    ```hot
+    err("bad") |> if-err("default")
+    // Ok("default") — recovers with default value
+
+    err("bad") |> if-err(err(\`wrapped: ${%}\`))
+    // Err("wrapped: bad") — transforms the error
+
+    err("bad") |> if-err((e) { fetch-backup() })
+    // Ok(...) or Err(...) — recovery attempt
+
+    ok(42) |> if-err("default")
+    // Ok(42) — passes through unchanged
+    ```
+    """
+}
+fn (lazy result, handler) {
+    call-lib(::hot::type/if-err, [result, handler])
+}
+
+
+is-result
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a Result type.
+
+    **Example**
+
+    ```hot
+    is-result(ok(42))        // true
+    is-result(err("fail"))   // true
+    is-result(42)            // false
+    ```
+    """
+}
+fn (value: Any): Bool { is-type(value, Result) }
+
+
+// ============================================================================
+// Type Conversion Implementations
+// ============================================================================
+// These `implements` declarations make type conversions visible to the LSP
+// and type system, enabling autocomplete, documentation, and type checking.
+
+// --- Conversions to Str ---
+
+// Convert integer to string representation
+Int -> Str fn (value: Int): Str { call-lib(::hot::type/Str, [value]) }
+
+// Convert decimal to string representation
+Dec -> Str fn (value: Dec): Str { call-lib(::hot::type/Str, [value]) }
+
+// Convert boolean to string ("true" or "false")
+Bool -> Str fn (value: Bool): Str { call-lib(::hot::type/Str, [value]) }
+
+// Convert bytes to UTF-8 string. Invalid UTF-8 sequences are replaced with the Unicode replacement character.
+Bytes -> Str fn (value: Bytes): Str { call-lib(::hot::type/Str, [value]) }
+
+// Convert vector to string representation (e.g., "[1, 2, 3]")
+Vec -> Str fn (value: Vec): Str { call-lib(::hot::type/Str, [value]) }
+
+// Convert map to string representation (e.g., "{\"a\": 1, \"b\": 2}")
+Map -> Str fn (value: Map): Str { call-lib(::hot::type/Str, [value]) }
+
+// --- Conversions to Bytes ---
+
+// Convert string to UTF-8 byte sequence
+Str -> Bytes fn (value: Str): Bytes { call-lib(::hot::type/Bytes, [value]) }
+
+// --- Conversions to Int ---
+
+// Parse string as integer (returns error if not a valid integer)
+Str -> Int fn (value: Str): Int { call-lib(::hot::type/Int, [value]) }
+
+// Truncate decimal to integer (rounds towards zero)
+Dec -> Int fn (value: Dec): Int { call-lib(::hot::type/Int, [value]) }
+
+// Convert boolean to integer (true = 1, false = 0)
+Bool -> Int fn (value: Bool): Int { call-lib(::hot::type/Int, [value]) }
+
+// --- Conversions to Dec ---
+
+// Parse string as decimal number (returns error if not a valid number)
+Str -> Dec fn (value: Str): Dec { call-lib(::hot::type/Dec, [value]) }
+
+// ============================================================================
+// Convert integer to decimal
+Int -> Dec fn (value: Int): Dec { call-lib(::hot::type/Dec, [value]) }
+
+// --- Conversions to Bool ---
+
+// Convert integer to boolean (0 = false, non-zero = true)
+Int -> Bool fn (value: Int): Bool { call-lib(::hot::type/Bool, [value]) }
+
+// Convert string to boolean (empty string or "false" = false, otherwise true)
+Str -> Bool fn (value: Str): Bool { call-lib(::hot::type/Bool, [value]) }

@@ -1,0 +1,599 @@
+::hot::test ns
+meta {doc: """Testing framework with assertions and test runners."""}
+
+white ::hot::term/white
+red ::hot::term/red
+bright-green ::hot::term/bright-green
+bright-red ::hot::term/bright-red
+colors ::hot::term/colors
+
+// debug helper
+ptap
+meta {
+    doc: """
+    Debug helper: print each item in `x` and return `x`.
+
+    **Example**
+
+    ```hot
+    [1, 2, 3] |> ptap |> map(mul(%, 2))
+    // Prints: 1, 2, 3
+    // Returns: [2, 4, 6]
+    ```
+    """
+}
+fn (x) { map(x, println) x }
+
+// DIAG: a local copy of mapcat used only by the test runner so that the
+// runner doesn't sit on top of `mapcat`'s own activation when a test
+// itself calls `mapcat`.
+test-runner-mapcat fn (coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
+    coll
+    |> map(f)
+    |> reduce((acc, x) { concat(acc, x) }, [])
+}
+
+empty-test-counter {passed: 0, failed: 0, total: 0}
+
+// Initialize test counters in context
+init-test-counters
+meta {doc: """Initialize test counters in context."""}
+fn () {
+    ::hot::ctx/set("test-counters", {
+            assertions: empty-test-counter,
+            tests: empty-test-counter,
+            current-test: empty-test-counter,
+            failed-tests: [],
+            failed-assertions: []
+        })
+}
+
+get-test-counters
+meta {doc: """Get test counters from context, initializing if missing."""}
+fn () {
+    existing-counters ::hot::ctx/get("test-counters")
+    cond {
+        existing-counters => { existing-counters }
+        => {
+            // Initialize counters if they don't exist
+            init-test-counters()
+            ::hot::ctx/get("test-counters")
+        }
+    }
+}
+
+set-test-counters
+meta {doc: """Set test counters in context."""}
+fn (counters) {
+    ::hot::ctx/set("test-counters", counters)
+}
+
+// Helper to increment a counter in context
+assertion-passed
+meta {doc: """Increment passed assertion counters."""}
+fn () {
+    counters get-test-counters()
+    new-counters {
+        ...counters,
+        assertions: {
+            passed: add(counters.assertions.passed, 1),
+            failed: counters.assertions.failed,
+            total: add(counters.assertions.total, 1)
+        },
+        current-test: {
+            passed: add(counters.current-test.passed, 1),
+            failed: counters.current-test.failed,
+            total: add(counters.current-test.total, 1)
+        }
+    }
+
+    set-test-counters(new-counters)
+}
+
+assertion-failed
+meta {doc: """Increment failed assertion counters."""}
+fn () {
+    counters get-test-counters()
+    new-counters {
+        ...counters,
+        assertions: {
+            passed: counters.assertions.passed,
+            failed: add(counters.assertions.failed, 1),
+            total: add(counters.assertions.total, 1)
+        },
+        current-test: {
+            passed: counters.current-test.passed,
+            failed: add(counters.current-test.failed, 1),
+            total: add(counters.current-test.total, 1)
+        }
+    }
+
+    set-test-counters(new-counters)
+}
+
+assertion-failed-with-details
+meta {doc: """Record a failed assertion with test name and description."""}
+fn (test-name, assertion-description) {
+    assertion-failed()
+
+    counters get-test-counters()
+
+    // Get source location for the current test using IDE-friendly format
+    test-source ::hot::meta/source(test-name)
+    location-str format-source-location(test-source)
+
+    failed-assertion {
+        test: test-name,
+        location: location-str,
+        assertion: assertion-description
+    }
+
+    new-counters {
+        ...counters,
+        failed-assertions: concat(counters.failed-assertions, [failed-assertion])
+    }
+
+    set-test-counters(new-counters)
+}
+
+test-passed
+meta {doc: """Increment passed test counters."""}
+fn () {
+    counters get-test-counters()
+    new-counters {
+        ...counters,
+        tests: {
+            passed: add(counters.tests.passed, 1),
+            failed: counters.tests.failed,
+            total: add(counters.tests.total, 1)
+        }
+    }
+
+    set-test-counters(new-counters)
+}
+
+test-failed
+meta {doc: """Record a failed test and store enhanced name."""}
+fn (test-name) {
+    counters get-test-counters()
+
+    // Get source location info for enhanced reporting
+    test-source ::hot::meta/source(test-name)
+    location-str format-source-location(test-source)
+
+    // Store enhanced test name with IDE-friendly location format
+    enhanced-test-name if(location-str, `${test-name} (${location-str})`, test-name)
+
+    new-counters {
+        ...counters,
+        tests: {
+            passed: counters.tests.passed,
+            failed: add(counters.tests.failed, 1),
+            total: add(counters.tests.total, 1)
+        },
+        failed-tests: concat(counters.failed-tests, [enhanced-test-name])
+    }
+
+    set-test-counters(new-counters)
+}
+
+current-test-reset
+meta {doc: """Reset current test counters between tests."""}
+fn () {
+    counters get-test-counters()
+    set-test-counters({...counters, current-test: empty-test-counter})
+}
+
+current-test-assertions-passed
+meta {doc: """Return true if current test has zero failed assertions."""}
+fn () {
+    counters get-test-counters()
+    is-zero(counters.current-test.failed)
+}
+
+
+assert-expected-got
+meta {doc: """Format expected vs actual values."""}
+fn (expected, actual) {
+    `expected ${expected}, got ${actual}`
+}
+
+// Helper function to format source location in IDE-friendly format
+format-source-location fn (source-info) {
+    cond {
+        and(source-info.file, and(source-info.line, source-info.column)) => {
+            `${source-info.file}:${source-info.line}:${source-info.column}`
+        }
+
+        and(source-info.file, source-info.line) => {
+            `${source-info.file}:${source-info.line}`
+        }
+
+        source-info.file => {
+            source-info.file
+        }
+        => { null }
+    }
+}
+
+// Test assertion helpers (use these in your test functions)
+assert-eq
+meta {
+    core: true,
+    doc: """
+    Assert that `expected` equals `actual` (with optional description).
+
+    **Example**
+
+    ```hot
+    test-math #["test"] fn () {
+        assert-eq(4, add(2, 2), "2 + 2 should equal 4")
+        assert-eq([1, 2], [1, 2])  // description auto-generated
+    }
+    ```
+    """
+}
+fn
+(lazy expected: Any, lazy actual: Any): Bool {
+    // Evaluate lazy arguments
+    expected-val do expected
+    actual-val do actual
+    assert-eq(expected-val, actual-val, assert-expected-got(expected-val, actual-val))
+},
+(lazy expected: Any, lazy actual: Any, description: Str): Bool {
+    // Evaluate lazy arguments first
+    expected-val do expected
+    actual-val do actual
+
+    // Check if either argument is an error Result - if so, fail with clear message
+    cond {
+        is-err(expected-val) => {
+            current-test-name ::hot::ctx/get("current-test-name")
+            error-msg `${description}: expected argument returned error: ${expected-val.$val}`
+
+            if(current-test-name,
+                assertion-failed-with-details(current-test-name, error-msg),
+                assertion-failed())
+
+            println(`    ${bright-red("✗")} ${error-msg}`)
+            false
+        }
+
+        is-err(actual-val) => {
+            current-test-name ::hot::ctx/get("current-test-name")
+            error-msg `${description}: actual argument returned error: ${actual-val.$val}`
+
+            if(current-test-name,
+                assertion-failed-with-details(current-test-name, error-msg),
+                assertion-failed())
+
+            println(`    ${bright-red("✗")} ${error-msg}`)
+            false
+        }
+        => {
+            // Normal comparison
+            passed eq(expected-val, actual-val)
+
+            cond {
+                passed => {
+                    assertion-passed()
+                    println(`    ${bright-green("✓")} ${description}`)
+                }
+                => {
+                    current-test-name ::hot::ctx/get("current-test-name")
+                    full-description `${description}: ${assert-expected-got(expected-val, actual-val)}`
+
+                    if(current-test-name,
+                        assertion-failed-with-details(current-test-name, full-description),
+                        assertion-failed())
+
+                    println(`    ${bright-red("✗")} ${full-description}`)
+                }
+            }
+
+            passed
+        }
+    }
+}
+
+assert
+meta {
+    core: true,
+    doc: """
+    Assert that `actual` is truthy (not null, not false, not an error Result).
+
+    **Example**
+
+    ```hot
+    test-truthy #["test"] fn () {
+        assert(gt(5, 3), "5 should be greater than 3")
+        assert(contains("hello", "ell"))
+        assert(response.id, "response should have an id")
+    }
+    ```
+    """
+}
+fn
+(lazy actual: Any): Bool {
+    actual-val do actual
+    assert(actual-val, `expected truthy value, got ${actual-val}`)
+},
+(lazy actual: Any, description: Str): Bool {
+    actual-val do actual
+    passed is-truthy(actual-val)
+
+    cond {
+        passed => {
+            assertion-passed()
+            println(`    ${bright-green("✓")} ${description}`)
+        }
+        => {
+            current-test-name ::hot::ctx/get("current-test-name")
+            full-description `${description}: expected truthy, got ${actual-val}`
+
+            if(current-test-name,
+                assertion-failed-with-details(current-test-name, full-description),
+                assertion-failed())
+
+            println(`    ${bright-red("✗")} ${full-description}`)
+        }
+    }
+
+    passed
+}
+
+print-test-header
+meta {doc: """Print header for the test run and record start time."""}
+fn (tests) {
+    println(`${red("hot test runner")}`)
+    // Use the imported length function instead of direct hotlib call
+    test-count length(tests)
+    println(`\nrunning ${test-count} tests\n`)
+    // Record start time (epoch millis) for total duration measurement
+    start-ms ::hot::time/epoch-millis(::hot::time/now())
+    ::hot::ctx/set("test-run-start-ms", start-ms)
+}
+
+call-with-capture
+meta {doc: """Call function `f` with stdout capture, discarding captured output."""}
+fn (f) {
+    stdout ::hot::io/capture-stdout()
+    result call(f)
+
+    // Discard captured content instead of releasing it
+    // This prevents the output from being displayed while maintaining stream redirection
+    ::hot::io/discard(stdout)
+    result
+}
+
+run-test
+meta {
+    core: true,
+    doc: """
+    Run a single test function with optional output capture.
+
+    **Example**
+
+    ```hot
+    // Typically called by run-tests, not directly
+    run-test(my-test-fn, true)  // true = capture output
+    ```
+    """
+}
+fn (f, capture-output) {
+    current-test-reset()
+
+    // Ensure f is a string (convert function reference to string if needed)
+    f-str Str(f)
+
+    // Set current test name in context for assertion tracking
+    ::hot::ctx/set("current-test-name", f-str)
+
+    cond {
+        capture-output => { print(`${pad-end(f-str, 54)} ... `) }
+        => { println(`${pad-end(f-str, 58)} ...`) }
+    }
+
+    result cond {
+        capture-output => { call-with-capture(f-str) }
+        => { call(f-str, []) }
+    }
+
+    // Check if test had any execution errors (real engine/compiler errors)
+    test-had-execution-error is-err(result)
+    did-pass if(test-had-execution-error, {
+        // For actual execution errors, print the error details
+        // Access result.$val directly to avoid auto-unwrapping the Result.Err in template string
+        error-detail result.$val
+        println(`    ${::hot::term/bright-red("✗")} Test execution error: ${error-detail}`)
+        false
+    }, {
+        if(current-test-assertions-passed(), true, false)
+    })
+
+    // Update test counters
+    if(did-pass, {
+        test-passed()
+        if(capture-output,
+            println(`${bright-green(pad-start("ok", 4))}`),
+            println(`... ${bright-green(pad-start("ok", 48))}\n`))
+    }, {
+        test-failed(f-str)
+        if(capture-output,
+            println(`${::hot::term/bright-red(pad-start("fail", 4))}`),
+            println(`... ${::hot::term/bright-red(pad-start("fail", 48))}`))
+    })
+
+    did-pass
+}
+
+// Print summary of test results
+print-test-summary
+meta {doc: """Print a summary of test results including failures and duration."""}
+fn () {
+    counters get-test-counters()
+    tests-total counters.tests.total
+    tests-passed counters.tests.passed
+    tests-failed counters.tests.failed
+    assertions-total counters.assertions.total
+    assertions-passed counters.assertions.passed
+    assertions-failed counters.assertions.failed
+    failed-tests counters.failed-tests
+    failed-assertions counters.failed-assertions
+
+    // Print failed tests and detailed assertion failures if any
+    cond {
+        gt(tests-failed, 0) => {
+            println(`\nfailed tests:\n`)
+            map(failed-tests, println(`  ${::hot::term/bright-red(%)}`))
+
+            // Print detailed assertion failures if we have them
+            cond {
+                and(failed-assertions, gt(length(failed-assertions), 0)) => {
+                    println(`\nfailed assertions:\n`)
+                    map(failed-assertions, (assertion-failure) {
+                            // Display in IDE-friendly format: test-name at file:line:column
+                            location-display if(assertion-failure.location,
+                                ` at ${assertion-failure.location}`,
+                                "")
+                            println(`  ${::hot::term/bright-red(assertion-failure.test)}${location-display}`)
+                            println(`    ${assertion-failure.assertion}`)
+                            println("")
+                        })
+                }
+                => { false }
+            }
+        }
+        => { false }
+    }
+
+    cond {
+        is-zero(tests-failed) => {
+            print(`\nassertions: `)
+            print(`${bright-green(pad-start(Str(assertions-passed), 6))} ${bright-green("passed")}`)
+            print(`${pad-start(Str(assertions-failed), 6)} ${white("failed")}`)
+            println(`${pad-start(Str(assertions-total), 9)} total`)
+            print(`     tests: `)
+            print(`${bright-green(pad-start(Str(tests-passed), 6))} ${bright-green("passed")}`)
+            print(`${pad-start(Str(tests-failed), 6)} ${white("failed")}`)
+            println(`${pad-start(Str(tests-total), 9)} total`)
+        }
+        => {
+            print(`\nassertions:`)
+            print(`${pad-start(Str(assertions-passed), 6)} ${white("passed")}`)
+            print(`${::hot::term/bright-red(pad-start(Str(assertions-failed), 6))} ${::hot::term/bright-red("failed")}`)
+            println(`${pad-start(Str(assertions-total), 9)} total`)
+            print(`     tests:`)
+            print(`${pad-start(Str(tests-passed), 6)} ${white("passed")}`)
+            print(`${::hot::term/bright-red(pad-start(Str(tests-failed), 6))} ${::hot::term/bright-red("failed")}`)
+            println(`${pad-start(Str(tests-total), 9)} total`)
+        }
+    }
+
+    if(is-zero(tests-failed),
+        println(`\n${bright-green("all tests passed!\n")}`),
+        println(`\n${::hot::term/bright-red(tests-failed)} tests failed.\n`))
+
+    // Print total duration
+    end-ms ::hot::time/epoch-millis(::hot::time/now())
+    start-ms ::hot::ctx/get("test-run-start-ms")
+    if(start-ms,
+        println(`duration: ${::hot::math/div(::hot::math/sub(end-ms, start-ms), 1000)}s`),
+        false)
+
+}
+
+is-test
+meta {
+    doc: """
+    Return true if function `f` is marked as a test via metadata.
+
+    **Example**
+
+    ```hot
+    my-test #["test"] fn () { assert(true) }
+    other-fn fn () { "not a test" }
+
+    is-test(my-test)   // true
+    is-test(other-fn)  // false
+    ```
+    """
+}
+fn (f) {
+    // Use the Rust hotlib implementation to avoid variable scoping issues
+    call-lib(::hot::test/is-test, [f])
+}
+
+all-tests-passed
+meta {doc: """Return true if all tests passed - helper to avoid scoping issues."""}
+fn () {
+    counters get-test-counters()
+    tests-failed counters.tests.failed
+    is-zero(tests-failed)
+}
+
+run-tests
+meta {
+    doc: """
+    Discover and run all test functions; return true if all passed.
+
+    **Example**
+
+    ```hot
+    // Run all tests with output capture
+    run-tests(true)
+
+    // Run all tests showing full output
+    run-tests(false)
+    ```
+    """
+}
+fn (capture-output) {
+    init-test-counters()
+    ::hot::ctx/set("test-capture-output", capture-output)
+
+    test-results namespaces()
+    |> test-runner-mapcat(functions-in-namespace(%))
+    |> filter(is-test(%))
+    |> (tests) { print-test-header(tests) tests}
+    |> map(run-test(%, ::hot::ctx/get("test-capture-output")))
+
+    print-test-summary()
+
+    // Return the final result - use a simple expression
+    final-counters get-test-counters()
+    is-zero(final-counters.tests.failed)
+}
+
+run-matching-tests
+meta {
+    doc: """
+    Run tests whose names contain `pattern`; return true if all passed.
+
+    **Example**
+
+    ```hot
+    // Run only tests with "math" in the name
+    run-matching-tests("math", true)
+
+    // Run tests matching "coll" with full output
+    run-matching-tests("coll", false)
+    ```
+    """
+}
+fn (pattern, capture-output) {
+    init-test-counters()
+    ::hot::ctx/set("test-capture-output", capture-output)
+
+    test-results namespaces()
+    |> test-runner-mapcat(functions-in-namespace(%))
+    |> filter(and(is-test(%), contains(`${%}`, pattern)))
+    |> (tests) { print-test-header(tests) tests}
+    |> map(run-test(%, ::hot::ctx/get("test-capture-output")))
+
+    print-test-summary()
+
+    // Return the final result - use a simple expression
+    final-counters get-test-counters()
+    is-zero(final-counters.tests.failed)
+}

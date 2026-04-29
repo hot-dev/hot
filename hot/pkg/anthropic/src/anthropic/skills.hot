@@ -1,0 +1,148 @@
+::anthropic::skills ns
+meta {doc: """Anthropic Skills API (Beta) - Create and manage custom agent skills."""}
+
+api-request ::anthropic::api/request
+HttpError ::anthropic::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// Beta header required for Skills API
+BETA_HEADER "skills-2025-10-02"
+
+// =============================================================================
+// Types
+// =============================================================================
+
+Skill type {
+    id: Str,
+    type: Str,
+    display_title: Str,
+    source: Str,
+    latest_version: Str,
+    created_at: Str,
+    updated_at: Str
+}
+
+SkillVersion type {
+    id: Str,
+    type: Str,
+    skill_id: Str,
+    description: Str?,
+    name: Str,
+    definition: Any,
+    created_at: Str
+}
+
+SkillsListResponse type {
+    data: Vec<Skill>,
+    has_more: Bool,
+    first_id: Str?,
+    last_id: Str?
+}
+
+CreateSkillRequest type {
+    display_title: Str,
+    description: Str?,
+    name: Str,
+    definition: Any
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+list
+meta {
+    doc: """
+    GET /v1/skills - List skills.
+
+    Returns a paginated list of skills available to your account, including both
+    custom and Anthropic-provided skills. Optionally pass a `limit` to control
+    page size.
+
+    **Example**
+
+    ```hot
+    // List all skills
+    skills ::anthropic::skills/list()
+    assert(is-vec(skills.data))
+    map(skills.data, %.display_title)
+
+    // List with a limit
+    skills ::anthropic::skills/list(5)
+    assert(lte(length(skills.data), 5))
+    ```
+    """
+}
+fn
+(): SkillsListResponse {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/skills`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), SkillsListResponse(response.body), err(HttpError(response)))
+},
+(limit: Int): SkillsListResponse {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/skills?limit=${limit}`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), SkillsListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    GET /v1/skills/{skill_id} - Get a skill.
+
+    Returns details about a specific skill.
+
+    **Example**
+
+    ```hot
+    skill ::anthropic::skills/get("skill_abc123")
+    skill.display_title // => "My Custom Skill"
+    ```
+    """
+}
+fn (skill_id: Str): Skill {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), Skill(response.body), err(HttpError(response)))
+}
+
+create
+meta {
+    doc: """
+    POST /v1/skills - Create a new skill.
+
+    Creates a custom skill that can be used with Claude.
+
+    **Example**
+
+    ```hot
+    skill ::anthropic::skills/create(CreateSkillRequest({
+        display_title: "My Custom Skill",
+        name: "my_skill",
+        definition: {
+            // skill definition
+        }
+    }))
+    ```
+    """
+}
+fn (request: CreateSkillRequest): Skill {
+    response api-request("POST", `${::anthropic/BASE_URL}/v1/skills`, {anthropic-beta: BETA_HEADER}, request)
+    if(is-ok-response(response), Skill(response.body), err(HttpError(response)))
+}
+
+delete
+meta {
+    doc: """
+    DELETE /v1/skills/{skill_id} - Delete a skill.
+
+    Permanently deletes a skill.
+
+    **Example**
+
+    ```hot
+    ::anthropic::skills/delete("skill_abc123")
+    ```
+    """
+}
+fn (skill_id: Str): Map {
+    response api-request("DELETE", `${::anthropic/BASE_URL}/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), response.body, err(HttpError(response)))
+}

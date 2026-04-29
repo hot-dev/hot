@@ -1,0 +1,136 @@
+::openai::realtime ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+RealtimeSessionCreateRequest type {
+    modalities: Any?,
+    model: "gpt-4o-realtime-preview" | "gpt-4o-realtime-preview-2024-10-01" | "gpt-4o-realtime-preview-2024-12-17" | "gpt-4o-realtime-preview-2025-06-03" | "gpt-4o-mini-realtime-preview" | "gpt-4o-mini-realtime-preview-2024-12-17"?,
+    instructions: Str?,
+    voice: VoiceIdsShared?,
+    input_audio_format: "pcm16" | "g711_ulaw" | "g711_alaw"?,
+    output_audio_format: "pcm16" | "g711_ulaw" | "g711_alaw"?,
+    input_audio_transcription: Map?,
+    turn_detection: Map?,
+    input_audio_noise_reduction: Map?,
+    speed: Dec?,
+    tracing: Any?,
+    tools: Vec<Map>?,
+    tool_choice: Str?,
+    temperature: Dec?,
+    max_response_output_tokens: Any?,
+    client_secret: Map?
+}
+
+RealtimeSessionCreateResponse type {
+    client_secret: Map,
+    modalities: Any?,
+    instructions: Str?,
+    voice: VoiceIdsShared?,
+    input_audio_format: Str?,
+    output_audio_format: Str?,
+    input_audio_transcription: Map?,
+    speed: Dec?,
+    tracing: Any?,
+    turn_detection: Map?,
+    tools: Vec<Map>?,
+    tool_choice: Str?,
+    temperature: Dec?,
+    max_response_output_tokens: Any?
+}
+
+RealtimeTranscriptionSessionCreateRequest type {
+    modalities: Any?,
+    input_audio_format: "pcm16" | "g711_ulaw" | "g711_alaw"?,
+    input_audio_transcription: Map?,
+    turn_detection: Map?,
+    input_audio_noise_reduction: Map?,
+    include: Vec<Str>?,
+    client_secret: Map?
+}
+
+// Voice ID for realtime audio (e.g. "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")
+VoiceIdsShared type Str
+
+RealtimeTranscriptionSessionCreateResponse type {
+    client_secret: Map,
+    modalities: Any?,
+    input_audio_format: Str?,
+    input_audio_transcription: Map?,
+    turn_detection: Map?
+}
+
+CreateRealtimeSessionRequest type {
+    modalities: Any?,
+    model: "gpt-4o-realtime-preview" | "gpt-4o-realtime-preview-2024-10-01" | "gpt-4o-realtime-preview-2024-12-17" | "gpt-4o-realtime-preview-2025-06-03" | "gpt-4o-mini-realtime-preview" | "gpt-4o-mini-realtime-preview-2024-12-17"?,
+    instructions: Str?,
+    voice: VoiceIdsShared?,
+    input_audio_format: "pcm16" | "g711_ulaw" | "g711_alaw"?,
+    output_audio_format: "pcm16" | "g711_ulaw" | "g711_alaw"?,
+    input_audio_transcription: Map?,
+    turn_detection: Map?,
+    input_audio_noise_reduction: Map?,
+    speed: Dec?,
+    tracing: Any?,
+    tools: Vec<Map>?,
+    tool_choice: Str?,
+    temperature: Dec?,
+    max_response_output_tokens: Any?,
+    client_secret: Map?
+}
+
+CreateRealtimeSessionResponse type {
+    client_secret: Map,
+    modalities: Any?,
+    instructions: Str?,
+    voice: VoiceIdsShared?,
+    input_audio_format: Str?,
+    output_audio_format: Str?,
+    input_audio_transcription: Map?,
+    speed: Dec?,
+    tracing: Any?,
+    turn_detection: Map?,
+    tools: Vec<Map>?,
+    tool_choice: Str?,
+    temperature: Dec?,
+    max_response_output_tokens: Any?
+}
+
+
+create-session
+meta {
+    doc: """POST /realtime/sessions - Create a realtime session for audio/text conversations with GPT-4o models."""
+}
+fn (request: CreateRealtimeSessionRequest): CreateRealtimeSessionResponse {
+  response api-request("POST", `${::openai/BASE_URL}/realtime/sessions`, {}, request)
+  if(is-ok-response(response), CreateRealtimeSessionResponse(response.body), err(HttpError(response)))
+}
+
+CreateRealtimeTranscriptionSessionRequest type {
+    modalities: Any?,
+    input_audio_format: "pcm16" | "g711_ulaw" | "g711_alaw"?,
+    input_audio_transcription: Map?,
+    turn_detection: Map?,
+    input_audio_noise_reduction: Map?,
+    include: Vec<Str>?,
+    client_secret: Map?
+}
+
+CreateRealtimeTranscriptionSessionResponse type {
+    client_secret: Map,
+    modalities: Any?,
+    input_audio_format: Str?,
+    input_audio_transcription: Map?,
+    turn_detection: Map?
+}
+
+
+create-transcription-session
+meta {
+    doc: """POST /realtime/transcription_sessions - Create a realtime transcription session for live audio-to-text."""
+}
+fn (request: CreateRealtimeTranscriptionSessionRequest): CreateRealtimeTranscriptionSessionResponse {
+  response api-request("POST", `${::openai/BASE_URL}/realtime/transcription_sessions`, {}, request)
+  if(is-ok-response(response), CreateRealtimeTranscriptionSessionResponse(response.body), err(HttpError(response)))
+}

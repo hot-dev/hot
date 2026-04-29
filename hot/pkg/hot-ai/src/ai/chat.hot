@@ -1,0 +1,928 @@
+::ai::chat ns
+meta {
+    doc: """
+    Provider-agnostic chat surface used by every `::ai::*` consumer.
+
+    This module defines:
+
+    - `Provider` enum and a model-name → provider mapping for routing.
+    - `Message` and `ChatReply` types that normalize provider responses
+      so downstream code never branches on the underlying SDK.
+    - `ChatOptions` carrying the chat function reference, model name,
+      optional system prompt, and (for tool-using flows) `tools` plus
+      a `max-iterations` cap.
+    - `run-loop`, the canonical agent loop that calls `chat-fn`,
+      dispatches `tool_use` blocks via `::ai::tool/dispatch`, and
+      iterates until the model finishes or the iteration cap is hit.
+
+    Provider packages (e.g. `::anthropic::messages`, `::openai::chat`)
+    each expose a `chat-with-tools` function matching the new
+    `chat-fn` contract:
+
+    ```hot
+    chat-fn(model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?): ChatReply
+    ```
+
+    The legacy `(model, prompt, system) -> Str` shape used by `::ai::rag`
+    is still supported as-is — only `run-loop` callers must adopt the
+    new shape.
+    """
+}
+
+::tool ::ai::tool
+
+// ============================================================================
+// Provider enum + registry
+// ============================================================================
+
+Provider
+meta {
+    doc: """
+    Known AI chat completion providers. Declared `enum open` so
+    third-party adapters can register their own provider identity
+    via arrow enrollment without forking this enum:
+
+    ```hot
+    Mistral type { name: Str }
+    Mistral -> Provider.Mistral
+    ```
+
+    Match expressions on `Provider` MUST include a `_` default arm
+    (`open-enum-match-missing-default` otherwise).
+    """
+}
+enum open { Anthropic, OpenAi, Xai, Gemini }
+
+MODEL_PREFIXES [
+    {prefix: "claude",  provider: Provider.Anthropic},
+    {prefix: "gpt",     provider: Provider.OpenAi},
+    {prefix: "o1",      provider: Provider.OpenAi},
+    {prefix: "o3",      provider: Provider.OpenAi},
+    {prefix: "o4",      provider: Provider.OpenAi},
+    {prefix: "grok",    provider: Provider.Xai},
+    {prefix: "gemini",  provider: Provider.Gemini},
+]
+
+detect-provider
+meta {
+    doc: """
+    Map a model name to its `Provider`. Matches on known prefixes
+    (`claude`, `gpt`, `o1`/`o3`/`o4`, `grok`, `gemini`). Returns `Err`
+    for unrecognized models.
+
+    **Example**
+
+    ```hot
+    detect-provider("claude-sonnet-4-5")  // Provider.Anthropic
+    detect-provider("gpt-4o")             // Provider.OpenAi
+    ```
+    """
+}
+fn (model: Str): Provider {
+    name lowercase(model)
+    hit find-first(MODEL_PREFIXES, (entry) { starts-with(name, entry.prefix) })
+    if(is-null(hit), err(`Unknown model: ${model}`), hit.provider)
+}
+
+provider-name
+meta {
+    doc: """
+    Human-readable name for a `Provider`. Falls back to the variant's
+    short name for any provider enrolled by a third-party package via
+    `Source -> Provider.Variant` arrows. The `_` default arm is
+    required because `Provider` is an open enum.
+    """
+}
+fn match (provider: Provider): Str {
+    Provider.Anthropic => { "Anthropic" }
+    Provider.OpenAi    => { "OpenAI" }
+    Provider.Xai       => { "xAI" }
+    Provider.Gemini    => { "Google Gemini" }
+    _                  => { Str(provider) }
+}
+
+// ============================================================================
+// Conversation types
+// ============================================================================
+
+Message
+meta {
+    doc: """
+    One turn of a chat conversation in normalized form. Provider
+    adapters translate this into their native message shape.
+
+    Fields
+
+    - `role` — `"user"`, `"assistant"`, `"system"`, or `"tool"`.
+    - `content` — usually a `Str` (plain text). For `role: "tool"` it
+      is the result returned by `::ai::tool/dispatch`. For
+      `role: "assistant"` turns that called tools it may be empty.
+    - `tool-calls` — present on `role: "assistant"` turns that
+      requested tool use; carries the parsed `ToolCall` records.
+    - `tool-call-id` — present on `role: "tool"` results, echoing
+      the `id` of the originating `ToolCall`.
+
+    **Example**
+
+    ```hot
+    user-msg Message({role: "user", content: "What's the weather in Paris?"})
+
+    assistant-call Message({
+        role: "assistant",
+        content: "",
+        tool-calls: [::tool/ToolCall({id: "tu_1", name: "get-weather", input: {city: "Paris"}})]
+    })
+
+    tool-result Message({
+        role: "tool",
+        content: "18C and clear",
+        tool-call-id: "tu_1"
+    })
+    ```
+    """
+}
+type {
+    role: Str,
+    content: Any,
+    tool-calls: Vec<::ai::tool/ToolCall>?,
+    tool-call-id: Str?
+}
+
+ChatReply
+meta {
+    doc: """
+    Normalized provider response. Returned by the new `chat-fn`
+    contract and consumed by `run-loop`.
+
+    Fields
+
+    - `text` — the assistant's text output for this turn (may be empty
+      when the turn is purely tool-use).
+    - `tool-calls` — parsed `ToolCall` records when the model
+      requested tool use.
+    - `stop-reason` — `"end_turn"`, `"tool_use"`, `"max_tokens"`,
+      `"stop_sequence"`, or any other provider-specific reason.
+    - `usage` — token accounting `{input-tokens, output-tokens}` when
+      the provider reports it (Phase 1.5 populates this universally).
+    - `raw` — the raw provider response for adapter use; opaque to
+      `run-loop` callers.
+    """
+}
+type {
+    text: Str?,
+    tool-calls: Vec<::ai::tool/ToolCall>?,
+    stop-reason: Str,
+    usage: Map?,
+    raw: Any?
+}
+
+// ============================================================================
+// Streaming deltas
+// ============================================================================
+
+TextDelta
+meta {
+    doc: """
+    Incremental text fragment from a streaming reply. `text` is the
+    delta only — concatenate them in order to reconstruct the full
+    assistant text for the turn.
+    """
+}
+type {
+    text: Str
+}
+
+ToolUseStart
+meta {
+    doc: """
+    A new `tool_use` block has begun in a streaming reply. The model
+    has chosen `name` for tool-call `id`; the input arguments stream
+    as `ToolUseInputDelta` events until a matching `ToolUseEnd`.
+    """
+}
+type {
+    id: Str,
+    name: Str
+}
+
+ToolUseInputDelta
+meta {
+    doc: """
+    Partial JSON fragment of a tool call's input. Concatenate the
+    `partial-input-json` strings for a given `id`, then `from-json`
+    the result to reconstruct the call's `input` map.
+    """
+}
+type {
+    id: Str,
+    partial-input-json: Str
+}
+
+ToolUseEnd
+meta {
+    doc: """
+    A `tool_use` block has finished streaming. The accumulated input
+    JSON is now ready to parse and dispatch.
+    """
+}
+type {
+    id: Str
+}
+
+StreamStop
+meta {
+    doc: """
+    Final event of a streaming turn. `reason` mirrors `ChatReply.stop-reason`
+    (`"end_turn"`, `"tool_use"`, `"max_tokens"`, …). `usage` carries
+    the normalized `{input-tokens, output-tokens}` map when the
+    provider reports it on this terminal event.
+    """
+}
+type {
+    reason: Str,
+    usage: Map?
+}
+
+ReplyDelta
+meta {
+    doc: """
+    Provider-agnostic streaming event emitted by a `chat-stream-fn`.
+    Each event is one of:
+
+    - `TextDelta` — a text fragment (concatenate to rebuild the turn).
+    - `ToolUseStart` — a new tool call has begun (`id`, `name`).
+    - `ToolUseInputDelta` — partial JSON of a tool call's input.
+    - `ToolUseEnd` — a tool call has finished streaming.
+    - `Stop` — terminal event with `stop-reason` and optional `usage`.
+
+    Provider adapters translate native SSE/wire events into this
+    enum so consumers (and `run-loop-stream`) never branch on the
+    underlying SDK.
+
+    Declared `enum open` so provider adapters can introduce
+    provider-specific delta kinds (e.g., `ThinkingDelta`,
+    `ReasoningDelta`) via arrow enrollment without forking this
+    type. Match expressions on `ReplyDelta` MUST include a `_`
+    default arm (`open-enum-match-missing-default` otherwise) —
+    unknown deltas should be silently ignored or forwarded.
+    """
+}
+enum open {
+    TextDelta(TextDelta),
+    ToolUseStart(ToolUseStart),
+    ToolUseInputDelta(ToolUseInputDelta),
+    ToolUseEnd(ToolUseEnd),
+    Stop(StreamStop)
+}
+
+noop-on-delta
+meta {
+    doc: """
+    Default `on-delta` callback used when a streaming caller does not
+    supply one. Discards every event.
+    """
+}
+fn (delta: ReplyDelta): Null { null }
+
+// ============================================================================
+// Token counting helpers
+// ============================================================================
+
+CHARS_PER_TOKEN_HEURISTIC 4
+PER_MESSAGE_OVERHEAD_TOKENS 4
+
+count-message-chars
+meta {
+    doc: """Internal: serialize a single Message to a char-count for the shared heuristic."""
+}
+fn (m: Message): Int {
+    body cond {
+        is-str(m.content) => { m.content }
+        is-null(m.content) => { "" }
+        => { to-json(untype(m.content)) }
+    }
+
+    role-chars length(or(m.role, ""))
+    body-chars length(body)
+    tool-chars cond {
+        is-null(m.tool-calls) => { 0 }
+        => { length(to-json(untype(m.tool-calls))) }
+    }
+
+    add(add(role-chars, body-chars), tool-chars)
+}
+
+count-tokens-heuristic
+meta {
+    doc: """
+    Provider-agnostic char/4 token estimator. Use as a fallback for
+    `ChatOptions.count-tokens-fn` when a provider lacks a precise
+    counter (e.g. OpenAI without `tiktoken`). Tracks BPE tokenizers
+    to within ~10% on English prose; code/JSON/non-Latin will skew
+    higher.
+
+    Contract matches the `count-tokens-fn` slot:
+
+    ```
+    (messages: Vec<Message>, model: Str): Int
+    ```
+    """
+}
+fn (messages: Vec<Message>, model: Str): Int {
+    char-total reduce(messages, (acc, m) { add(acc, count-message-chars(m)) }, 0)
+    overhead mul(length(messages), PER_MESSAGE_OVERHEAD_TOKENS)
+    add(ceil(div(char-total, CHARS_PER_TOKEN_HEURISTIC)), overhead)
+}
+
+// ============================================================================
+// ChatOptions
+// ============================================================================
+
+ChatOptions
+meta {
+    doc: """
+    Options bundle for chat-consuming functions.
+
+    Required
+
+    - `chat-fn` — function reference used to call the underlying
+      provider. Two contracts are recognized:
+        - Legacy: `(model: Str, prompt: Str, system: Str?) -> Str`
+          — used by `::ai::rag` and other single-shot helpers.
+        - Tools-aware: `(model: Str, messages: Vec<Message>,
+          system: Str?, tools: Vec<Tool>?) -> ChatReply` — required
+          by `run-loop`.
+    - `model` — model identifier passed through to the provider.
+    - `chat-stream-fn` — streaming counterpart used by
+      `run-loop-stream`. Contract:
+
+      ```
+      (model: Str, messages: Vec<Message>, system: Str?,
+       tools: Vec<Tool>?, on-delta: Fn) -> ChatReply
+      ```
+
+      The function invokes `on-delta(delta: ReplyDelta)` for each
+      event in turn order and returns the same `ChatReply` shape
+      as the non-streaming version.
+
+    Optional
+
+    - `system` — system prompt prepended to every call.
+    - `tools` — tools the model is allowed to call from `run-loop`.
+    - `skills` — vector of skill-meta'd functions to advertise to the
+      model. `run-loop` wraps these in `::ai::skill/in-memory-resolver`
+      and exposes the `list_skills`/`read_skill`/`apply_skill` built-in
+      tools automatically. Ignored when `skill-resolver` is set.
+    - `skill-resolver` — explicit `::ai::skill/SkillResolver`. Takes
+      precedence over `skills` and lets callers plug in store-backed,
+      embedding-ranked, or otherwise dynamic skill discovery while
+      reusing the run-loop's index + built-in-tools machinery.
+    - `max-iterations` — hard cap on `run-loop` turns (default 10).
+    - `max-context-tokens`, `max-output-tokens`, `warn-context-pct` —
+      reserved for Phase 1.5 token-budget enforcement; ignored today.
+    - `emit-steps` — when `true`, `run-loop` publishes a per-turn
+      observability record to the current run's stream via
+      `::hot::stream/data`. Defaults to `false`. Errors from missing
+      stream context are swallowed so opting in is safe in any
+      execution environment.
+    - `step-data-type` — stream `data-type` label used when
+      `emit-steps` is on. Defaults to `"ai:chat:step"`.
+    - `emit-stream-deltas` — when `true`, `run-loop-stream` mirrors
+      every `ReplyDelta` to the current run's stream via
+      `::hot::stream/data` (in addition to invoking any caller
+      `on-delta`). Defaults to `false`. Errors from missing stream
+      context are swallowed.
+    - `delta-data-type` — stream `data-type` label used when
+      `emit-stream-deltas` is on. Defaults to `"ai:chat:delta"`.
+    - `count-tokens-fn` — provider's `(messages, model) -> Int`
+      counter used by pre-call budget checks. When unset, falls
+      back to `count-tokens-heuristic`.
+    - `model-context-window` — explicit context-window size in
+      tokens. When unset, the budget check uses
+      `max-context-tokens` directly without computing a percentage.
+
+    **Example**
+
+    ```hot
+    ::tool ::ai::tool
+    ::anth ::anthropic::messages
+
+    weather-tool ::tool/from-fn(get-weather)
+
+    opts ChatOptions({
+        chat-fn: ::anth/chat-with-tools,
+        model: "claude-sonnet-4-5",
+        system: "You are a concise assistant.",
+        tools: [weather-tool],
+        max-iterations: 5
+    })
+    ```
+    """
+}
+type {
+    chat-fn: Fn?,
+    chat-stream-fn: Fn?,
+    model: Str,
+    system: Str?,
+    tools: Vec<::ai::tool/Tool>?,
+    skills: Vec<Any>?,
+    skill-resolver: ::ai::skill/SkillResolver?,
+    max-iterations: Int?,
+    max-context-tokens: Int?,
+    max-output-tokens: Int?,
+    warn-context-pct: Dec?,
+    emit-steps: Bool?,
+    step-data-type: Str?,
+    emit-stream-deltas: Bool?,
+    delta-data-type: Str?,
+    count-tokens-fn: Fn?,
+    model-context-window: Int?
+}
+
+// ============================================================================
+// Run loop
+// ============================================================================
+
+DEFAULT_MAX_ITERATIONS 10
+
+user-message
+meta {
+    doc: """Construct a `Message` with `role: "user"` and the given text content."""
+}
+fn (text: Str): Message {
+    Message({role: "user", content: text})
+}
+
+assistant-message
+meta {
+    doc: """
+    Construct a `Message` representing an assistant turn. When
+    `tool-calls` is non-null the message records a tool-use turn that
+    must be paired with one or more `tool-result-message` entries on
+    the next user turn.
+    """
+}
+fn (text: Str?, tool-calls: Vec<::ai::tool/ToolCall>?): Message {
+    Message({
+        role: "assistant",
+        content: or(text, ""),
+        tool-calls: tool-calls
+    })
+}
+
+tool-result-message
+meta {
+    doc: """
+    Construct a `Message` carrying a `::ai::tool/dispatch` result back
+    to the model. Echoes `result.id` as `tool-call-id` so providers
+    can correlate it with the originating `ToolCall`.
+    """
+}
+fn (result: ::ai::tool/ToolResult): Message {
+    Message({
+        role: "tool",
+        content: result.output,
+        tool-call-id: result.id
+    })
+}
+
+run-loop
+meta {
+    doc: """
+    Drive a chat conversation through any number of tool-use turns,
+    stopping when the model says `end_turn` or when `max-iterations`
+    is reached.
+
+    `opts.chat-fn` must match the tools-aware contract:
+
+    ```
+    (model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?) -> ChatReply
+    ```
+
+    On each iteration:
+
+    1. Call `chat-fn` with the running message list.
+    2. If the reply has no tool calls, return its text.
+    3. Otherwise, dispatch every tool call via `::ai::tool/dispatch`,
+       append the assistant turn and one tool-result turn per call,
+       and loop.
+
+    Errors from individual tool calls are surfaced back to the model
+    as `tool-result-message` entries with the failure text — the model
+    is allowed to recover. Hitting `max-iterations` raises a `fail`.
+
+    **Example**
+
+    ```hot
+    add fn (x: Int, y: Int): Int { add(x, y) }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::anthropic::messages/chat-with-tools,
+        model: "claude-sonnet-4-5",
+        tools: [::ai::tool/from-fn(add)],
+        max-iterations: 5
+    })
+
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    // answer = "17 + 25 is 42."
+    ```
+    """
+}
+fn (opts: ChatOptions, user-msg: Str): Str {
+    run-loop-messages(opts, [user-message(user-msg)])
+}
+
+run-loop-messages
+meta {
+    doc: """
+    Variant of `run-loop` that takes an explicit `Vec<Message>` as
+    starting history. Useful for resuming an existing conversation.
+
+    **Example**
+
+    ```hot
+    history [
+        ::ai::chat/user-message("Hi"),
+        ::ai::chat/assistant-message("Hello!", null),
+        ::ai::chat/user-message("How are you?")
+    ]
+    ::ai::chat/run-loop-messages(opts, history)
+    ```
+    """
+}
+fn (opts: ChatOptions, messages: Vec<Message>): Str {
+    max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
+    base-tools or(opts.tools, [])
+    resolver ::ai::skill/effective-resolver(opts.skill-resolver, opts.skills)
+
+    skill-ctx {messages: messages, system: opts.system, model: opts.model}
+    indexed-skills cond {
+        is-null(resolver) => { [] }
+        => { resolver.list-fn(skill-ctx) }
+    }
+
+    tools cond {
+        is-null(resolver) => { base-tools }
+        => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver)) }
+    }
+
+    effective-system cond {
+        is-empty(indexed-skills) => { opts.system }
+        => {
+            index ::ai::skill/build-index(indexed-skills)
+            cond {
+                is-null(opts.system) => { index }
+                is-empty(opts.system) => { index }
+                => { `${opts.system}\n\n${index}` }
+            }
+        }
+    }
+
+    run-loop-step(
+        ChatOptions({...untype(opts), system: effective-system}),
+        messages,
+        tools,
+        max-iter
+    )
+}
+
+// ============================================================================
+// Pre-call budget checks
+// ============================================================================
+
+DEFAULT_WARN_CONTEXT_PCT 0.8
+
+estimate-tools-tokens
+meta {
+    doc: """
+    Internal: char-based heuristic for the JSON-serialized weight of
+    a tool list. Adds ~10 tokens of overhead per tool to account for
+    schema formatting in the wire request.
+    """
+}
+fn (tools: Vec<::ai::tool/Tool>?): Int {
+    cond {
+        is-null(tools) => { 0 }
+        is-empty(tools) => { 0 }
+        => {
+            json to-json(untype(tools))
+            chars length(json)
+            tool-overhead mul(length(tools), 10)
+            add(ceil(div(chars, CHARS_PER_TOKEN_HEURISTIC)), tool-overhead)
+        }
+    }
+}
+
+estimate-system-tokens
+meta { doc: """Internal: char/4 heuristic for the system prompt.""" }
+fn (system: Str?): Int {
+    cond {
+        is-null(system) => { 0 }
+        is-empty(system) => { 0 }
+        => { ceil(div(length(system), CHARS_PER_TOKEN_HEURISTIC)) }
+    }
+}
+
+format-budget-breakdown
+meta { doc: """Internal: human-readable breakdown of a token budget overrun.""" }
+fn (parts: Map, total: Int, limit: Int): Str {
+    `Approaching context limit (${total} / ${limit}):
+  system prompt: ${parts.system}
+  tool schemas:  ${parts.tools}
+  message history: ${parts.messages}`
+}
+
+check-budget
+meta {
+    doc: """
+    Internal: enforce `opts.max-context-tokens` /
+    `opts.warn-context-pct` against `messages` + `system` + `tools`.
+
+    - If neither limit is set, returns silently.
+    - If `count-tokens-fn` is set, uses it for messages; otherwise
+      falls back to `count-tokens-heuristic`.
+    - Logs a warning via `tap` when the projected total crosses the
+      `warn-context-pct` threshold of the limit.
+    - Fails (`fail`) when the projected total exceeds the limit
+      outright. The failure carries a structured breakdown.
+    """
+}
+fn (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>?): Null {
+    limit cond {
+        is-some(opts.max-context-tokens) => { opts.max-context-tokens }
+        is-some(opts.model-context-window) => { opts.model-context-window }
+        => { 0 }
+    }
+
+    cond {
+        lte(limit, 0) => { null }
+        => {
+            counter or(opts.count-tokens-fn, count-tokens-heuristic)
+            msg-tokens counter(messages, opts.model)
+            sys-tokens estimate-system-tokens(opts.system)
+            tool-tokens estimate-tools-tokens(tools)
+            total add(add(msg-tokens, sys-tokens), tool-tokens)
+            warn-pct or(opts.warn-context-pct, DEFAULT_WARN_CONTEXT_PCT)
+            warn-threshold mul(limit, warn-pct)
+
+            parts {
+                messages: msg-tokens,
+                system: sys-tokens,
+                tools: tool-tokens
+            }
+
+            cond {
+                gt(total, limit) => {
+                    fail(
+                        format-budget-breakdown(parts, total, limit),
+                        {parts, total, limit, kind: "context_overflow"}
+                    )
+                }
+
+                gt(total, warn-threshold) => {
+                    tap(format-budget-breakdown(parts, total, limit), "ai:chat:budget warning")
+                    null
+                }
+                => { null }
+            }
+        }
+    }
+}
+
+emit-stream-delta
+meta {
+    doc: """
+    Internal: forward a `ReplyDelta` to the current run's stream when
+    `opts.emit-stream-deltas` is on. Errors (e.g. no stream context)
+    are swallowed.
+    """
+}
+fn (opts: ChatOptions, delta: ReplyDelta): Null {
+    cond {
+        not(or(opts.emit-stream-deltas, false)) => { null }
+        => {
+            data-type or(opts.delta-data-type, ::ai::stream-labels/CHAT_DELTA)
+            if-err(::hot::stream/data(data-type, delta), null)
+            null
+        }
+    }
+}
+
+wrap-on-delta
+meta {
+    doc: """
+    Internal: build the effective per-turn `on-delta` callback —
+    combines an optional caller-supplied `user-on-delta` with the
+    stream-emit forwarder controlled by `opts.emit-stream-deltas`.
+    """
+}
+fn (opts: ChatOptions, user-on-delta: Fn?): Fn {
+    base or(user-on-delta, noop-on-delta)
+    cond {
+        not(or(opts.emit-stream-deltas, false)) => { base }
+        => {
+            (delta: ReplyDelta) {
+                emit-stream-delta(opts, delta)
+                base(delta)
+            }
+        }
+    }
+}
+
+emit-step
+meta {
+    doc: """
+    Internal: publish a per-turn step record to the current run's
+    stream when `opts.emit-steps` is on. Errors (e.g. no stream
+    context) are swallowed so callers can opt in unconditionally.
+    """
+}
+fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?): Null {
+    cond {
+        not(or(opts.emit-steps, false)) => { null }
+        => {
+            data-type or(opts.step-data-type, ::ai::stream-labels/CHAT_STEP)
+            payload {
+                iteration: iteration,
+                model: opts.model,
+                text: reply.text,
+                tool-calls: reply.tool-calls,
+                tool-results: tool-results,
+                stop-reason: reply.stop-reason,
+                usage: reply.usage,
+            }
+
+            if-err(::hot::stream/data(data-type, payload), null)
+            null
+        }
+    }
+}
+
+run-loop-step
+meta { doc: """Internal: one iteration of `run-loop`. Tail-recursive.""" }
+fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int): Str {
+    lte(remaining, 0) => {
+        fail(`run-loop exceeded max-iterations`, {messages: messages})
+    }
+    => {
+        max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
+        iteration add(sub(max-iter, remaining), 1)
+        check-budget(opts, messages, tools)
+        reply opts.chat-fn(opts.model, messages, opts.system, tools)
+        calls or(reply.tool-calls, [])
+        cond {
+            is-empty(calls) => {
+                emit-step(opts, iteration, reply, null)
+                or(reply.text, "")
+            }
+            => {
+                results map(calls, (call) { ::tool/dispatch(tools, call) })
+                emit-step(opts, iteration, reply, results)
+                tool-msgs map(results, tool-result-message)
+                next-messages concat(
+                    messages,
+                    [assistant-message(reply.text, calls)],
+                    tool-msgs
+                )
+                run-loop-step(opts, next-messages, tools, sub(remaining, 1))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Streaming run loop
+// ============================================================================
+
+run-loop-stream
+meta {
+    doc: """
+    Streaming counterpart to `run-loop`. Drives a tools-aware
+    conversation through any number of turns, invoking
+    `on-delta(delta: ReplyDelta)` for every event the underlying
+    `chat-stream-fn` emits across all turns.
+
+    `opts.chat-stream-fn` must match the streaming contract:
+
+    ```
+    (model: Str, messages: Vec<Message>, system: Str?,
+     tools: Vec<Tool>?, on-delta: Fn) -> ChatReply
+    ```
+
+    On each iteration the function:
+
+    1. Calls `chat-stream-fn` with the running message list and a
+       merged on-delta that also forwards to `::hot::stream/data`
+       when `opts.emit-stream-deltas` is on.
+    2. Collects the final `ChatReply`. If no tool calls, returns
+       the accumulated text.
+    3. Otherwise dispatches every tool call via `::ai::tool/dispatch`,
+       appends the assistant turn + tool-result turns, and loops.
+
+    Errors and `max-iterations` behavior match `run-loop`.
+
+    **Example**
+
+    ```hot
+    on-token (delta: ::ai::chat/ReplyDelta) {
+        match delta {
+            ::ai::chat/ReplyDelta.TextDelta => { print(delta.text) }
+            => { null }
+        }
+    }
+
+    opts ::ai::chat/ChatOptions({
+        chat-stream-fn: ::anthropic::chat-tools/chat-with-tools-stream,
+        model: "claude-sonnet-4-5",
+        tools: [::ai::tool/from-fn(add)]
+    })
+
+    answer ::ai::chat/run-loop-stream(opts, "What is 17 + 25?", on-token)
+    ```
+    """
+}
+fn
+(opts: ChatOptions, user-msg: Str): Str {
+    run-loop-stream-messages(opts, [user-message(user-msg)], null)
+},
+(opts: ChatOptions, user-msg: Str, on-delta: Fn?): Str {
+    run-loop-stream-messages(opts, [user-message(user-msg)], on-delta)
+}
+
+run-loop-stream-messages
+meta {
+    doc: """
+    Variant of `run-loop-stream` that takes an explicit
+    `Vec<Message>` as starting history. Useful for resuming an
+    existing conversation while still streaming the next response.
+    """
+}
+fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
+    max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
+    base-tools or(opts.tools, [])
+    resolver ::ai::skill/effective-resolver(opts.skill-resolver, opts.skills)
+
+    skill-ctx {messages: messages, system: opts.system, model: opts.model}
+    indexed-skills cond {
+        is-null(resolver) => { [] }
+        => { resolver.list-fn(skill-ctx) }
+    }
+
+    tools cond {
+        is-null(resolver) => { base-tools }
+        => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver)) }
+    }
+
+    effective-system cond {
+        is-empty(indexed-skills) => { opts.system }
+        => {
+            index ::ai::skill/build-index(indexed-skills)
+            cond {
+                is-null(opts.system) => { index }
+                is-empty(opts.system) => { index }
+                => { `${opts.system}\n\n${index}` }
+            }
+        }
+    }
+
+    effective-on-delta wrap-on-delta(opts, on-delta)
+    run-loop-stream-step(
+        ChatOptions({...untype(opts), system: effective-system}),
+        messages,
+        tools,
+        max-iter,
+        effective-on-delta
+    )
+}
+
+run-loop-stream-step
+meta { doc: """Internal: one iteration of `run-loop-stream`. Tail-recursive.""" }
+fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int, on-delta: Fn): Str {
+    lte(remaining, 0) => {
+        fail(`run-loop-stream exceeded max-iterations`, {messages: messages})
+    }
+    => {
+        max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
+        iteration add(sub(max-iter, remaining), 1)
+        check-budget(opts, messages, tools)
+        reply opts.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+        calls or(reply.tool-calls, [])
+        cond {
+            is-empty(calls) => {
+                emit-step(opts, iteration, reply, null)
+                or(reply.text, "")
+            }
+            => {
+                results map(calls, (call) { ::tool/dispatch(tools, call) })
+                emit-step(opts, iteration, reply, results)
+                tool-msgs map(results, tool-result-message)
+                next-messages concat(
+                    messages,
+                    [assistant-message(reply.text, calls)],
+                    tool-msgs
+                )
+                run-loop-stream-step(opts, next-messages, tools, sub(remaining, 1), on-delta)
+            }
+        }
+    }
+}

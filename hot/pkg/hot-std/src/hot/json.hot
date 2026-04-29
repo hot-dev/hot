@@ -1,0 +1,47 @@
+::hot::json ns
+meta {doc: """JSON serialization and deserialization."""}
+
+to-json
+meta {
+    core: true,
+    doc: """
+    Serialize a value to a JSON string.
+
+    **Example**
+
+    ```hot
+    to-json({"name": "Alice", "age": 30})
+    // "{\"name\":\"Alice\",\"age\":30}"
+
+    to-json([1, 2, 3])   // "[1,2,3]"
+    to-json(true)        // "true"
+    to-json(null)        // "null"
+    ```
+    """
+}
+fn (value: Any): Str {
+    call-lib(::hot::json/to-json, [value])
+}
+
+
+from-json
+meta {
+    core: true,
+    doc: """
+    Deserialize a JSON string to a value.
+
+    **Example**
+
+    ```hot
+    from-json("{\"name\":\"Alice\"}")
+    // {"name": "Alice"}
+
+    from-json("[1,2,3]")   // [1, 2, 3]
+    from-json("true")      // true
+    from-json("null")      // null
+    ```
+    """
+}
+fn (value: Str): Any {
+    call-lib(::hot::json/from-json, [value])
+}

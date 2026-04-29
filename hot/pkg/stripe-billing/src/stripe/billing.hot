@@ -1,0 +1,4500 @@
+::stripe::stripe::billing ns
+
+api-request ::stripe::api/request
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+PortalSubscriptionCancellationReason type {
+    enabled: Bool,
+    options: Vec<"customer_service" | "low_quality" | "missing_features" | "other" | "switched_service" | "too_complex" | "too_expensive" | "unused">
+}
+
+PortalCustomerUpdate type {
+    allowed_updates: Vec<"address" | "email" | "name" | "phone" | "shipping" | "tax_id">,
+    enabled: Bool
+}
+
+Invoice type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflows type {
+    inputs: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs?
+}
+
+PaymentMethodSatispay type {
+
+}
+
+DiscountsResourceDiscountAmount type {
+    amount: Int,
+    discount: Any
+}
+
+PortalPaymentMethodUpdate type {
+    enabled: Bool,
+    payment_method_configuration: Str?
+}
+
+DeletedInvoiceitem type {
+    deleted: Bool,
+    id: Str,
+    object: "invoiceitem"
+}
+
+PaymentMethodCard type {
+    brand: Str,
+    checks: Any?,
+    country: Str?,
+    display_brand: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    generated_from: Any?,
+    last4: Str,
+    networks: Any?,
+    regulated_status: "regulated" | "unregulated"?,
+    three_d_secure_usage: Any?,
+    wallet: Any?
+}
+
+PaymentMethodLink type {
+    email: Str?
+}
+
+PaymentMethodPix type {
+
+}
+
+BillingMeterResourceBillingMeterValue type {
+    event_payload_key: Str
+}
+
+PaymentMethodCashapp type {
+    buyer_id: Str?,
+    cashtag: Str?
+}
+
+BillingCreditGrantsResourceApplicablePrice type {
+    id: Str?
+}
+
+LineItemsDiscountAmount type {
+    amount: Int,
+    discount: Discount
+}
+
+InvoicesPaymentsInvoicePaymentAssociatedPayment type {
+    charge: Any?,
+    payment_intent: Any?,
+    payment_record: Any?,
+    type: "charge" | "payment_intent" | "payment_record"
+}
+
+InvoicesResourcePretaxCreditAmount type {
+    amount: Int,
+    credit_balance_transaction: Any?,
+    discount: Any?,
+    type: "credit_balance_transaction" | "discount"
+}
+
+ApiErrors type {
+    advice_code: Str?,
+    charge: Str?,
+    code: Str?,
+    decline_code: Str?,
+    doc_url: Str?,
+    message: Str?,
+    network_advice_code: Str?,
+    network_decline_code: Str?,
+    param: Str?,
+    payment_intent: PaymentIntent?,
+    payment_method: PaymentMethod?,
+    payment_method_type: Str?,
+    request_log_url: Str?,
+    setup_intent: SetupIntent?,
+    source: Any?,
+    type: "api_error" | "card_error" | "idempotency_error" | "invalid_request_error"
+}
+
+PaymentMethodGrabpay type {
+
+}
+
+QuotesResourceComputed type {
+    recurring: Any?,
+    upfront: QuotesResourceUpfront
+}
+
+PaymentMethodAmazonPay type {
+
+}
+
+InvoicesResourceStatusTransitions type {
+    finalized_at: Int?,
+    marked_uncollectible_at: Int?,
+    paid_at: Int?,
+    voided_at: Int?
+}
+
+PaymentMethodCrypto type {
+
+}
+
+InvoiceSettingQuoteSetting type {
+    days_until_due: Int?,
+    issuer: ConnectAccountReference
+}
+
+Quote type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+BillingAlert type {
+    alert_type: "usage_threshold",
+    id: Str,
+    livemode: Bool,
+    object: "billing.alert",
+    status: "active" | "archived" | "inactive"?,
+    title: Str,
+    usage_threshold: Any?
+}
+
+PaymentMethodWechatPay type {
+
+}
+
+BillingCreditGrant type {
+    amount: BillingCreditGrantsResourceAmount,
+    applicability_config: BillingCreditGrantsResourceApplicabilityConfig,
+    category: "paid" | "promotional",
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    effective_at: Int?,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    name: Str?,
+    object: "billing.credit_grant",
+    priority: Int?,
+    test_clock: Any?,
+    updated: Int,
+    voided_at: Int?
+}
+
+InvoiceItemThresholdReason type {
+    line_item_ids: Vec<Str>,
+    usage_gte: Int
+}
+
+PaymentMethodCustomerBalance type {
+
+}
+
+PaymentMethodPaypal type {
+    country: Str?,
+    payer_email: Str?,
+    payer_id: Str?
+}
+
+BillingBillResourceInvoicingTaxesTax type {
+    amount: Int,
+    tax_behavior: "exclusive" | "inclusive",
+    tax_rate_details: Any?,
+    taxability_reason: "customer_exempt" | "not_available" | "not_collecting" | "not_subject_to_tax" | "not_supported" | "portion_product_exempt" | "portion_reduced_rated" | "portion_standard_rated" | "product_exempt" | "product_exempt_holiday" | "proportionally_rated" | "reduced_rated" | "reverse_charge" | "standard_rated" | "taxable_basis_reduced" | "zero_rated",
+    taxable_amount: Int?,
+    type: "tax_rate_details"
+}
+
+PaymentMethodSofort type {
+    country: Str?
+}
+
+QuotesResourceSubscriptionDataBillingMode type {
+    flexible: SubscriptionsResourceBillingModeFlexible?,
+    type: "classic" | "flexible"
+}
+
+PaymentMethodUsBankAccount type {
+    account_holder_type: "company" | "individual"?,
+    account_type: "checking" | "savings"?,
+    bank_name: Str?,
+    financial_connections_account: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    networks: Any?,
+    routing_number: Str?,
+    status_details: Any?
+}
+
+RadarRadarOptions type {
+    session: Str?
+}
+
+PaymentMethodAffirm type {
+
+}
+
+PortalResourceScheduleUpdateAtPeriodEndCondition type {
+    type: "decreasing_item_amount" | "shortening_interval"
+}
+
+CreditNoteRefund type {
+    amount_refunded: Int,
+    payment_record_refund: Any?,
+    refund: Any,
+    type: "payment_record_refund" | "refund"?
+}
+
+SubscriptionsResourceBillingModeFlexible type {
+    proration_discounts: "included" | "itemized"?
+}
+
+InvoiceThresholdReason type {
+    amount_gte: Int?,
+    item_reasons: Vec<InvoiceItemThresholdReason>
+}
+
+PaymentMethodAcssDebit type {
+    bank_name: Str?,
+    fingerprint: Str?,
+    institution_number: Str?,
+    last4: Str?,
+    transit_number: Str?
+}
+
+PortalBusinessProfile type {
+    headline: Str?,
+    privacy_policy_url: Str?,
+    terms_of_service_url: Str?
+}
+
+BillingMeter type {
+    created: Int,
+    customer_mapping: BillingMeterResourceCustomerMappingSettings,
+    default_aggregation: BillingMeterResourceAggregationSettings,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    id: Str,
+    livemode: Bool,
+    object: "billing.meter",
+    status: "active" | "inactive",
+    status_transitions: BillingMeterResourceBillingMeterStatusTransitions,
+    updated: Int,
+    value_settings: BillingMeterResourceBillingMeterValue
+}
+
+InvoicePayment type {
+    amount_paid: Int?,
+    amount_requested: Int,
+    created: Int,
+    currency: Str,
+    id: Str,
+    invoice: Any,
+    is_default: Bool,
+    livemode: Bool,
+    object: "invoice_payment",
+    payment: InvoicesPaymentsInvoicePaymentAssociatedPayment,
+    status: Str,
+    status_transitions: InvoicesPaymentsInvoicePaymentStatusTransitions
+}
+
+DeletedInvoice type {
+    deleted: Bool,
+    id: Str,
+    object: "invoice"
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs type {
+    tax: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax?
+}
+
+BillingCreditGrantsResourceAmount type {
+    monetary: Any?,
+    type: "monetary"
+}
+
+QuotesResourceTotalDetailsResourceBreakdown type {
+    discounts: Vec<LineItemsDiscountAmount>,
+    taxes: Vec<LineItemsTaxAmount>
+}
+
+InvoicesResourceInvoiceTaxId type {
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str?
+}
+
+PortalInvoiceList type {
+    enabled: Bool
+}
+
+BillingMeterEventAdjustment type {
+    cancel: Any?,
+    event_name: Str,
+    livemode: Bool,
+    object: "billing.meter_event_adjustment",
+    status: "complete" | "pending",
+    type: "cancel"
+}
+
+PaymentMethodTwint type {
+
+}
+
+Item type {
+    amount_discount: Int,
+    amount_subtotal: Int,
+    amount_tax: Int,
+    amount_total: Int,
+    currency: Str,
+    description: Str?,
+    discounts: Vec<LineItemsDiscountAmount>?,
+    id: Str,
+    metadata: Map?,
+    object: "item",
+    price: Any?,
+    quantity: Int?,
+    taxes: Vec<LineItemsTaxAmount>?
+}
+
+LineItem type {
+    amount: Int,
+    currency: Str,
+    description: Str?,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    discountable: Bool,
+    discounts: Vec,
+    id: Str,
+    invoice: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "line_item",
+    parent: Any?,
+    period: InvoiceLineItemPeriod,
+    pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    pricing: Any?,
+    quantity: Int?,
+    subscription: Any?,
+    subtotal: Int,
+    taxes: Vec<BillingBillResourceInvoicingTaxesTax>?
+}
+
+PortalSubscriptionCancel type {
+    cancellation_reason: PortalSubscriptionCancellationReason,
+    enabled: Bool,
+    mode: "at_period_end" | "immediately",
+    proration_behavior: "always_invoice" | "create_prorations" | "none"
+}
+
+PaymentFlowsPrivatePaymentMethodsAlipay type {
+
+}
+
+PaymentMethodMultibanco type {
+
+}
+
+ConnectAccountReference type {
+    account: Any?,
+    type: "account" | "self"
+}
+
+PaymentMethodP24 type {
+    bank: "alior_bank" | "bank_millennium" | "bank_nowy_bfg_sa" | "bank_pekao_sa" | "banki_spbdzielcze" | "blik" | "bnp_paribas" | "boz" | "citi_handlowy" | "credit_agricole" | "envelobank" | "etransfer_pocztowy24" | "getin_bank" | "ideabank" | "ing" | "inteligo" | "mbank_mtransfer" | "nest_przelew" | "noble_pay" | "pbac_z_ipko" | "plus_bank" | "santander_przelew24" | "tmobile_usbugi_bankowe" | "toyota_bank" | "velobank" | "volkswagen_bank"?
+}
+
+PaymentMethodPromptpay type {
+
+}
+
+PaymentMethodEps type {
+    bank: "arzte_und_apotheker_bank" | "austrian_anadi_bank_ag" | "bank_austria" | "bankhaus_carl_spangler" | "bankhaus_schelhammer_und_schattera_ag" | "bawag_psk_ag" | "bks_bank_ag" | "brull_kallmus_bank_ag" | "btv_vier_lander_bank" | "capital_bank_grawe_gruppe_ag" | "deutsche_bank_ag" | "dolomitenbank" | "easybank_ag" | "erste_bank_und_sparkassen" | "hypo_alpeadriabank_international_ag" | "hypo_bank_burgenland_aktiengesellschaft" | "hypo_noe_lb_fur_niederosterreich_u_wien" | "hypo_oberosterreich_salzburg_steiermark" | "hypo_tirol_bank_ag" | "hypo_vorarlberg_bank_ag" | "marchfelder_bank" | "oberbank_ag" | "raiffeisen_bankengruppe_osterreich" | "schoellerbank_ag" | "sparda_bank_wien" | "volksbank_gruppe" | "volkskreditbank_ag" | "vr_bank_braunau"?
+}
+
+SetupIntent type {
+    application: Any?,
+    attach_to_self: Bool?,
+    automatic_payment_methods: Any?,
+    cancellation_reason: "abandoned" | "duplicate" | "requested_by_customer"?,
+    client_secret: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    flow_directions: Vec<"inbound" | "outbound">?,
+    id: Str,
+    last_setup_error: Any?,
+    latest_attempt: Any?,
+    livemode: Bool,
+    mandate: Any?,
+    metadata: Map?,
+    next_action: Any?,
+    object: "setup_intent",
+    on_behalf_of: Any?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>,
+    single_use_mandate: Any?,
+    status: "canceled" | "processing" | "requires_action" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    usage: Str
+}
+
+PaymentMethodIdeal type {
+    bank: "abn_amro" | "asn_bank" | "bunq" | "buut" | "finom" | "handelsbanken" | "ing" | "knab" | "mollie" | "moneyou" | "n26" | "nn" | "rabobank" | "regiobank" | "revolut" | "sns_bank" | "triodos_bank" | "van_lanschot" | "yoursafe"?,
+    bic: "ABNANL2A" | "ASNBNL21" | "BITSNL2A" | "BUNQNL2A" | "BUUTNL2A" | "FNOMNL22" | "FVLBNL22" | "HANDNL2A" | "INGBNL2A" | "KNABNL2H" | "MLLENL2A" | "MOYONL21" | "NNBANL2G" | "NTSBDEB1" | "RABONL2U" | "RBRBNL21" | "REVOIE23" | "REVOLT21" | "SNSBNL2A" | "TRIONL2U"?
+}
+
+BillingDetails type {
+    address: Any?,
+    email: Str?,
+    name: Str?,
+    phone: Str?,
+    tax_id: Str?
+}
+
+PaymentMethodBancontact type {
+
+}
+
+ProrationDetails type {
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>
+}
+
+PaymentMethodMbWay type {
+
+}
+
+PaymentMethodSamsungPay type {
+
+}
+
+PaymentMethodSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    generated_from: Any?,
+    last4: Str?
+}
+
+PaymentMethodNaverPay type {
+    buyer_id: Str?,
+    funding: "card" | "points"
+}
+
+Error type {
+    error: ApiErrors
+}
+
+PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet type {
+    type: "apple_pay" | "google_pay" | "samsung_pay" | "unknown"
+}
+
+InvoiceRenderingTemplate type {
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    nickname: Str?,
+    object: "invoice_rendering_template",
+    status: "active" | "archived",
+    version: Int
+}
+
+BillingMeterEvent type {
+    created: Int,
+    event_name: Str,
+    identifier: Str,
+    livemode: Bool,
+    object: "billing.meter_event",
+    payload: Map,
+    timestamp: Int
+}
+
+BillingCreditBalanceTransaction type {
+    created: Int,
+    credit: Any?,
+    credit_grant: Any,
+    debit: Any?,
+    effective_at: Int,
+    id: Str,
+    livemode: Bool,
+    object: "billing.credit_balance_transaction",
+    test_clock: Any?,
+    type: "credit" | "debit"?
+}
+
+BillingMeterEventSummary type {
+    aggregated_value: Dec,
+    end_time: Int,
+    id: Str,
+    livemode: Bool,
+    meter: Str,
+    object: "billing.meter_event_summary",
+    start_time: Int
+}
+
+PaymentMethodRevolutPay type {
+
+}
+
+InvoiceLineItemPeriod type {
+    end: Int,
+    start: Int
+}
+
+PaymentMethodPayto type {
+    bsb_number: Str?,
+    last4: Str?,
+    pay_id: Str?
+}
+
+PaymentMethodPayco type {
+
+}
+
+PaymentMethodOxxo type {
+
+}
+
+QuotesResourceSubscriptionDataSubscriptionData type {
+    billing_mode: QuotesResourceSubscriptionDataBillingMode,
+    description: Str?,
+    effective_date: Int?,
+    metadata: Map?,
+    trial_period_days: Int?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax type {
+    calculation: Str
+}
+
+PaymentMethodAlma type {
+
+}
+
+PaymentMethodPaynow type {
+
+}
+
+PaymentMethodBacsDebit type {
+    fingerprint: Str?,
+    last4: Str?,
+    sort_code: Str?
+}
+
+PaymentMethodBoleto type {
+    tax_id: Str
+}
+
+PaymentMethodCustom type {
+    display_name: Str?,
+    logo: Any?,
+    type: Str
+}
+
+CreditBalance type {
+    available_balance: BillingCreditGrantsResourceAmount,
+    ledger_balance: BillingCreditGrantsResourceAmount
+}
+
+QuotesResourceStatusTransitions type {
+    accepted_at: Int?,
+    canceled_at: Int?,
+    finalized_at: Int?
+}
+
+TaxRate type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+BillingPortalConfiguration type {
+    active: Bool,
+    application: Any?,
+    business_profile: PortalBusinessProfile,
+    created: Int,
+    default_return_url: Str?,
+    features: PortalFeatures,
+    id: Str,
+    is_default: Bool,
+    livemode: Bool,
+    login_page: PortalLoginPage,
+    metadata: Map?,
+    name: Str?,
+    object: "billing_portal.configuration",
+    updated: Int
+}
+
+PortalFeatures type {
+    customer_update: PortalCustomerUpdate,
+    invoice_history: PortalInvoiceList,
+    payment_method_update: PortalPaymentMethodUpdate,
+    subscription_cancel: PortalSubscriptionCancel,
+    subscription_update: PortalSubscriptionUpdate
+}
+
+PaymentMethod type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+PaymentMethodKonbini type {
+
+}
+
+PaymentMethodBillie type {
+
+}
+
+QuotesResourceUpfront type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    line_items: Map?,
+    total_details: QuotesResourceTotalDetails
+}
+
+BillingCreditGrantsResourceScope type {
+    price_type: "metered"?,
+    prices: Vec<BillingCreditGrantsResourceApplicablePrice>?
+}
+
+PaymentMethodAfterpayClearpay type {
+
+}
+
+PaymentMethodBlik type {
+
+}
+
+InvoicesPaymentSettings type {
+    default_mandate: Str?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<"ach_credit_transfer" | "ach_debit" | "acss_debit" | "affirm" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "boleto" | "card" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "jp_credit_transfer" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "multibanco" | "naver_pay" | "nz_bank_account" | "p24" | "payco" | "paynow" | "paypal" | "payto" | "promptpay" | "revolut_pay" | "sepa_credit_transfer" | "sepa_debit" | "sofort" | "swish" | "us_bank_account" | "wechat_pay">?
+}
+
+PaymentMethodMobilepay type {
+
+}
+
+PaymentMethodPayByBank type {
+
+}
+
+BillingCreditGrantsResourceApplicabilityConfig type {
+    scope: BillingCreditGrantsResourceScope
+}
+
+Discount type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    end: Int?,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+InvoiceSettingCustomField type {
+    name: Str,
+    value: Str
+}
+
+DiscountSource type {
+    coupon: Any?,
+    type: "coupon"
+}
+
+PaymentMethodZip type {
+
+}
+
+PaymentMethodInteracPresent type {
+    brand: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?
+}
+
+PaymentMethodNzBankAccount type {
+    account_holder_name: Str?,
+    bank_code: Str,
+    bank_name: Str,
+    branch_code: Str,
+    last4: Str,
+    suffix: Str?
+}
+
+PaymentMethodAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+PortalLoginPage type {
+    enabled: Bool,
+    url: Str?
+}
+
+PortalSubscriptionUpdateProductAdjustableQuantity type {
+    enabled: Bool,
+    maximum: Int?,
+    minimum: Int
+}
+
+QuotesResourceTotalDetails type {
+    amount_discount: Int,
+    amount_shipping: Int?,
+    amount_tax: Int,
+    breakdown: QuotesResourceTotalDetailsResourceBreakdown?
+}
+
+PaymentFlowsPaymentIntentPresentmentDetails type {
+    presentment_amount: Int,
+    presentment_currency: Str
+}
+
+PortalResourceScheduleUpdateAtPeriodEnd type {
+    conditions: Vec<PortalResourceScheduleUpdateAtPeriodEndCondition>
+}
+
+BillingPortalSession type {
+    configuration: Any,
+    created: Int,
+    customer: Str,
+    customer_account: Str?,
+    flow: Any?,
+    id: Str,
+    livemode: Bool,
+    locale: "auto" | "bg" | "cs" | "da" | "de" | "el" | "en" | "en-AU" | "en-CA" | "en-GB" | "en-IE" | "en-IN" | "en-NZ" | "en-SG" | "es" | "es-419" | "et" | "fi" | "fil" | "fr" | "fr-CA" | "hr" | "hu" | "id" | "it" | "ja" | "ko" | "lt" | "lv" | "ms" | "mt" | "nb" | "nl" | "pl" | "pt" | "pt-BR" | "ro" | "ru" | "sk" | "sl" | "sv" | "th" | "tr" | "vi" | "zh" | "zh-HK" | "zh-TW"?,
+    object: "billing_portal.session",
+    on_behalf_of: Str?,
+    return_url: Str?,
+    url: Str
+}
+
+BillingCreditBalanceSummary type {
+    balances: Vec<CreditBalance>,
+    customer: Any,
+    customer_account: Str?,
+    livemode: Bool,
+    object: "billing.credit_balance_summary"
+}
+
+LineItemsTaxAmount type {
+    amount: Int,
+    rate: TaxRate,
+    taxability_reason: "customer_exempt" | "not_collecting" | "not_subject_to_tax" | "not_supported" | "portion_product_exempt" | "portion_reduced_rated" | "portion_standard_rated" | "product_exempt" | "product_exempt_holiday" | "proportionally_rated" | "reduced_rated" | "reverse_charge" | "standard_rated" | "taxable_basis_reduced" | "zero_rated"?,
+    taxable_amount: Int?
+}
+
+PortalSubscriptionUpdate type {
+    billing_cycle_anchor: "now" | "unchanged"?,
+    default_allowed_updates: Vec<"price" | "promotion_code" | "quantity">,
+    enabled: Bool,
+    products: Vec<PortalSubscriptionUpdateProduct>?,
+    proration_behavior: "always_invoice" | "create_prorations" | "none",
+    schedule_at_period_end: PortalResourceScheduleUpdateAtPeriodEnd,
+    trial_update_behavior: "continue_trial" | "end_trial"
+}
+
+PaymentFlowsPaymentDetails type {
+    customer_reference: Str?,
+    order_reference: Str?
+}
+
+PaymentMethodKakaoPay type {
+
+}
+
+InvoicesPaymentsInvoicePaymentStatusTransitions type {
+    canceled_at: Int?,
+    paid_at: Int?
+}
+
+CreditNoteLineItem type {
+    amount: Int,
+    description: Str?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    id: Str,
+    invoice_line_item: Str?,
+    livemode: Bool,
+    object: "credit_note_line_item",
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    quantity: Int?,
+    tax_rates: Vec<TaxRate>,
+    taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "custom_line_item" | "invoice_line_item",
+    unit_amount: Int?,
+    unit_amount_decimal: Str?
+}
+
+PaymentMethodGiropay type {
+
+}
+
+BillingMeterResourceBillingMeterStatusTransitions type {
+    deactivated_at: Int?
+}
+
+PaymentMethodKrCard type {
+    brand: "bc" | "citi" | "hana" | "hyundai" | "jeju" | "jeonbuk" | "kakaobank" | "kbank" | "kdbbank" | "kookmin" | "kwangju" | "lotte" | "mg" | "nh" | "post" | "samsung" | "savingsbank" | "shinhan" | "shinhyup" | "suhyup" | "tossbank" | "woori"?,
+    last4: Str?
+}
+
+PaymentMethodFpx type {
+    bank: "affin_bank" | "agrobank" | "alliance_bank" | "ambank" | "bank_islam" | "bank_muamalat" | "bank_of_china" | "bank_rakyat" | "bsn" | "cimb" | "deutsche_bank" | "hong_leong_bank" | "hsbc" | "kfh" | "maybank2e" | "maybank2u" | "ocbc" | "pb_enterprise" | "public_bank" | "rhb" | "standard_chartered" | "uob"
+}
+
+BillingMeterResourceAggregationSettings type {
+    formula: "count" | "last" | "sum"
+}
+
+PaymentMethodSwish type {
+
+}
+
+QuotesResourceAutomaticTax type {
+    enabled: Bool,
+    liability: Any?,
+    provider: Str?,
+    status: "complete" | "failed" | "requires_location_inputs"?
+}
+
+CreditNotesPretaxCreditAmount type {
+    amount: Int,
+    credit_balance_transaction: Any?,
+    discount: Any?,
+    type: "credit_balance_transaction" | "discount"
+}
+
+PaymentIntent type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+PortalSubscriptionUpdateProduct type {
+    adjustable_quantity: PortalSubscriptionUpdateProductAdjustableQuantity,
+    prices: Vec<Str>,
+    product: Str
+}
+
+PaymentMethodCardPresent type {
+    brand: Str?,
+    brand_product: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    offline: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?,
+    wallet: PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet?
+}
+
+Invoiceitem type {
+    amount: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    date: Int,
+    description: Str?,
+    discountable: Bool,
+    discounts: Vec?,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    net_amount: Int?,
+    object: "invoiceitem",
+    parent: Any?,
+    period: InvoiceLineItemPeriod,
+    pricing: Any?,
+    proration: Bool,
+    proration_details: ProrationDetails?,
+    quantity: Int,
+    tax_rates: Vec<TaxRate>?,
+    test_clock: Any?
+}
+
+AutomaticTax type {
+    disabled_reason: "finalization_requires_location_inputs" | "finalization_system_error"?,
+    enabled: Bool,
+    liability: Any?,
+    provider: Str?,
+    status: "complete" | "failed" | "requires_location_inputs"?
+}
+
+BillingMeterResourceCustomerMappingSettings type {
+    event_payload_key: Str,
+    type: "by_id"
+}
+
+CreditNote type {
+    amount: Int,
+    amount_shipping: Int,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    customer_balance_transaction: Any?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    effective_at: Int?,
+    id: Str,
+    invoice: Any,
+    lines: Map,
+    livemode: Bool,
+    memo: Str?,
+    metadata: Map?,
+    number: Str,
+    object: "credit_note",
+    out_of_band_amount: Int?,
+    pdf: Str,
+    post_payment_amount: Int,
+    pre_payment_amount: Int,
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refunds: Vec<CreditNoteRefund>,
+    shipping_cost: Any?,
+    status: "issued" | "void",
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    total: Int,
+    total_excluding_tax: Int?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "mixed" | "post_payment" | "pre_payment",
+    voided_at: Int?
+}
+
+PaymentMethodKlarna type {
+    dob: Any?
+}
+
+GetBillingPortalConfigurationsRequest type {
+
+}
+
+GetBillingPortalConfigurationsResponse type {
+    data: Vec<BillingPortalConfiguration>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-portal-configurations
+meta {doc: """GET /v1/billing_portal/configurations - List portal configurations"""}
+fn (active: Str, ending-before: Str, expand: Str, is-default: Str, limit: Str, starting-after: Str, request: GetBillingPortalConfigurationsRequest): GetBillingPortalConfigurationsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing_portal/configurations?active=${active}&ending_before=${ending-before}&expand=${expand}&is_default=${is-default}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetBillingPortalConfigurationsResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingPortalConfigurationsRequest type {
+    business_profile: Map?,
+    default_return_url: Any?,
+    expand: Vec<Str>?,
+    features: Map,
+    login_page: Map?,
+    metadata: Map?,
+    name: Any?
+}
+
+PostBillingPortalConfigurationsResponse type {
+    active: Bool,
+    application: Any?,
+    business_profile: PortalBusinessProfile,
+    created: Int,
+    default_return_url: Str?,
+    features: PortalFeatures,
+    id: Str,
+    is_default: Bool,
+    livemode: Bool,
+    login_page: PortalLoginPage,
+    metadata: Map?,
+    name: Str?,
+    object: "billing_portal.configuration",
+    updated: Int
+}
+
+
+create-portal-configuration
+meta {
+    doc: """POST /v1/billing_portal/configurations - Create a portal configuration"""
+}
+fn (request: PostBillingPortalConfigurationsRequest): PostBillingPortalConfigurationsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing_portal/configurations`, {}, request)
+  if(is-ok-response(response), PostBillingPortalConfigurationsResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingPortalConfigurationsConfigurationRequest type {
+
+}
+
+GetBillingPortalConfigurationsConfigurationResponse type {
+    active: Bool,
+    application: Any?,
+    business_profile: PortalBusinessProfile,
+    created: Int,
+    default_return_url: Str?,
+    features: PortalFeatures,
+    id: Str,
+    is_default: Bool,
+    livemode: Bool,
+    login_page: PortalLoginPage,
+    metadata: Map?,
+    name: Str?,
+    object: "billing_portal.configuration",
+    updated: Int
+}
+
+
+retrieve-portal-configuration
+meta {
+    doc: """GET /v1/billing_portal/configurations/{configuration} - Retrieve a portal configuration"""
+}
+fn (configuration: Str, expand: Str, request: GetBillingPortalConfigurationsConfigurationRequest): GetBillingPortalConfigurationsConfigurationResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing_portal/configurations/${configuration}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBillingPortalConfigurationsConfigurationResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingPortalConfigurationsConfigurationRequest type {
+    active: Bool?,
+    business_profile: Map?,
+    default_return_url: Any?,
+    expand: Vec<Str>?,
+    features: Map?,
+    login_page: Map?,
+    metadata: Any?,
+    name: Any?
+}
+
+PostBillingPortalConfigurationsConfigurationResponse type {
+    active: Bool,
+    application: Any?,
+    business_profile: PortalBusinessProfile,
+    created: Int,
+    default_return_url: Str?,
+    features: PortalFeatures,
+    id: Str,
+    is_default: Bool,
+    livemode: Bool,
+    login_page: PortalLoginPage,
+    metadata: Map?,
+    name: Str?,
+    object: "billing_portal.configuration",
+    updated: Int
+}
+
+
+update-portal-configuration
+meta {
+    doc: """POST /v1/billing_portal/configurations/{configuration} - Update a portal configuration"""
+}
+fn (configuration: Str, request: PostBillingPortalConfigurationsConfigurationRequest): PostBillingPortalConfigurationsConfigurationResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing_portal/configurations/${configuration}`, {}, request)
+  if(is-ok-response(response), PostBillingPortalConfigurationsConfigurationResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingPortalSessionsRequest type {
+    configuration: Str?,
+    customer: Str?,
+    customer_account: Str?,
+    expand: Vec<Str>?,
+    flow_data: Map?,
+    locale: "auto" | "bg" | "cs" | "da" | "de" | "el" | "en" | "en-AU" | "en-CA" | "en-GB" | "en-IE" | "en-IN" | "en-NZ" | "en-SG" | "es" | "es-419" | "et" | "fi" | "fil" | "fr" | "fr-CA" | "hr" | "hu" | "id" | "it" | "ja" | "ko" | "lt" | "lv" | "ms" | "mt" | "nb" | "nl" | "pl" | "pt" | "pt-BR" | "ro" | "ru" | "sk" | "sl" | "sv" | "th" | "tr" | "vi" | "zh" | "zh-HK" | "zh-TW"?,
+    on_behalf_of: Str?,
+    return_url: Str?
+}
+
+PostBillingPortalSessionsResponse type {
+    configuration: Any,
+    created: Int,
+    customer: Str,
+    customer_account: Str?,
+    flow: Any?,
+    id: Str,
+    livemode: Bool,
+    locale: "auto" | "bg" | "cs" | "da" | "de" | "el" | "en" | "en-AU" | "en-CA" | "en-GB" | "en-IE" | "en-IN" | "en-NZ" | "en-SG" | "es" | "es-419" | "et" | "fi" | "fil" | "fr" | "fr-CA" | "hr" | "hu" | "id" | "it" | "ja" | "ko" | "lt" | "lv" | "ms" | "mt" | "nb" | "nl" | "pl" | "pt" | "pt-BR" | "ro" | "ru" | "sk" | "sl" | "sv" | "th" | "tr" | "vi" | "zh" | "zh-HK" | "zh-TW"?,
+    object: "billing_portal.session",
+    on_behalf_of: Str?,
+    return_url: Str?,
+    url: Str
+}
+
+
+create-portal-session
+meta {doc: """POST /v1/billing_portal/sessions - Create a portal session"""}
+fn (request: PostBillingPortalSessionsRequest): PostBillingPortalSessionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing_portal/sessions`, {}, request)
+  if(is-ok-response(response), PostBillingPortalSessionsResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoicePaymentsRequest type {
+
+}
+
+GetInvoicePaymentsResponse type {
+    data: Vec<InvoicePayment>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-payments-invoice
+meta {doc: """GET /v1/invoice_payments - List all payments for an invoice"""}
+fn (created: Str, ending-before: Str, expand: Str, invoice: Str, limit: Str, payment: Str, starting-after: Str, status: Str, request: GetInvoicePaymentsRequest): GetInvoicePaymentsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoice_payments?created=${created}&ending_before=${ending-before}&expand=${expand}&invoice=${invoice}&limit=${limit}&payment=${payment}&starting_after=${starting-after}&status=${status}`, {}, request)
+  if(is-ok-response(response), GetInvoicePaymentsResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoicePaymentsInvoicePaymentRequest type {
+
+}
+
+GetInvoicePaymentsInvoicePaymentResponse type {
+    amount_paid: Int?,
+    amount_requested: Int,
+    created: Int,
+    currency: Str,
+    id: Str,
+    invoice: Any,
+    is_default: Bool,
+    livemode: Bool,
+    object: "invoice_payment",
+    payment: InvoicesPaymentsInvoicePaymentAssociatedPayment,
+    status: Str,
+    status_transitions: InvoicesPaymentsInvoicePaymentStatusTransitions
+}
+
+
+retrieve-invoicepayment
+meta {
+    doc: """GET /v1/invoice_payments/{invoice_payment} - Retrieve an InvoicePayment"""
+}
+fn (invoice-payment: Str, expand: Str, request: GetInvoicePaymentsInvoicePaymentRequest): GetInvoicePaymentsInvoicePaymentResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoice_payments/${invoice-payment}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetInvoicePaymentsInvoicePaymentResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoicesRequest type {
+
+}
+
+GetInvoicesResponse type {
+    data: Vec<Invoice>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-invoices
+meta {doc: """GET /v1/invoices - List all invoices"""}
+fn (collection-method: Str, created: Str, customer: Str, customer-account: Str, due-date: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, subscription: Str, request: GetInvoicesRequest): GetInvoicesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoices?collection_method=${collection-method}&created=${created}&customer=${customer}&customer_account=${customer-account}&due_date=${due-date}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}&subscription=${subscription}`, {}, request)
+  if(is-ok-response(response), GetInvoicesResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesRequest type {
+    account_tax_ids: Any?,
+    application_fee_amount: Int?,
+    auto_advance: Bool?,
+    automatic_tax: Map?,
+    automatically_finalizes_at: Int?,
+    collection_method: "charge_automatically" | "send_invoice"?,
+    currency: Str?,
+    custom_fields: Any?,
+    customer: Str?,
+    customer_account: Str?,
+    days_until_due: Int?,
+    default_payment_method: Str?,
+    default_source: Str?,
+    default_tax_rates: Vec<Str>?,
+    description: Str?,
+    discounts: Any?,
+    due_date: Int?,
+    effective_at: Int?,
+    expand: Vec<Str>?,
+    footer: Str?,
+    from_invoice: Map?,
+    issuer: Map?,
+    metadata: Any?,
+    number: Str?,
+    on_behalf_of: Str?,
+    payment_settings: Map?,
+    pending_invoice_items_behavior: "exclude" | "include"?,
+    rendering: Map?,
+    shipping_cost: Map?,
+    shipping_details: Map?,
+    statement_descriptor: Str?,
+    subscription: Str?,
+    transfer_data: Map?
+}
+
+PostInvoicesResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+create-invoice
+meta {doc: """POST /v1/invoices - Create an invoice"""}
+fn (request: PostInvoicesRequest): PostInvoicesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices`, {}, request)
+  if(is-ok-response(response), PostInvoicesResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesCreatePreviewRequest type {
+    automatic_tax: Map?,
+    currency: Str?,
+    customer: Str?,
+    customer_account: Str?,
+    customer_details: Map?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    invoice_items: Vec<Map>?,
+    issuer: Map?,
+    on_behalf_of: Any?,
+    preview_mode: "next" | "recurring"?,
+    schedule: Str?,
+    schedule_details: Map?,
+    subscription: Str?,
+    subscription_details: Map?
+}
+
+PostInvoicesCreatePreviewResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+create-preview-invoice
+meta {doc: """POST /v1/invoices/create_preview - Create a preview invoice"""}
+fn (request: PostInvoicesCreatePreviewRequest): PostInvoicesCreatePreviewResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/create_preview`, {}, request)
+  if(is-ok-response(response), PostInvoicesCreatePreviewResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoicesSearchRequest type {
+
+}
+
+GetInvoicesSearchResponse type {
+    data: Vec<Invoice>,
+    has_more: Bool,
+    next_page: Str?,
+    object: "search_result",
+    total_count: Int?,
+    url: Str
+}
+
+
+search-invoices
+meta {doc: """GET /v1/invoices/search - Search invoices"""}
+fn (expand: Str, limit: Str, page: Str, query: Str, request: GetInvoicesSearchRequest): GetInvoicesSearchResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoices/search?expand=${expand}&limit=${limit}&page=${page}&query=${query}`, {}, request)
+  if(is-ok-response(response), GetInvoicesSearchResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoicesInvoiceRequest type {
+
+}
+
+GetInvoicesInvoiceResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+retrieve-invoice
+meta {doc: """GET /v1/invoices/{invoice} - Retrieve an invoice"""}
+fn (invoice: Str, expand: Str, request: GetInvoicesInvoiceRequest): GetInvoicesInvoiceResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoices/${invoice}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetInvoicesInvoiceResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceRequest type {
+    account_tax_ids: Any?,
+    application_fee_amount: Int?,
+    auto_advance: Bool?,
+    automatic_tax: Map?,
+    automatically_finalizes_at: Int?,
+    collection_method: "charge_automatically" | "send_invoice"?,
+    custom_fields: Any?,
+    days_until_due: Int?,
+    default_payment_method: Str?,
+    default_source: Any?,
+    default_tax_rates: Any?,
+    description: Str?,
+    discounts: Any?,
+    due_date: Int?,
+    effective_at: Any?,
+    expand: Vec<Str>?,
+    footer: Str?,
+    issuer: Map?,
+    metadata: Any?,
+    number: Any?,
+    on_behalf_of: Any?,
+    payment_settings: Map?,
+    rendering: Map?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    statement_descriptor: Str?,
+    transfer_data: Any?
+}
+
+PostInvoicesInvoiceResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+update-invoice
+meta {doc: """POST /v1/invoices/{invoice} - Update an invoice"""}
+fn (invoice: Str, request: PostInvoicesInvoiceRequest): PostInvoicesInvoiceResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceResponse(response.body), err(HttpError(response)))
+}
+
+DeleteInvoicesInvoiceRequest type {
+
+}
+
+DeleteInvoicesInvoiceResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "invoice"
+}
+
+
+delete-draft-invoice
+meta {doc: """DELETE /v1/invoices/{invoice} - Delete a draft invoice"""}
+fn (invoice: Str, request: DeleteInvoicesInvoiceRequest): DeleteInvoicesInvoiceResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/invoices/${invoice}`, {}, request)
+  if(is-ok-response(response), DeleteInvoicesInvoiceResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceAddLinesRequest type {
+    expand: Vec<Str>?,
+    invoice_metadata: Any?,
+    lines: Vec<Map>
+}
+
+PostInvoicesInvoiceAddLinesResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+bulk-add-invoice-line-items
+meta {doc: """POST /v1/invoices/{invoice}/add_lines - Bulk add invoice line items"""}
+fn (invoice: Str, request: PostInvoicesInvoiceAddLinesRequest): PostInvoicesInvoiceAddLinesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/add_lines`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceAddLinesResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceAttachPaymentRequest type {
+    expand: Vec<Str>?,
+    payment_intent: Str?,
+    payment_record: Str?
+}
+
+PostInvoicesInvoiceAttachPaymentResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+attach-payment-invoice
+meta {
+    doc: """POST /v1/invoices/{invoice}/attach_payment - Attach a payment to an Invoice"""
+}
+fn (invoice: Str, request: PostInvoicesInvoiceAttachPaymentRequest): PostInvoicesInvoiceAttachPaymentResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/attach_payment`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceAttachPaymentResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceFinalizeRequest type {
+    auto_advance: Bool?,
+    expand: Vec<Str>?
+}
+
+PostInvoicesInvoiceFinalizeResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+finalize-invoice
+meta {doc: """POST /v1/invoices/{invoice}/finalize - Finalize an invoice"""}
+fn (invoice: Str, request: PostInvoicesInvoiceFinalizeRequest): PostInvoicesInvoiceFinalizeResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/finalize`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceFinalizeResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoicesInvoiceLinesRequest type {
+
+}
+
+GetInvoicesInvoiceLinesResponse type {
+    data: Vec<LineItem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-invoices-line-items
+meta {doc: """GET /v1/invoices/{invoice}/lines - Retrieve an invoice's line items"""}
+fn (invoice: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetInvoicesInvoiceLinesRequest): GetInvoicesInvoiceLinesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoices/${invoice}/lines?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetInvoicesInvoiceLinesResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceLinesLineItemIdRequest type {
+    amount: Int?,
+    description: Str?,
+    discountable: Bool?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    period: Map?,
+    price_data: Map?,
+    pricing: Map?,
+    quantity: Int?,
+    tax_amounts: Any?,
+    tax_rates: Any?
+}
+
+PostInvoicesInvoiceLinesLineItemIdResponse type {
+    amount: Int,
+    currency: Str,
+    description: Str?,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    discountable: Bool,
+    discounts: Vec,
+    id: Str,
+    invoice: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "line_item",
+    parent: Any?,
+    period: InvoiceLineItemPeriod,
+    pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    pricing: Any?,
+    quantity: Int?,
+    subscription: Any?,
+    subtotal: Int,
+    taxes: Vec<BillingBillResourceInvoicingTaxesTax>?
+}
+
+
+update-invoices-line-item
+meta {
+    doc: """POST /v1/invoices/{invoice}/lines/{line_item_id} - Update an invoice's line item"""
+}
+fn (invoice: Str, line-item-id: Str, request: PostInvoicesInvoiceLinesLineItemIdRequest): PostInvoicesInvoiceLinesLineItemIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/lines/${line-item-id}`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceLinesLineItemIdResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceMarkUncollectibleRequest type {
+    expand: Vec<Str>?
+}
+
+PostInvoicesInvoiceMarkUncollectibleResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+mark-invoice-as-uncollectible
+meta {
+    doc: """POST /v1/invoices/{invoice}/mark_uncollectible - Mark an invoice as uncollectible"""
+}
+fn (invoice: Str, request: PostInvoicesInvoiceMarkUncollectibleRequest): PostInvoicesInvoiceMarkUncollectibleResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/mark_uncollectible`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceMarkUncollectibleResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoicePayRequest type {
+    expand: Vec<Str>?,
+    forgive: Bool?,
+    mandate: Any?,
+    off_session: Bool?,
+    paid_out_of_band: Bool?,
+    payment_method: Str?,
+    source: Str?
+}
+
+PostInvoicesInvoicePayResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+pay-invoice
+meta {doc: """POST /v1/invoices/{invoice}/pay - Pay an invoice"""}
+fn (invoice: Str, request: PostInvoicesInvoicePayRequest): PostInvoicesInvoicePayResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/pay`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoicePayResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceRemoveLinesRequest type {
+    expand: Vec<Str>?,
+    invoice_metadata: Any?,
+    lines: Vec<Map>
+}
+
+PostInvoicesInvoiceRemoveLinesResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+bulk-remove-invoice-line-items
+meta {
+    doc: """POST /v1/invoices/{invoice}/remove_lines - Bulk remove invoice line items"""
+}
+fn (invoice: Str, request: PostInvoicesInvoiceRemoveLinesRequest): PostInvoicesInvoiceRemoveLinesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/remove_lines`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceRemoveLinesResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceSendRequest type {
+    expand: Vec<Str>?
+}
+
+PostInvoicesInvoiceSendResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+send-invoice-manual-payment
+meta {doc: """POST /v1/invoices/{invoice}/send - Send an invoice for manual payment"""}
+fn (invoice: Str, request: PostInvoicesInvoiceSendRequest): PostInvoicesInvoiceSendResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/send`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceSendResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceUpdateLinesRequest type {
+    expand: Vec<Str>?,
+    invoice_metadata: Any?,
+    lines: Vec<Map>
+}
+
+PostInvoicesInvoiceUpdateLinesResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+bulk-update-invoice-line-items
+meta {
+    doc: """POST /v1/invoices/{invoice}/update_lines - Bulk update invoice line items"""
+}
+fn (invoice: Str, request: PostInvoicesInvoiceUpdateLinesRequest): PostInvoicesInvoiceUpdateLinesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/update_lines`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceUpdateLinesResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoicesInvoiceVoidRequest type {
+    expand: Vec<Str>?
+}
+
+PostInvoicesInvoiceVoidResponse type {
+    account_country: Str?,
+    account_name: Str?,
+    account_tax_ids: Vec?,
+    amount_due: Int,
+    amount_overpaid: Int,
+    amount_paid: Int,
+    amount_remaining: Int,
+    amount_shipping: Int,
+    application: Any?,
+    attempt_count: Int,
+    attempted: Bool,
+    auto_advance: Bool,
+    automatic_tax: AutomaticTax,
+    automatically_finalizes_at: Int?,
+    billing_reason: "automatic_pending_invoice_item_invoice" | "manual" | "quote_accept" | "subscription" | "subscription_create" | "subscription_cycle" | "subscription_threshold" | "subscription_update" | "upcoming"?,
+    collection_method: "charge_automatically" | "send_invoice",
+    confirmation_secret: Any?,
+    created: Int,
+    currency: Str,
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    customer: Any,
+    customer_account: Str?,
+    customer_address: Any?,
+    customer_email: Str?,
+    customer_name: Str?,
+    customer_phone: Str?,
+    customer_shipping: Any?,
+    customer_tax_exempt: "exempt" | "none" | "reverse"?,
+    customer_tax_ids: Vec<InvoicesResourceInvoiceTaxId>?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>,
+    description: Str?,
+    discounts: Vec,
+    due_date: Int?,
+    effective_at: Int?,
+    ending_balance: Int?,
+    footer: Str?,
+    from_invoice: Any?,
+    hosted_invoice_url: Str?,
+    id: Str,
+    invoice_pdf: Str?,
+    issuer: ConnectAccountReference,
+    last_finalization_error: Any?,
+    latest_revision: Any?,
+    lines: Map,
+    livemode: Bool,
+    metadata: Map?,
+    next_payment_attempt: Int?,
+    number: Str?,
+    object: "invoice",
+    on_behalf_of: Any?,
+    parent: Any?,
+    payment_settings: InvoicesPaymentSettings,
+    payments: Map?,
+    period_end: Int,
+    period_start: Int,
+    post_payment_credit_notes_amount: Int,
+    pre_payment_credit_notes_amount: Int,
+    receipt_number: Str?,
+    rendering: Any?,
+    shipping_cost: Any?,
+    shipping_details: Any?,
+    starting_balance: Int,
+    statement_descriptor: Str?,
+    status: "draft" | "open" | "paid" | "uncollectible" | "void"?,
+    status_transitions: InvoicesResourceStatusTransitions,
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    test_clock: Any?,
+    threshold_reason: InvoiceThresholdReason?,
+    total: Int,
+    total_discount_amounts: Vec<DiscountsResourceDiscountAmount>?,
+    total_excluding_tax: Int?,
+    total_pretax_credit_amounts: Vec<InvoicesResourcePretaxCreditAmount>?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    webhooks_delivered_at: Int?
+}
+
+
+void-invoice
+meta {doc: """POST /v1/invoices/{invoice}/void - Void an invoice"""}
+fn (invoice: Str, request: PostInvoicesInvoiceVoidRequest): PostInvoicesInvoiceVoidResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/void`, {}, request)
+  if(is-ok-response(response), PostInvoicesInvoiceVoidResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoiceRenderingTemplatesRequest type {
+
+}
+
+GetInvoiceRenderingTemplatesResponse type {
+    data: Vec<InvoiceRenderingTemplate>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-invoice-rendering-templates
+meta {
+    doc: """GET /v1/invoice_rendering_templates - List all invoice rendering templates"""
+}
+fn (ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, request: GetInvoiceRenderingTemplatesRequest): GetInvoiceRenderingTemplatesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoice_rendering_templates?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}`, {}, request)
+  if(is-ok-response(response), GetInvoiceRenderingTemplatesResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoiceRenderingTemplatesTemplateRequest type {
+
+}
+
+GetInvoiceRenderingTemplatesTemplateResponse type {
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    nickname: Str?,
+    object: "invoice_rendering_template",
+    status: "active" | "archived",
+    version: Int
+}
+
+
+retrieve-invoice-rendering-template
+meta {
+    doc: """GET /v1/invoice_rendering_templates/{template} - Retrieve an invoice rendering template"""
+}
+fn (template: Str, expand: Str, version: Str, request: GetInvoiceRenderingTemplatesTemplateRequest): GetInvoiceRenderingTemplatesTemplateResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoice_rendering_templates/${template}?expand=${expand}&version=${version}`, {}, request)
+  if(is-ok-response(response), GetInvoiceRenderingTemplatesTemplateResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoiceRenderingTemplatesTemplateArchiveRequest type {
+    expand: Vec<Str>?
+}
+
+PostInvoiceRenderingTemplatesTemplateArchiveResponse type {
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    nickname: Str?,
+    object: "invoice_rendering_template",
+    status: "active" | "archived",
+    version: Int
+}
+
+
+archive-invoice-rendering-template
+meta {
+    doc: """POST /v1/invoice_rendering_templates/{template}/archive - Archive an invoice rendering template"""
+}
+fn (template: Str, request: PostInvoiceRenderingTemplatesTemplateArchiveRequest): PostInvoiceRenderingTemplatesTemplateArchiveResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoice_rendering_templates/${template}/archive`, {}, request)
+  if(is-ok-response(response), PostInvoiceRenderingTemplatesTemplateArchiveResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoiceRenderingTemplatesTemplateUnarchiveRequest type {
+    expand: Vec<Str>?
+}
+
+PostInvoiceRenderingTemplatesTemplateUnarchiveResponse type {
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    nickname: Str?,
+    object: "invoice_rendering_template",
+    status: "active" | "archived",
+    version: Int
+}
+
+
+unarchive-invoice-rendering-template
+meta {
+    doc: """POST /v1/invoice_rendering_templates/{template}/unarchive - Unarchive an invoice rendering template"""
+}
+fn (template: Str, request: PostInvoiceRenderingTemplatesTemplateUnarchiveRequest): PostInvoiceRenderingTemplatesTemplateUnarchiveResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoice_rendering_templates/${template}/unarchive`, {}, request)
+  if(is-ok-response(response), PostInvoiceRenderingTemplatesTemplateUnarchiveResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoiceitemsRequest type {
+
+}
+
+GetInvoiceitemsResponse type {
+    data: Vec<Invoiceitem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-invoice-items
+meta {doc: """GET /v1/invoiceitems - List all invoice items"""}
+fn (created: Str, customer: Str, customer-account: Str, ending-before: Str, expand: Str, invoice: Str, limit: Str, pending: Str, starting-after: Str, request: GetInvoiceitemsRequest): GetInvoiceitemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoiceitems?created=${created}&customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&invoice=${invoice}&limit=${limit}&pending=${pending}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetInvoiceitemsResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoiceitemsRequest type {
+    amount: Int?,
+    currency: Str?,
+    customer: Str?,
+    customer_account: Str?,
+    description: Str?,
+    discountable: Bool?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    invoice: Str?,
+    metadata: Any?,
+    period: Map?,
+    price_data: Map?,
+    pricing: Map?,
+    quantity: Int?,
+    subscription: Str?,
+    tax_behavior: "exclusive" | "inclusive" | "unspecified"?,
+    tax_code: Any?,
+    tax_rates: Vec<Str>?,
+    unit_amount_decimal: Str?
+}
+
+PostInvoiceitemsResponse type {
+    amount: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    date: Int,
+    description: Str?,
+    discountable: Bool,
+    discounts: Vec?,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    net_amount: Int?,
+    object: "invoiceitem",
+    parent: Any?,
+    period: InvoiceLineItemPeriod,
+    pricing: Any?,
+    proration: Bool,
+    proration_details: ProrationDetails?,
+    quantity: Int,
+    tax_rates: Vec<TaxRate>?,
+    test_clock: Any?
+}
+
+
+create-invoice-item
+meta {doc: """POST /v1/invoiceitems - Create an invoice item"""}
+fn (request: PostInvoiceitemsRequest): PostInvoiceitemsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoiceitems`, {}, request)
+  if(is-ok-response(response), PostInvoiceitemsResponse(response.body), err(HttpError(response)))
+}
+
+GetInvoiceitemsInvoiceitemRequest type {
+
+}
+
+GetInvoiceitemsInvoiceitemResponse type {
+    amount: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    date: Int,
+    description: Str?,
+    discountable: Bool,
+    discounts: Vec?,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    net_amount: Int?,
+    object: "invoiceitem",
+    parent: Any?,
+    period: InvoiceLineItemPeriod,
+    pricing: Any?,
+    proration: Bool,
+    proration_details: ProrationDetails?,
+    quantity: Int,
+    tax_rates: Vec<TaxRate>?,
+    test_clock: Any?
+}
+
+
+retrieve-invoice-item
+meta {doc: """GET /v1/invoiceitems/{invoiceitem} - Retrieve an invoice item"""}
+fn (invoiceitem: Str, expand: Str, request: GetInvoiceitemsInvoiceitemRequest): GetInvoiceitemsInvoiceitemResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoiceitems/${invoiceitem}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetInvoiceitemsInvoiceitemResponse(response.body), err(HttpError(response)))
+}
+
+PostInvoiceitemsInvoiceitemRequest type {
+    amount: Int?,
+    description: Str?,
+    discountable: Bool?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    period: Map?,
+    price_data: Map?,
+    pricing: Map?,
+    quantity: Int?,
+    tax_behavior: "exclusive" | "inclusive" | "unspecified"?,
+    tax_code: Any?,
+    tax_rates: Any?,
+    unit_amount_decimal: Str?
+}
+
+PostInvoiceitemsInvoiceitemResponse type {
+    amount: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    date: Int,
+    description: Str?,
+    discountable: Bool,
+    discounts: Vec?,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    net_amount: Int?,
+    object: "invoiceitem",
+    parent: Any?,
+    period: InvoiceLineItemPeriod,
+    pricing: Any?,
+    proration: Bool,
+    proration_details: ProrationDetails?,
+    quantity: Int,
+    tax_rates: Vec<TaxRate>?,
+    test_clock: Any?
+}
+
+
+update-invoice-item
+meta {doc: """POST /v1/invoiceitems/{invoiceitem} - Update an invoice item"""}
+fn (invoiceitem: Str, request: PostInvoiceitemsInvoiceitemRequest): PostInvoiceitemsInvoiceitemResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoiceitems/${invoiceitem}`, {}, request)
+  if(is-ok-response(response), PostInvoiceitemsInvoiceitemResponse(response.body), err(HttpError(response)))
+}
+
+DeleteInvoiceitemsInvoiceitemRequest type {
+
+}
+
+DeleteInvoiceitemsInvoiceitemResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "invoiceitem"
+}
+
+
+delete-invoice-item
+meta {doc: """DELETE /v1/invoiceitems/{invoiceitem} - Delete an invoice item"""}
+fn (invoiceitem: Str, request: DeleteInvoiceitemsInvoiceitemRequest): DeleteInvoiceitemsInvoiceitemResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/invoiceitems/${invoiceitem}`, {}, request)
+  if(is-ok-response(response), DeleteInvoiceitemsInvoiceitemResponse(response.body), err(HttpError(response)))
+}
+
+GetCreditNotesRequest type {
+
+}
+
+GetCreditNotesResponse type {
+    data: Vec<CreditNote>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-credit-notes
+meta {doc: """GET /v1/credit_notes - List all credit notes"""}
+fn (created: Str, customer: Str, customer-account: Str, ending-before: Str, expand: Str, invoice: Str, limit: Str, starting-after: Str, request: GetCreditNotesRequest): GetCreditNotesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/credit_notes?created=${created}&customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&invoice=${invoice}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCreditNotesResponse(response.body), err(HttpError(response)))
+}
+
+PostCreditNotesRequest type {
+    amount: Int?,
+    credit_amount: Int?,
+    effective_at: Int?,
+    email_type: "credit_note" | "none"?,
+    expand: Vec<Str>?,
+    invoice: Str,
+    lines: Vec<Map>?,
+    memo: Str?,
+    metadata: Map?,
+    out_of_band_amount: Int?,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refund_amount: Int?,
+    refunds: Vec<Map>?,
+    shipping_cost: Map?
+}
+
+PostCreditNotesResponse type {
+    amount: Int,
+    amount_shipping: Int,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    customer_balance_transaction: Any?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    effective_at: Int?,
+    id: Str,
+    invoice: Any,
+    lines: Map,
+    livemode: Bool,
+    memo: Str?,
+    metadata: Map?,
+    number: Str,
+    object: "credit_note",
+    out_of_band_amount: Int?,
+    pdf: Str,
+    post_payment_amount: Int,
+    pre_payment_amount: Int,
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refunds: Vec<CreditNoteRefund>,
+    shipping_cost: Any?,
+    status: "issued" | "void",
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    total: Int,
+    total_excluding_tax: Int?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "mixed" | "post_payment" | "pre_payment",
+    voided_at: Int?
+}
+
+
+create-credit-note
+meta {doc: """POST /v1/credit_notes - Create a credit note"""}
+fn (request: PostCreditNotesRequest): PostCreditNotesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/credit_notes`, {}, request)
+  if(is-ok-response(response), PostCreditNotesResponse(response.body), err(HttpError(response)))
+}
+
+GetCreditNotesPreviewRequest type {
+
+}
+
+GetCreditNotesPreviewResponse type {
+    amount: Int,
+    amount_shipping: Int,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    customer_balance_transaction: Any?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    effective_at: Int?,
+    id: Str,
+    invoice: Any,
+    lines: Map,
+    livemode: Bool,
+    memo: Str?,
+    metadata: Map?,
+    number: Str,
+    object: "credit_note",
+    out_of_band_amount: Int?,
+    pdf: Str,
+    post_payment_amount: Int,
+    pre_payment_amount: Int,
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refunds: Vec<CreditNoteRefund>,
+    shipping_cost: Any?,
+    status: "issued" | "void",
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    total: Int,
+    total_excluding_tax: Int?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "mixed" | "post_payment" | "pre_payment",
+    voided_at: Int?
+}
+
+
+preview-credit-note
+meta {doc: """GET /v1/credit_notes/preview - Preview a credit note"""}
+fn (amount: Str, credit-amount: Str, effective-at: Str, email-type: Str, expand: Str, invoice: Str, lines: Str, memo: Str, metadata: Str, out-of-band-amount: Str, reason: Str, refund-amount: Str, refunds: Str, shipping-cost: Str, request: GetCreditNotesPreviewRequest): GetCreditNotesPreviewResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/credit_notes/preview?amount=${amount}&credit_amount=${credit-amount}&effective_at=${effective-at}&email_type=${email-type}&expand=${expand}&invoice=${invoice}&lines=${lines}&memo=${memo}&metadata=${metadata}&out_of_band_amount=${out-of-band-amount}&reason=${reason}&refund_amount=${refund-amount}&refunds=${refunds}&shipping_cost=${shipping-cost}`, {}, request)
+  if(is-ok-response(response), GetCreditNotesPreviewResponse(response.body), err(HttpError(response)))
+}
+
+GetCreditNotesPreviewLinesRequest type {
+
+}
+
+GetCreditNotesPreviewLinesResponse type {
+    data: Vec<CreditNoteLineItem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-credit-note-previews-line-items
+meta {
+    doc: """GET /v1/credit_notes/preview/lines - Retrieve a credit note preview's line items"""
+}
+fn (amount: Str, credit-amount: Str, effective-at: Str, email-type: Str, ending-before: Str, expand: Str, invoice: Str, limit: Str, lines: Str, memo: Str, metadata: Str, out-of-band-amount: Str, reason: Str, refund-amount: Str, refunds: Str, shipping-cost: Str, starting-after: Str, request: GetCreditNotesPreviewLinesRequest): GetCreditNotesPreviewLinesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/credit_notes/preview/lines?amount=${amount}&credit_amount=${credit-amount}&effective_at=${effective-at}&email_type=${email-type}&ending_before=${ending-before}&expand=${expand}&invoice=${invoice}&limit=${limit}&lines=${lines}&memo=${memo}&metadata=${metadata}&out_of_band_amount=${out-of-band-amount}&reason=${reason}&refund_amount=${refund-amount}&refunds=${refunds}&shipping_cost=${shipping-cost}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCreditNotesPreviewLinesResponse(response.body), err(HttpError(response)))
+}
+
+GetCreditNotesCreditNoteLinesRequest type {
+
+}
+
+GetCreditNotesCreditNoteLinesResponse type {
+    data: Vec<CreditNoteLineItem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-credit-notes-line-items
+meta {
+    doc: """GET /v1/credit_notes/{credit_note}/lines - Retrieve a credit note's line items"""
+}
+fn (credit-note: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetCreditNotesCreditNoteLinesRequest): GetCreditNotesCreditNoteLinesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/credit_notes/${credit-note}/lines?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCreditNotesCreditNoteLinesResponse(response.body), err(HttpError(response)))
+}
+
+GetCreditNotesIdRequest type {
+
+}
+
+GetCreditNotesIdResponse type {
+    amount: Int,
+    amount_shipping: Int,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    customer_balance_transaction: Any?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    effective_at: Int?,
+    id: Str,
+    invoice: Any,
+    lines: Map,
+    livemode: Bool,
+    memo: Str?,
+    metadata: Map?,
+    number: Str,
+    object: "credit_note",
+    out_of_band_amount: Int?,
+    pdf: Str,
+    post_payment_amount: Int,
+    pre_payment_amount: Int,
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refunds: Vec<CreditNoteRefund>,
+    shipping_cost: Any?,
+    status: "issued" | "void",
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    total: Int,
+    total_excluding_tax: Int?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "mixed" | "post_payment" | "pre_payment",
+    voided_at: Int?
+}
+
+
+retrieve-credit-note
+meta {doc: """GET /v1/credit_notes/{id} - Retrieve a credit note"""}
+fn (id: Str, expand: Str, request: GetCreditNotesIdRequest): GetCreditNotesIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/credit_notes/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCreditNotesIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCreditNotesIdRequest type {
+    expand: Vec<Str>?,
+    memo: Str?,
+    metadata: Map?
+}
+
+PostCreditNotesIdResponse type {
+    amount: Int,
+    amount_shipping: Int,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    customer_balance_transaction: Any?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    effective_at: Int?,
+    id: Str,
+    invoice: Any,
+    lines: Map,
+    livemode: Bool,
+    memo: Str?,
+    metadata: Map?,
+    number: Str,
+    object: "credit_note",
+    out_of_band_amount: Int?,
+    pdf: Str,
+    post_payment_amount: Int,
+    pre_payment_amount: Int,
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refunds: Vec<CreditNoteRefund>,
+    shipping_cost: Any?,
+    status: "issued" | "void",
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    total: Int,
+    total_excluding_tax: Int?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "mixed" | "post_payment" | "pre_payment",
+    voided_at: Int?
+}
+
+
+update-credit-note
+meta {doc: """POST /v1/credit_notes/{id} - Update a credit note"""}
+fn (id: Str, request: PostCreditNotesIdRequest): PostCreditNotesIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/credit_notes/${id}`, {}, request)
+  if(is-ok-response(response), PostCreditNotesIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCreditNotesIdVoidRequest type {
+    expand: Vec<Str>?
+}
+
+PostCreditNotesIdVoidResponse type {
+    amount: Int,
+    amount_shipping: Int,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    customer_balance_transaction: Any?,
+    discount_amount: Int,
+    discount_amounts: Vec<DiscountsResourceDiscountAmount>,
+    effective_at: Int?,
+    id: Str,
+    invoice: Any,
+    lines: Map,
+    livemode: Bool,
+    memo: Str?,
+    metadata: Map?,
+    number: Str,
+    object: "credit_note",
+    out_of_band_amount: Int?,
+    pdf: Str,
+    post_payment_amount: Int,
+    pre_payment_amount: Int,
+    pretax_credit_amounts: Vec<CreditNotesPretaxCreditAmount>,
+    reason: "duplicate" | "fraudulent" | "order_change" | "product_unsatisfactory"?,
+    refunds: Vec<CreditNoteRefund>,
+    shipping_cost: Any?,
+    status: "issued" | "void",
+    subtotal: Int,
+    subtotal_excluding_tax: Int?,
+    total: Int,
+    total_excluding_tax: Int?,
+    total_taxes: Vec<BillingBillResourceInvoicingTaxesTax>?,
+    type: "mixed" | "post_payment" | "pre_payment",
+    voided_at: Int?
+}
+
+
+void-credit-note
+meta {doc: """POST /v1/credit_notes/{id}/void - Void a credit note"""}
+fn (id: Str, request: PostCreditNotesIdVoidRequest): PostCreditNotesIdVoidResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/credit_notes/${id}/void`, {}, request)
+  if(is-ok-response(response), PostCreditNotesIdVoidResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingAlertsRequest type {
+
+}
+
+GetBillingAlertsResponse type {
+    data: Vec<BillingAlert>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-billing-alerts
+meta {doc: """GET /v1/billing/alerts - List billing alerts"""}
+fn (alert-type: Str, ending-before: Str, expand: Str, limit: Str, meter: Str, starting-after: Str, request: GetBillingAlertsRequest): GetBillingAlertsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/alerts?alert_type=${alert-type}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&meter=${meter}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetBillingAlertsResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingAlertsRequest type {
+    alert_type: "usage_threshold",
+    expand: Vec<Str>?,
+    title: Str,
+    usage_threshold: Map?
+}
+
+PostBillingAlertsResponse type {
+    alert_type: "usage_threshold",
+    id: Str,
+    livemode: Bool,
+    object: "billing.alert",
+    status: "active" | "archived" | "inactive"?,
+    title: Str,
+    usage_threshold: Any?
+}
+
+
+create-billing-alert
+meta {doc: """POST /v1/billing/alerts - Create a billing alert"""}
+fn (request: PostBillingAlertsRequest): PostBillingAlertsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/alerts`, {}, request)
+  if(is-ok-response(response), PostBillingAlertsResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingAlertsIdRequest type {
+
+}
+
+GetBillingAlertsIdResponse type {
+    alert_type: "usage_threshold",
+    id: Str,
+    livemode: Bool,
+    object: "billing.alert",
+    status: "active" | "archived" | "inactive"?,
+    title: Str,
+    usage_threshold: Any?
+}
+
+
+retrieve-billing-alert
+meta {doc: """GET /v1/billing/alerts/{id} - Retrieve a billing alert"""}
+fn (id: Str, expand: Str, request: GetBillingAlertsIdRequest): GetBillingAlertsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/alerts/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBillingAlertsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingAlertsIdActivateRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingAlertsIdActivateResponse type {
+    alert_type: "usage_threshold",
+    id: Str,
+    livemode: Bool,
+    object: "billing.alert",
+    status: "active" | "archived" | "inactive"?,
+    title: Str,
+    usage_threshold: Any?
+}
+
+
+activate-billing-alert
+meta {doc: """POST /v1/billing/alerts/{id}/activate - Activate a billing alert"""}
+fn (id: Str, request: PostBillingAlertsIdActivateRequest): PostBillingAlertsIdActivateResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/alerts/${id}/activate`, {}, request)
+  if(is-ok-response(response), PostBillingAlertsIdActivateResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingAlertsIdArchiveRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingAlertsIdArchiveResponse type {
+    alert_type: "usage_threshold",
+    id: Str,
+    livemode: Bool,
+    object: "billing.alert",
+    status: "active" | "archived" | "inactive"?,
+    title: Str,
+    usage_threshold: Any?
+}
+
+
+archive-billing-alert
+meta {doc: """POST /v1/billing/alerts/{id}/archive - Archive a billing alert"""}
+fn (id: Str, request: PostBillingAlertsIdArchiveRequest): PostBillingAlertsIdArchiveResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/alerts/${id}/archive`, {}, request)
+  if(is-ok-response(response), PostBillingAlertsIdArchiveResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingAlertsIdDeactivateRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingAlertsIdDeactivateResponse type {
+    alert_type: "usage_threshold",
+    id: Str,
+    livemode: Bool,
+    object: "billing.alert",
+    status: "active" | "archived" | "inactive"?,
+    title: Str,
+    usage_threshold: Any?
+}
+
+
+deactivate-billing-alert
+meta {doc: """POST /v1/billing/alerts/{id}/deactivate - Deactivate a billing alert"""}
+fn (id: Str, request: PostBillingAlertsIdDeactivateRequest): PostBillingAlertsIdDeactivateResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/alerts/${id}/deactivate`, {}, request)
+  if(is-ok-response(response), PostBillingAlertsIdDeactivateResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingCreditBalanceSummaryRequest type {
+
+}
+
+GetBillingCreditBalanceSummaryResponse type {
+    balances: Vec<CreditBalance>,
+    customer: Any,
+    customer_account: Str?,
+    livemode: Bool,
+    object: "billing.credit_balance_summary"
+}
+
+
+retrieve-credit-balance-summary-customer
+meta {
+    doc: """GET /v1/billing/credit_balance_summary - Retrieve the credit balance summary for a customer"""
+}
+fn (customer: Str, customer-account: Str, expand: Str, filter: Str, request: GetBillingCreditBalanceSummaryRequest): GetBillingCreditBalanceSummaryResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/credit_balance_summary?customer=${customer}&customer_account=${customer-account}&expand=${expand}&filter=${filter}`, {}, request)
+  if(is-ok-response(response), GetBillingCreditBalanceSummaryResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingCreditBalanceTransactionsRequest type {
+
+}
+
+GetBillingCreditBalanceTransactionsResponse type {
+    data: Vec<BillingCreditBalanceTransaction>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-credit-balance-transactions
+meta {
+    doc: """GET /v1/billing/credit_balance_transactions - List credit balance transactions"""
+}
+fn (credit-grant: Str, customer: Str, customer-account: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetBillingCreditBalanceTransactionsRequest): GetBillingCreditBalanceTransactionsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/credit_balance_transactions?credit_grant=${credit-grant}&customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetBillingCreditBalanceTransactionsResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingCreditBalanceTransactionsIdRequest type {
+
+}
+
+GetBillingCreditBalanceTransactionsIdResponse type {
+    created: Int,
+    credit: Any?,
+    credit_grant: Any,
+    debit: Any?,
+    effective_at: Int,
+    id: Str,
+    livemode: Bool,
+    object: "billing.credit_balance_transaction",
+    test_clock: Any?,
+    type: "credit" | "debit"?
+}
+
+
+retrieve-credit-balance-transaction
+meta {
+    doc: """GET /v1/billing/credit_balance_transactions/{id} - Retrieve a credit balance transaction"""
+}
+fn (id: Str, expand: Str, request: GetBillingCreditBalanceTransactionsIdRequest): GetBillingCreditBalanceTransactionsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/credit_balance_transactions/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBillingCreditBalanceTransactionsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingCreditGrantsRequest type {
+
+}
+
+GetBillingCreditGrantsResponse type {
+    data: Vec<BillingCreditGrant>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-credit-grants
+meta {doc: """GET /v1/billing/credit_grants - List credit grants"""}
+fn (customer: Str, customer-account: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetBillingCreditGrantsRequest): GetBillingCreditGrantsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/credit_grants?customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetBillingCreditGrantsResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingCreditGrantsRequest type {
+    amount: Map,
+    applicability_config: Map,
+    category: "paid" | "promotional"?,
+    customer: Str?,
+    customer_account: Str?,
+    effective_at: Int?,
+    expand: Vec<Str>?,
+    expires_at: Int?,
+    metadata: Map?,
+    name: Str?,
+    priority: Int?
+}
+
+PostBillingCreditGrantsResponse type {
+    amount: BillingCreditGrantsResourceAmount,
+    applicability_config: BillingCreditGrantsResourceApplicabilityConfig,
+    category: "paid" | "promotional",
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    effective_at: Int?,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    name: Str?,
+    object: "billing.credit_grant",
+    priority: Int?,
+    test_clock: Any?,
+    updated: Int,
+    voided_at: Int?
+}
+
+
+create-credit-grant
+meta {doc: """POST /v1/billing/credit_grants - Create a credit grant"""}
+fn (request: PostBillingCreditGrantsRequest): PostBillingCreditGrantsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/credit_grants`, {}, request)
+  if(is-ok-response(response), PostBillingCreditGrantsResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingCreditGrantsIdRequest type {
+
+}
+
+GetBillingCreditGrantsIdResponse type {
+    amount: BillingCreditGrantsResourceAmount,
+    applicability_config: BillingCreditGrantsResourceApplicabilityConfig,
+    category: "paid" | "promotional",
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    effective_at: Int?,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    name: Str?,
+    object: "billing.credit_grant",
+    priority: Int?,
+    test_clock: Any?,
+    updated: Int,
+    voided_at: Int?
+}
+
+
+retrieve-credit-grant
+meta {doc: """GET /v1/billing/credit_grants/{id} - Retrieve a credit grant"""}
+fn (id: Str, expand: Str, request: GetBillingCreditGrantsIdRequest): GetBillingCreditGrantsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/credit_grants/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBillingCreditGrantsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingCreditGrantsIdRequest type {
+    expand: Vec<Str>?,
+    expires_at: Any?,
+    metadata: Map?
+}
+
+PostBillingCreditGrantsIdResponse type {
+    amount: BillingCreditGrantsResourceAmount,
+    applicability_config: BillingCreditGrantsResourceApplicabilityConfig,
+    category: "paid" | "promotional",
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    effective_at: Int?,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    name: Str?,
+    object: "billing.credit_grant",
+    priority: Int?,
+    test_clock: Any?,
+    updated: Int,
+    voided_at: Int?
+}
+
+
+update-credit-grant
+meta {doc: """POST /v1/billing/credit_grants/{id} - Update a credit grant"""}
+fn (id: Str, request: PostBillingCreditGrantsIdRequest): PostBillingCreditGrantsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/credit_grants/${id}`, {}, request)
+  if(is-ok-response(response), PostBillingCreditGrantsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingCreditGrantsIdExpireRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingCreditGrantsIdExpireResponse type {
+    amount: BillingCreditGrantsResourceAmount,
+    applicability_config: BillingCreditGrantsResourceApplicabilityConfig,
+    category: "paid" | "promotional",
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    effective_at: Int?,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    name: Str?,
+    object: "billing.credit_grant",
+    priority: Int?,
+    test_clock: Any?,
+    updated: Int,
+    voided_at: Int?
+}
+
+
+expire-credit-grant
+meta {doc: """POST /v1/billing/credit_grants/{id}/expire - Expire a credit grant"""}
+fn (id: Str, request: PostBillingCreditGrantsIdExpireRequest): PostBillingCreditGrantsIdExpireResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/credit_grants/${id}/expire`, {}, request)
+  if(is-ok-response(response), PostBillingCreditGrantsIdExpireResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingCreditGrantsIdVoidRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingCreditGrantsIdVoidResponse type {
+    amount: BillingCreditGrantsResourceAmount,
+    applicability_config: BillingCreditGrantsResourceApplicabilityConfig,
+    category: "paid" | "promotional",
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    effective_at: Int?,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    name: Str?,
+    object: "billing.credit_grant",
+    priority: Int?,
+    test_clock: Any?,
+    updated: Int,
+    voided_at: Int?
+}
+
+
+void-credit-grant
+meta {doc: """POST /v1/billing/credit_grants/{id}/void - Void a credit grant"""}
+fn (id: Str, request: PostBillingCreditGrantsIdVoidRequest): PostBillingCreditGrantsIdVoidResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/credit_grants/${id}/void`, {}, request)
+  if(is-ok-response(response), PostBillingCreditGrantsIdVoidResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingMeterEventAdjustmentsRequest type {
+    cancel: Map?,
+    event_name: Str,
+    expand: Vec<Str>?,
+    type: "cancel"
+}
+
+PostBillingMeterEventAdjustmentsResponse type {
+    cancel: Any?,
+    event_name: Str,
+    livemode: Bool,
+    object: "billing.meter_event_adjustment",
+    status: "complete" | "pending",
+    type: "cancel"
+}
+
+
+create-billing-meter-event-adjustment
+meta {
+    doc: """POST /v1/billing/meter_event_adjustments - Create a billing meter event adjustment"""
+}
+fn (request: PostBillingMeterEventAdjustmentsRequest): PostBillingMeterEventAdjustmentsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/meter_event_adjustments`, {}, request)
+  if(is-ok-response(response), PostBillingMeterEventAdjustmentsResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingMeterEventsRequest type {
+    event_name: Str,
+    expand: Vec<Str>?,
+    identifier: Str?,
+    payload: Map,
+    timestamp: Int?
+}
+
+PostBillingMeterEventsResponse type {
+    created: Int,
+    event_name: Str,
+    identifier: Str,
+    livemode: Bool,
+    object: "billing.meter_event",
+    payload: Map,
+    timestamp: Int
+}
+
+
+create-billing-meter-event
+meta {doc: """POST /v1/billing/meter_events - Create a billing meter event"""}
+fn (request: PostBillingMeterEventsRequest): PostBillingMeterEventsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/meter_events`, {}, request)
+  if(is-ok-response(response), PostBillingMeterEventsResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingMetersRequest type {
+
+}
+
+GetBillingMetersResponse type {
+    data: Vec<BillingMeter>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-billing-meters
+meta {doc: """GET /v1/billing/meters - List billing meters"""}
+fn (ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, request: GetBillingMetersRequest): GetBillingMetersResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/meters?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}`, {}, request)
+  if(is-ok-response(response), GetBillingMetersResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingMetersRequest type {
+    customer_mapping: Map?,
+    default_aggregation: Map,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    expand: Vec<Str>?,
+    value_settings: Map?
+}
+
+PostBillingMetersResponse type {
+    created: Int,
+    customer_mapping: BillingMeterResourceCustomerMappingSettings,
+    default_aggregation: BillingMeterResourceAggregationSettings,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    id: Str,
+    livemode: Bool,
+    object: "billing.meter",
+    status: "active" | "inactive",
+    status_transitions: BillingMeterResourceBillingMeterStatusTransitions,
+    updated: Int,
+    value_settings: BillingMeterResourceBillingMeterValue
+}
+
+
+create-billing-meter
+meta {doc: """POST /v1/billing/meters - Create a billing meter"""}
+fn (request: PostBillingMetersRequest): PostBillingMetersResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/meters`, {}, request)
+  if(is-ok-response(response), PostBillingMetersResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingMetersIdRequest type {
+
+}
+
+GetBillingMetersIdResponse type {
+    created: Int,
+    customer_mapping: BillingMeterResourceCustomerMappingSettings,
+    default_aggregation: BillingMeterResourceAggregationSettings,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    id: Str,
+    livemode: Bool,
+    object: "billing.meter",
+    status: "active" | "inactive",
+    status_transitions: BillingMeterResourceBillingMeterStatusTransitions,
+    updated: Int,
+    value_settings: BillingMeterResourceBillingMeterValue
+}
+
+
+retrieve-billing-meter
+meta {doc: """GET /v1/billing/meters/{id} - Retrieve a billing meter"""}
+fn (id: Str, expand: Str, request: GetBillingMetersIdRequest): GetBillingMetersIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/meters/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBillingMetersIdResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingMetersIdRequest type {
+    display_name: Str?,
+    expand: Vec<Str>?
+}
+
+PostBillingMetersIdResponse type {
+    created: Int,
+    customer_mapping: BillingMeterResourceCustomerMappingSettings,
+    default_aggregation: BillingMeterResourceAggregationSettings,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    id: Str,
+    livemode: Bool,
+    object: "billing.meter",
+    status: "active" | "inactive",
+    status_transitions: BillingMeterResourceBillingMeterStatusTransitions,
+    updated: Int,
+    value_settings: BillingMeterResourceBillingMeterValue
+}
+
+
+update-billing-meter
+meta {doc: """POST /v1/billing/meters/{id} - Update a billing meter"""}
+fn (id: Str, request: PostBillingMetersIdRequest): PostBillingMetersIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/meters/${id}`, {}, request)
+  if(is-ok-response(response), PostBillingMetersIdResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingMetersIdDeactivateRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingMetersIdDeactivateResponse type {
+    created: Int,
+    customer_mapping: BillingMeterResourceCustomerMappingSettings,
+    default_aggregation: BillingMeterResourceAggregationSettings,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    id: Str,
+    livemode: Bool,
+    object: "billing.meter",
+    status: "active" | "inactive",
+    status_transitions: BillingMeterResourceBillingMeterStatusTransitions,
+    updated: Int,
+    value_settings: BillingMeterResourceBillingMeterValue
+}
+
+
+deactivate-billing-meter
+meta {doc: """POST /v1/billing/meters/{id}/deactivate - Deactivate a billing meter"""}
+fn (id: Str, request: PostBillingMetersIdDeactivateRequest): PostBillingMetersIdDeactivateResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/meters/${id}/deactivate`, {}, request)
+  if(is-ok-response(response), PostBillingMetersIdDeactivateResponse(response.body), err(HttpError(response)))
+}
+
+GetBillingMetersIdEventSummariesRequest type {
+
+}
+
+GetBillingMetersIdEventSummariesResponse type {
+    data: Vec<BillingMeterEventSummary>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-billing-meter-event-summaries
+meta {
+    doc: """GET /v1/billing/meters/{id}/event_summaries - List billing meter event summaries"""
+}
+fn (id: Str, customer: Str, end-time: Str, ending-before: Str, expand: Str, limit: Str, start-time: Str, starting-after: Str, value-grouping-window: Str, request: GetBillingMetersIdEventSummariesRequest): GetBillingMetersIdEventSummariesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/billing/meters/${id}/event_summaries?customer=${customer}&end_time=${end-time}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&start_time=${start-time}&starting_after=${starting-after}&value_grouping_window=${value-grouping-window}`, {}, request)
+  if(is-ok-response(response), GetBillingMetersIdEventSummariesResponse(response.body), err(HttpError(response)))
+}
+
+PostBillingMetersIdReactivateRequest type {
+    expand: Vec<Str>?
+}
+
+PostBillingMetersIdReactivateResponse type {
+    created: Int,
+    customer_mapping: BillingMeterResourceCustomerMappingSettings,
+    default_aggregation: BillingMeterResourceAggregationSettings,
+    display_name: Str,
+    event_name: Str,
+    event_time_window: "day" | "hour"?,
+    id: Str,
+    livemode: Bool,
+    object: "billing.meter",
+    status: "active" | "inactive",
+    status_transitions: BillingMeterResourceBillingMeterStatusTransitions,
+    updated: Int,
+    value_settings: BillingMeterResourceBillingMeterValue
+}
+
+
+reactivate-billing-meter
+meta {doc: """POST /v1/billing/meters/{id}/reactivate - Reactivate a billing meter"""}
+fn (id: Str, request: PostBillingMetersIdReactivateRequest): PostBillingMetersIdReactivateResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/billing/meters/${id}/reactivate`, {}, request)
+  if(is-ok-response(response), PostBillingMetersIdReactivateResponse(response.body), err(HttpError(response)))
+}
+
+GetQuotesRequest type {
+
+}
+
+GetQuotesResponse type {
+    data: Vec<Quote>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-quotes
+meta {doc: """GET /v1/quotes - List all quotes"""}
+fn (customer: Str, customer-account: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, test-clock: Str, request: GetQuotesRequest): GetQuotesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/quotes?customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}&test_clock=${test-clock}`, {}, request)
+  if(is-ok-response(response), GetQuotesResponse(response.body), err(HttpError(response)))
+}
+
+PostQuotesRequest type {
+    application_fee_amount: Any?,
+    application_fee_percent: Any?,
+    automatic_tax: Map?,
+    collection_method: "charge_automatically" | "send_invoice"?,
+    customer: Str?,
+    customer_account: Str?,
+    default_tax_rates: Any?,
+    description: Any?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    expires_at: Int?,
+    footer: Any?,
+    from_quote: Map?,
+    header: Any?,
+    invoice_settings: Map?,
+    line_items: Vec<Map>?,
+    metadata: Map?,
+    on_behalf_of: Any?,
+    subscription_data: Map?,
+    test_clock: Str?,
+    transfer_data: Any?
+}
+
+PostQuotesResponse type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+
+create-quote
+meta {doc: """POST /v1/quotes - Create a quote"""}
+fn (request: PostQuotesRequest): PostQuotesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/quotes`, {}, request)
+  if(is-ok-response(response), PostQuotesResponse(response.body), err(HttpError(response)))
+}
+
+GetQuotesQuoteRequest type {
+
+}
+
+GetQuotesQuoteResponse type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+
+retrieve-quote
+meta {doc: """GET /v1/quotes/{quote} - Retrieve a quote"""}
+fn (quote: Str, expand: Str, request: GetQuotesQuoteRequest): GetQuotesQuoteResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/quotes/${quote}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetQuotesQuoteResponse(response.body), err(HttpError(response)))
+}
+
+PostQuotesQuoteRequest type {
+    application_fee_amount: Any?,
+    application_fee_percent: Any?,
+    automatic_tax: Map?,
+    collection_method: "charge_automatically" | "send_invoice"?,
+    customer: Str?,
+    customer_account: Str?,
+    default_tax_rates: Any?,
+    description: Any?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    expires_at: Int?,
+    footer: Any?,
+    header: Any?,
+    invoice_settings: Map?,
+    line_items: Vec<Map>?,
+    metadata: Map?,
+    on_behalf_of: Any?,
+    subscription_data: Map?,
+    transfer_data: Any?
+}
+
+PostQuotesQuoteResponse type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+
+update-quote
+meta {doc: """POST /v1/quotes/{quote} - Update a quote"""}
+fn (quote: Str, request: PostQuotesQuoteRequest): PostQuotesQuoteResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/quotes/${quote}`, {}, request)
+  if(is-ok-response(response), PostQuotesQuoteResponse(response.body), err(HttpError(response)))
+}
+
+PostQuotesQuoteAcceptRequest type {
+    expand: Vec<Str>?
+}
+
+PostQuotesQuoteAcceptResponse type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+
+accept-quote
+meta {doc: """POST /v1/quotes/{quote}/accept - Accept a quote"""}
+fn (quote: Str, request: PostQuotesQuoteAcceptRequest): PostQuotesQuoteAcceptResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/quotes/${quote}/accept`, {}, request)
+  if(is-ok-response(response), PostQuotesQuoteAcceptResponse(response.body), err(HttpError(response)))
+}
+
+PostQuotesQuoteCancelRequest type {
+    expand: Vec<Str>?
+}
+
+PostQuotesQuoteCancelResponse type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+
+cancel-quote
+meta {doc: """POST /v1/quotes/{quote}/cancel - Cancel a quote"""}
+fn (quote: Str, request: PostQuotesQuoteCancelRequest): PostQuotesQuoteCancelResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/quotes/${quote}/cancel`, {}, request)
+  if(is-ok-response(response), PostQuotesQuoteCancelResponse(response.body), err(HttpError(response)))
+}
+
+GetQuotesQuoteComputedUpfrontLineItemsRequest type {
+
+}
+
+GetQuotesQuoteComputedUpfrontLineItemsResponse type {
+    data: Vec<Item>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-quotes-upfront-line-items
+meta {
+    doc: """GET /v1/quotes/{quote}/computed_upfront_line_items - Retrieve a quote's upfront line items"""
+}
+fn (quote: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetQuotesQuoteComputedUpfrontLineItemsRequest): GetQuotesQuoteComputedUpfrontLineItemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/quotes/${quote}/computed_upfront_line_items?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetQuotesQuoteComputedUpfrontLineItemsResponse(response.body), err(HttpError(response)))
+}
+
+PostQuotesQuoteFinalizeRequest type {
+    expand: Vec<Str>?,
+    expires_at: Int?
+}
+
+PostQuotesQuoteFinalizeResponse type {
+    amount_subtotal: Int,
+    amount_total: Int,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: QuotesResourceAutomaticTax,
+    collection_method: "charge_automatically" | "send_invoice",
+    computed: QuotesResourceComputed,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    default_tax_rates: Vec?,
+    description: Str?,
+    discounts: Vec,
+    expires_at: Int,
+    footer: Str?,
+    from_quote: Any?,
+    header: Str?,
+    id: Str,
+    invoice: Any?,
+    invoice_settings: InvoiceSettingQuoteSetting,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    number: Str?,
+    object: "quote",
+    on_behalf_of: Any?,
+    status: "accepted" | "canceled" | "draft" | "open",
+    status_transitions: QuotesResourceStatusTransitions,
+    subscription: Any?,
+    subscription_data: QuotesResourceSubscriptionDataSubscriptionData,
+    subscription_schedule: Any?,
+    test_clock: Any?,
+    total_details: QuotesResourceTotalDetails,
+    transfer_data: Any?
+}
+
+
+finalize-quote
+meta {doc: """POST /v1/quotes/{quote}/finalize - Finalize a quote"""}
+fn (quote: Str, request: PostQuotesQuoteFinalizeRequest): PostQuotesQuoteFinalizeResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/quotes/${quote}/finalize`, {}, request)
+  if(is-ok-response(response), PostQuotesQuoteFinalizeResponse(response.body), err(HttpError(response)))
+}
+
+GetQuotesQuoteLineItemsRequest type {
+
+}
+
+GetQuotesQuoteLineItemsResponse type {
+    data: Vec<Item>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-quotes-line-items
+meta {doc: """GET /v1/quotes/{quote}/line_items - Retrieve a quote's line items"""}
+fn (quote: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetQuotesQuoteLineItemsRequest): GetQuotesQuoteLineItemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/quotes/${quote}/line_items?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetQuotesQuoteLineItemsResponse(response.body), err(HttpError(response)))
+}
+
+GetQuotesQuotePdfRequest type {
+
+}
+
+GetQuotesQuotePdfResponse type {
+    value: Str
+}
+
+
+download-quote-pdf
+meta {doc: """GET /v1/quotes/{quote}/pdf - Download quote PDF"""}
+fn (quote: Str, expand: Str, request: GetQuotesQuotePdfRequest): GetQuotesQuotePdfResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/quotes/${quote}/pdf?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetQuotesQuotePdfResponse(response.body), err(HttpError(response)))
+}

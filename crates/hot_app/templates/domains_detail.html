@@ -1,0 +1,346 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2 px-2 sm:px-0">
+    <div class="max-w-2xl mx-auto">
+        {% if !flash_message.is_empty() %}
+        <div class="mb-4 rounded-md p-4 
+            {% if flash_type == "success" %}bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800
+            {% else if flash_type == "warning" %}bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800
+            {% else %}bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800{% endif %}">
+            <p class="text-sm 
+                {% if flash_type == "success" %}text-green-800 dark:text-green-200
+                {% else if flash_type == "warning" %}text-yellow-800 dark:text-yellow-200
+                {% else %}text-blue-800 dark:text-blue-200{% endif %}">
+                {{ flash_message }}
+            </p>
+        </div>
+        {% endif %}
+
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <!-- Header -->
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-lg font-semibold text-gray-900 dark:text-white font-mono">{{ domain.domain }}</h2>
+                {% match domain.status() %}
+                {% when hot::db::domain::DomainStatus::Active %}
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                    <svg class="w-3.5 h-3.5 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                    </svg>
+                    Active
+                </span>
+                {% when hot::db::domain::DomainStatus::Provisioning %}
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+                    <svg class="w-3.5 h-3.5 mr-1 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Provisioning
+                </span>
+                {% when hot::db::domain::DomainStatus::Validated %}
+                {% if domain.provisioning_error.is_some() %}
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    DNS Conflict
+                </span>
+                {% else %}
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+                    Validated
+                </span>
+                {% endif %}
+                {% when hot::db::domain::DomainStatus::PendingValidation %}
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+                    Pending Validation
+                </span>
+                {% when hot::db::domain::DomainStatus::PendingDeletion %}
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                    <svg class="w-3.5 h-3.5 mr-1 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Deleting...
+                </span>
+                {% endmatch %}
+            </div>
+
+            <!-- DNS Configuration (polls via htmx until domain is fully active) -->
+            <div id="dns-config" class="mb-6"
+                 {% if !domain.is_ready() %}
+                 hx-get="/domains/{{ domain.domain_id }}"
+                 hx-trigger="every 5s"
+                 hx-select="#dns-config"
+                 hx-swap="outerHTML"
+                 {% endif %}>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">DNS Configuration</h3>
+
+                <!-- Progress stepper -->
+                <div class="flex items-start mb-6">
+                    {% let step1_done = domain.validation_cname_name.is_some() %}
+                    {% let step2_done = domain.is_verified() %}
+                    {% let step3_done = domain.is_ready() %}
+                    {% let step1_current = !step1_done %}
+                    {% let step2_current = step1_done && !step2_done %}
+                    {% let step3_current = step2_done && !step3_done %}
+
+                    <!-- Step 1 -->
+                    <div class="flex flex-col items-center flex-shrink-0" style="width: 5rem;">
+                        {% if step1_done %}
+                        <div class="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center">
+                            <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                        {% else if step1_current %}
+                        <div class="w-8 h-8 rounded-full border-2 border-blue-500 bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center">
+                            <span class="text-xs font-bold text-blue-600 dark:text-blue-400">1</span>
+                        </div>
+                        {% else %}
+                        <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
+                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">1</span>
+                        </div>
+                        {% endif %}
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step1_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step1_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Request Certificate</span>
+                    </div>
+
+                    <!-- Connector 1-2 -->
+                    <div class="flex-1 mt-4 mx-1">
+                        <div class="h-0.5 {% if step1_done %}bg-green-400{% else %}bg-gray-300 dark:bg-gray-600{% endif %}"></div>
+                    </div>
+
+                    <!-- Step 2 -->
+                    <div class="flex flex-col items-center flex-shrink-0" style="width: 5rem;">
+                        {% if step2_done %}
+                        <div class="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center">
+                            <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                        {% else if step2_current %}
+                        <div class="w-8 h-8 rounded-full border-2 border-blue-500 bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center">
+                            <span class="text-xs font-bold text-blue-600 dark:text-blue-400">2</span>
+                        </div>
+                        {% else %}
+                        <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
+                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">2</span>
+                        </div>
+                        {% endif %}
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step2_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step2_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Validate &amp; Issue</span>
+                    </div>
+
+                    <!-- Connector 2-3 -->
+                    <div class="flex-1 mt-4 mx-1">
+                        <div class="h-0.5 {% if step2_done %}bg-green-400{% else %}bg-gray-300 dark:bg-gray-600{% endif %}"></div>
+                    </div>
+
+                    <!-- Step 3 -->
+                    <div class="flex flex-col items-center flex-shrink-0" style="width: 5rem;">
+                        {% if step3_done %}
+                        <div class="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center">
+                            <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                        {% else if step3_current %}
+                        <div class="w-8 h-8 rounded-full border-2 border-blue-500 bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center">
+                            <span class="text-xs font-bold text-blue-600 dark:text-blue-400">3</span>
+                        </div>
+                        {% else %}
+                        <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
+                            <span class="text-xs font-medium text-gray-400 dark:text-gray-500">3</span>
+                        </div>
+                        {% endif %}
+                        <span class="mt-1.5 text-xs text-center leading-tight {% if step3_current %}font-semibold text-blue-600 dark:text-blue-400{% else if step3_done %}text-green-600 dark:text-green-400 font-medium{% else %}text-gray-400 dark:text-gray-500{% endif %}">Domain CNAME</span>
+                    </div>
+                </div>
+
+                <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                    Add these records in your DNS provider. Your provider may only need the part before your zone name.
+                </p>
+                <div class="space-y-4">
+                    {% if domain.validation_cname_name.is_none() %}
+                    <!-- Waiting for certificate request -->
+                    <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                        <div class="flex items-center gap-3">
+                            <svg class="w-5 h-5 text-blue-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <div>
+                                <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Requesting TLS certificate...</p>
+                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">DNS records will appear here shortly. This page will update automatically.</p>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <!-- Step 2: Certificate Validation CNAME -->
+                    <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 2: Certificate Validation CNAME</span>
+                            {% if domain.is_verified() %}
+                            <span class="text-xs text-green-600 dark:text-green-400 font-medium">Done</span>
+                            {% else %}
+                            <span class="text-xs text-yellow-600 dark:text-yellow-400 font-medium">Required</span>
+                            {% endif %}
+                        </div>
+                        <div class="space-y-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
+                                <div class="flex items-center gap-1" x-data="{ copied: false }">
+                                    <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.validation_cname_name.as_deref().unwrap_or("") }}</code>
+                                    <button @click="navigator.clipboard.writeText('{{ domain.validation_cname_name.as_deref().unwrap_or("") }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy name">
+                                        <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
+                                        <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Value</label>
+                                <div class="flex items-center gap-1" x-data="{ copied: false }">
+                                    <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.validation_cname_value.as_deref().unwrap_or("") }}</code>
+                                    <button @click="navigator.clipboard.writeText('{{ domain.validation_cname_value.as_deref().unwrap_or("") }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy value">
+                                        <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
+                                        <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Domain CNAME -->
+                    {% if domain.routing_domain.is_some() %}
+                    <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
+                            {% if domain.is_tls_provisioned() %}
+                            <span class="text-xs text-green-600 dark:text-green-400 font-medium">Ready</span>
+                            {% else %}
+                            <span class="text-xs text-blue-600 dark:text-blue-400 font-medium">Add now</span>
+                            {% endif %}
+                        </div>
+                        <div class="space-y-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
+                                <div class="flex items-center gap-1" x-data="{ copied: false }">
+                                    <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.domain }}</code>
+                                    <button @click="navigator.clipboard.writeText('{{ domain.domain }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy name">
+                                        <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
+                                        <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Value</label>
+                                <div class="flex items-center gap-1" x-data="{ copied: false }">
+                                    <code class="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-900 dark:text-white break-all">{{ domain.routing_domain.as_deref().unwrap_or("") }}</code>
+                                    <button @click="navigator.clipboard.writeText('{{ domain.routing_domain.as_deref().unwrap_or("") }}'); copied = true; setTimeout(() => copied = false, 2000)" class="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex-shrink-0" title="Copy value">
+                                        <span x-show="!copied"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></span>
+                                        <span x-show="copied" x-cloak><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg></span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% else if domain.is_verified() %}
+                    {% if domain.provisioning_error.is_some() %}
+                    <!-- Provisioning error — user action required -->
+                    <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-md p-4">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
+                            <span class="text-xs text-red-600 dark:text-red-400 font-medium">Action Required</span>
+                        </div>
+                        <div class="flex gap-3 mt-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                            </svg>
+                            <p class="text-sm text-red-700 dark:text-red-300">{{ domain.provisioning_error.as_deref().unwrap_or("") }}</p>
+                        </div>
+                    </div>
+                    {% else %}
+                    <!-- Certificate validated, waiting for routing target -->
+                    <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
+                            <span class="text-xs text-blue-600 dark:text-blue-400 font-medium">Provisioning</span>
+                        </div>
+                        <div class="flex items-center gap-3 mt-2">
+                            <svg class="w-5 h-5 text-blue-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Creating distribution. The domain CNAME will appear here shortly.</p>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% else %}
+                    <!-- Certificate not yet validated -->
+                    <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4 opacity-60">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Step 3: Domain CNAME</span>
+                            <span class="text-xs text-gray-400 dark:text-gray-500 font-medium">Available after validation</span>
+                        </div>
+                        <p class="text-sm text-gray-500 dark:text-gray-400">
+                            The domain CNAME will appear here once your certificate is validated and the distribution is created.
+                        </p>
+                    </div>
+                    {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Details -->
+            <dl class="divide-y divide-gray-200 dark:divide-gray-700 mb-6">
+                <div class="py-3 flex justify-between">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Domain ID</dt>
+                    <dd class="text-sm text-gray-900 dark:text-white font-mono">{{ domain.domain_id }}</dd>
+                </div>
+                <div class="py-3 flex justify-between">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Status</dt>
+                    <dd class="text-sm text-gray-900 dark:text-white">{{ domain.status() }}</dd>
+                </div>
+                <div class="py-3 flex justify-between">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Added</dt>
+                    <dd class="text-sm text-gray-900 dark:text-white">{{ domain.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                </div>
+                {% if let Some(verified) = domain.verified_at %}
+                <div class="py-3 flex justify-between">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Certificate Validated</dt>
+                    <dd class="text-sm text-green-600 dark:text-green-400">{{ verified|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                </div>
+                {% endif %}
+                {% if let Some(tls) = domain.tls_provisioned_at %}
+                <div class="py-3 flex justify-between">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">TLS Provisioned</dt>
+                    <dd class="text-sm text-green-600 dark:text-green-400">{{ tls|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%b %d, %Y at %H:%M") }}</dd>
+                </div>
+                {% endif %}
+            </dl>
+
+            <!-- Actions -->
+            {% let is_deleting = domain.status() == hot::db::domain::DomainStatus::PendingDeletion %}
+            <div class="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
+                <form id="delete-domain-form" method="POST" action="/domains/{{ domain.domain_id }}/delete">
+                    <button type="button" {% if is_deleting %}disabled{% endif %} onclick="showConfirm('Remove Domain', 'This will delete the routing target and TLS certificate. This cannot be undone.\n\nRemember to also remove the DNS CNAME records you created for this domain.', () => document.getElementById('delete-domain-form').submit(), { confirmText: 'Remove', type: 'warning' })" class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-600 text-sm font-medium rounded-md text-red-700 dark:text-red-400 bg-white dark:bg-gray-800 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors {% if is_deleting %}opacity-50 cursor-not-allowed{% endif %}">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        Remove Domain
+                    </button>
+                </form>
+
+                {% if !is_deleting %}
+                <form method="POST" action="/domains/{{ domain.domain_id }}/verify">
+                    <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-colors">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            {% if domain.is_ready() %}
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                            {% else %}
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            {% endif %}
+                        </svg>
+                        {% if domain.is_ready() %}Verify DNS{% else %}Check Status{% endif %}
+                    </button>
+                </form>
+                {% else %}
+                <div></div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

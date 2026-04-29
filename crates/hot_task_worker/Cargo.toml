@@ -1,0 +1,46 @@
+[package]
+name = "hot_task_worker"
+version.workspace = true
+edition.workspace = true
+description = "Hot long-running task and container worker"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+kata = ["containerd-client", "tonic", "prost-types", "sha2", "tokio-vsock"]
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+redis = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+hot = { workspace = true }
+bollard = { workspace = true }
+parking_lot = { workspace = true }
+
+# Kata/containerd backend (optional, Linux only)
+containerd-client = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio-vsock = { workspace = true, optional = true }
+
+# ONNX Runtime (used by fastembed) has no pre-built binaries for Windows ARM64
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+hot = { workspace = true, features = ["local-embeddings"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+sqlx = { workspace = true }

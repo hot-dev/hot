@@ -1,0 +1,106 @@
+::hot::bit ns
+meta {doc: """Bitwise operations for integers and bytes."""}
+
+and
+meta {
+    doc: """
+    Bitwise AND of `a` and `b`.
+
+    **Example**
+
+    ```hot
+    ::hot::bit/and(12, 10)  // 8 (0b1100 & 0b1010 = 0b1000)
+    ```
+    """
+}
+fn (a: Int | Byte, b: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/and, [a, b])
+}
+
+
+or
+meta {
+    doc: """
+    Bitwise OR of `a` and `b`.
+
+    **Example**
+
+    ```hot
+    ::hot::bit/or(12, 10)  // 14 (0b1100 | 0b1010 = 0b1110)
+    ```
+    """
+}
+fn (a: Int | Byte, b: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/or, [a, b])
+}
+
+
+xor
+meta {
+    doc: """
+    Bitwise XOR (exclusive or) of `a` and `b`.
+
+    **Example**
+
+    ```hot
+    ::hot::bit/xor(12, 10)  // 6 (0b1100 ^ 0b1010 = 0b0110)
+    ```
+    """
+}
+fn (a: Int | Byte, b: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/xor, [a, b])
+}
+
+
+not
+meta {
+    doc: """
+    Bitwise NOT (ones' complement) of `a`.
+
+    **Example**
+
+    ```hot
+    ::hot::bit/not(0)  // -1 (all bits set for Int)
+    ```
+    """
+}
+fn (a: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/not, [a])
+}
+
+
+shift-left
+meta {
+    doc: """
+    Shift `a` left by `n` bits.
+
+    **Example**
+
+    ```hot
+    ::hot::bit/shift-left(1, 4)   // 16 (1 << 4)
+    ::hot::bit/shift-left(3, 2)   // 12 (3 << 2)
+    ```
+    """
+}
+fn (a: Int | Byte, n: Int): Int | Byte {
+    call-lib(::hot::bit/shift-left, [a, n])
+}
+
+
+shift-right
+meta {
+    doc: """
+    Shift `a` right by `n` bits.
+    For signed integers, this is an arithmetic shift (preserves sign).
+
+    **Example**
+
+    ```hot
+    ::hot::bit/shift-right(16, 2)   // 4 (16 >> 2)
+    ::hot::bit/shift-right(-8, 1)   // -4 (arithmetic shift preserves sign)
+    ```
+    """
+}
+fn (a: Int | Byte, n: Int): Int | Byte {
+    call-lib(::hot::bit/shift-right, [a, n])
+}

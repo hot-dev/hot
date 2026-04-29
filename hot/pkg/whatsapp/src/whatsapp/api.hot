@@ -1,0 +1,82 @@
+::whatsapp::api ns
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    ctx: {"whatsapp.access.token": {required: true}},
+    doc: """
+    Call the WhatsApp Business Cloud API (Meta Graph API). The access token is read from the `whatsapp.access.token` context variable and sent as a Bearer token.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    // GET request
+    response ::api/request("GET", "https://graph.facebook.com/v21.0/123456/messages")
+
+    // POST request with JSON body
+    response ::api/request("POST", "https://graph.facebook.com/v21.0/123456/messages", {}, {messaging_product: "whatsapp", to: "15551234567", type: "text", text: {body: "Hello"}})
+    ```
+    """
+}
+fn
+(method: Str, url: Str): Any {
+  request(method, url, {}, {}, ::ctx/get("whatsapp.access.token"))
+},
+(method: Str, url: Str, additional-headers: Map, body: Map): Any {
+  request(method, url, additional-headers, body, ::ctx/get("whatsapp.access.token"))
+},
+(method: Str, url: Str, additional-headers: Map, body: Map, access-token: Str): Any {
+  default-headers {
+    Authorization: `Bearer ${access-token}`
+  }
+
+  has-body not(is-empty(filter-vals(body, is-some)))
+  headers if(has-body, {...default-headers, Content-Type: "application/json"}, default-headers)
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(has-body, to-json(untype(body)), "")
+
+  response http-request(HttpRequest({
+    method,
+    url,
+    headers: final-headers,
+    body: encoded-body
+  }))
+
+  cond {
+    not(is-ok-response(response)) => {
+      error-body response.body
+      cond {
+        is-some(get(error-body, "error")) => { err(error-body.error) }
+        => { err(HttpError(response)) }
+      }
+    }
+    => { response.body }
+  }
+}
+
+url fn (path: Str): Str {
+  `${::whatsapp::core/BASE_URL}/${path}`
+}

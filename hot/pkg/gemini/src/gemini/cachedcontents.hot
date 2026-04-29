@@ -1,0 +1,342 @@
+::gemini::cachedcontents ns
+
+api-request ::gemini::api/request
+HttpError ::gemini::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ExecutableCode type {
+    language: "LANGUAGE_UNSPECIFIED" | "PYTHON"?,
+    code: Str?
+}
+
+GoogleSearchRetrieval type {
+    dynamicRetrievalConfig: DynamicRetrievalConfig?
+}
+
+ToolConfig type {
+    functionCallingConfig: FunctionCallingConfig?
+}
+
+Status type {
+    code: Int?,
+    message: Str?,
+    details: Vec<Map>?
+}
+
+CreateCachedContentRequest type {
+    model: Str,
+    displayName: Str?,
+    systemInstruction: Content?,
+    contents: Vec<Content>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    ttl: Str?,
+    expireTime: Str?
+}
+
+ErrorResponse type {
+    error: Status?
+}
+
+UpdateCachedContentRequest type {
+    ttl: Str?,
+    expireTime: Str?
+}
+
+FileData type {
+    mimeType: Str?,
+    fileUri: Str?
+}
+
+FunctionResponse type {
+    name: Str?,
+    response: Map?
+}
+
+Blob type {
+    mimeType: Str?,
+    data: Str?
+}
+
+FunctionCallingConfig type {
+    mode: "MODE_UNSPECIFIED" | "AUTO" | "ANY" | "NONE"?,
+    allowedFunctionNames: Vec<Str>?
+}
+
+CachedContentUsageMetadata type {
+    totalTokenCount: Int?
+}
+
+ListCachedContentsResponse type {
+    cachedContents: Vec<CachedContent>?,
+    nextPageToken: Str?
+}
+
+FunctionCall type {
+    name: Str?,
+    args: Map?
+}
+
+Content type {
+    parts: Vec<Part>?,
+    role: "user" | "model"?
+}
+
+Part type {
+    text: Str?,
+    inlineData: Blob?,
+    fileData: FileData?,
+    functionCall: FunctionCall?,
+    functionResponse: FunctionResponse?,
+    executableCode: ExecutableCode?,
+    codeExecutionResult: CodeExecutionResult?
+}
+
+FunctionDeclaration type {
+    name: Str?,
+    description: Str?,
+    parameters: Schema?
+}
+
+Schema type {
+    type: "TYPE_UNSPECIFIED" | "STRING" | "NUMBER" | "INTEGER" | "BOOLEAN" | "ARRAY" | "OBJECT"?,
+    format: Str?,
+    description: Str?,
+    nullable: Bool?,
+    enum: Vec<Str>?,
+    items: Schema?,
+    properties: Map?,
+    required: Vec<Str>?
+}
+
+DynamicRetrievalConfig type {
+    mode: "MODE_UNSPECIFIED" | "MODE_DYNAMIC"?,
+    dynamicThreshold: Dec?
+}
+
+CodeExecutionResult type {
+    outcome: "OUTCOME_UNSPECIFIED" | "OUTCOME_OK" | "OUTCOME_FAILED" | "OUTCOME_DEADLINE_EXCEEDED"?,
+    output: Str?
+}
+
+Tool type {
+    functionDeclarations: Vec<FunctionDeclaration>?,
+    codeExecution: Map?,
+    googleSearch: Map?,
+    googleSearchRetrieval: GoogleSearchRetrieval?
+}
+
+CachedContent type {
+    name: Str?,
+    displayName: Str?,
+    model: Str?,
+    systemInstruction: Content?,
+    contents: Vec<Content>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    createTime: Str?,
+    updateTime: Str?,
+    usageMetadata: CachedContentUsageMetadata?,
+    expireTime: Str?,
+    ttl: Str?
+}
+
+CachedContentsListRequest type {
+  page-size: Str,
+  page-token: Str
+}
+
+CachedContentsListResponse type {
+    cachedContents: Vec<CachedContent>?,
+    nextPageToken: Str?
+}
+
+
+list
+meta {
+    doc: """
+    List cached contents. Returns a paginated list of previously cached content entries.
+
+    **Example**
+
+    ```hot
+    result ::gemini::cachedcontents/list(CachedContentsListRequest({
+        page-size: "10",
+        page-token: ""
+    }))
+
+    cached or(result.cachedContents, [])
+    ```
+    """
+}
+fn (request: CachedContentsListRequest): CachedContentsListResponse {
+  response api-request("GET", `${::gemini/BASE_URL}/v1/cachedContents?pageSize=${request.page-size}&pageToken=${request.page-token}`)
+  if(is-ok-response(response), CachedContentsListResponse(response.body), err(HttpError(response)))
+}
+
+CachedContentsCreateRequest type {
+    model: Str,
+    displayName: Str?,
+    systemInstruction: Content?,
+    contents: Vec<Content>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    ttl: Str?,
+    expireTime: Str?
+}
+
+CachedContentsCreateResponse type {
+    name: Str?,
+    displayName: Str?,
+    model: Str?,
+    systemInstruction: Content?,
+    contents: Vec<Content>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    createTime: Str?,
+    updateTime: Str?,
+    usageMetadata: CachedContentUsageMetadata?,
+    expireTime: Str?,
+    ttl: Str?
+}
+
+
+create
+meta {
+    doc: """
+    Create a new cached content entry. Cached content allows reusing large contexts across multiple requests, reducing latency and cost.
+
+    **Example**
+
+    ```hot
+    result ::gemini::cachedcontents/create(CachedContentsCreateRequest({
+        model: "models/gemini-2.0-flash",
+        displayName: "My cached context",
+        contents: [Content({
+            role: "user",
+            parts: [Part({text: "This is a large document to cache..."})]
+        })],
+        ttl: "3600s"
+    }))
+
+    result.name // => "cachedContents/abc123"
+    ```
+    """
+}
+fn (request: CachedContentsCreateRequest): CachedContentsCreateResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/v1/cachedContents`, {}, request)
+  if(is-ok-response(response), CachedContentsCreateResponse(response.body), err(HttpError(response)))
+}
+
+CachedContentsGetRequest type {
+  name: Str
+}
+
+CachedContentsGetResponse type {
+    name: Str?,
+    displayName: Str?,
+    model: Str?,
+    systemInstruction: Content?,
+    contents: Vec<Content>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    createTime: Str?,
+    updateTime: Str?,
+    usageMetadata: CachedContentUsageMetadata?,
+    expireTime: Str?,
+    ttl: Str?
+}
+
+
+get
+meta {
+    doc: """
+    Get a specific cached content entry by name.
+
+    **Example**
+
+    ```hot
+    result ::gemini::cachedcontents/get(CachedContentsGetRequest({
+        name: "cachedContents/abc123"
+    }))
+
+    result.displayName // => "My cached context"
+    result.model       // => "models/gemini-2.0-flash"
+    result.expireTime  // => "2025-01-01T00:00:00Z"
+    ```
+    """
+}
+fn (request: CachedContentsGetRequest): CachedContentsGetResponse {
+  response api-request("GET", `${::gemini/BASE_URL}/v1/cachedContents/${request.name}`)
+  if(is-ok-response(response), CachedContentsGetResponse(response.body), err(HttpError(response)))
+}
+
+CachedContentsUpdateRequest type {
+    ttl: Str?,
+    expireTime: Str?
+}
+
+CachedContentsUpdateResponse type {
+    name: Str?,
+    displayName: Str?,
+    model: Str?,
+    systemInstruction: Content?,
+    contents: Vec<Content>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    createTime: Str?,
+    updateTime: Str?,
+    usageMetadata: CachedContentUsageMetadata?,
+    expireTime: Str?,
+    ttl: Str?
+}
+
+
+update
+meta {
+    doc: """
+    Update a cached content entry. Currently supports updating the TTL or expire time. The `update-mask` parameter specifies which fields to update.
+
+    **Example**
+
+    ```hot
+    result ::gemini::cachedcontents/update("cachedContents/abc123", "ttl", CachedContentsUpdateRequest({
+        ttl: "7200s"
+    }))
+
+    result.expireTime // updated expiration time
+    ```
+    """
+}
+fn (name: Str, update-mask: Str, request: CachedContentsUpdateRequest): CachedContentsUpdateResponse {
+  response api-request("PATCH", `${::gemini/BASE_URL}/v1/cachedContents/${name}?updateMask=${update-mask}`, {}, request)
+  if(is-ok-response(response), CachedContentsUpdateResponse(response.body), err(HttpError(response)))
+}
+
+CachedContentsDeleteRequest type {
+  name: Str
+}
+
+CachedContentsDeleteResponse type {
+    value: Map
+}
+
+
+delete
+meta {
+    doc: """
+    Delete a cached content entry by name.
+
+    **Example**
+
+    ```hot
+    ::gemini::cachedcontents/delete(CachedContentsDeleteRequest({
+        name: "cachedContents/abc123"
+    }))
+    ```
+    """
+}
+fn (request: CachedContentsDeleteRequest): CachedContentsDeleteResponse {
+  response api-request("DELETE", `${::gemini/BASE_URL}/v1/cachedContents/${request.name}`)
+  if(is-ok-response(response), CachedContentsDeleteResponse(response.body), err(HttpError(response)))
+}

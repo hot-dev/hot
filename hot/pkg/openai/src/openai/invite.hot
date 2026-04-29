@@ -1,0 +1,51 @@
+::openai::invite ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+InviteRequest type {
+    email: Str,
+    role: "reader" | "owner",
+    projects: Vec<Map>?
+}
+
+Invite type {
+    object: "organization.invite",
+    id: Str,
+    email: Str,
+    role: "owner" | "reader",
+    status: "accepted" | "expired" | "pending",
+    invited_at: Int,
+    expires_at: Int,
+    accepted_at: Int?,
+    projects: Vec<Map>?
+}
+
+InviteUserRequest type {
+    email: Str,
+    role: "reader" | "owner",
+    projects: Vec<Map>?
+}
+
+InviteUserResponse type {
+    object: "organization.invite",
+    id: Str,
+    email: Str,
+    role: "owner" | "reader",
+    status: "accepted" | "expired" | "pending",
+    invited_at: Int,
+    expires_at: Int,
+    accepted_at: Int?,
+    projects: Vec<Map>?
+}
+
+
+create-invite
+meta {
+    doc: """POST /organization/invites - Invite a user to the organization by email."""
+}
+fn (request: InviteUserRequest): InviteUserResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/invites`, {}, request)
+  if(is-ok-response(response), InviteUserResponse(response.body), err(HttpError(response)))
+}

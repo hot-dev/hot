@@ -1,0 +1,211 @@
+::xai::search ns
+
+// ============================================================================
+// xAI Live Search
+// https://docs.x.ai/docs/guides/live-search
+//
+// Live search allows xAI models to access real-time information from the web and X.
+// It's implemented as a built-in tool in the Responses API.
+// ============================================================================
+
+api-request ::xai::api/request
+HttpError ::xai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+CreateResponseRequest ::xai::responses/CreateResponseRequest
+CreateResponseResponse ::xai::responses/CreateResponseResponse
+create ::xai::responses/create
+extract-response-text ::xai::responses/extract-response-text
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Search tool configuration
+SearchTool type {
+    type: Str
+}
+
+// Search result from X (Twitter)
+XSearchResult type {
+    tweet_id: Str?,
+    author: Str?,
+    text: Str?,
+    created_at: Str?
+}
+
+// Web search result
+WebSearchResult type {
+    url: Str?,
+    title: Str?,
+    snippet: Str?
+}
+
+// ============================================================================
+// Tool Helpers
+// ============================================================================
+
+web-search-tool
+meta {
+    doc: """
+    Create a web search tool configuration for the Responses API.
+
+    Use this in the tools array of a CreateResponseRequest to enable real-time web search.
+    The model will automatically decide when to search based on the query.
+
+    **Example**
+
+    ```hot
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3",
+        input: "What is the latest news about AI?",
+        tools: [web-search-tool()]
+    }))
+    ```
+    """
+}
+fn (): SearchTool {
+    SearchTool({type: "web_search"})
+}
+
+x-search-tool
+meta {
+    doc: """
+    Create an X (Twitter) search tool configuration for the Responses API.
+
+    Use this in the tools array of a CreateResponseRequest to enable real-time X search.
+    The model will automatically decide when to search based on the query.
+
+    **Example**
+
+    ```hot
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3",
+        input: "What are people saying about the new iPhone?",
+        tools: [x-search-tool()]
+    }))
+    ```
+    """
+}
+fn (): SearchTool {
+    SearchTool({type: "x_search"})
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+search-web
+meta {
+    doc: """
+    Search the web and get an AI-summarized response.
+
+    This is a convenience function that enables web search and returns
+    the model's response text with real-time web information.
+    Optionally pass system instructions as a third argument.
+
+    **Example**
+
+    ```hot
+    answer search-web("grok-3", "What is the current weather in San Francisco?")
+    // => "Currently in San Francisco, it's 62°F..."
+
+    // With instructions
+    answer search-web("grok-3", "Latest AI news", "Summarize in bullet points.")
+    ```
+    """
+}
+fn
+(model: Str, query: Str): Str {
+    search-web(model, query, null)
+},
+(model: Str, query: Str, instructions: Str): Str {
+    request {
+        model: model,
+        input: query,
+        instructions: instructions,
+        tools: [web-search-tool()]
+    }
+
+    response create(CreateResponseRequest(request))
+
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => { extract-response-text(response) }
+    }
+}
+
+search-x
+meta {
+    doc: """
+    Search X (Twitter) and get an AI-summarized response.
+
+    This is a convenience function that enables X search and returns
+    the model's response text with real-time information from X posts.
+    Optionally pass system instructions as a third argument.
+
+    **Example**
+
+    ```hot
+    answer search-x("grok-3", "What are people saying about the latest tech news?")
+    // => "Here's what people are discussing on X..."
+
+    // With instructions
+    answer search-x("grok-3", "Reactions to the new iPhone", "Focus on sentiment analysis.")
+    ```
+    """
+}
+fn
+(model: Str, query: Str): Str {
+    search-x(model, query, null)
+},
+(model: Str, query: Str, instructions: Str): Str {
+    request {
+        model: model,
+        input: query,
+        instructions: instructions,
+        tools: [x-search-tool()]
+    }
+
+    response create(CreateResponseRequest(request))
+
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => { extract-response-text(response) }
+    }
+}
+
+search-all
+meta {
+    doc: """
+    Search both web and X simultaneously, returning an AI-summarized response.
+
+    Combines web-search-tool() and x-search-tool() for comprehensive coverage.
+    Optionally pass system instructions as a third argument.
+
+    **Example**
+
+    ```hot
+    answer search-all("grok-3", "What's happening with climate change today?")
+    // => "Based on web and X sources..."
+    ```
+    """
+}
+fn
+(model: Str, query: Str): Str {
+    search-all(model, query, null)
+},
+(model: Str, query: Str, instructions: Str): Str {
+    request {
+        model: model,
+        input: query,
+        instructions: instructions,
+        tools: [web-search-tool(), x-search-tool()]
+    }
+
+    response create(CreateResponseRequest(request))
+
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => { extract-response-text(response) }
+    }
+}

@@ -1,0 +1,209 @@
+::twilio::accounts ns
+
+api-request ::twilio::api/request
+HttpError ::twilio::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+::ctx ::hot::ctx
+
+account-url fn (): Str {
+  `${::twilio::core/BASE_URL}/Accounts/${::ctx/get("twilio.account.sid")}`
+}
+
+// ============================================================================
+// Account
+// ============================================================================
+
+GetAccountResponse type {
+  sid: Str?,
+  friendly_name: Str?,
+  status: Str?,
+  type: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  auth_token: Str?,
+  uri: Str?,
+  owner_account_sid: Str?,
+  subresource_uris: Map?
+}
+
+get-account
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}.json - Get your Twilio account details. Returns account SID, friendly name, status, type, and subresource URIs.
+
+**Example**
+
+```hot
+::accounts ::twilio::accounts
+
+response ::accounts/get-account()
+response.sid            // => "AC..."
+response.friendly_name  // => "My Twilio Account"
+response.status         // => "active"
+response.type           // => "Full"
+```
+"""
+}
+fn (): GetAccountResponse {
+  response api-request("GET", `${account-url()}.json`)
+  if(is-ok-response(response), GetAccountResponse(response.body), err(HttpError(response)))
+}
+
+UpdateAccountRequest type {
+  FriendlyName: Str?,
+  Status: Str?
+}
+
+UpdateAccountResponse type {
+  sid: Str?,
+  friendly_name: Str?,
+  status: Str?,
+  type: Str?,
+  date_created: Str?,
+  date_updated: Str?
+}
+
+update-account
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """POST /Accounts/{AccountSid}.json - Update account settings. Can change the `FriendlyName` or set `Status` to "suspended" or "closed"."""
+}
+fn (request: UpdateAccountRequest): UpdateAccountResponse {
+  body {
+    FriendlyName: request.FriendlyName,
+    Status: request.Status
+  }
+
+  response api-request("POST", `${account-url()}.json`, {}, body)
+  if(is-ok-response(response), UpdateAccountResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Phone Number Lookup
+// ============================================================================
+
+GetIncomingPhoneNumbersRequest type {
+  PhoneNumber: Str?,
+  FriendlyName: Str?,
+  PageSize: Int?,
+  Page: Int?
+}
+
+GetIncomingPhoneNumbersResponse type {
+  incoming_phone_numbers: Vec<Map>?,
+  end: Int?,
+  page: Int?,
+  page_size: Int?,
+  start: Int?,
+  uri: Str?
+}
+
+get-incoming-phone-numbers
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}/IncomingPhoneNumbers.json - List your Twilio phone numbers. Filter by `PhoneNumber` or `FriendlyName`.
+
+**Example**
+
+```hot
+::accounts ::twilio::accounts
+
+response ::accounts/get-incoming-phone-numbers(::accounts/GetIncomingPhoneNumbersRequest({}))
+numbers response.incoming_phone_numbers
+// => [{sid: "PN...", phone_number: "+15017122661", friendly_name: "My Number", ...}]
+```
+"""
+}
+fn (request: GetIncomingPhoneNumbersRequest): GetIncomingPhoneNumbersResponse {
+  response api-request("GET", `${account-url()}/IncomingPhoneNumbers.json?PhoneNumber=${or(request.PhoneNumber, "")}&FriendlyName=${or(request.FriendlyName, "")}&PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  if(is-ok-response(response), GetIncomingPhoneNumbersResponse(response.body), err(HttpError(response)))
+}
+
+GetIncomingPhoneNumberRequest type {
+  sid: Str
+}
+
+GetIncomingPhoneNumberResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  phone_number: Str?,
+  friendly_name: Str?,
+  capabilities: Map?,
+  status: Str?,
+  voice_url: Str?,
+  sms_url: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  uri: Str?
+}
+
+get-incoming-phone-number
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """GET /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Get details of a specific phone number by SID."""
+}
+fn (request: GetIncomingPhoneNumberRequest): GetIncomingPhoneNumberResponse {
+  response api-request("GET", `${account-url()}/IncomingPhoneNumbers/${request.sid}.json`)
+  if(is-ok-response(response), GetIncomingPhoneNumberResponse(response.body), err(HttpError(response)))
+}
+
+UpdateIncomingPhoneNumberRequest type {
+  sid: Str,
+  FriendlyName: Str?,
+  SmsUrl: Str?,
+  SmsMethod: Str?,
+  SmsFallbackUrl: Str?,
+  VoiceUrl: Str?,
+  VoiceMethod: Str?,
+  VoiceFallbackUrl: Str?,
+  StatusCallback: Str?,
+  StatusCallbackMethod: Str?
+}
+
+UpdateIncomingPhoneNumberResponse type {
+  sid: Str?,
+  phone_number: Str?,
+  friendly_name: Str?,
+  voice_url: Str?,
+  sms_url: Str?,
+  date_updated: Str?
+}
+
+update-incoming-phone-number
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """POST /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Update a phone number's settings. Configure voice/SMS webhook URLs and friendly name."""
+}
+fn (request: UpdateIncomingPhoneNumberRequest): UpdateIncomingPhoneNumberResponse {
+  body {
+    FriendlyName: request.FriendlyName,
+    SmsUrl: request.SmsUrl,
+    SmsMethod: request.SmsMethod,
+    SmsFallbackUrl: request.SmsFallbackUrl,
+    VoiceUrl: request.VoiceUrl,
+    VoiceMethod: request.VoiceMethod,
+    VoiceFallbackUrl: request.VoiceFallbackUrl,
+    StatusCallback: request.StatusCallback,
+    StatusCallbackMethod: request.StatusCallbackMethod
+  }
+
+  response api-request("POST", `${account-url()}/IncomingPhoneNumbers/${request.sid}.json`, {}, body)
+  if(is-ok-response(response), UpdateIncomingPhoneNumberResponse(response.body), err(HttpError(response)))
+}
+
+DeleteIncomingPhoneNumberRequest type {
+  sid: Str
+}
+
+delete-incoming-phone-number
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """DELETE /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Release a phone number. The number is returned to Twilio's inventory and will no longer incur charges."""
+}
+fn (request: DeleteIncomingPhoneNumberRequest): Bool {
+  response api-request("DELETE", `${account-url()}/IncomingPhoneNumbers/${request.sid}.json`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}

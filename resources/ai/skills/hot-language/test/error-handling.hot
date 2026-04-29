@@ -1,0 +1,198 @@
+// Test file for: references/error-handling.md
+// All code snippets should be validated with `hot check`
+::hot::ai::skills::test::error-handling ns
+meta ["test"]
+
+// =============================================================================
+// Stubs for examples (not shown in docs)
+// =============================================================================
+
+::http ::hot::http
+
+// Stub functions for error handling examples
+fetch-user fn (id: Str): Map { {id: id, name: "Alice", email: "alice@example.com"} }
+fetch-posts fn (id: Str): Vec { ["post1", "post2"] }
+render-page fn (user: Map, posts: Vec): Str { "rendered" }
+render-profile fn (user: Map): Str { "profile" }
+render-error-page fn (err: Any): Str { "error page" }
+fetch-config fn (): Map { {timeout: 30} }
+default-config fn (): Map { {timeout: 60} }
+
+// =============================================================================
+// @doc: creating-results
+// =============================================================================
+
+// @doc: create-results
+create-results-example fn (): Vec {
+    success ok(42)
+    failure err("Something went wrong")
+    [success, failure]
+}
+// @end: create-results
+
+// =============================================================================
+// @doc: return-type-annotation
+// =============================================================================
+
+// @doc: safe-divide
+// Return type is Int (the Ok value), not Result
+safe-divide fn (a: Int, b: Int): Int {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+// @end: safe-divide
+
+// =============================================================================
+// @doc: checking-results
+// =============================================================================
+
+// @doc: check-result
+check-result-example fn (): Str {
+    result safe-divide(10, 0)
+
+    if(is-ok(result),
+        `Result: ${result}`,
+        "Cannot divide by zero")
+}
+// @end: check-result
+
+// =============================================================================
+// @doc: pattern-matching-results
+// =============================================================================
+
+// @doc: match-result
+match-result-example fn (id: Str): Str {
+    result fetch-user(id)
+
+    message match result {
+        Result.Ok => { `Found: ${result.name}` }
+        Result.Err => { `Error: ${result}` }
+    }
+
+    message
+}
+// @end: match-result
+
+// =============================================================================
+// @doc: lazy-arguments
+// =============================================================================
+
+// @doc: maybe-run
+maybe-run fn (should-run: Bool, lazy action: Any): Any {
+    if(should-run, do action, null)
+}
+// @end: maybe-run
+
+// =============================================================================
+// @doc: short-circuit
+// =============================================================================
+
+is-valid fn (data: Map): Bool { not(is-empty(data)) }
+is-authorized fn (user: Map): Bool { user.admin }
+cached-value fn (): Any { null }
+fetch-from-database fn (): Str { "fetched" }
+
+// @doc: short-circuit-and
+short-circuit-example fn (data: Map, user: Map): Bool {
+    // The second condition only evaluates if the first is true
+    result and(is-valid(data), is-authorized(user))
+    result
+}
+// @end: short-circuit-and
+
+// @doc: short-circuit-or
+or-example fn (): Str {
+    // The second option only evaluates if the first is false/null
+    value or(cached-value(), fetch-from-database())
+    value
+}
+// @end: short-circuit-or
+
+// =============================================================================
+// @doc: error-patterns
+// =============================================================================
+
+// @doc: let-it-fail
+main-let-fail fn (id: Str): Str {
+    user fetch-user(id)
+    posts fetch-posts(user.id)
+    render-page(user, posts)
+}
+// @end: let-it-fail
+
+// @doc: check-and-handle
+check-and-handle fn (id: Str): Str {
+    result fetch-user(id)
+
+    if(is-ok(result),
+        render-profile(result),
+        render-error-page(result))
+}
+// @end: check-and-handle
+
+// @doc: match-handle
+match-handle fn (id: Str): Str {
+    result fetch-user(id)
+
+    match result {
+        Result.Ok => { render-profile(result) }
+        Result.Err => { render-error-page(result) }
+    }
+}
+// @end: match-handle
+
+// @doc: default-values
+with-default fn (): Map {
+    result fetch-config()
+
+    config if(is-ok(result), result, default-config())
+    config
+}
+// @end: default-values
+
+// @doc: fail-with-context
+validate-email fn (data: Map): Map {
+    if(is-empty(data.email),
+        fail("Email is required", {field: "email"}),
+        data)
+}
+// @end: fail-with-context
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-safe-divide-success
+meta ["test"] fn () {
+    result safe-divide(10, 2)
+    assert-eq(5, result, "10 / 2 = 5")
+}
+
+test-safe-divide-zero
+meta ["test"] fn () {
+    result safe-divide(10, 0)
+    assert(is-err(result), "division by zero should error")
+}
+
+test-check-result
+meta ["test"] fn () {
+    result check-result-example()
+    assert-eq("Cannot divide by zero", result, "should handle error")
+}
+
+test-maybe-run-true
+meta ["test"] fn () {
+    result maybe-run(true, add(1, 2))
+    assert-eq(3, result, "should run when true")
+}
+
+test-maybe-run-false
+meta ["test"] fn () {
+    result maybe-run(false, add(1, 2))
+    assert-eq(null, result, "should not run when false")
+}
+
+test-or-example
+meta ["test"] fn () {
+    result or-example()
+    assert-eq("fetched", result, "should fetch when cached is null")
+}

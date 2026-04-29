@@ -1,0 +1,108 @@
+::hot::hmac ns
+meta {
+    doc: """HMAC (Hash-based Message Authentication Code) functions for message authentication and API signing."""
+}
+
+hmac-sha256
+meta {
+    core: true,
+    doc: """
+    HMAC-SHA256 message authentication code. Returns hex-encoded 64-character string.
+    Essential for AWS Signature v4, webhook verification, and API authentication.
+
+    **Example**
+
+    ```hot
+    hmac-sha256("secret-key", "message to sign")
+    // 64-character hex string
+
+    // AWS Signature v4 key derivation chain
+    k-date hmac-sha256-bytes(`AWS4${secret}`, date)
+    k-region hmac-sha256-bytes(k-date, region)
+    k-service hmac-sha256-bytes(k-region, service)
+    k-signing hmac-sha256-bytes(k-service, "aws4_request")
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes): Str {
+    call-lib(::hot::hmac/hmac-sha256, [key, data])
+}
+
+
+hmac-sha256-bytes
+meta {
+    core: true,
+    doc: """
+    HMAC-SHA256 returning raw bytes instead of hex. Useful for chained HMAC operations like AWS Signature v4.
+
+    **Example**
+
+    ```hot
+    // Chain HMACs for key derivation
+    k-date hmac-sha256-bytes(`AWS4${secret}`, "20231215")
+    k-region hmac-sha256-bytes(k-date, "us-east-1")
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes): Bytes {
+    call-lib(::hot::hmac/hmac-sha256-bytes, [key, data])
+}
+
+
+hmac-sha512
+meta {
+    doc: """
+    HMAC-SHA512 message authentication code. Returns hex-encoded 128-character string.
+
+    **Example**
+
+    ```hot
+    hmac-sha512("secret-key", "message")
+    // 128-character hex string
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes): Str {
+    call-lib(::hot::hmac/hmac-sha512, [key, data])
+}
+
+
+hmac-sha1
+meta {
+    doc: """
+    HMAC-SHA1 (legacy). Use only for compatibility with existing systems.
+    NOT recommended for new applications.
+
+    **Example**
+
+    ```hot
+    // GitHub webhook signature verification
+    hmac-sha1(webhook-secret, payload)
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes): Str {
+    call-lib(::hot::hmac/hmac-sha1, [key, data])
+}
+
+
+hmac-verify
+meta {
+    core: true,
+    doc: """
+    Verify HMAC in constant time to prevent timing attacks.
+    Returns true if the computed HMAC matches the expected value.
+
+    **Example**
+
+    ```hot
+    // Verify a webhook signature
+    is-valid hmac-verify(secret, payload, signature, "sha256")
+
+    // Supported algorithms: "sha256", "sha512", "sha1"
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes, expected: Str, algorithm: Str): Bool {
+    call-lib(::hot::hmac/hmac-verify, [key, data, expected, algorithm])
+}

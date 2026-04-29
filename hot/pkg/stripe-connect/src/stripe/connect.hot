@@ -1,0 +1,3203 @@
+::stripe::stripe::connect ns
+
+api-request ::stripe::api/request
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+PaymentMethodBillie type {
+
+}
+
+PaymentMethodAcssDebit type {
+    bank_name: Str?,
+    fingerprint: Str?,
+    institution_number: Str?,
+    last4: Str?,
+    transit_number: Str?
+}
+
+PaymentMethodSamsungPay type {
+
+}
+
+ConnectEmbeddedPayoutsConfig type {
+    enabled: Bool,
+    features: ConnectEmbeddedPayoutsFeatures
+}
+
+PaymentMethodAfterpayClearpay type {
+
+}
+
+BankConnectionsResourceLinkAccountSessionFilters type {
+    account_subcategories: Vec<"checking" | "credit_card" | "line_of_credit" | "mortgage" | "savings">?,
+    countries: Vec<Str>?
+}
+
+DeletedExternalAccount type {
+
+}
+
+ApiErrors type {
+    advice_code: Str?,
+    charge: Str?,
+    code: Str?,
+    decline_code: Str?,
+    doc_url: Str?,
+    message: Str?,
+    network_advice_code: Str?,
+    network_decline_code: Str?,
+    param: Str?,
+    payment_intent: PaymentIntent?,
+    payment_method: PaymentMethod?,
+    payment_method_type: Str?,
+    request_log_url: Str?,
+    setup_intent: SetupIntent?,
+    source: Any?,
+    type: "api_error" | "card_error" | "idempotency_error" | "invalid_request_error"
+}
+
+ConnectEmbeddedAccountSessionCreateComponents type {
+    account_management: ConnectEmbeddedAccountConfigClaim,
+    account_onboarding: ConnectEmbeddedAccountConfigClaim,
+    balances: ConnectEmbeddedPayoutsConfig,
+    disputes_list: ConnectEmbeddedDisputesListConfig,
+    documents: ConnectEmbeddedBaseConfigClaim,
+    financial_account: ConnectEmbeddedFinancialAccountConfigClaim,
+    financial_account_transactions: ConnectEmbeddedFinancialAccountTransactionsConfigClaim,
+    instant_payouts_promotion: ConnectEmbeddedInstantPayoutsPromotionConfig,
+    issuing_card: ConnectEmbeddedIssuingCardConfigClaim,
+    issuing_cards_list: ConnectEmbeddedIssuingCardsListConfigClaim,
+    notification_banner: ConnectEmbeddedAccountConfigClaim,
+    payment_details: ConnectEmbeddedPaymentsConfigClaim,
+    payment_disputes: ConnectEmbeddedPaymentDisputesConfig,
+    payments: ConnectEmbeddedPaymentsConfigClaim,
+    payout_details: ConnectEmbeddedBaseConfigClaim,
+    payouts: ConnectEmbeddedPayoutsConfig,
+    payouts_list: ConnectEmbeddedBaseConfigClaim,
+    tax_registrations: ConnectEmbeddedBaseConfigClaim,
+    tax_settings: ConnectEmbeddedBaseConfigClaim
+}
+
+Topup type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    expected_availability_date: Int?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "topup",
+    source: Any?,
+    statement_descriptor: Str?,
+    status: "canceled" | "failed" | "pending" | "reversed" | "succeeded",
+    transfer_group: Str?
+}
+
+Error type {
+    error: ApiErrors
+}
+
+PaymentMethodPayByBank type {
+
+}
+
+RadarRadarOptions type {
+    session: Str?
+}
+
+ConnectEmbeddedAccountFeaturesClaim type {
+    disable_stripe_user_authentication: Bool,
+    external_account_collection: Bool
+}
+
+PaymentMethodPix type {
+
+}
+
+PaymentFlowsPaymentIntentPresentmentDetails type {
+    presentment_amount: Int,
+    presentment_currency: Str
+}
+
+ConnectEmbeddedPaymentsFeatures type {
+    capture_payments: Bool,
+    destination_on_behalf_of_charge_management: Bool,
+    dispute_management: Bool,
+    refund_management: Bool
+}
+
+PaymentMethodBacsDebit type {
+    fingerprint: Str?,
+    last4: Str?,
+    sort_code: Str?
+}
+
+ConnectEmbeddedIssuingCardConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedIssuingCardFeatures
+}
+
+SetupIntent type {
+    application: Any?,
+    attach_to_self: Bool?,
+    automatic_payment_methods: Any?,
+    cancellation_reason: "abandoned" | "duplicate" | "requested_by_customer"?,
+    client_secret: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    flow_directions: Vec<"inbound" | "outbound">?,
+    id: Str,
+    last_setup_error: Any?,
+    latest_attempt: Any?,
+    livemode: Bool,
+    mandate: Any?,
+    metadata: Map?,
+    next_action: Any?,
+    object: "setup_intent",
+    on_behalf_of: Any?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>,
+    single_use_mandate: Any?,
+    status: "canceled" | "processing" | "requires_action" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    usage: Str
+}
+
+ConnectEmbeddedBaseFeatures type {
+
+}
+
+AccountRequirementsAlternative type {
+    alternative_fields_due: Vec<Str>,
+    original_fields_due: Vec<Str>
+}
+
+PaymentMethodIdeal type {
+    bank: "abn_amro" | "asn_bank" | "bunq" | "buut" | "finom" | "handelsbanken" | "ing" | "knab" | "mollie" | "moneyou" | "n26" | "nn" | "rabobank" | "regiobank" | "revolut" | "sns_bank" | "triodos_bank" | "van_lanschot" | "yoursafe"?,
+    bic: "ABNANL2A" | "ASNBNL21" | "BITSNL2A" | "BUNQNL2A" | "BUUTNL2A" | "FNOMNL22" | "FVLBNL22" | "HANDNL2A" | "INGBNL2A" | "KNABNL2H" | "MLLENL2A" | "MOYONL21" | "NNBANL2G" | "NTSBDEB1" | "RABONL2U" | "RBRBNL21" | "REVOIE23" | "REVOLT21" | "SNSBNL2A" | "TRIONL2U"?
+}
+
+PaymentMethodCustom type {
+    display_name: Str?,
+    logo: Any?,
+    type: Str
+}
+
+PaymentMethodCustomerBalance type {
+
+}
+
+LegalEntityRegistrationDate type {
+    day: Int?,
+    month: Int?,
+    year: Int?
+}
+
+ConnectEmbeddedFinancialAccountConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedFinancialAccountFeatures
+}
+
+PaymentMethodFpx type {
+    bank: "affin_bank" | "agrobank" | "alliance_bank" | "ambank" | "bank_islam" | "bank_muamalat" | "bank_of_china" | "bank_rakyat" | "bsn" | "cimb" | "deutsche_bank" | "hong_leong_bank" | "hsbc" | "kfh" | "maybank2e" | "maybank2u" | "ocbc" | "pb_enterprise" | "public_bank" | "rhb" | "standard_chartered" | "uob"
+}
+
+AccountCapabilityRequirements type {
+    alternatives: Vec<AccountRequirementsAlternative>?,
+    current_deadline: Int?,
+    currently_due: Vec<Str>,
+    disabled_reason: "other" | "paused.inactivity" | "pending.onboarding" | "pending.review" | "platform_disabled" | "platform_paused" | "rejected.inactivity" | "rejected.other" | "rejected.unsupported_business" | "requirements.fields_needed"?,
+    errors: Vec<AccountRequirementsError>,
+    eventually_due: Vec<Str>,
+    past_due: Vec<Str>,
+    pending_verification: Vec<Str>
+}
+
+PaymentMethodAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflows type {
+    inputs: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs?
+}
+
+PaymentMethodGrabpay type {
+
+}
+
+PaymentMethodSofort type {
+    country: Str?
+}
+
+AccountUnificationAccountControllerLosses type {
+    payments: "application" | "stripe"
+}
+
+PaymentFlowsPaymentDetails type {
+    customer_reference: Str?,
+    order_reference: Str?
+}
+
+PaymentMethodInteracPresent type {
+    brand: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?
+}
+
+ExternalAccount type {
+
+}
+
+PaymentMethodNaverPay type {
+    buyer_id: Str?,
+    funding: "card" | "points"
+}
+
+ConnectEmbeddedIssuingCardsListFeatures type {
+    card_management: Bool,
+    card_spend_dispute_management: Bool,
+    cardholder_management: Bool,
+    disable_stripe_user_authentication: Bool,
+    spend_control_management: Bool
+}
+
+AccountCapabilities type {
+    acss_debit_payments: "active" | "inactive" | "pending"?,
+    affirm_payments: "active" | "inactive" | "pending"?,
+    afterpay_clearpay_payments: "active" | "inactive" | "pending"?,
+    alma_payments: "active" | "inactive" | "pending"?,
+    amazon_pay_payments: "active" | "inactive" | "pending"?,
+    au_becs_debit_payments: "active" | "inactive" | "pending"?,
+    bacs_debit_payments: "active" | "inactive" | "pending"?,
+    bancontact_payments: "active" | "inactive" | "pending"?,
+    bank_transfer_payments: "active" | "inactive" | "pending"?,
+    billie_payments: "active" | "inactive" | "pending"?,
+    blik_payments: "active" | "inactive" | "pending"?,
+    boleto_payments: "active" | "inactive" | "pending"?,
+    card_issuing: "active" | "inactive" | "pending"?,
+    card_payments: "active" | "inactive" | "pending"?,
+    cartes_bancaires_payments: "active" | "inactive" | "pending"?,
+    cashapp_payments: "active" | "inactive" | "pending"?,
+    crypto_payments: "active" | "inactive" | "pending"?,
+    eps_payments: "active" | "inactive" | "pending"?,
+    fpx_payments: "active" | "inactive" | "pending"?,
+    gb_bank_transfer_payments: "active" | "inactive" | "pending"?,
+    giropay_payments: "active" | "inactive" | "pending"?,
+    grabpay_payments: "active" | "inactive" | "pending"?,
+    ideal_payments: "active" | "inactive" | "pending"?,
+    india_international_payments: "active" | "inactive" | "pending"?,
+    jcb_payments: "active" | "inactive" | "pending"?,
+    jp_bank_transfer_payments: "active" | "inactive" | "pending"?,
+    kakao_pay_payments: "active" | "inactive" | "pending"?,
+    klarna_payments: "active" | "inactive" | "pending"?,
+    konbini_payments: "active" | "inactive" | "pending"?,
+    kr_card_payments: "active" | "inactive" | "pending"?,
+    legacy_payments: "active" | "inactive" | "pending"?,
+    link_payments: "active" | "inactive" | "pending"?,
+    mb_way_payments: "active" | "inactive" | "pending"?,
+    mobilepay_payments: "active" | "inactive" | "pending"?,
+    multibanco_payments: "active" | "inactive" | "pending"?,
+    mx_bank_transfer_payments: "active" | "inactive" | "pending"?,
+    naver_pay_payments: "active" | "inactive" | "pending"?,
+    nz_bank_account_becs_debit_payments: "active" | "inactive" | "pending"?,
+    oxxo_payments: "active" | "inactive" | "pending"?,
+    p24_payments: "active" | "inactive" | "pending"?,
+    pay_by_bank_payments: "active" | "inactive" | "pending"?,
+    payco_payments: "active" | "inactive" | "pending"?,
+    paynow_payments: "active" | "inactive" | "pending"?,
+    payto_payments: "active" | "inactive" | "pending"?,
+    pix_payments: "active" | "inactive" | "pending"?,
+    promptpay_payments: "active" | "inactive" | "pending"?,
+    revolut_pay_payments: "active" | "inactive" | "pending"?,
+    samsung_pay_payments: "active" | "inactive" | "pending"?,
+    satispay_payments: "active" | "inactive" | "pending"?,
+    sepa_bank_transfer_payments: "active" | "inactive" | "pending"?,
+    sepa_debit_payments: "active" | "inactive" | "pending"?,
+    sofort_payments: "active" | "inactive" | "pending"?,
+    swish_payments: "active" | "inactive" | "pending"?,
+    tax_reporting_us_1099_k: "active" | "inactive" | "pending"?,
+    tax_reporting_us_1099_misc: "active" | "inactive" | "pending"?,
+    transfers: "active" | "inactive" | "pending"?,
+    treasury: "active" | "inactive" | "pending"?,
+    twint_payments: "active" | "inactive" | "pending"?,
+    us_bank_account_ach_payments: "active" | "inactive" | "pending"?,
+    us_bank_transfer_payments: "active" | "inactive" | "pending"?,
+    zip_payments: "active" | "inactive" | "pending"?
+}
+
+PaymentMethodBlik type {
+
+}
+
+PaymentMethodSwish type {
+
+}
+
+PaymentMethodAffirm type {
+
+}
+
+AccountSession type {
+    account: Str,
+    client_secret: Str,
+    components: ConnectEmbeddedAccountSessionCreateComponents,
+    expires_at: Int,
+    livemode: Bool,
+    object: "account_session"
+}
+
+ConnectEmbeddedBaseConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedBaseFeatures
+}
+
+PaymentMethodPayto type {
+    bsb_number: Str?,
+    last4: Str?,
+    pay_id: Str?
+}
+
+Transfer type {
+    amount: Int,
+    amount_reversed: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    destination_payment: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "transfer",
+    reversals: Map,
+    reversed: Bool,
+    source_transaction: Any?,
+    source_type: Str?,
+    transfer_group: Str?
+}
+
+PaymentMethodKlarna type {
+    dob: Any?
+}
+
+PersonRelationship type {
+    authorizer: Bool?,
+    director: Bool?,
+    executive: Bool?,
+    legal_guardian: Bool?,
+    owner: Bool?,
+    percent_ownership: Dec?,
+    representative: Bool?,
+    title: Str?
+}
+
+PaymentMethodCard type {
+    brand: Str,
+    checks: Any?,
+    country: Str?,
+    display_brand: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    generated_from: Any?,
+    last4: Str,
+    networks: Any?,
+    regulated_status: "regulated" | "unregulated"?,
+    three_d_secure_usage: Any?,
+    wallet: Any?
+}
+
+Account type {
+    business_profile: Any?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: AccountCapabilities?,
+    charges_enabled: Bool?,
+    company: LegalEntityCompany?,
+    controller: AccountUnificationAccountController?,
+    country: Str?,
+    created: Int?,
+    default_currency: Str?,
+    details_submitted: Bool?,
+    email: Str?,
+    external_accounts: Map?,
+    future_requirements: AccountFutureRequirements?,
+    groups: Any?,
+    id: Str,
+    individual: Person?,
+    metadata: Map?,
+    object: "account",
+    payouts_enabled: Bool?,
+    requirements: AccountRequirements?,
+    settings: Any?,
+    tos_acceptance: AccountTosAcceptance?,
+    type: "custom" | "express" | "none" | "standard"?
+}
+
+ConnectEmbeddedAccountConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedAccountFeaturesClaim
+}
+
+ConnectEmbeddedPaymentDisputesFeatures type {
+    destination_on_behalf_of_charge_management: Bool,
+    dispute_management: Bool,
+    refund_management: Bool
+}
+
+PaymentMethodZip type {
+
+}
+
+FinancialConnectionsAccountOwner type {
+    email: Str?,
+    id: Str,
+    name: Str,
+    object: "financial_connections.account_owner",
+    ownership: Str,
+    phone: Str?,
+    raw_address: Str?,
+    refreshed_at: Int?
+}
+
+ConnectEmbeddedFinancialAccountTransactionsConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedFinancialAccountTransactionsFeatures
+}
+
+PaymentMethodAlma type {
+
+}
+
+Capability type {
+    account: Any,
+    future_requirements: AccountCapabilityFutureRequirements?,
+    id: Str,
+    object: "capability",
+    requested: Bool,
+    requested_at: Int?,
+    requirements: AccountCapabilityRequirements?,
+    status: "active" | "inactive" | "pending" | "unrequested"
+}
+
+Address type {
+    city: Str?,
+    country: Str?,
+    line1: Str?,
+    line2: Str?,
+    postal_code: Str?,
+    state: Str?
+}
+
+ConnectEmbeddedIssuingCardsListConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedIssuingCardsListFeatures
+}
+
+PaymentMethodCashapp type {
+    buyer_id: Str?,
+    cashtag: Str?
+}
+
+Person type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+PaymentFlowsPrivatePaymentMethodsAlipay type {
+
+}
+
+ConnectEmbeddedPayoutsFeatures type {
+    disable_stripe_user_authentication: Bool,
+    edit_payout_schedule: Bool,
+    external_account_collection: Bool,
+    instant_payouts: Bool,
+    standard_payouts: Bool
+}
+
+PaymentMethodKonbini type {
+
+}
+
+ConnectEmbeddedFinancialAccountTransactionsFeatures type {
+    card_spend_dispute_management: Bool
+}
+
+PaymentMethodOxxo type {
+
+}
+
+PaymentMethodMobilepay type {
+
+}
+
+PaymentMethodLink type {
+    email: Str?
+}
+
+ConnectEmbeddedInstantPayoutsPromotionFeatures type {
+    disable_stripe_user_authentication: Bool,
+    external_account_collection: Bool,
+    instant_payouts: Bool
+}
+
+PaymentMethodAmazonPay type {
+
+}
+
+ConnectEmbeddedDisputesListFeatures type {
+    capture_payments: Bool,
+    destination_on_behalf_of_charge_management: Bool,
+    dispute_management: Bool,
+    refund_management: Bool
+}
+
+ConnectEmbeddedPaymentsConfigClaim type {
+    enabled: Bool,
+    features: ConnectEmbeddedPaymentsFeatures
+}
+
+PaymentMethodNzBankAccount type {
+    account_holder_name: Str?,
+    bank_code: Str,
+    bank_name: Str,
+    branch_code: Str,
+    last4: Str,
+    suffix: Str?
+}
+
+DeletedPerson type {
+    deleted: Bool,
+    id: Str,
+    object: "person"
+}
+
+AccountUnificationAccountControllerFees type {
+    payer: "account" | "application" | "application_custom" | "application_express"
+}
+
+AccountUnificationAccountController type {
+    fees: AccountUnificationAccountControllerFees?,
+    is_controller: Bool?,
+    losses: AccountUnificationAccountControllerLosses?,
+    requirement_collection: "application" | "stripe"?,
+    stripe_dashboard: AccountUnificationAccountControllerStripeDashboard?,
+    type: "account" | "application"
+}
+
+PaymentMethodCardPresent type {
+    brand: Str?,
+    brand_product: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    offline: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?,
+    wallet: PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet?
+}
+
+PaymentMethodKakaoPay type {
+
+}
+
+PaymentMethod type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+Payout type {
+    amount: Int,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    arrival_date: Int,
+    automatic: Bool,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    method: Str,
+    object: "payout",
+    original_payout: Any?,
+    payout_method: Str?,
+    reconciliation_status: "completed" | "in_progress" | "not_applicable",
+    reversed_by: Any?,
+    source_type: Str,
+    statement_descriptor: Str?,
+    status: Str,
+    trace_id: Any?,
+    type: "bank_account" | "card"
+}
+
+AccountRequirements type {
+    alternatives: Vec<AccountRequirementsAlternative>?,
+    current_deadline: Int?,
+    currently_due: Vec<Str>?,
+    disabled_reason: "action_required.requested_capabilities" | "listed" | "other" | "platform_paused" | "rejected.fraud" | "rejected.incomplete_verification" | "rejected.listed" | "rejected.other" | "rejected.platform_fraud" | "rejected.platform_other" | "rejected.platform_terms_of_service" | "rejected.terms_of_service" | "requirements.past_due" | "requirements.pending_verification" | "under_review"?,
+    errors: Vec<AccountRequirementsError>?,
+    eventually_due: Vec<Str>?,
+    past_due: Vec<Str>?,
+    pending_verification: Vec<Str>?
+}
+
+PaymentMethodTwint type {
+
+}
+
+AccountRequirementsError type {
+    code: "external_request" | "information_missing" | "invalid_address_city_state_postal_code" | "invalid_address_highway_contract_box" | "invalid_address_private_mailbox" | "invalid_business_profile_name" | "invalid_business_profile_name_denylisted" | "invalid_company_name_denylisted" | "invalid_dob_age_over_maximum" | "invalid_dob_age_under_18" | "invalid_dob_age_under_minimum" | "invalid_product_description_length" | "invalid_product_description_url_match" | "invalid_representative_country" | "invalid_signator" | "invalid_statement_descriptor_business_mismatch" | "invalid_statement_descriptor_denylisted" | "invalid_statement_descriptor_length" | "invalid_statement_descriptor_prefix_denylisted" | "invalid_statement_descriptor_prefix_mismatch" | "invalid_street_address" | "invalid_tax_id" | "invalid_tax_id_format" | "invalid_tos_acceptance" | "invalid_url_denylisted" | "invalid_url_format" | "invalid_url_web_presence_detected" | "invalid_url_website_business_information_mismatch" | "invalid_url_website_empty" | "invalid_url_website_inaccessible" | "invalid_url_website_inaccessible_geoblocked" | "invalid_url_website_inaccessible_password_protected" | "invalid_url_website_incomplete" | "invalid_url_website_incomplete_cancellation_policy" | "invalid_url_website_incomplete_customer_service_details" | "invalid_url_website_incomplete_legal_restrictions" | "invalid_url_website_incomplete_refund_policy" | "invalid_url_website_incomplete_return_policy" | "invalid_url_website_incomplete_terms_and_conditions" | "invalid_url_website_incomplete_under_construction" | "invalid_url_website_other" | "invalid_value_other" | "unsupported_business_type" | "verification_directors_mismatch" | "verification_document_address_mismatch" | "verification_document_address_missing" | "verification_document_corrupt" | "verification_document_country_not_supported" | "verification_document_directors_mismatch" | "verification_document_dob_mismatch" | "verification_document_duplicate_type" | "verification_document_expired" | "verification_document_failed_copy" | "verification_document_failed_greyscale" | "verification_document_failed_other" | "verification_document_failed_test_mode" | "verification_document_fraudulent" | "verification_document_id_number_mismatch" | "verification_document_id_number_missing" | "verification_document_incomplete" | "verification_document_invalid" | "verification_document_issue_or_expiry_date_missing" | "verification_document_manipulated" | "verification_document_missing_back" | "verification_document_missing_front" | "verification_document_name_mismatch" | "verification_document_name_missing" | "verification_document_nationality_mismatch" | "verification_document_not_readable" | "verification_document_not_signed" | "verification_document_not_uploaded" | "verification_document_photo_mismatch" | "verification_document_too_large" | "verification_document_type_not_supported" | "verification_extraneous_directors" | "verification_failed_address_match" | "verification_failed_authorizer_authority" | "verification_failed_business_iec_number" | "verification_failed_document_match" | "verification_failed_id_number_match" | "verification_failed_keyed_identity" | "verification_failed_keyed_match" | "verification_failed_name_match" | "verification_failed_other" | "verification_failed_representative_authority" | "verification_failed_residential_address" | "verification_failed_tax_id_match" | "verification_failed_tax_id_not_issued" | "verification_legal_entity_structure_mismatch" | "verification_missing_directors" | "verification_missing_executives" | "verification_missing_owners" | "verification_rejected_ownership_exemption_reason" | "verification_requires_additional_memorandum_of_associations" | "verification_requires_additional_proof_of_registration" | "verification_supportability",
+    reason: Str,
+    requirement: Str
+}
+
+PaymentMethodUsBankAccount type {
+    account_holder_type: "company" | "individual"?,
+    account_type: "checking" | "savings"?,
+    bank_name: Str?,
+    financial_connections_account: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    networks: Any?,
+    routing_number: Str?,
+    status_details: Any?
+}
+
+PaymentMethodBancontact type {
+
+}
+
+DeletedAccount type {
+    deleted: Bool,
+    id: Str,
+    object: "account"
+}
+
+PaymentMethodKrCard type {
+    brand: "bc" | "citi" | "hana" | "hyundai" | "jeju" | "jeonbuk" | "kakaobank" | "kbank" | "kdbbank" | "kookmin" | "kwangju" | "lotte" | "mg" | "nh" | "post" | "samsung" | "savingsbank" | "shinhan" | "shinhyup" | "suhyup" | "tossbank" | "woori"?,
+    last4: Str?
+}
+
+FeeRefund type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    fee: Any,
+    id: Str,
+    metadata: Map?,
+    object: "fee_refund"
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax type {
+    calculation: Str
+}
+
+LegalEntityPersonVerification type {
+    additional_document: Any?,
+    details: Str?,
+    details_code: Str?,
+    document: LegalEntityPersonVerificationDocument?,
+    status: Str
+}
+
+LegalEntityDob type {
+    day: Int?,
+    month: Int?,
+    year: Int?
+}
+
+LegalEntityPersonVerificationDocument type {
+    back: Any?,
+    details: Str?,
+    details_code: Str?,
+    front: Any?
+}
+
+PaymentMethodMbWay type {
+
+}
+
+PaymentMethodPayco type {
+
+}
+
+PaymentMethodPaypal type {
+    country: Str?,
+    payer_email: Str?,
+    payer_id: Str?
+}
+
+AccountUnificationAccountControllerStripeDashboard type {
+    type: "express" | "full" | "none"
+}
+
+LoginLink type {
+    created: Int,
+    object: "login_link",
+    url: Str
+}
+
+ConnectEmbeddedFinancialAccountFeatures type {
+    disable_stripe_user_authentication: Bool,
+    external_account_collection: Bool,
+    send_money: Bool,
+    transfer_balance: Bool
+}
+
+PaymentMethodCrypto type {
+
+}
+
+PaymentMethodP24 type {
+    bank: "alior_bank" | "bank_millennium" | "bank_nowy_bfg_sa" | "bank_pekao_sa" | "banki_spbdzielcze" | "blik" | "bnp_paribas" | "boz" | "citi_handlowy" | "credit_agricole" | "envelobank" | "etransfer_pocztowy24" | "getin_bank" | "ideabank" | "ing" | "inteligo" | "mbank_mtransfer" | "nest_przelew" | "noble_pay" | "pbac_z_ipko" | "plus_bank" | "santander_przelew24" | "tmobile_usbugi_bankowe" | "toyota_bank" | "velobank" | "volkswagen_bank"?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs type {
+    tax: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax?
+}
+
+ConnectEmbeddedInstantPayoutsPromotionConfig type {
+    enabled: Bool,
+    features: ConnectEmbeddedInstantPayoutsPromotionFeatures
+}
+
+AccountLink type {
+    created: Int,
+    expires_at: Int,
+    object: "account_link",
+    url: Str
+}
+
+PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet type {
+    type: "apple_pay" | "google_pay" | "samsung_pay" | "unknown"
+}
+
+PaymentMethodMultibanco type {
+
+}
+
+PaymentMethodGiropay type {
+
+}
+
+PaymentMethodRevolutPay type {
+
+}
+
+AccountFutureRequirements type {
+    alternatives: Vec<AccountRequirementsAlternative>?,
+    current_deadline: Int?,
+    currently_due: Vec<Str>?,
+    disabled_reason: "action_required.requested_capabilities" | "listed" | "other" | "platform_paused" | "rejected.fraud" | "rejected.incomplete_verification" | "rejected.listed" | "rejected.other" | "rejected.platform_fraud" | "rejected.platform_other" | "rejected.platform_terms_of_service" | "rejected.terms_of_service" | "requirements.past_due" | "requirements.pending_verification" | "under_review"?,
+    errors: Vec<AccountRequirementsError>?,
+    eventually_due: Vec<Str>?,
+    past_due: Vec<Str>?,
+    pending_verification: Vec<Str>?
+}
+
+ConnectEmbeddedDisputesListConfig type {
+    enabled: Bool,
+    features: ConnectEmbeddedDisputesListFeatures
+}
+
+PersonAdditionalTosAcceptances type {
+    account: Any?
+}
+
+ConnectEmbeddedPaymentDisputesConfig type {
+    enabled: Bool,
+    features: ConnectEmbeddedPaymentDisputesFeatures
+}
+
+AccountCapabilityFutureRequirements type {
+    alternatives: Vec<AccountRequirementsAlternative>?,
+    current_deadline: Int?,
+    currently_due: Vec<Str>,
+    disabled_reason: "other" | "paused.inactivity" | "pending.onboarding" | "pending.review" | "platform_disabled" | "platform_paused" | "rejected.inactivity" | "rejected.other" | "rejected.unsupported_business" | "requirements.fields_needed"?,
+    errors: Vec<AccountRequirementsError>,
+    eventually_due: Vec<Str>,
+    past_due: Vec<Str>,
+    pending_verification: Vec<Str>
+}
+
+PaymentIntent type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+LegalEntityCompany type {
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    directors_provided: Bool?,
+    directorship_declaration: Any?,
+    executives_provided: Bool?,
+    export_license_id: Str?,
+    export_purpose_code: Str?,
+    name: Str?,
+    name_kana: Str?,
+    name_kanji: Str?,
+    owners_provided: Bool?,
+    ownership_declaration: Any?,
+    ownership_exemption_reason: "qualified_entity_exceeds_ownership_threshold" | "qualifies_as_financial_institution"?,
+    phone: Str?,
+    registration_date: LegalEntityRegistrationDate?,
+    representative_declaration: Any?,
+    structure: "free_zone_establishment" | "free_zone_llc" | "government_instrumentality" | "governmental_unit" | "incorporated_non_profit" | "incorporated_partnership" | "limited_liability_partnership" | "llc" | "multi_member_llc" | "private_company" | "private_corporation" | "private_partnership" | "public_company" | "public_corporation" | "public_partnership" | "registered_charity" | "single_member_llc" | "sole_establishment" | "sole_proprietorship" | "tax_exempt_government_instrumentality" | "unincorporated_association" | "unincorporated_non_profit" | "unincorporated_partnership"?,
+    tax_id_provided: Bool?,
+    tax_id_registrar: Str?,
+    vat_id_provided: Bool?,
+    verification: Any?
+}
+
+PaymentMethodEps type {
+    bank: "arzte_und_apotheker_bank" | "austrian_anadi_bank_ag" | "bank_austria" | "bankhaus_carl_spangler" | "bankhaus_schelhammer_und_schattera_ag" | "bawag_psk_ag" | "bks_bank_ag" | "brull_kallmus_bank_ag" | "btv_vier_lander_bank" | "capital_bank_grawe_gruppe_ag" | "deutsche_bank_ag" | "dolomitenbank" | "easybank_ag" | "erste_bank_und_sparkassen" | "hypo_alpeadriabank_international_ag" | "hypo_bank_burgenland_aktiengesellschaft" | "hypo_noe_lb_fur_niederosterreich_u_wien" | "hypo_oberosterreich_salzburg_steiermark" | "hypo_tirol_bank_ag" | "hypo_vorarlberg_bank_ag" | "marchfelder_bank" | "oberbank_ag" | "raiffeisen_bankengruppe_osterreich" | "schoellerbank_ag" | "sparda_bank_wien" | "volksbank_gruppe" | "volkskreditbank_ag" | "vr_bank_braunau"?
+}
+
+FinancialConnectionsSession type {
+    account_holder: Any?,
+    accounts: Map,
+    client_secret: Str?,
+    filters: BankConnectionsResourceLinkAccountSessionFilters?,
+    id: Str,
+    livemode: Bool,
+    object: "financial_connections.session",
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">,
+    prefetch: Vec<"balances" | "ownership" | "transactions">?,
+    return_url: Str?
+}
+
+PaymentMethodPaynow type {
+
+}
+
+PaymentMethodPromptpay type {
+
+}
+
+ApplicationFee type {
+    account: Any,
+    amount: Int,
+    amount_refunded: Int,
+    application: Any,
+    balance_transaction: Any?,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    fee_source: Any?,
+    id: Str,
+    livemode: Bool,
+    object: "application_fee",
+    originating_transaction: Any?,
+    refunded: Bool,
+    refunds: Map
+}
+
+PaymentMethodWechatPay type {
+
+}
+
+TransferReversal type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    destination_payment_refund: Any?,
+    id: Str,
+    metadata: Map?,
+    object: "transfer_reversal",
+    source_refund: Any?,
+    transfer: Any
+}
+
+PaymentMethodBoleto type {
+    tax_id: Str
+}
+
+AccountTosAcceptance type {
+    date: Int?,
+    ip: Str?,
+    service_agreement: Str?,
+    user_agent: Str?
+}
+
+PaymentMethodSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    generated_from: Any?,
+    last4: Str?
+}
+
+ConnectEmbeddedIssuingCardFeatures type {
+    card_management: Bool,
+    card_spend_dispute_management: Bool,
+    cardholder_management: Bool,
+    spend_control_management: Bool
+}
+
+BankConnectionsResourceAccountNumberDetails type {
+    expected_expiry_date: Int?,
+    identifier_type: "account_number" | "tokenized_account_number",
+    status: "deactivated" | "transactable",
+    supported_networks: Vec<"ach">
+}
+
+PaymentMethodSatispay type {
+
+}
+
+BillingDetails type {
+    address: Any?,
+    email: Str?,
+    name: Str?,
+    phone: Str?,
+    tax_id: Str?
+}
+
+FinancialConnectionsAccount type {
+    account_holder: Any?,
+    account_numbers: Vec<BankConnectionsResourceAccountNumberDetails>?,
+    balance: Any?,
+    balance_refresh: Any?,
+    category: "cash" | "credit" | "investment" | "other",
+    created: Int,
+    display_name: Str?,
+    id: Str,
+    institution_name: Str,
+    last4: Str?,
+    livemode: Bool,
+    object: "financial_connections.account",
+    ownership: Any?,
+    ownership_refresh: Any?,
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">?,
+    status: "active" | "disconnected" | "inactive",
+    subcategory: "checking" | "credit_card" | "line_of_credit" | "mortgage" | "other" | "savings",
+    subscriptions: Vec<"transactions">?,
+    supported_payment_method_types: Vec<"link" | "us_bank_account">,
+    transaction_refresh: Any?
+}
+
+GetTopupsRequest type {
+
+}
+
+GetTopupsResponse type {
+    data: Vec<Topup>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-topups
+meta {doc: """GET /v1/topups - List all top-ups"""}
+fn (amount: Str, created: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, request: GetTopupsRequest): GetTopupsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/topups?amount=${amount}&created=${created}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}`, {}, request)
+  if(is-ok-response(response), GetTopupsResponse(response.body), err(HttpError(response)))
+}
+
+PostTopupsRequest type {
+    amount: Int,
+    currency: Str,
+    description: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    source: Str?,
+    statement_descriptor: Str?,
+    transfer_group: Str?
+}
+
+PostTopupsResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    expected_availability_date: Int?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "topup",
+    source: Any?,
+    statement_descriptor: Str?,
+    status: "canceled" | "failed" | "pending" | "reversed" | "succeeded",
+    transfer_group: Str?
+}
+
+
+create-topup
+meta {doc: """POST /v1/topups - Create a top-up"""}
+fn (request: PostTopupsRequest): PostTopupsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/topups`, {}, request)
+  if(is-ok-response(response), PostTopupsResponse(response.body), err(HttpError(response)))
+}
+
+GetTopupsTopupRequest type {
+
+}
+
+GetTopupsTopupResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    expected_availability_date: Int?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "topup",
+    source: Any?,
+    statement_descriptor: Str?,
+    status: "canceled" | "failed" | "pending" | "reversed" | "succeeded",
+    transfer_group: Str?
+}
+
+
+retrieve-topup
+meta {doc: """GET /v1/topups/{topup} - Retrieve a top-up"""}
+fn (topup: Str, expand: Str, request: GetTopupsTopupRequest): GetTopupsTopupResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/topups/${topup}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTopupsTopupResponse(response.body), err(HttpError(response)))
+}
+
+PostTopupsTopupRequest type {
+    description: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostTopupsTopupResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    expected_availability_date: Int?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "topup",
+    source: Any?,
+    statement_descriptor: Str?,
+    status: "canceled" | "failed" | "pending" | "reversed" | "succeeded",
+    transfer_group: Str?
+}
+
+
+update-topup
+meta {doc: """POST /v1/topups/{topup} - Update a top-up"""}
+fn (topup: Str, request: PostTopupsTopupRequest): PostTopupsTopupResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/topups/${topup}`, {}, request)
+  if(is-ok-response(response), PostTopupsTopupResponse(response.body), err(HttpError(response)))
+}
+
+PostTopupsTopupCancelRequest type {
+    expand: Vec<Str>?
+}
+
+PostTopupsTopupCancelResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    expected_availability_date: Int?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "topup",
+    source: Any?,
+    statement_descriptor: Str?,
+    status: "canceled" | "failed" | "pending" | "reversed" | "succeeded",
+    transfer_group: Str?
+}
+
+
+cancel-topup
+meta {doc: """POST /v1/topups/{topup}/cancel - Cancel a top-up"""}
+fn (topup: Str, request: PostTopupsTopupCancelRequest): PostTopupsTopupCancelResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/topups/${topup}/cancel`, {}, request)
+  if(is-ok-response(response), PostTopupsTopupCancelResponse(response.body), err(HttpError(response)))
+}
+
+PostExternalAccountsIdRequest type {
+    account_holder_name: Str?,
+    account_holder_type: "" | "company" | "individual"?,
+    account_type: "checking" | "futsu" | "savings" | "toza"?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    default_for_currency: Bool?,
+    documents: Map?,
+    exp_month: Str?,
+    exp_year: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    name: Str?
+}
+
+PostExternalAccountsIdResponse type {
+
+}
+
+
+post-external-accounts-id
+meta {doc: """POST /v1/external_accounts/{id}"""}
+fn (id: Str, request: PostExternalAccountsIdRequest): PostExternalAccountsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/external_accounts/${id}`, {}, request)
+  if(is-ok-response(response), PostExternalAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetPayoutsRequest type {
+
+}
+
+GetPayoutsResponse type {
+    data: Vec<Payout>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-payouts
+meta {doc: """GET /v1/payouts - List all payouts"""}
+fn (arrival-date: Str, created: Str, destination: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, request: GetPayoutsRequest): GetPayoutsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payouts?arrival_date=${arrival-date}&created=${created}&destination=${destination}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}`, {}, request)
+  if(is-ok-response(response), GetPayoutsResponse(response.body), err(HttpError(response)))
+}
+
+PostPayoutsRequest type {
+    amount: Int,
+    currency: Str,
+    description: Str?,
+    destination: Str?,
+    expand: Vec<Str>?,
+    metadata: Map?,
+    method: "instant" | "standard"?,
+    payout_method: Str?,
+    source_type: "bank_account" | "card" | "fpx"?,
+    statement_descriptor: Str?
+}
+
+PostPayoutsResponse type {
+    amount: Int,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    arrival_date: Int,
+    automatic: Bool,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    method: Str,
+    object: "payout",
+    original_payout: Any?,
+    payout_method: Str?,
+    reconciliation_status: "completed" | "in_progress" | "not_applicable",
+    reversed_by: Any?,
+    source_type: Str,
+    statement_descriptor: Str?,
+    status: Str,
+    trace_id: Any?,
+    type: "bank_account" | "card"
+}
+
+
+create-payout
+meta {doc: """POST /v1/payouts - Create a payout"""}
+fn (request: PostPayoutsRequest): PostPayoutsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payouts`, {}, request)
+  if(is-ok-response(response), PostPayoutsResponse(response.body), err(HttpError(response)))
+}
+
+GetPayoutsPayoutRequest type {
+
+}
+
+GetPayoutsPayoutResponse type {
+    amount: Int,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    arrival_date: Int,
+    automatic: Bool,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    method: Str,
+    object: "payout",
+    original_payout: Any?,
+    payout_method: Str?,
+    reconciliation_status: "completed" | "in_progress" | "not_applicable",
+    reversed_by: Any?,
+    source_type: Str,
+    statement_descriptor: Str?,
+    status: Str,
+    trace_id: Any?,
+    type: "bank_account" | "card"
+}
+
+
+retrieve-payout
+meta {doc: """GET /v1/payouts/{payout} - Retrieve a payout"""}
+fn (payout: Str, expand: Str, request: GetPayoutsPayoutRequest): GetPayoutsPayoutResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payouts/${payout}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPayoutsPayoutResponse(response.body), err(HttpError(response)))
+}
+
+PostPayoutsPayoutRequest type {
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostPayoutsPayoutResponse type {
+    amount: Int,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    arrival_date: Int,
+    automatic: Bool,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    method: Str,
+    object: "payout",
+    original_payout: Any?,
+    payout_method: Str?,
+    reconciliation_status: "completed" | "in_progress" | "not_applicable",
+    reversed_by: Any?,
+    source_type: Str,
+    statement_descriptor: Str?,
+    status: Str,
+    trace_id: Any?,
+    type: "bank_account" | "card"
+}
+
+
+update-payout
+meta {doc: """POST /v1/payouts/{payout} - Update a payout"""}
+fn (payout: Str, request: PostPayoutsPayoutRequest): PostPayoutsPayoutResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payouts/${payout}`, {}, request)
+  if(is-ok-response(response), PostPayoutsPayoutResponse(response.body), err(HttpError(response)))
+}
+
+PostPayoutsPayoutCancelRequest type {
+    expand: Vec<Str>?
+}
+
+PostPayoutsPayoutCancelResponse type {
+    amount: Int,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    arrival_date: Int,
+    automatic: Bool,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    method: Str,
+    object: "payout",
+    original_payout: Any?,
+    payout_method: Str?,
+    reconciliation_status: "completed" | "in_progress" | "not_applicable",
+    reversed_by: Any?,
+    source_type: Str,
+    statement_descriptor: Str?,
+    status: Str,
+    trace_id: Any?,
+    type: "bank_account" | "card"
+}
+
+
+cancel-payout
+meta {doc: """POST /v1/payouts/{payout}/cancel - Cancel a payout"""}
+fn (payout: Str, request: PostPayoutsPayoutCancelRequest): PostPayoutsPayoutCancelResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payouts/${payout}/cancel`, {}, request)
+  if(is-ok-response(response), PostPayoutsPayoutCancelResponse(response.body), err(HttpError(response)))
+}
+
+PostPayoutsPayoutReverseRequest type {
+    expand: Vec<Str>?,
+    metadata: Map?
+}
+
+PostPayoutsPayoutReverseResponse type {
+    amount: Int,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    arrival_date: Int,
+    automatic: Bool,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    method: Str,
+    object: "payout",
+    original_payout: Any?,
+    payout_method: Str?,
+    reconciliation_status: "completed" | "in_progress" | "not_applicable",
+    reversed_by: Any?,
+    source_type: Str,
+    statement_descriptor: Str?,
+    status: Str,
+    trace_id: Any?,
+    type: "bank_account" | "card"
+}
+
+
+reverse-payout
+meta {doc: """POST /v1/payouts/{payout}/reverse - Reverse a payout"""}
+fn (payout: Str, request: PostPayoutsPayoutReverseRequest): PostPayoutsPayoutReverseResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payouts/${payout}/reverse`, {}, request)
+  if(is-ok-response(response), PostPayoutsPayoutReverseResponse(response.body), err(HttpError(response)))
+}
+
+GetLinkedAccountsRequest type {
+
+}
+
+GetLinkedAccountsResponse type {
+    data: Vec<FinancialConnectionsAccount>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-accounts
+meta {doc: """GET /v1/linked_accounts - List Accounts"""}
+fn (account-holder: Str, ending-before: Str, expand: Str, limit: Str, session: Str, starting-after: Str, request: GetLinkedAccountsRequest): GetLinkedAccountsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/linked_accounts?account_holder=${account-holder}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&session=${session}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetLinkedAccountsResponse(response.body), err(HttpError(response)))
+}
+
+GetLinkedAccountsAccountRequest type {
+
+}
+
+GetLinkedAccountsAccountResponse type {
+    account_holder: Any?,
+    account_numbers: Vec<BankConnectionsResourceAccountNumberDetails>?,
+    balance: Any?,
+    balance_refresh: Any?,
+    category: "cash" | "credit" | "investment" | "other",
+    created: Int,
+    display_name: Str?,
+    id: Str,
+    institution_name: Str,
+    last4: Str?,
+    livemode: Bool,
+    object: "financial_connections.account",
+    ownership: Any?,
+    ownership_refresh: Any?,
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">?,
+    status: "active" | "disconnected" | "inactive",
+    subcategory: "checking" | "credit_card" | "line_of_credit" | "mortgage" | "other" | "savings",
+    subscriptions: Vec<"transactions">?,
+    supported_payment_method_types: Vec<"link" | "us_bank_account">,
+    transaction_refresh: Any?
+}
+
+
+retrieve-account
+meta {doc: """GET /v1/linked_accounts/{account} - Retrieve an Account"""}
+fn (account: Str, expand: Str, request: GetLinkedAccountsAccountRequest): GetLinkedAccountsAccountResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/linked_accounts/${account}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetLinkedAccountsAccountResponse(response.body), err(HttpError(response)))
+}
+
+PostLinkedAccountsAccountDisconnectRequest type {
+    expand: Vec<Str>?
+}
+
+PostLinkedAccountsAccountDisconnectResponse type {
+    account_holder: Any?,
+    account_numbers: Vec<BankConnectionsResourceAccountNumberDetails>?,
+    balance: Any?,
+    balance_refresh: Any?,
+    category: "cash" | "credit" | "investment" | "other",
+    created: Int,
+    display_name: Str?,
+    id: Str,
+    institution_name: Str,
+    last4: Str?,
+    livemode: Bool,
+    object: "financial_connections.account",
+    ownership: Any?,
+    ownership_refresh: Any?,
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">?,
+    status: "active" | "disconnected" | "inactive",
+    subcategory: "checking" | "credit_card" | "line_of_credit" | "mortgage" | "other" | "savings",
+    subscriptions: Vec<"transactions">?,
+    supported_payment_method_types: Vec<"link" | "us_bank_account">,
+    transaction_refresh: Any?
+}
+
+
+disconnect-account
+meta {doc: """POST /v1/linked_accounts/{account}/disconnect - Disconnect an Account"""}
+fn (account: Str, request: PostLinkedAccountsAccountDisconnectRequest): PostLinkedAccountsAccountDisconnectResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/linked_accounts/${account}/disconnect`, {}, request)
+  if(is-ok-response(response), PostLinkedAccountsAccountDisconnectResponse(response.body), err(HttpError(response)))
+}
+
+GetLinkedAccountsAccountOwnersRequest type {
+
+}
+
+GetLinkedAccountsAccountOwnersResponse type {
+    data: Vec<FinancialConnectionsAccountOwner>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-account-owners
+meta {doc: """GET /v1/linked_accounts/{account}/owners - List Account Owners"""}
+fn (account: Str, ending-before: Str, expand: Str, limit: Str, ownership: Str, starting-after: Str, request: GetLinkedAccountsAccountOwnersRequest): GetLinkedAccountsAccountOwnersResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/linked_accounts/${account}/owners?ending_before=${ending-before}&expand=${expand}&limit=${limit}&ownership=${ownership}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetLinkedAccountsAccountOwnersResponse(response.body), err(HttpError(response)))
+}
+
+PostLinkedAccountsAccountRefreshRequest type {
+    expand: Vec<Str>?,
+    features: Vec<"balance" | "ownership" | "transactions">
+}
+
+PostLinkedAccountsAccountRefreshResponse type {
+    account_holder: Any?,
+    account_numbers: Vec<BankConnectionsResourceAccountNumberDetails>?,
+    balance: Any?,
+    balance_refresh: Any?,
+    category: "cash" | "credit" | "investment" | "other",
+    created: Int,
+    display_name: Str?,
+    id: Str,
+    institution_name: Str,
+    last4: Str?,
+    livemode: Bool,
+    object: "financial_connections.account",
+    ownership: Any?,
+    ownership_refresh: Any?,
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">?,
+    status: "active" | "disconnected" | "inactive",
+    subcategory: "checking" | "credit_card" | "line_of_credit" | "mortgage" | "other" | "savings",
+    subscriptions: Vec<"transactions">?,
+    supported_payment_method_types: Vec<"link" | "us_bank_account">,
+    transaction_refresh: Any?
+}
+
+
+refresh-account-data
+meta {doc: """POST /v1/linked_accounts/{account}/refresh - Refresh Account data"""}
+fn (account: Str, request: PostLinkedAccountsAccountRefreshRequest): PostLinkedAccountsAccountRefreshResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/linked_accounts/${account}/refresh`, {}, request)
+  if(is-ok-response(response), PostLinkedAccountsAccountRefreshResponse(response.body), err(HttpError(response)))
+}
+
+GetApplicationFeesRequest type {
+
+}
+
+GetApplicationFeesResponse type {
+    data: Vec<ApplicationFee>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-application-fees
+meta {doc: """GET /v1/application_fees - List all application fees"""}
+fn (charge: Str, created: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetApplicationFeesRequest): GetApplicationFeesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/application_fees?charge=${charge}&created=${created}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetApplicationFeesResponse(response.body), err(HttpError(response)))
+}
+
+GetApplicationFeesFeeRefundsIdRequest type {
+
+}
+
+GetApplicationFeesFeeRefundsIdResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    fee: Any,
+    id: Str,
+    metadata: Map?,
+    object: "fee_refund"
+}
+
+
+retrieve-application-fee-refund
+meta {
+    doc: """GET /v1/application_fees/{fee}/refunds/{id} - Retrieve an application fee refund"""
+}
+fn (fee: Str, id: Str, expand: Str, request: GetApplicationFeesFeeRefundsIdRequest): GetApplicationFeesFeeRefundsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/application_fees/${fee}/refunds/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetApplicationFeesFeeRefundsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostApplicationFeesFeeRefundsIdRequest type {
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostApplicationFeesFeeRefundsIdResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    fee: Any,
+    id: Str,
+    metadata: Map?,
+    object: "fee_refund"
+}
+
+
+update-application-fee-refund
+meta {
+    doc: """POST /v1/application_fees/{fee}/refunds/{id} - Update an application fee refund"""
+}
+fn (fee: Str, id: Str, request: PostApplicationFeesFeeRefundsIdRequest): PostApplicationFeesFeeRefundsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/application_fees/${fee}/refunds/${id}`, {}, request)
+  if(is-ok-response(response), PostApplicationFeesFeeRefundsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetApplicationFeesIdRequest type {
+
+}
+
+GetApplicationFeesIdResponse type {
+    account: Any,
+    amount: Int,
+    amount_refunded: Int,
+    application: Any,
+    balance_transaction: Any?,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    fee_source: Any?,
+    id: Str,
+    livemode: Bool,
+    object: "application_fee",
+    originating_transaction: Any?,
+    refunded: Bool,
+    refunds: Map
+}
+
+
+retrieve-application-fee
+meta {doc: """GET /v1/application_fees/{id} - Retrieve an application fee"""}
+fn (id: Str, expand: Str, request: GetApplicationFeesIdRequest): GetApplicationFeesIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/application_fees/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetApplicationFeesIdResponse(response.body), err(HttpError(response)))
+}
+
+PostApplicationFeesIdRefundRequest type {
+    amount: Int?,
+    directive: Str?,
+    expand: Vec<Str>?
+}
+
+PostApplicationFeesIdRefundResponse type {
+    account: Any,
+    amount: Int,
+    amount_refunded: Int,
+    application: Any,
+    balance_transaction: Any?,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    fee_source: Any?,
+    id: Str,
+    livemode: Bool,
+    object: "application_fee",
+    originating_transaction: Any?,
+    refunded: Bool,
+    refunds: Map
+}
+
+
+post-application-fees-id-refund
+meta {doc: """POST /v1/application_fees/{id}/refund"""}
+fn (id: Str, request: PostApplicationFeesIdRefundRequest): PostApplicationFeesIdRefundResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/application_fees/${id}/refund`, {}, request)
+  if(is-ok-response(response), PostApplicationFeesIdRefundResponse(response.body), err(HttpError(response)))
+}
+
+GetApplicationFeesIdRefundsRequest type {
+
+}
+
+GetApplicationFeesIdRefundsResponse type {
+    data: Vec<FeeRefund>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-application-fee-refunds
+meta {
+    doc: """GET /v1/application_fees/{id}/refunds - List all application fee refunds"""
+}
+fn (id: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetApplicationFeesIdRefundsRequest): GetApplicationFeesIdRefundsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/application_fees/${id}/refunds?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetApplicationFeesIdRefundsResponse(response.body), err(HttpError(response)))
+}
+
+PostApplicationFeesIdRefundsRequest type {
+    amount: Int?,
+    expand: Vec<Str>?,
+    metadata: Map?
+}
+
+PostApplicationFeesIdRefundsResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    fee: Any,
+    id: Str,
+    metadata: Map?,
+    object: "fee_refund"
+}
+
+
+create-application-fee-refund
+meta {
+    doc: """POST /v1/application_fees/{id}/refunds - Create an application fee refund"""
+}
+fn (id: Str, request: PostApplicationFeesIdRefundsRequest): PostApplicationFeesIdRefundsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/application_fees/${id}/refunds`, {}, request)
+  if(is-ok-response(response), PostApplicationFeesIdRefundsResponse(response.body), err(HttpError(response)))
+}
+
+GetTransfersRequest type {
+
+}
+
+GetTransfersResponse type {
+    data: Vec<Transfer>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-transfers
+meta {doc: """GET /v1/transfers - List all transfers"""}
+fn (created: Str, destination: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, transfer-group: Str, request: GetTransfersRequest): GetTransfersResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/transfers?created=${created}&destination=${destination}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&transfer_group=${transfer-group}`, {}, request)
+  if(is-ok-response(response), GetTransfersResponse(response.body), err(HttpError(response)))
+}
+
+PostTransfersRequest type {
+    amount: Int?,
+    currency: Str,
+    description: Str?,
+    destination: Str,
+    expand: Vec<Str>?,
+    metadata: Map?,
+    source_transaction: Str?,
+    source_type: "bank_account" | "card" | "fpx"?,
+    transfer_group: Str?
+}
+
+PostTransfersResponse type {
+    amount: Int,
+    amount_reversed: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    destination_payment: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "transfer",
+    reversals: Map,
+    reversed: Bool,
+    source_transaction: Any?,
+    source_type: Str?,
+    transfer_group: Str?
+}
+
+
+create-transfer
+meta {doc: """POST /v1/transfers - Create a transfer"""}
+fn (request: PostTransfersRequest): PostTransfersResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/transfers`, {}, request)
+  if(is-ok-response(response), PostTransfersResponse(response.body), err(HttpError(response)))
+}
+
+GetTransfersIdReversalsRequest type {
+
+}
+
+GetTransfersIdReversalsResponse type {
+    data: Vec<TransferReversal>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-reversals
+meta {doc: """GET /v1/transfers/{id}/reversals - List all reversals"""}
+fn (id: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetTransfersIdReversalsRequest): GetTransfersIdReversalsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/transfers/${id}/reversals?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetTransfersIdReversalsResponse(response.body), err(HttpError(response)))
+}
+
+PostTransfersIdReversalsRequest type {
+    amount: Int?,
+    description: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    refund_application_fee: Bool?
+}
+
+PostTransfersIdReversalsResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    destination_payment_refund: Any?,
+    id: Str,
+    metadata: Map?,
+    object: "transfer_reversal",
+    source_refund: Any?,
+    transfer: Any
+}
+
+
+create-transfer-reversal
+meta {doc: """POST /v1/transfers/{id}/reversals - Create a transfer reversal"""}
+fn (id: Str, request: PostTransfersIdReversalsRequest): PostTransfersIdReversalsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/transfers/${id}/reversals`, {}, request)
+  if(is-ok-response(response), PostTransfersIdReversalsResponse(response.body), err(HttpError(response)))
+}
+
+GetTransfersTransferRequest type {
+
+}
+
+GetTransfersTransferResponse type {
+    amount: Int,
+    amount_reversed: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    destination_payment: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "transfer",
+    reversals: Map,
+    reversed: Bool,
+    source_transaction: Any?,
+    source_type: Str?,
+    transfer_group: Str?
+}
+
+
+retrieve-transfer
+meta {doc: """GET /v1/transfers/{transfer} - Retrieve a transfer"""}
+fn (transfer: Str, expand: Str, request: GetTransfersTransferRequest): GetTransfersTransferResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/transfers/${transfer}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTransfersTransferResponse(response.body), err(HttpError(response)))
+}
+
+PostTransfersTransferRequest type {
+    description: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostTransfersTransferResponse type {
+    amount: Int,
+    amount_reversed: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination: Any?,
+    destination_payment: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "transfer",
+    reversals: Map,
+    reversed: Bool,
+    source_transaction: Any?,
+    source_type: Str?,
+    transfer_group: Str?
+}
+
+
+update-transfer
+meta {doc: """POST /v1/transfers/{transfer} - Update a transfer"""}
+fn (transfer: Str, request: PostTransfersTransferRequest): PostTransfersTransferResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/transfers/${transfer}`, {}, request)
+  if(is-ok-response(response), PostTransfersTransferResponse(response.body), err(HttpError(response)))
+}
+
+GetTransfersTransferReversalsIdRequest type {
+
+}
+
+GetTransfersTransferReversalsIdResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    destination_payment_refund: Any?,
+    id: Str,
+    metadata: Map?,
+    object: "transfer_reversal",
+    source_refund: Any?,
+    transfer: Any
+}
+
+
+retrieve-reversal
+meta {doc: """GET /v1/transfers/{transfer}/reversals/{id} - Retrieve a reversal"""}
+fn (id: Str, transfer: Str, expand: Str, request: GetTransfersTransferReversalsIdRequest): GetTransfersTransferReversalsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/transfers/${transfer}/reversals/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTransfersTransferReversalsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostTransfersTransferReversalsIdRequest type {
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostTransfersTransferReversalsIdResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    created: Int,
+    currency: Str,
+    destination_payment_refund: Any?,
+    id: Str,
+    metadata: Map?,
+    object: "transfer_reversal",
+    source_refund: Any?,
+    transfer: Any
+}
+
+
+update-reversal
+meta {doc: """POST /v1/transfers/{transfer}/reversals/{id} - Update a reversal"""}
+fn (id: Str, transfer: Str, request: PostTransfersTransferReversalsIdRequest): PostTransfersTransferReversalsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/transfers/${transfer}/reversals/${id}`, {}, request)
+  if(is-ok-response(response), PostTransfersTransferReversalsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsRequest type {
+
+}
+
+GetAccountsResponse type {
+    data: Vec<Account>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-connected-accounts
+meta {doc: """GET /v1/accounts - List all connected accounts"""}
+fn (created: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetAccountsRequest): GetAccountsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts?created=${created}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetAccountsResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsRequest type {
+    account_token: Str?,
+    bank_account: Any?,
+    business_profile: Map?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: Map?,
+    company: Map?,
+    controller: Map?,
+    country: Str?,
+    default_currency: Str?,
+    documents: Map?,
+    email: Str?,
+    expand: Vec<Str>?,
+    external_account: Str?,
+    groups: Map?,
+    individual: Map?,
+    metadata: Any?,
+    settings: Map?,
+    tos_acceptance: Map?,
+    type: "custom" | "express" | "standard"?
+}
+
+PostAccountsResponse type {
+    business_profile: Any?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: AccountCapabilities?,
+    charges_enabled: Bool?,
+    company: LegalEntityCompany?,
+    controller: AccountUnificationAccountController?,
+    country: Str?,
+    created: Int?,
+    default_currency: Str?,
+    details_submitted: Bool?,
+    email: Str?,
+    external_accounts: Map?,
+    future_requirements: AccountFutureRequirements?,
+    groups: Any?,
+    id: Str,
+    individual: Person?,
+    metadata: Map?,
+    object: "account",
+    payouts_enabled: Bool?,
+    requirements: AccountRequirements?,
+    settings: Any?,
+    tos_acceptance: AccountTosAcceptance?,
+    type: "custom" | "express" | "none" | "standard"?
+}
+
+
+post-accounts
+meta {doc: """POST /v1/accounts"""}
+fn (request: PostAccountsRequest): PostAccountsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts`, {}, request)
+  if(is-ok-response(response), PostAccountsResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountRequest type {
+
+}
+
+GetAccountsAccountResponse type {
+    business_profile: Any?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: AccountCapabilities?,
+    charges_enabled: Bool?,
+    company: LegalEntityCompany?,
+    controller: AccountUnificationAccountController?,
+    country: Str?,
+    created: Int?,
+    default_currency: Str?,
+    details_submitted: Bool?,
+    email: Str?,
+    external_accounts: Map?,
+    future_requirements: AccountFutureRequirements?,
+    groups: Any?,
+    id: Str,
+    individual: Person?,
+    metadata: Map?,
+    object: "account",
+    payouts_enabled: Bool?,
+    requirements: AccountRequirements?,
+    settings: Any?,
+    tos_acceptance: AccountTosAcceptance?,
+    type: "custom" | "express" | "none" | "standard"?
+}
+
+
+retrieve-account
+meta {doc: """GET /v1/accounts/{account} - Retrieve account"""}
+fn (account: Str, expand: Str, request: GetAccountsAccountRequest): GetAccountsAccountResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountRequest type {
+    account_token: Str?,
+    business_profile: Map?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: Map?,
+    company: Map?,
+    default_currency: Str?,
+    documents: Map?,
+    email: Str?,
+    expand: Vec<Str>?,
+    external_account: Str?,
+    groups: Map?,
+    individual: Map?,
+    metadata: Any?,
+    settings: Map?,
+    tos_acceptance: Map?
+}
+
+PostAccountsAccountResponse type {
+    business_profile: Any?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: AccountCapabilities?,
+    charges_enabled: Bool?,
+    company: LegalEntityCompany?,
+    controller: AccountUnificationAccountController?,
+    country: Str?,
+    created: Int?,
+    default_currency: Str?,
+    details_submitted: Bool?,
+    email: Str?,
+    external_accounts: Map?,
+    future_requirements: AccountFutureRequirements?,
+    groups: Any?,
+    id: Str,
+    individual: Person?,
+    metadata: Map?,
+    object: "account",
+    payouts_enabled: Bool?,
+    requirements: AccountRequirements?,
+    settings: Any?,
+    tos_acceptance: AccountTosAcceptance?,
+    type: "custom" | "express" | "none" | "standard"?
+}
+
+
+update-account
+meta {doc: """POST /v1/accounts/{account} - Update an account"""}
+fn (account: Str, request: PostAccountsAccountRequest): PostAccountsAccountResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountResponse(response.body), err(HttpError(response)))
+}
+
+DeleteAccountsAccountRequest type {
+
+}
+
+DeleteAccountsAccountResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "account"
+}
+
+
+delete-account
+meta {doc: """DELETE /v1/accounts/{account} - Delete an account"""}
+fn (account: Str, request: DeleteAccountsAccountRequest): DeleteAccountsAccountResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/accounts/${account}`, {}, request)
+  if(is-ok-response(response), DeleteAccountsAccountResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountBankAccountsRequest type {
+    bank_account: Any?,
+    default_for_currency: Bool?,
+    expand: Vec<Str>?,
+    external_account: Str?,
+    metadata: Map?
+}
+
+PostAccountsAccountBankAccountsResponse type {
+
+}
+
+
+create-external-account
+meta {
+    doc: """POST /v1/accounts/{account}/bank_accounts - Create an external account"""
+}
+fn (account: Str, request: PostAccountsAccountBankAccountsRequest): PostAccountsAccountBankAccountsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/bank_accounts`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountBankAccountsResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountBankAccountsIdRequest type {
+
+}
+
+GetAccountsAccountBankAccountsIdResponse type {
+
+}
+
+
+retrieve-external-account
+meta {
+    doc: """GET /v1/accounts/{account}/bank_accounts/{id} - Retrieve an external account"""
+}
+fn (account: Str, id: Str, expand: Str, request: GetAccountsAccountBankAccountsIdRequest): GetAccountsAccountBankAccountsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/bank_accounts/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountBankAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountBankAccountsIdRequest type {
+    account_holder_name: Str?,
+    account_holder_type: "" | "company" | "individual"?,
+    account_type: "checking" | "futsu" | "savings" | "toza"?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    default_for_currency: Bool?,
+    documents: Map?,
+    exp_month: Str?,
+    exp_year: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    name: Str?
+}
+
+PostAccountsAccountBankAccountsIdResponse type {
+
+}
+
+
+post-accounts-account-bank-accounts-id
+meta {doc: """POST /v1/accounts/{account}/bank_accounts/{id}"""}
+fn (account: Str, id: Str, request: PostAccountsAccountBankAccountsIdRequest): PostAccountsAccountBankAccountsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/bank_accounts/${id}`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountBankAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteAccountsAccountBankAccountsIdRequest type {
+
+}
+
+DeleteAccountsAccountBankAccountsIdResponse type {
+
+}
+
+
+delete-external-account
+meta {
+    doc: """DELETE /v1/accounts/{account}/bank_accounts/{id} - Delete an external account"""
+}
+fn (account: Str, id: Str, request: DeleteAccountsAccountBankAccountsIdRequest): DeleteAccountsAccountBankAccountsIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/accounts/${account}/bank_accounts/${id}`, {}, request)
+  if(is-ok-response(response), DeleteAccountsAccountBankAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountCapabilitiesRequest type {
+
+}
+
+GetAccountsAccountCapabilitiesResponse type {
+    data: Vec<Capability>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-account-capabilities
+meta {
+    doc: """GET /v1/accounts/{account}/capabilities - List all account capabilities"""
+}
+fn (account: Str, expand: Str, request: GetAccountsAccountCapabilitiesRequest): GetAccountsAccountCapabilitiesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/capabilities?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountCapabilitiesResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountCapabilitiesCapabilityRequest type {
+
+}
+
+GetAccountsAccountCapabilitiesCapabilityResponse type {
+    account: Any,
+    future_requirements: AccountCapabilityFutureRequirements?,
+    id: Str,
+    object: "capability",
+    requested: Bool,
+    requested_at: Int?,
+    requirements: AccountCapabilityRequirements?,
+    status: "active" | "inactive" | "pending" | "unrequested"
+}
+
+
+retrieve-account-capability
+meta {
+    doc: """GET /v1/accounts/{account}/capabilities/{capability} - Retrieve an Account Capability"""
+}
+fn (account: Str, capability: Str, expand: Str, request: GetAccountsAccountCapabilitiesCapabilityRequest): GetAccountsAccountCapabilitiesCapabilityResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/capabilities/${capability}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountCapabilitiesCapabilityResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountCapabilitiesCapabilityRequest type {
+    expand: Vec<Str>?,
+    requested: Bool?
+}
+
+PostAccountsAccountCapabilitiesCapabilityResponse type {
+    account: Any,
+    future_requirements: AccountCapabilityFutureRequirements?,
+    id: Str,
+    object: "capability",
+    requested: Bool,
+    requested_at: Int?,
+    requirements: AccountCapabilityRequirements?,
+    status: "active" | "inactive" | "pending" | "unrequested"
+}
+
+
+update-account-capability
+meta {
+    doc: """POST /v1/accounts/{account}/capabilities/{capability} - Update an Account Capability"""
+}
+fn (account: Str, capability: Str, request: PostAccountsAccountCapabilitiesCapabilityRequest): PostAccountsAccountCapabilitiesCapabilityResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/capabilities/${capability}`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountCapabilitiesCapabilityResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountExternalAccountsRequest type {
+
+}
+
+GetAccountsAccountExternalAccountsResponse type {
+    data: Vec,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-external-accounts
+meta {
+    doc: """GET /v1/accounts/{account}/external_accounts - List all external accounts"""
+}
+fn (account: Str, ending-before: Str, expand: Str, limit: Str, object: Str, starting-after: Str, request: GetAccountsAccountExternalAccountsRequest): GetAccountsAccountExternalAccountsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/external_accounts?ending_before=${ending-before}&expand=${expand}&limit=${limit}&object=${object}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountExternalAccountsResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountExternalAccountsRequest type {
+    bank_account: Any?,
+    default_for_currency: Bool?,
+    expand: Vec<Str>?,
+    external_account: Str?,
+    metadata: Map?
+}
+
+PostAccountsAccountExternalAccountsResponse type {
+
+}
+
+
+create-external-account
+meta {
+    doc: """POST /v1/accounts/{account}/external_accounts - Create an external account"""
+}
+fn (account: Str, request: PostAccountsAccountExternalAccountsRequest): PostAccountsAccountExternalAccountsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/external_accounts`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountExternalAccountsResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountExternalAccountsIdRequest type {
+
+}
+
+GetAccountsAccountExternalAccountsIdResponse type {
+
+}
+
+
+retrieve-external-account
+meta {
+    doc: """GET /v1/accounts/{account}/external_accounts/{id} - Retrieve an external account"""
+}
+fn (account: Str, id: Str, expand: Str, request: GetAccountsAccountExternalAccountsIdRequest): GetAccountsAccountExternalAccountsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/external_accounts/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountExternalAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountExternalAccountsIdRequest type {
+    account_holder_name: Str?,
+    account_holder_type: "" | "company" | "individual"?,
+    account_type: "checking" | "futsu" | "savings" | "toza"?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    default_for_currency: Bool?,
+    documents: Map?,
+    exp_month: Str?,
+    exp_year: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    name: Str?
+}
+
+PostAccountsAccountExternalAccountsIdResponse type {
+
+}
+
+
+post-accounts-account-external-accounts-id
+meta {doc: """POST /v1/accounts/{account}/external_accounts/{id}"""}
+fn (account: Str, id: Str, request: PostAccountsAccountExternalAccountsIdRequest): PostAccountsAccountExternalAccountsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/external_accounts/${id}`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountExternalAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteAccountsAccountExternalAccountsIdRequest type {
+
+}
+
+DeleteAccountsAccountExternalAccountsIdResponse type {
+
+}
+
+
+delete-external-account
+meta {
+    doc: """DELETE /v1/accounts/{account}/external_accounts/{id} - Delete an external account"""
+}
+fn (account: Str, id: Str, request: DeleteAccountsAccountExternalAccountsIdRequest): DeleteAccountsAccountExternalAccountsIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/accounts/${account}/external_accounts/${id}`, {}, request)
+  if(is-ok-response(response), DeleteAccountsAccountExternalAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountLoginLinksRequest type {
+    expand: Vec<Str>?
+}
+
+PostAccountsAccountLoginLinksResponse type {
+    created: Int,
+    object: "login_link",
+    url: Str
+}
+
+
+create-login-link
+meta {doc: """POST /v1/accounts/{account}/login_links - Create a login link"""}
+fn (account: Str, request: PostAccountsAccountLoginLinksRequest): PostAccountsAccountLoginLinksResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/login_links`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountLoginLinksResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountPeopleRequest type {
+
+}
+
+GetAccountsAccountPeopleResponse type {
+    data: Vec<Person>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-persons
+meta {doc: """GET /v1/accounts/{account}/people - List all persons"""}
+fn (account: Str, ending-before: Str, expand: Str, limit: Str, relationship: Str, starting-after: Str, request: GetAccountsAccountPeopleRequest): GetAccountsAccountPeopleResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/people?ending_before=${ending-before}&expand=${expand}&limit=${limit}&relationship=${relationship}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountPeopleResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountPeopleRequest type {
+    additional_tos_acceptances: Map?,
+    address: Map?,
+    address_kana: Map?,
+    address_kanji: Map?,
+    dob: Any?,
+    documents: Map?,
+    email: Str?,
+    expand: Vec<Str>?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Any?,
+    gender: Str?,
+    id_number: Str?,
+    id_number_secondary: Str?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Any?,
+    nationality: Str?,
+    person_token: Str?,
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Map?,
+    relationship: Map?,
+    ssn_last_4: Str?,
+    us_cfpb_data: Map?,
+    verification: Map?
+}
+
+PostAccountsAccountPeopleResponse type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+
+create-person
+meta {doc: """POST /v1/accounts/{account}/people - Create a person"""}
+fn (account: Str, request: PostAccountsAccountPeopleRequest): PostAccountsAccountPeopleResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/people`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountPeopleResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountPeoplePersonRequest type {
+
+}
+
+GetAccountsAccountPeoplePersonResponse type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+
+retrieve-person
+meta {doc: """GET /v1/accounts/{account}/people/{person} - Retrieve a person"""}
+fn (account: Str, person: Str, expand: Str, request: GetAccountsAccountPeoplePersonRequest): GetAccountsAccountPeoplePersonResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/people/${person}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountPeoplePersonResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountPeoplePersonRequest type {
+    additional_tos_acceptances: Map?,
+    address: Map?,
+    address_kana: Map?,
+    address_kanji: Map?,
+    dob: Any?,
+    documents: Map?,
+    email: Str?,
+    expand: Vec<Str>?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Any?,
+    gender: Str?,
+    id_number: Str?,
+    id_number_secondary: Str?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Any?,
+    nationality: Str?,
+    person_token: Str?,
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Map?,
+    relationship: Map?,
+    ssn_last_4: Str?,
+    us_cfpb_data: Map?,
+    verification: Map?
+}
+
+PostAccountsAccountPeoplePersonResponse type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+
+update-person
+meta {doc: """POST /v1/accounts/{account}/people/{person} - Update a person"""}
+fn (account: Str, person: Str, request: PostAccountsAccountPeoplePersonRequest): PostAccountsAccountPeoplePersonResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/people/${person}`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountPeoplePersonResponse(response.body), err(HttpError(response)))
+}
+
+DeleteAccountsAccountPeoplePersonRequest type {
+
+}
+
+DeleteAccountsAccountPeoplePersonResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "person"
+}
+
+
+delete-person
+meta {doc: """DELETE /v1/accounts/{account}/people/{person} - Delete a person"""}
+fn (account: Str, person: Str, request: DeleteAccountsAccountPeoplePersonRequest): DeleteAccountsAccountPeoplePersonResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/accounts/${account}/people/${person}`, {}, request)
+  if(is-ok-response(response), DeleteAccountsAccountPeoplePersonResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountPersonsRequest type {
+
+}
+
+GetAccountsAccountPersonsResponse type {
+    data: Vec<Person>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-persons
+meta {doc: """GET /v1/accounts/{account}/persons - List all persons"""}
+fn (account: Str, ending-before: Str, expand: Str, limit: Str, relationship: Str, starting-after: Str, request: GetAccountsAccountPersonsRequest): GetAccountsAccountPersonsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/persons?ending_before=${ending-before}&expand=${expand}&limit=${limit}&relationship=${relationship}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountPersonsResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountPersonsRequest type {
+    additional_tos_acceptances: Map?,
+    address: Map?,
+    address_kana: Map?,
+    address_kanji: Map?,
+    dob: Any?,
+    documents: Map?,
+    email: Str?,
+    expand: Vec<Str>?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Any?,
+    gender: Str?,
+    id_number: Str?,
+    id_number_secondary: Str?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Any?,
+    nationality: Str?,
+    person_token: Str?,
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Map?,
+    relationship: Map?,
+    ssn_last_4: Str?,
+    us_cfpb_data: Map?,
+    verification: Map?
+}
+
+PostAccountsAccountPersonsResponse type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+
+create-person
+meta {doc: """POST /v1/accounts/{account}/persons - Create a person"""}
+fn (account: Str, request: PostAccountsAccountPersonsRequest): PostAccountsAccountPersonsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/persons`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountPersonsResponse(response.body), err(HttpError(response)))
+}
+
+GetAccountsAccountPersonsPersonRequest type {
+
+}
+
+GetAccountsAccountPersonsPersonResponse type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+
+retrieve-person
+meta {doc: """GET /v1/accounts/{account}/persons/{person} - Retrieve a person"""}
+fn (account: Str, person: Str, expand: Str, request: GetAccountsAccountPersonsPersonRequest): GetAccountsAccountPersonsPersonResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/accounts/${account}/persons/${person}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetAccountsAccountPersonsPersonResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountPersonsPersonRequest type {
+    additional_tos_acceptances: Map?,
+    address: Map?,
+    address_kana: Map?,
+    address_kanji: Map?,
+    dob: Any?,
+    documents: Map?,
+    email: Str?,
+    expand: Vec<Str>?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Any?,
+    gender: Str?,
+    id_number: Str?,
+    id_number_secondary: Str?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Any?,
+    nationality: Str?,
+    person_token: Str?,
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Map?,
+    relationship: Map?,
+    ssn_last_4: Str?,
+    us_cfpb_data: Map?,
+    verification: Map?
+}
+
+PostAccountsAccountPersonsPersonResponse type {
+    account: Str,
+    additional_tos_acceptances: PersonAdditionalTosAcceptances?,
+    address: Address?,
+    address_kana: Any?,
+    address_kanji: Any?,
+    created: Int,
+    dob: LegalEntityDob?,
+    email: Str?,
+    first_name: Str?,
+    first_name_kana: Str?,
+    first_name_kanji: Str?,
+    full_name_aliases: Vec<Str>?,
+    future_requirements: Any?,
+    gender: Str?,
+    id: Str,
+    id_number_provided: Bool?,
+    id_number_secondary_provided: Bool?,
+    last_name: Str?,
+    last_name_kana: Str?,
+    last_name_kanji: Str?,
+    maiden_name: Str?,
+    metadata: Map?,
+    nationality: Str?,
+    object: "person",
+    phone: Str?,
+    political_exposure: "existing" | "none"?,
+    registered_address: Address?,
+    relationship: PersonRelationship?,
+    requirements: Any?,
+    ssn_last_4_provided: Bool?,
+    us_cfpb_data: Any?,
+    verification: LegalEntityPersonVerification?
+}
+
+
+update-person
+meta {doc: """POST /v1/accounts/{account}/persons/{person} - Update a person"""}
+fn (account: Str, person: Str, request: PostAccountsAccountPersonsPersonRequest): PostAccountsAccountPersonsPersonResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/persons/${person}`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountPersonsPersonResponse(response.body), err(HttpError(response)))
+}
+
+DeleteAccountsAccountPersonsPersonRequest type {
+
+}
+
+DeleteAccountsAccountPersonsPersonResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "person"
+}
+
+
+delete-person
+meta {doc: """DELETE /v1/accounts/{account}/persons/{person} - Delete a person"""}
+fn (account: Str, person: Str, request: DeleteAccountsAccountPersonsPersonRequest): DeleteAccountsAccountPersonsPersonResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/accounts/${account}/persons/${person}`, {}, request)
+  if(is-ok-response(response), DeleteAccountsAccountPersonsPersonResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountsAccountRejectRequest type {
+    expand: Vec<Str>?,
+    reason: Str
+}
+
+PostAccountsAccountRejectResponse type {
+    business_profile: Any?,
+    business_type: "company" | "government_entity" | "individual" | "non_profit"?,
+    capabilities: AccountCapabilities?,
+    charges_enabled: Bool?,
+    company: LegalEntityCompany?,
+    controller: AccountUnificationAccountController?,
+    country: Str?,
+    created: Int?,
+    default_currency: Str?,
+    details_submitted: Bool?,
+    email: Str?,
+    external_accounts: Map?,
+    future_requirements: AccountFutureRequirements?,
+    groups: Any?,
+    id: Str,
+    individual: Person?,
+    metadata: Map?,
+    object: "account",
+    payouts_enabled: Bool?,
+    requirements: AccountRequirements?,
+    settings: Any?,
+    tos_acceptance: AccountTosAcceptance?,
+    type: "custom" | "express" | "none" | "standard"?
+}
+
+
+reject-account
+meta {doc: """POST /v1/accounts/{account}/reject - Reject an account"""}
+fn (account: Str, request: PostAccountsAccountRejectRequest): PostAccountsAccountRejectResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/accounts/${account}/reject`, {}, request)
+  if(is-ok-response(response), PostAccountsAccountRejectResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountSessionsRequest type {
+    account: Str,
+    components: Map,
+    expand: Vec<Str>?
+}
+
+PostAccountSessionsResponse type {
+    account: Str,
+    client_secret: Str,
+    components: ConnectEmbeddedAccountSessionCreateComponents,
+    expires_at: Int,
+    livemode: Bool,
+    object: "account_session"
+}
+
+
+create-account-session
+meta {doc: """POST /v1/account_sessions - Create an Account Session"""}
+fn (request: PostAccountSessionsRequest): PostAccountSessionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/account_sessions`, {}, request)
+  if(is-ok-response(response), PostAccountSessionsResponse(response.body), err(HttpError(response)))
+}
+
+PostLinkAccountSessionsRequest type {
+    account_holder: Map,
+    expand: Vec<Str>?,
+    filters: Map?,
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">,
+    prefetch: Vec<"balances" | "ownership" | "transactions">?,
+    return_url: Str?
+}
+
+PostLinkAccountSessionsResponse type {
+    account_holder: Any?,
+    accounts: Map,
+    client_secret: Str?,
+    filters: BankConnectionsResourceLinkAccountSessionFilters?,
+    id: Str,
+    livemode: Bool,
+    object: "financial_connections.session",
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">,
+    prefetch: Vec<"balances" | "ownership" | "transactions">?,
+    return_url: Str?
+}
+
+
+create-session
+meta {doc: """POST /v1/link_account_sessions - Create a Session"""}
+fn (request: PostLinkAccountSessionsRequest): PostLinkAccountSessionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/link_account_sessions`, {}, request)
+  if(is-ok-response(response), PostLinkAccountSessionsResponse(response.body), err(HttpError(response)))
+}
+
+GetLinkAccountSessionsSessionRequest type {
+
+}
+
+GetLinkAccountSessionsSessionResponse type {
+    account_holder: Any?,
+    accounts: Map,
+    client_secret: Str?,
+    filters: BankConnectionsResourceLinkAccountSessionFilters?,
+    id: Str,
+    livemode: Bool,
+    object: "financial_connections.session",
+    permissions: Vec<"balances" | "ownership" | "payment_method" | "transactions">,
+    prefetch: Vec<"balances" | "ownership" | "transactions">?,
+    return_url: Str?
+}
+
+
+retrieve-session
+meta {doc: """GET /v1/link_account_sessions/{session} - Retrieve a Session"""}
+fn (session: Str, expand: Str, request: GetLinkAccountSessionsSessionRequest): GetLinkAccountSessionsSessionResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/link_account_sessions/${session}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetLinkAccountSessionsSessionResponse(response.body), err(HttpError(response)))
+}
+
+PostAccountLinksRequest type {
+    account: Str,
+    collect: "currently_due" | "eventually_due"?,
+    collection_options: Map?,
+    expand: Vec<Str>?,
+    refresh_url: Str?,
+    return_url: Str?,
+    type: "account_onboarding" | "account_update"
+}
+
+PostAccountLinksResponse type {
+    created: Int,
+    expires_at: Int,
+    object: "account_link",
+    url: Str
+}
+
+
+create-account-link
+meta {doc: """POST /v1/account_links - Create an account link"""}
+fn (request: PostAccountLinksRequest): PostAccountLinksResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/account_links`, {}, request)
+  if(is-ok-response(response), PostAccountLinksResponse(response.body), err(HttpError(response)))
+}

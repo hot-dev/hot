@@ -1,0 +1,328 @@
+::hot::http ns
+meta {doc: """HTTP client for making web requests."""}
+
+// HTTP method literal union type. Declared `open` so applications can
+// register methods outside the standard set (e.g., "CONNECT", "TRACE",
+// or WebDAV verbs) without forking this type. Add members at top level
+// in any namespace, e.g.
+//
+//   ::hot::http/HttpMethod type open | "CONNECT"
+//   ::hot::http/HttpMethod type open "PROPFIND" | "MKCOL"
+HttpMethod type open "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+
+// Stream format literal union type. Declared `open` so callers can
+// register custom transports (e.g., "websocket", "grpc") without
+// forking this type. Add members at top level in any namespace, e.g.
+//
+//   ::hot::http/StreamFormat type open | "websocket"
+StreamFormat type open "sse" | "ndjson" | "raw"
+
+HttpRequest
+meta {
+    doc: """
+    HTTP request. Used for both inbound webhook requests and outbound HTTP calls.
+
+    **Fields**
+    - `method` - HTTP method (GET, POST, PUT, etc.)
+    - `url` - Request URL (full URL for outbound, path for inbound webhooks)
+    - `headers` - Request headers (keys are lowercase for inbound)
+    - `query` - Query string parameters as a Map (inbound only)
+    - `body` - Parsed body (JSON auto-parsed to Map/Vec for inbound, or the body to send for outbound)
+    - `body-raw` - Original request body as a raw string (inbound only, useful for signature verification)
+
+    **Examples**
+
+    Outbound request:
+    ```hot
+    response request(HttpRequest({method: "POST", url: "https://api.example.com/data", body: {name: "Alice"}}))
+    ```
+
+    Inbound webhook handler:
+    ```hot
+    on-hook
+    meta {webhook: {service: "demo", path: "/hook"}}
+    fn (request: HttpRequest): HttpResponse {
+        HttpResponse({status: 200, body: request.body})
+    }
+    ```
+    """
+}
+type {
+    method: Str,
+    url: Str,
+    headers: Map<Str, Str>?,
+    query: Map?,
+    body: Any?,
+    body-raw: Str?
+}
+
+HttpResponse
+meta {
+    doc: """
+    HTTP response returned from request functions or webhook handlers.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/get("https://api.example.com/users/1")
+    response.status   // 200
+    response.headers  // {"content-type": "application/json", ...}
+    response.body     // {"id": 1, "name": "Alice"}
+    ```
+    """
+}
+type {
+    status: Int,
+    headers: Map<Str, Str>?,
+    body: Any?
+}
+
+request
+meta {
+    doc: """
+    Perform an HTTP request.
+
+    Accepts either an `HttpRequest` or positional arguments (method, url, headers, body).
+
+    **Examples**
+
+    ```hot
+    // Using HttpRequest
+    response request(HttpRequest({method: "POST", url: "https://api.example.com/data", body: {name: "Alice"}}))
+
+    // Using positional arguments
+    response request("POST", "https://api.example.com/data", {"Content-Type": "application/json"}, {name: "Alice"})
+    ```
+    """
+}
+fn (request: HttpRequest): HttpResponse {
+    call-lib(::hot::http/request, [request])
+},
+(method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): HttpResponse {
+    request(HttpRequest({method, url, headers, body}))
+}
+
+
+get
+meta {
+    doc: """
+    Send an HTTP GET request to `url`.
+
+    **Example**
+
+    ```hot
+
+    response ::hot::http/get("https://api.example.com/users/1")
+    // response.status = 200
+    // response.body = {"id": 1, "name": "Alice"}
+    ```
+    """
+}
+fn (url: Str): HttpResponse {
+    request(HttpRequest({method: "GET", url}))
+}
+
+post
+meta {
+    doc: """
+    Send an HTTP POST request to `url` with `body`.
+
+    **Example**
+
+    ```hot
+
+    response ::hot::http/post("https://api.example.com/users", {"name": "Bob"})
+    // response.status = 201
+    ```
+    """
+}
+fn (url: Str, body: Any): HttpResponse { request(HttpRequest({method: "POST", url, body})) }
+
+
+put
+meta {
+    doc: """
+    Send an HTTP PUT request to `url` with `body`.
+
+    **Example**
+
+    ```hot
+
+    response ::hot::http/put("https://api.example.com/users/1", {"name": "Updated"})
+    ```
+    """
+}
+fn (url: Str, body: Any): HttpResponse { request(HttpRequest({method: "PUT", url, body})) }
+
+
+delete
+meta {
+    doc: """
+    Send an HTTP DELETE request to `url`.
+
+    **Example**
+
+    ```hot
+
+    response ::hot::http/delete("https://api.example.com/users/1")
+    // response.status = 204
+    ```
+    """
+}
+fn (url: Str): HttpResponse { request(HttpRequest({method: "DELETE", url})) }
+
+
+patch
+meta {
+    doc: """
+    Send an HTTP PATCH request to `url` with `body`.
+
+    **Example**
+
+    ```hot
+
+    response ::hot::http/patch("https://api.example.com/users/1", {"email": "new@example.com"})
+    ```
+    """
+}
+fn (url: Str, body: Any): HttpResponse {
+    request(HttpRequest({method: "PATCH", url, body}))
+}
+
+
+is-ok-response
+meta {
+    doc: """
+    Return true if the HTTP response status is between 200 and 299.
+
+    **Example**
+
+    ```hot
+
+    response ::hot::http/get("https://api.example.com/data")
+    if(::hot::http/is-ok-response(response), response.body, err("Request failed"))
+    ```
+    """
+}
+fn (response: HttpResponse): Bool {
+    between(response.status, 200, 299)
+}
+
+
+// ============================================================================
+// Streaming HTTP Support
+// ============================================================================
+
+StreamingHttpResponse
+meta {
+    doc: """
+    HTTP response with a streaming body iterator.
+
+    **Fields**
+    - `status` - HTTP status code
+    - `headers` - Response headers
+    - `body` - An iterator that yields chunks from the response stream
+    """
+}
+type {
+    status: Int,
+    headers: Map<Str, Str>,
+    body: Any  // Iterator
+}
+
+request-stream
+meta {
+    doc: """
+    Make a streaming HTTP request that returns an iterator for the body.
+
+    Use this for Server-Sent Events (SSE), NDJSON streams, or any response
+    you want to process incrementally.
+
+    Accepts an `HttpRequest` (with optional format), or positional arguments.
+
+    **Formats**
+    - `"sse"` - Server-Sent Events, parses event/data/id fields
+    - `"ndjson"` - Newline-delimited JSON
+    - `"raw"` - Raw chunks as strings or bytes (default)
+
+    **Examples**
+
+    ```hot
+    // Using HttpRequest
+    response request-stream(HttpRequest({method: "GET", url: "https://api.example.com/events"}), "sse")
+
+    // Using positional arguments
+    response request-stream("GET", "https://api.example.com/events", {}, "", "sse")
+
+    for-each(response.body, fn (event) {
+        print(event.data)
+    })
+    ```
+    """
+}
+fn
+(request: HttpRequest): StreamingHttpResponse {
+    call-lib(::hot::http/request-stream, [request])
+},
+(request: HttpRequest, format: StreamFormat): StreamingHttpResponse {
+    call-lib(::hot::http/request-stream, [request, format])
+},
+(method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): StreamingHttpResponse {
+    request-stream(HttpRequest({method, url, headers, body}))
+},
+(method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any, format: StreamFormat): StreamingHttpResponse {
+    request-stream(HttpRequest({method, url, headers, body}), format)
+}
+
+
+get-stream
+meta {
+    doc: """
+    Make a streaming HTTP GET request.
+
+    **Example**
+
+    ```hot
+    response get-stream("https://api.example.com/events", "sse")
+
+    for-each(response.body, fn (event) {
+        print(event.data)
+    })
+    ```
+    """
+}
+fn
+(url: Str): StreamingHttpResponse {
+    request-stream(HttpRequest({method: "GET", url}))
+},
+(url: Str, format: StreamFormat): StreamingHttpResponse {
+    request-stream(HttpRequest({method: "GET", url}), format)
+}
+
+
+post-stream
+meta {
+    doc: """
+    Make a streaming HTTP POST request.
+
+    **Example**
+
+    ```hot
+    response post-stream("https://api.example.com/stream", {query: "test"}, {}, "ndjson")
+
+    for-each(response.body, fn (item) {
+        print(item)
+    })
+    ```
+    """
+}
+fn
+(url: Str, body: Any, headers: Map<Str, Str>, format: StreamFormat): StreamingHttpResponse {
+    request-stream(HttpRequest({method: "POST", url, headers, body}), format)
+},
+(url: Str, body: Any, headers: Map<Str, Str>): StreamingHttpResponse {
+    request-stream(HttpRequest({method: "POST", url, headers, body}))
+},
+(url: Str, body: Any): StreamingHttpResponse {
+    request-stream(HttpRequest({method: "POST", url, body}))
+}

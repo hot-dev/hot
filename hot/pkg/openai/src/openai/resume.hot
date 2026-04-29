@@ -1,0 +1,109 @@
+::openai::resume ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+FineTuneDPOHyperparameters type {
+    beta: Any?,
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?
+}
+
+FineTuneReinforcementMethod type {
+    grader: Map,
+    hyperparameters: FineTuneReinforcementHyperparameters?
+}
+
+FineTuneReinforcementHyperparameters type {
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?,
+    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    compute_multiplier: Any?,
+    eval_interval: Any?,
+    eval_samples: Any?
+}
+
+FineTuneSupervisedHyperparameters type {
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?
+}
+
+FineTuningJob type {
+    id: Str,
+    created_at: Int,
+    error: Map,
+    fine_tuned_model: Str,
+    finished_at: Int,
+    hyperparameters: Map,
+    model: Str,
+    object: "fine_tuning.job",
+    organization_id: Str,
+    result_files: Vec<Str>,
+    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    trained_tokens: Int,
+    training_file: Str,
+    validation_file: Str,
+    integrations: Vec?,
+    seed: Int,
+    estimated_finish: Int?,
+    method: FineTuneMethod?,
+    metadata: Metadata?
+}
+
+FineTuneMethod type {
+    type: "supervised" | "dpo" | "reinforcement",
+    supervised: FineTuneSupervisedMethod?,
+    dpo: FineTuneDPOMethod?,
+    reinforcement: FineTuneReinforcementMethod?
+}
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+FineTuneDPOMethod type {
+    hyperparameters: FineTuneDPOHyperparameters?
+}
+
+FineTuneSupervisedMethod type {
+    hyperparameters: FineTuneSupervisedHyperparameters?
+}
+
+ResumeFineTuningJobRequest type {
+  fine-tuning-job-id: Str
+}
+
+ResumeFineTuningJobResponse type {
+    id: Str,
+    created_at: Int,
+    error: Map,
+    fine_tuned_model: Str,
+    finished_at: Int,
+    hyperparameters: Map,
+    model: Str,
+    object: "fine_tuning.job",
+    organization_id: Str,
+    result_files: Vec<Str>,
+    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    trained_tokens: Int,
+    training_file: Str,
+    validation_file: Str,
+    integrations: Vec?,
+    seed: Int,
+    estimated_finish: Int?,
+    method: FineTuneMethod?,
+    metadata: Metadata?
+}
+
+
+resume-finetuning
+meta {
+    doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/resume - Resume a paused fine-tuning job."""
+}
+fn (request: ResumeFineTuningJobRequest): ResumeFineTuningJobResponse {
+  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}/resume`)
+  if(is-ok-response(response), ResumeFineTuningJobResponse(response.body), err(HttpError(response)))
+}

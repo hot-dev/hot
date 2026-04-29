@@ -1,0 +1,866 @@
+::hot::test::time ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+contains ::hot::str/contains
+
+Millisecond ::hot::time/Millisecond
+Nanosecond ::hot::time/Nanosecond
+PlainDate ::hot::time/PlainDate
+PlainTime ::hot::time/PlainTime
+PlainDateTime ::hot::time/PlainDateTime
+Instant ::hot::time/Instant
+Duration ::hot::time/Duration
+parse ::hot::time/parse
+now ::hot::time/now
+start-of-day ::hot::time/start-of-day
+end-of-day ::hot::time/end-of-day
+years ::hot::time/years
+months ::hot::time/months
+days ::hot::time/days
+epoch-millis ::hot::time/epoch-millis
+epoch-nanos ::hot::time/epoch-nanos
+year ::hot::time/year
+month ::hot::time/month
+day ::hot::time/day
+hour ::hot::time/hour
+minute ::hot::time/minute
+second ::hot::time/second
+millisecond ::hot::time/millisecond
+microsecond ::hot::time/microsecond
+nanosecond ::hot::time/nanosecond
+
+test-time-basic
+meta ["test"] fn () {
+
+    // Test instant creation via type constructor
+    instant Instant(Millisecond(1640995200000))
+    recovered-millis epoch-millis(instant)
+    assert-eq(1640995200000, recovered-millis, "instant-from-millis should preserve milliseconds")
+    // Test PlainDate creation
+    date PlainDate(2024, 12, 25)
+    assert-eq(2024, year(date), "year should be 2024")
+    assert-eq(12, month(date), "month should be 12")
+    assert-eq(25, day(date), "day should be 25")
+    // Test PlainTime creation
+    time PlainTime(14, 30, 45)
+    assert-eq(14, hour(time), "hour should be 14")
+    assert-eq(30, minute(time), "minute should be 30")
+    assert-eq(45, second(time), "second should be 45")
+}
+
+test-time-datetime
+meta ["test"] fn () {
+
+    // Test PlainDateTime creation
+    datetime PlainDateTime(2024, 12, 25, 14, 30, 45)
+    assert-eq(2024, year(datetime), "year should be 2024")
+    assert-eq(12, month(datetime), "month should be 12")
+    assert-eq(25, day(datetime), "day should be 25")
+    assert-eq(14, hour(datetime), "hour should be 14")
+    assert-eq(30, minute(datetime), "minute should be 30")
+    assert-eq(45, second(datetime), "second should be 45")
+}
+
+test-time-duration
+meta ["test"] fn () {
+
+    // Test duration creation via type constructor
+    dur Duration({years: 1, months: 2, days: 3, hours: 4})
+    // Test convenience duration functions
+    years-dur years(2)
+    months-dur months(3)
+    days-dur days(7)
+    // Basic existence check - if these functions don't error, they work
+    assert(true, "duration functions work")
+}
+
+test-time-parsing
+meta ["test"] fn () {
+
+    // Test parsing functionality
+    parsed parse("2024-12-25")
+    assert-eq(2024, year(parsed), "parsed year should be 2024")
+    assert-eq(12, month(parsed), "parsed month should be 12")
+    assert-eq(25, day(parsed), "parsed day should be 25")
+}
+
+test-time-string-constructors
+meta ["test"] fn () {
+
+    // Test specific type string constructors
+    date-from-string PlainDate("2024-12-25")
+    assert-eq(2024, year(date-from-string), "string date year should be 2024")
+    assert-eq(12, month(date-from-string), "string date month should be 12")
+    assert-eq(25, day(date-from-string), "string date day should be 25")
+    time-from-string PlainTime("14:30:45")
+    assert-eq(14, hour(time-from-string), "string time hour should be 14")
+    assert-eq(30, minute(time-from-string), "string time minute should be 30")
+    assert-eq(45, second(time-from-string), "string time second should be 45")
+    datetime-from-string PlainDateTime("2024-12-25T14:30:45")
+    assert-eq(2024, year(datetime-from-string), "string datetime year should be 2024")
+    assert-eq(14, hour(datetime-from-string), "string datetime hour should be 14")
+}
+
+test-time-now
+meta ["test"] fn () {
+
+    // Test current time
+    instant now()
+    nanos epoch-nanos(instant)
+    assert(gt(nanos, 0), "current time should be positive")
+}
+
+test-time-utilities
+meta ["test"] fn () {
+
+    // Test utility functions
+    date PlainDate(2024, 12, 25)
+    start start-of-day(date)
+    end end-of-day(date)
+    assert-eq(0, hour(start), "start of day hour should be 0")
+    assert-eq(0, minute(start), "start of day minute should be 0")
+    assert-eq(0, second(start), "start of day second should be 0")
+    assert-eq(23, hour(end), "end of day hour should be 23")
+    assert-eq(59, minute(end), "end of day minute should be 59")
+    assert-eq(59, second(end), "end of day second should be 59")
+}
+
+test-time-constructors
+meta ["test"] fn () {
+
+    // Test Instant constructors
+    instant1 Instant(Millisecond(1672531200000))
+    instant2 Instant(Nanosecond(1672531200000000000))
+    assert-eq(
+        1672531200000000000,
+        epoch-nanos(instant1),
+        "instant from millis should have correct nanoseconds"
+    )
+    assert-eq(
+        1672531200000000000,
+        epoch-nanos(instant2),
+        "instant from nanos should have correct nanoseconds"
+    )
+    // Test Duration constructor (just test that it doesn't crash)
+    duration Duration({hours: 2, minutes: 30, seconds: 15})
+}
+
+test-time-str-coercion
+meta ["test"] fn () {
+    date PlainDate(2024, 12, 25)
+    assert-eq("2024-12-25", Str(date), "PlainDate Str conversion should delegate to to-string")
+    time PlainTime(14, 30, 45)
+    assert-eq("14:30:45", Str(time), "PlainTime Str conversion should delegate to to-string")
+    dt PlainDateTime(2024, 12, 25, 14, 30, 45)
+    assert-eq(
+        "2024-12-25T14:30:45",
+        Str(dt),
+        "PlainDateTime Str conversion should delegate to to-string"
+    )
+    inst Instant(dt)
+
+    // Instant should format as ISO timestamp with Z suffix
+    inst_str Str(inst)
+    assert(contains(inst_str, "2024-12-25T14:30:45"), "Instant Str should contain the datetime")
+    dur Duration({hours: 2, minutes: 30, seconds: 15})
+    assert-eq("PT2H30M15S", Str(dur), "Duration Str conversion should delegate to to-string")
+}
+
+test-time-subsecond-getters
+meta ["test"] fn () {
+
+    // millisecond/microsecond/nanosecond getters should be present
+    time PlainTime(14, 30, 45)
+    assert-eq(0, millisecond(time), "millisecond should default to 0")
+    assert-eq(0, microsecond(time), "microsecond should default to 0")
+    assert-eq(0, nanosecond(time), "nanosecond should default to 0")
+    dt PlainDateTime(2024, 12, 25, 14, 30, 45)
+    assert-eq(0, millisecond(dt), "datetime millisecond should default to 0")
+    assert-eq(0, microsecond(dt), "datetime microsecond should default to 0")
+    assert-eq(0, nanosecond(dt), "datetime nanosecond should default to 0")
+}
+
+test-time-format
+meta ["test"] fn () {
+
+    // PlainDate
+    date PlainDate(2024, 12, 25)
+    date_str Str(date)
+    assert-eq("2024-12-25", date_str, "PlainDate should format to YYYY-MM-DD")
+    // PlainTime without subseconds
+    time PlainTime(14, 30, 45)
+    time_str Str(time)
+    assert-eq("14:30:45", time_str, "PlainTime should format to HH:MM:SS when no subseconds")
+    // PlainDateTime without subseconds
+    dt PlainDateTime(2024, 12, 25, 14, 30, 45)
+    dt_str Str(dt)
+    assert-eq(
+        "2024-12-25T14:30:45",
+        dt_str,
+        "PlainDateTime should format to ISO local datetime without subseconds"
+    )
+    // Instant formatting includes Z and full precision
+    inst Instant(Nanosecond(1735689600000000000))
+    // 2025-01-01T00:00:00Z
+    inst_str Str(inst)
+    // Accept a prefix match up to seconds for stability; require trailing Z
+    expected_prefix "2025-01-01T00:00:00"
+    assert-eq(
+        true,
+        ::hot::str/starts-with(inst_str, expected_prefix),
+        "Instant should start with expected ISO timestamp"
+    )
+    assert-eq(true, ::hot::str/ends-with(inst_str, "Z"), "Instant should end with Z (UTC)")
+}
+
+test-duration-iso-constructor
+meta ["test"] fn () {
+
+    // Parse ISO 8601 duration string
+    dur Duration("P1M2DT3H4M")
+    // Should stringify to an ISO form containing the parts (order may vary across normalization, so compare via format())
+    s Str(dur)
+    // Ensure major components are present
+    assert-eq(true, contains(s, "1M"), "Duration should include 1M")
+    assert-eq(true, contains(s, "2D"), "Duration should include 2D")
+    assert-eq(true, contains(s, "3H"), "Duration should include 3H")
+    assert-eq(true, contains(s, "4M"), "Duration should include 4M (minutes)")
+}
+
+test-duration-iso-roundtrip
+meta ["test"] fn () {
+    dur Duration("P1M2DT3H4M")
+    not_empty contains(Str(dur), "P")
+    assert-eq(true, not_empty, "format(Duration) should be a non-empty ISO string starting with 'P'")
+}
+
+// -- add --
+
+test-add-days
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 1, 30, 12, 0, 0)
+    result ::hot::time/add(dt, days(5))
+    assert-eq(2026, year(result), "year unchanged")
+    assert-eq(2, month(result), "should roll into February")
+    assert-eq(4, day(result), "Jan 30 + 5 days = Feb 4")
+    assert-eq(12, hour(result), "hour preserved")
+}
+
+test-add-months
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 1, 15, 10, 0, 0)
+    result ::hot::time/add(dt, months(3))
+    assert-eq(2026, year(result), "year unchanged")
+    assert-eq(4, month(result), "Jan + 3 months = Apr")
+    assert-eq(15, day(result), "day preserved")
+}
+
+test-add-years
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 6, 15, 0, 0, 0)
+    result ::hot::time/add(dt, years(2))
+    assert-eq(2028, year(result), "2026 + 2 years = 2028")
+    assert-eq(6, month(result), "month preserved")
+}
+
+test-add-hours-across-midnight
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 2, 13, 22, 0, 0)
+    result ::hot::time/add(dt, Duration({hours: 5}))
+    assert-eq(14, day(result), "should roll into next day")
+    assert-eq(3, hour(result), "22 + 5 = 03 next day")
+}
+
+test-add-complex-duration
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 1, 1, 0, 0, 0)
+    result ::hot::time/add(dt, Duration("P1M2DT3H4M"))
+    assert-eq(2, month(result), "Jan + 1 month = Feb")
+    assert-eq(3, day(result), "1 + 2 days = 3")
+    assert-eq(3, hour(result), "0 + 3 hours = 3")
+    assert-eq(4, minute(result), "0 + 4 minutes = 4")
+}
+
+// -- subtract --
+
+test-subtract-days
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 2, 4, 12, 0, 0)
+    result ::hot::time/subtract(dt, days(5))
+    assert-eq(1, month(result), "should roll back into January")
+    assert-eq(30, day(result), "Feb 4 - 5 days = Jan 30")
+}
+
+test-subtract-months
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 4, 15, 10, 0, 0)
+    result ::hot::time/subtract(dt, months(3))
+    assert-eq(1, month(result), "Apr - 3 months = Jan")
+    assert-eq(15, day(result), "day preserved")
+}
+
+test-subtract-across-year
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 1, 10, 0, 0, 0)
+    result ::hot::time/subtract(dt, days(20))
+    assert-eq(2025, year(result), "should roll back to previous year")
+    assert-eq(12, month(result), "December")
+    assert-eq(21, day(result), "Jan 10 - 20 days = Dec 21")
+}
+
+// -- until --
+
+test-until-days
+meta ["test"]
+fn () {
+    start PlainDateTime(2026, 2, 1, 0, 0, 0)
+    end PlainDateTime(2026, 2, 14, 0, 0, 0)
+    dur ::hot::time/until(start, end)
+    assert-eq(13, Int(dur.days), "Feb 1 to Feb 14 = 13 days")
+}
+
+test-until-hours-and-minutes
+meta ["test"]
+fn () {
+    start PlainDateTime(2026, 2, 13, 10, 0, 0)
+    end PlainDateTime(2026, 2, 13, 14, 30, 0)
+    dur ::hot::time/until(start, end)
+    assert-eq(4, Int(dur.hours), "10:00 to 14:30 = 4 hours")
+    assert-eq(30, Int(dur.minutes), "10:00 to 14:30 = 30 minutes remainder")
+}
+
+test-until-same-datetime
+meta ["test"]
+fn () {
+    dt PlainDateTime(2026, 6, 15, 12, 0, 0)
+    dur ::hot::time/until(dt, dt)
+    assert-eq(0, Int(dur.days), "same datetime = 0 days")
+    assert-eq(0, Int(dur.hours), "same datetime = 0 hours")
+}
+
+// -- since --
+
+test-since-is-reverse-of-until
+meta ["test"]
+fn () {
+    start PlainDateTime(2026, 1, 1, 0, 0, 0)
+    end PlainDateTime(2026, 1, 15, 6, 30, 0)
+    dur-until ::hot::time/until(start, end)
+    dur-since ::hot::time/since(end, start)
+    // since(end, start) should produce a negative duration
+    // that mirrors until(start, end)
+    assert-eq(Int(dur-until.days), Int(dur-since.days), "since days should match until days (same direction)")
+    assert-eq(Int(dur-until.hours), Int(dur-since.hours), "since hours should match until hours")
+}
+
+// -- add / subtract roundtrip --
+
+test-add-subtract-roundtrip
+meta ["test"]
+fn () {
+    original PlainDateTime(2026, 3, 15, 14, 30, 0)
+    dur Duration({days: 10, hours: 3})
+    added ::hot::time/add(original, dur)
+    result ::hot::time/subtract(added, dur)
+    assert-eq(year(original), year(result), "year should roundtrip")
+    assert-eq(month(original), month(result), "month should roundtrip")
+    assert-eq(day(original), day(result), "day should roundtrip")
+    assert-eq(hour(original), hour(result), "hour should roundtrip")
+    assert-eq(minute(original), minute(result), "minute should roundtrip")
+}
+
+test-plain-date-zero-arg
+meta ["test"] fn () {
+
+    // Zero-arg PlainDate constructor should return today's date (basic sanity)
+    today PlainDate()
+    yr year(today)
+    // This should trigger a shadowing warning
+    println(today)
+    println(yr)
+    assert(gt(yr, 1970), "today's year should be after 1970")
+}
+
+// ---------------------------------------------------------------------------
+// ZonedDateTime tests
+// ---------------------------------------------------------------------------
+
+ZonedDateTime ::hot::time/ZonedDateTime
+now-zoned ::hot::time/now-zoned
+with-timezone ::hot::time/with-timezone
+to-plain-date-time ::hot::time/to-plain-date-time
+to-plain-date ::hot::time/to-plain-date
+to-plain-time ::hot::time/to-plain-time
+to-instant ::hot::time/to-instant
+format ::hot::time/format
+
+test-zoned-from-string
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    assert-eq(2026, zdt.year, "ZDT year should be 2026")
+    assert-eq(2, zdt.month, "ZDT month should be 2")
+    assert-eq(17, zdt.day, "ZDT day should be 17")
+    assert-eq(10, zdt.hour, "ZDT hour should be 10")
+    assert-eq(30, zdt.minute, "ZDT minute should be 30")
+    assert-eq(0, zdt.second, "ZDT second should be 0")
+    assert-eq("America/Chicago", zdt.timezone, "ZDT timezone should be America/Chicago")
+    assert-eq("-06:00", zdt.offset, "ZDT offset should be -06:00")
+}
+
+test-zoned-from-instant
+meta ["test"] fn () {
+    // 2021-01-01T00:00:00Z in nanoseconds
+    inst Instant(Nanosecond(1609459200000000000))
+    zdt ZonedDateTime(inst, "America/New_York")
+    // New York is UTC-5 in winter, so 2020-12-31T19:00:00
+    assert-eq(2020, zdt.year, "NY year should be 2020")
+    assert-eq(12, zdt.month, "NY month should be 12")
+    assert-eq(31, zdt.day, "NY day should be 31")
+    assert-eq(19, zdt.hour, "NY hour should be 19")
+    assert-eq("America/New_York", zdt.timezone, "timezone should be America/New_York")
+}
+
+test-zoned-from-plain-date-time
+meta ["test"] fn () {
+    pdt PlainDateTime(2026, 7, 4, 12, 0, 0)
+    zdt ZonedDateTime(pdt, "America/Los_Angeles")
+    assert-eq(2026, zdt.year, "LA year should be 2026")
+    assert-eq(7, zdt.month, "LA month should be 7")
+    assert-eq(4, zdt.day, "LA day should be 4")
+    assert-eq(12, zdt.hour, "LA hour should be 12")
+    assert-eq("America/Los_Angeles", zdt.timezone, "timezone should be America/Los_Angeles")
+}
+
+test-zoned-with-timezone
+meta ["test"] fn () {
+    chicago ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    tokyo with-timezone(chicago, "Asia/Tokyo")
+    // Chicago -6 -> Tokyo +9 = +15 hours difference
+    // 10:30 + 15 = 01:30 next day
+    assert-eq("Asia/Tokyo", tokyo.timezone, "converted timezone should be Asia/Tokyo")
+    assert-eq(2026, tokyo.year, "year should be 2026")
+    assert-eq(2, tokyo.month, "month should be 2")
+    assert-eq(18, tokyo.day, "should be next day (18th)")
+    assert-eq(1, tokyo.hour, "hour should be 1 (next day)")
+    assert-eq(30, tokyo.minute, "minute should still be 30")
+}
+
+test-zoned-to-plain-date-time
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    pdt to-plain-date-time(zdt)
+    assert-eq(2026, year(pdt), "extracted year should be 2026")
+    assert-eq(2, month(pdt), "extracted month should be 2")
+    assert-eq(17, day(pdt), "extracted day should be 17")
+    assert-eq(10, hour(pdt), "extracted hour should be 10")
+    assert-eq(30, minute(pdt), "extracted minute should be 30")
+}
+
+test-zoned-to-plain-date
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    d to-plain-date(zdt)
+    assert-eq("2026-02-17", Str(d), "extracted plain date should format correctly")
+}
+
+test-zoned-to-plain-time
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    t to-plain-time(zdt)
+    assert-eq("10:30:00", Str(t), "extracted plain time should format correctly")
+}
+
+test-zoned-to-instant
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    inst to-instant(zdt)
+    ns epoch-nanos(inst)
+    assert(gt(ns, 0), "extracted instant should have positive nanoseconds")
+}
+
+test-zoned-str-coercion
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    s Str(zdt)
+    assert(contains(s, "2026-02-17"), "ZDT string should contain date")
+    assert(contains(s, "10:30:00"), "ZDT string should contain time")
+    assert(contains(s, "America/Chicago"), "ZDT string should contain timezone")
+    assert(contains(s, "-06:00"), "ZDT string should contain offset")
+}
+
+test-zoned-now
+meta ["test"] fn () {
+    zdt now-zoned("UTC")
+    assert(gt(zdt.year, 2020), "now-zoned year should be recent")
+    assert-eq("UTC", zdt.timezone, "now-zoned timezone should be UTC")
+}
+
+// ---------------------------------------------------------------------------
+// Format tests
+// ---------------------------------------------------------------------------
+
+test-format-plain-date-iso
+meta ["test"] fn () {
+    date PlainDate(2026, 2, 17)
+    assert-eq("2026-02-17", format(date, "YYYY-MM-DD"), "ISO date format")
+}
+
+test-format-plain-date-us
+meta ["test"] fn () {
+    date PlainDate(2026, 2, 17)
+    assert-eq("02/17/2026", format(date, "MM/DD/YYYY"), "US date format")
+}
+
+test-format-month-names
+meta ["test"] fn () {
+    date PlainDate(2026, 2, 17)
+    assert-eq("Feb 17, 2026", format(date, "MMM D, YYYY"), "short month name format")
+    assert-eq("February 17, 2026", format(date, "MMMM D, YYYY"), "full month name format")
+}
+
+test-format-weekday-names
+meta ["test"] fn () {
+    // 2026-02-17 is a Tuesday
+    date PlainDate(2026, 2, 17)
+    assert-eq("Tuesday", format(date, "dddd"), "full weekday name")
+    assert-eq("Tue", format(date, "ddd"), "short weekday name")
+    assert-eq("Tuesday, February 17 2026", format(date, "dddd, MMMM D YYYY"), "full date with weekday")
+}
+
+test-format-time-24h
+meta ["test"] fn () {
+    dt PlainDateTime(2026, 2, 17, 14, 5, 9)
+    assert-eq("14:05:09", format(dt, "HH:mm:ss"), "24-hour time format")
+}
+
+test-format-time-12h
+meta ["test"] fn () {
+    dt PlainDateTime(2026, 2, 17, 14, 30, 0)
+    assert-eq("2:30 PM", format(dt, "h:mm A"), "12-hour PM format")
+
+    dt-am PlainDateTime(2026, 2, 17, 9, 5, 0)
+    assert-eq("9:05 AM", format(dt-am, "h:mm A"), "12-hour AM format")
+}
+
+test-format-midnight
+meta ["test"] fn () {
+    dt PlainDateTime(2026, 2, 17, 0, 0, 0)
+    assert-eq("12:00 AM", format(dt, "h:mm A"), "midnight should be 12:00 AM")
+}
+
+test-format-noon
+meta ["test"] fn () {
+    dt PlainDateTime(2026, 2, 17, 12, 0, 0)
+    assert-eq("12:00 PM", format(dt, "h:mm A"), "noon should be 12:00 PM")
+}
+
+test-format-two-digit-year
+meta ["test"] fn () {
+    date PlainDate(2026, 2, 17)
+    assert-eq("26", format(date, "YY"), "2-digit year")
+}
+
+test-format-milliseconds
+meta ["test"] fn () {
+    // PlainDateTime defaults to 0 milliseconds from the 6-arg constructor
+    dt PlainDateTime(2026, 2, 17, 14, 30, 45)
+    assert-eq("14:30:45.000", format(dt, "HH:mm:ss.SSS"), "milliseconds should be 000")
+}
+
+test-format-escaped-brackets
+meta ["test"] fn () {
+    date PlainDate(2026, 2, 17)
+    assert-eq("Year: 2026", format(date, "[Year: ]YYYY"), "escaped literal text")
+    assert-eq("Date is 2026-02-17!", format(date, "[Date is ]YYYY-MM-DD[!]"), "multiple escapes")
+}
+
+test-format-zoned-date-time
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    assert-eq("2026-02-17 10:30", format(zdt, "YYYY-MM-DD HH:mm"), "ZDT basic format")
+    assert-eq("-06:00", format(zdt, "Z"), "ZDT offset token")
+}
+
+// ── Timezone abbreviation tests (z token) ────────────────────────────
+
+// Americas: US time zones
+test-tz-abbr-est
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-05:00[America/New_York]")
+    assert-eq("EST", format(zdt, "z"), "New York winter should be EST")
+}
+
+test-tz-abbr-edt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-04:00[America/New_York]")
+    assert-eq("EDT", format(zdt, "z"), "New York summer should be EDT")
+}
+
+test-tz-abbr-cst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-06:00[America/Chicago]")
+    assert-eq("CST", format(zdt, "z"), "Chicago winter should be CST")
+}
+
+test-tz-abbr-cdt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-05:00[America/Chicago]")
+    assert-eq("CDT", format(zdt, "z"), "Chicago summer should be CDT")
+}
+
+test-tz-abbr-mst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-07:00[America/Denver]")
+    assert-eq("MST", format(zdt, "z"), "Denver winter should be MST")
+}
+
+test-tz-abbr-mdt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-06:00[America/Denver]")
+    assert-eq("MDT", format(zdt, "z"), "Denver summer should be MDT")
+}
+
+test-tz-abbr-pst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-08:00[America/Los_Angeles]")
+    assert-eq("PST", format(zdt, "z"), "LA winter should be PST")
+}
+
+test-tz-abbr-pdt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-07:00[America/Los_Angeles]")
+    assert-eq("PDT", format(zdt, "z"), "LA summer should be PDT")
+}
+
+test-tz-abbr-akst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-09:00[America/Anchorage]")
+    assert-eq("AKST", format(zdt, "z"), "Anchorage winter should be AKST")
+}
+
+test-tz-abbr-akdt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-08:00[America/Anchorage]")
+    assert-eq("AKDT", format(zdt, "z"), "Anchorage summer should be AKDT")
+}
+
+test-tz-abbr-hst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-10:00[Pacific/Honolulu]")
+    assert-eq("HST", format(zdt, "z"), "Honolulu should be HST")
+}
+
+// Americas: Atlantic, Newfoundland, Brazil, Argentina
+test-tz-abbr-ast
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-04:00[America/Halifax]")
+    assert-eq("AST", format(zdt, "z"), "Halifax winter should be AST")
+}
+
+test-tz-abbr-adt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-03:00[America/Halifax]")
+    assert-eq("ADT", format(zdt, "z"), "Halifax summer should be ADT")
+}
+
+test-tz-abbr-nst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00-03:30[America/St_Johns]")
+    assert-eq("NST", format(zdt, "z"), "St Johns winter should be NST")
+}
+
+test-tz-abbr-ndt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00-02:30[America/St_Johns]")
+    assert-eq("NDT", format(zdt, "z"), "St Johns summer should be NDT")
+}
+
+test-tz-abbr-brt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-06-15T10:00:00-03:00[America/Sao_Paulo]")
+    assert-eq("BRT", format(zdt, "z"), "Sao Paulo should be BRT")
+}
+
+test-tz-abbr-art
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-06-15T10:00:00-03:00[America/Argentina/Buenos_Aires]")
+    assert-eq("ART", format(zdt, "z"), "Buenos Aires should be ART")
+}
+
+// Europe
+test-tz-abbr-gmt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+00:00[Europe/London]")
+    assert-eq("GMT", format(zdt, "z"), "London winter should be GMT")
+}
+
+test-tz-abbr-bst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00+01:00[Europe/London]")
+    assert-eq("BST", format(zdt, "z"), "London summer should be BST")
+}
+
+test-tz-abbr-cet
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+01:00[Europe/Berlin]")
+    assert-eq("CET", format(zdt, "z"), "Berlin winter should be CET")
+}
+
+test-tz-abbr-cest
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00+02:00[Europe/Berlin]")
+    assert-eq("CEST", format(zdt, "z"), "Berlin summer should be CEST")
+}
+
+test-tz-abbr-eet
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+02:00[Europe/Athens]")
+    assert-eq("EET", format(zdt, "z"), "Athens winter should be EET")
+}
+
+test-tz-abbr-eest
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00+03:00[Europe/Athens]")
+    assert-eq("EEST", format(zdt, "z"), "Athens summer should be EEST")
+}
+
+test-tz-abbr-msk
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+03:00[Europe/Moscow]")
+    assert-eq("MSK", format(zdt, "z"), "Moscow should be MSK")
+}
+
+// Asia
+test-tz-abbr-jst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+09:00[Asia/Tokyo]")
+    assert-eq("JST", format(zdt, "z"), "Tokyo should be JST")
+}
+
+test-tz-abbr-kst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+09:00[Asia/Seoul]")
+    assert-eq("KST", format(zdt, "z"), "Seoul should be KST")
+}
+
+test-tz-abbr-cst-china
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+08:00[Asia/Shanghai]")
+    assert-eq("CST", format(zdt, "z"), "Shanghai should be CST (China)")
+}
+
+test-tz-abbr-sgt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+08:00[Asia/Singapore]")
+    assert-eq("SGT", format(zdt, "z"), "Singapore should be SGT")
+}
+
+test-tz-abbr-hkt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+08:00[Asia/Hong_Kong]")
+    assert-eq("HKT", format(zdt, "z"), "Hong Kong should be HKT")
+}
+
+test-tz-abbr-ist
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+05:30[Asia/Kolkata]")
+    assert-eq("IST", format(zdt, "z"), "Kolkata should be IST")
+}
+
+test-tz-abbr-ict
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+07:00[Asia/Bangkok]")
+    assert-eq("ICT", format(zdt, "z"), "Bangkok should be ICT")
+}
+
+test-tz-abbr-pkt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+05:00[Asia/Karachi]")
+    assert-eq("PKT", format(zdt, "z"), "Karachi should be PKT")
+}
+
+test-tz-abbr-gst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+04:00[Asia/Dubai]")
+    assert-eq("GST", format(zdt, "z"), "Dubai should be GST")
+}
+
+// Australia
+test-tz-abbr-aest
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00+10:00[Australia/Sydney]")
+    assert-eq("AEST", format(zdt, "z"), "Sydney winter should be AEST")
+}
+
+test-tz-abbr-aedt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+11:00[Australia/Sydney]")
+    assert-eq("AEDT", format(zdt, "z"), "Sydney summer should be AEDT")
+}
+
+test-tz-abbr-acst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00+09:30[Australia/Adelaide]")
+    assert-eq("ACST", format(zdt, "z"), "Adelaide winter should be ACST")
+}
+
+test-tz-abbr-acdt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+10:30[Australia/Adelaide]")
+    assert-eq("ACDT", format(zdt, "z"), "Adelaide summer should be ACDT")
+}
+
+test-tz-abbr-awst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+08:00[Australia/Perth]")
+    assert-eq("AWST", format(zdt, "z"), "Perth should be AWST")
+}
+
+// Pacific
+test-tz-abbr-nzst
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-07-15T10:00:00+12:00[Pacific/Auckland]")
+    assert-eq("NZST", format(zdt, "z"), "Auckland winter should be NZST")
+}
+
+test-tz-abbr-nzdt
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+13:00[Pacific/Auckland]")
+    assert-eq("NZDT", format(zdt, "z"), "Auckland summer should be NZDT")
+}
+
+// Africa
+test-tz-abbr-sast
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+02:00[Africa/Johannesburg]")
+    assert-eq("SAST", format(zdt, "z"), "Johannesburg should be SAST")
+}
+
+test-tz-abbr-eat
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+03:00[Africa/Nairobi]")
+    assert-eq("EAT", format(zdt, "z"), "Nairobi should be EAT")
+}
+
+test-tz-abbr-wat
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+01:00[Africa/Lagos]")
+    assert-eq("WAT", format(zdt, "z"), "Lagos should be WAT")
+}
+
+// UTC
+test-tz-abbr-utc
+meta ["test"] fn () {
+    zdt ZonedDateTime("2026-01-15T10:00:00+00:00[UTC]")
+    assert-eq("UTC", format(zdt, "z"), "UTC should be UTC")
+}

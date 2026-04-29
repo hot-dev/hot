@@ -1,0 +1,17 @@
+::demo::retries ns
+
+::http ::hot::http
+
+fetch-data
+meta {
+    on-event: "demo:fetch-data",
+    retry: {attempts: 5, delay: 2000}
+}
+fn (event) {
+    result ::http/post(or(event.data.url, "https://httpbin.org/post"), {source: "demo"})
+    if(not(::http/is-ok-response(result)), fail(`Request failed: ${result.status}`))
+    {
+        status: result.status,
+        bytes: length(to-json(result.body)),
+    }
+}

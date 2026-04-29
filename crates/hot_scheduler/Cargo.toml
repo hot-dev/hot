@@ -1,0 +1,24 @@
+[package]
+name = "hot_scheduler"
+version.workspace = true
+edition.workspace = true
+description = "Hot scheduled function runner"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+redis = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "time"] }
+# Replaced tokio-cron-scheduler with direct croner for full feature support
+croner = { workspace = true }
+english-to-cron = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+hot = { workspace = true }

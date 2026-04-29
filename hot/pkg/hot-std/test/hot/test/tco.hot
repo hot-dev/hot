@@ -1,0 +1,144 @@
+::hot::test::tco ns
+meta {doc: "Tests for Tail Call Optimization (TCO)."}
+
+// Top-level tail-recursive function for TCO testing
+// This will be compiled as a proper function with TCO support
+tco-count-down
+fn (n: Int, acc: Int): Int {
+    cond {
+        ::hot::cmp/lte(n, 0) => { acc }
+        => { tco-count-down(::hot::math/sub(n, 1), ::hot::math/add(acc, 1)) }
+    }
+}
+
+// Test simple self-recursive tail call with accumulator
+// This should work with TCO - the recursive call is in tail position
+test-tco-sum-accumulator
+meta ["test"] fn () {
+    // Define a tail-recursive sum function
+    sum-acc fn (n: Int, acc: Int): Int {
+        // This is a self-recursive tail call - should be TCO'd
+        cond {
+            ::hot::cmp/lte(n, 0) => { acc }
+            => { sum-acc(::hot::math/sub(n, 1), ::hot::math/add(acc, n)) }
+        }
+    }
+
+    sum fn (n: Int): Int {
+        sum-acc(n, 0)
+    }
+
+    // Test basic cases
+    ::hot::test/assert-eq(0, sum(0), "sum(0) = 0")
+    ::hot::test/assert-eq(1, sum(1), "sum(1) = 1")
+    ::hot::test/assert-eq(55, sum(10), "sum(10) = 55")
+    ::hot::test/assert-eq(5050, sum(100), "sum(100) = 5050")
+
+    // This would stack overflow without TCO (recursion limit is 256)
+    // With TCO extended to local functions, this now works
+    ::hot::test/assert-eq(500500, sum(1000), "sum(1000) = 500500")
+}
+
+// Test tail-recursive factorial
+test-tco-factorial
+meta ["test"] fn () {
+    factorial-acc fn (n: Int, acc: Int): Int {
+        cond {
+            ::hot::cmp/lte(n, 1) => { acc }
+            => { factorial-acc(::hot::math/sub(n, 1), ::hot::math/mul(n, acc)) }
+        }
+    }
+
+    factorial fn (n: Int): Int {
+        factorial-acc(n, 1)
+    }
+
+    ::hot::test/assert-eq(1, factorial(0), "factorial(0) = 1")
+    ::hot::test/assert-eq(1, factorial(1), "factorial(1) = 1")
+    ::hot::test/assert-eq(120, factorial(5), "factorial(5) = 120")
+    ::hot::test/assert-eq(3628800, factorial(10), "factorial(10) = 3628800")
+}
+
+// Test tail-recursive list processing
+test-tco-sum-list
+meta ["test"] fn () {
+    sum-list-acc fn (xs: Vec, acc: Int): Int {
+        cond {
+            ::hot::coll/is-empty(xs) => { acc }
+            => { sum-list-acc(::hot::coll/rest(xs), ::hot::math/add(acc, ::hot::coll/first(xs))) }
+        }
+    }
+
+    sum-list fn (xs: Vec): Int {
+        sum-list-acc(xs, 0)
+    }
+
+    ::hot::test/assert-eq(0, sum-list([]), "sum-list([]) = 0")
+    ::hot::test/assert-eq(6, sum-list([1, 2, 3]), "sum-list([1,2,3]) = 6")
+    ::hot::test/assert-eq(55, sum-list([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), "sum-list(1..10) = 55")
+}
+
+// Test tail-recursive countdown
+test-tco-countdown
+meta ["test"] fn () {
+    countdown fn (n: Int): Int {
+        cond {
+            ::hot::cmp/lte(n, 0) => { 0 }
+            => { countdown(::hot::math/sub(n, 1)) }
+        }
+    }
+
+    ::hot::test/assert-eq(0, countdown(0), "countdown(0) = 0")
+    ::hot::test/assert-eq(0, countdown(10), "countdown(10) = 0")
+    ::hot::test/assert-eq(0, countdown(100), "countdown(100) = 0")
+}
+
+// Test deep recursion that would overflow without TCO
+// The recursion limit is 256, so going past that proves TCO works
+test-tco-deep-recursion
+meta ["test"] fn () {
+    // Use the top-level tco-count-down function which has proper TCO support
+    // 500 iterations - well past the 256 recursion limit
+    result tco-count-down(500, 0)
+    ::hot::test/assert-eq(500, result, "tco-count-down(500) should work with TCO")
+
+    // 1000 iterations - way past any reasonable stack limit
+    result2 tco-count-down(1000, 0)
+    ::hot::test/assert-eq(1000, result2, "tco-count-down(1000) should work with TCO")
+}
+
+// ============================================================================
+// fn cond tests - function-level cond flow (different code path than inline cond)
+// ============================================================================
+
+// Top-level fn cond factorial
+factorial-fn-cond
+fn cond (n: Int, acc: Int): Int {
+    ::hot::cmp/lte(n, 1) => { acc }
+    => { factorial-fn-cond(::hot::math/sub(n, 1), ::hot::math/mul(n, acc)) }
+}
+
+// Top-level fn cond sum with Vec (tests is-empty/rest/first with TCO)
+sum-acc-fn-cond
+fn cond (xs: Vec, acc: Int): Int {
+    ::hot::coll/is-empty(xs) => { acc }
+    => { sum-acc-fn-cond(::hot::coll/rest(xs), ::hot::math/add(acc, ::hot::coll/first(xs))) }
+}
+
+// Test fn cond with factorial pattern
+test-tco-fn-cond-factorial
+meta ["test"] fn () {
+    ::hot::test/assert-eq(1, factorial-fn-cond(1, 1), "factorial-fn-cond(1, 1) = 1")
+    ::hot::test/assert-eq(120, factorial-fn-cond(5, 1), "factorial-fn-cond(5, 1) = 120")
+    ::hot::test/assert-eq(3628800, factorial-fn-cond(10, 1), "factorial-fn-cond(10, 1) = 3628800")
+}
+
+// Test fn cond with Vec and collection functions
+test-tco-fn-cond-sum-list
+meta ["test"] fn () {
+    sum-list fn (xs: Vec): Int { sum-acc-fn-cond(xs, 0) }
+
+    ::hot::test/assert-eq(0, sum-list([]), "sum-list([]) = 0")
+    ::hot::test/assert-eq(6, sum-list([1, 2, 3]), "sum-list([1,2,3]) = 6")
+    ::hot::test/assert-eq(55, sum-list([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), "sum-list(1..10) = 55")
+}

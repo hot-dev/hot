@@ -1,0 +1,26 @@
+::discord::integration::users ns
+meta ["test"]
+
+test-get-current-user
+meta ["test"]
+fn () {
+  response ::discord::users/get-current-user()
+
+  assert(response.id, "get-current-user should return user id")
+  assert(response.username, "get-current-user should return username")
+  assert(response.bot, "current user should be a bot")
+}
+
+test-get-current-user-guilds
+meta ["test"]
+fn () {
+  response ::discord::users/get-current-user-guilds(::discord::users/GetCurrentUserGuildsRequest({
+    limit: 10
+  }))
+
+  assert(gt(length(response), 0), "bot should be in at least one guild")
+
+  first-guild first(response)
+  assert(first-guild.id, "guild should have id")
+  assert(first-guild.name, "guild should have name")
+}

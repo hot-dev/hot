@@ -1,0 +1,37 @@
+::openai::add ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+AddUploadPartRequest type {
+    data: Str
+}
+
+UploadPart type {
+    id: Str,
+    created_at: Int,
+    upload_id: Str,
+    object: "upload.part"
+}
+
+AddUploadPartRequest type {
+    data: Str
+}
+
+AddUploadPartResponse type {
+    id: Str,
+    created_at: Int,
+    upload_id: Str,
+    object: "upload.part"
+}
+
+
+add-upload-part
+meta {
+    doc: """POST /uploads/{upload_id}/parts - Add a part to a multi-part upload. Returns the part ID to use when completing the upload."""
+}
+fn (upload-id: Str, request: AddUploadPartRequest): AddUploadPartResponse {
+  response api-request("POST", `${::openai/BASE_URL}/uploads/${upload-id}/parts`, {}, request)
+  if(is-ok-response(response), AddUploadPartResponse(response.body), err(HttpError(response)))
+}

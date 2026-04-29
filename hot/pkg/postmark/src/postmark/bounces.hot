@@ -1,0 +1,27 @@
+::postmark::bounces ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+BounceDumpResponse type {
+    Body: Str?
+}
+
+GETBouncesBounceidDumpRequest type {
+  bounceid: Str
+}
+
+GETBouncesBounceidDumpResponse type {
+    Body: Str?
+}
+
+
+get-bounce-dump
+meta {
+    doc: """Retrieve the raw SMTP dump for a specific bounce, useful for diagnosing delivery issues."""
+}
+fn (request: GETBouncesBounceidDumpRequest): GETBouncesBounceidDumpResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/bounces/${request.bounceid}/dump`)
+  if(is-ok-response(response), GETBouncesBounceidDumpResponse(response.body), err(HttpError(response)))
+}

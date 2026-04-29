@@ -1,0 +1,33 @@
+::demo::tasks ns
+
+::box ::hot::box
+::task ::hot::task
+
+process-upload
+meta {on-event: "demo:process-file"}
+fn (event) {
+    jobs parallel {
+        info ::box/start({
+            image: "alpine:latest",
+            script: "echo '{\"width\":1920,\"height\":1080}'",
+            timeout: 30,
+            size: "nano",
+        })
+        hash ::box/start({
+            image: "alpine:latest",
+            script: "echo -n 'demo' | sha256sum | cut -d' ' -f1",
+            timeout: 30,
+            size: "nano",
+        })
+    }
+
+    results parallel {
+        info ::task/await(jobs.info.id)
+        hash ::task/await(jobs.hash.id)
+    }
+
+    {
+        metadata: from-json(trim(or(results.info.stdout, "{}"))),
+        hash: trim(or(results.hash.stdout, "")),
+    }
+}

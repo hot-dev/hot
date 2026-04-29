@@ -1,0 +1,51 @@
+::supabase::integration::auth ns
+meta ["test"]
+
+::auth ::supabase::auth
+::admin ::supabase::auth-admin
+
+test-signup-signin-signout
+meta ["test"]
+fn () {
+  unique-id random-string(8)
+  test-email `hot-test-${unique-id}@example.com`
+  test-password `TestPass-${unique-id}!`
+
+  // Step 1: Create user via admin (confirmed)
+  user ::admin/create-user(::admin/CreateUserRequest({
+    email: test-email,
+    password: test-password,
+    email_confirm: true,
+    user_metadata: {source: "integration-test"}
+  }))
+  assert(user.id, "created user should have an id")
+
+  // Step 2: Sign in with password
+  session ::auth/sign-in-password(::auth/SignInPasswordRequest({
+    email: test-email,
+    password: test-password
+  }))
+  assert(session.access_token, "sign-in should return access_token")
+  assert(session.refresh_token, "sign-in should return refresh_token")
+
+  // Step 3: Get user with token
+  me ::auth/get-user(session.access_token)
+  assert-eq(test-email, me.email, "email should match")
+
+  // Step 4: Refresh token
+  refreshed ::auth/refresh-token(session.refresh_token)
+  assert(refreshed.access_token, "refresh should return new access_token")
+
+  // Step 5: Sign out
+  ::auth/sign-out(session.access_token)
+
+  // Clean up: delete user
+  ::admin/delete-user(user.id)
+}
+
+test-admin-list-users
+meta ["test"]
+fn () {
+  result ::admin/list-users(::admin/ListUsersRequest({page: 1, per_page: 5}))
+  assert(is-some(result.users), "should return users array")
+}

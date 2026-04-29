@@ -1,0 +1,79 @@
+::postmark::integration::send ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Postmark Email Sending API
+// =============================================================================
+// These tests require postmark.server.token to be set in context
+// Also requires POSTMARK_TEST_FROM_EMAIL and POSTMARK_TEST_TO_EMAIL env vars
+// The From address must be a verified Sender Signature in the Postmark account
+
+::env ::hot::env
+
+from-email ::env/get("POSTMARK_TEST_FROM_EMAIL", "")
+to-email ::env/get("POSTMARK_TEST_TO_EMAIL", "")
+
+// -----------------------------------------------------------------------------
+// Single Email Tests
+// -----------------------------------------------------------------------------
+
+test-send-single-email
+meta ["test"]
+fn () {
+    response ::postmark::send/send-single-email(::postmark::send/SendEmailRequest({
+        From: from-email,
+        To: to-email,
+        Subject: "Hot Integration Test - Single Email",
+        TextBody: "This is a test email sent from the Hot Postmark integration tests.",
+        HtmlBody: "<html><body><p>This is a test email sent from the <strong>Hot Postmark</strong> integration tests.</p></body></html>"
+    }))
+
+    assert(response.MessageID, "Response should have a MessageID")
+    assert(response.To, "Response should have a To field")
+    assert-eq(0, response.ErrorCode, "ErrorCode should be 0 for success")
+    assert(response.SubmittedAt, "Response should have SubmittedAt timestamp")
+}
+
+test-send-email-text-only
+meta ["test"]
+fn () {
+    response ::postmark::send/send-single-email(::postmark::send/SendEmailRequest({
+        From: from-email,
+        To: to-email,
+        Subject: "Hot Integration Test - Text Only",
+        TextBody: "Plain text email from Hot Postmark integration tests."
+    }))
+
+    assert(response.MessageID, "Response should have a MessageID")
+    assert-eq(0, response.ErrorCode, "ErrorCode should be 0 for success")
+}
+
+test-send-email-with-tag
+meta ["test"]
+fn () {
+    response ::postmark::send/send-single-email(::postmark::send/SendEmailRequest({
+        From: from-email,
+        To: to-email,
+        Subject: "Hot Integration Test - Tagged Email",
+        TextBody: "Tagged email from Hot integration tests.",
+        Tag: "integration-test"
+    }))
+
+    assert(response.MessageID, "Response should have a MessageID")
+    assert-eq(0, response.ErrorCode, "ErrorCode should be 0 for success")
+}
+
+test-send-email-with-reply-to
+meta ["test"]
+fn () {
+    response ::postmark::send/send-single-email(::postmark::send/SendEmailRequest({
+        From: from-email,
+        To: to-email,
+        Subject: "Hot Integration Test - Reply-To",
+        TextBody: "Email with Reply-To header.",
+        ReplyTo: from-email
+    }))
+
+    assert(response.MessageID, "Response should have a MessageID")
+    assert-eq(0, response.ErrorCode, "ErrorCode should be 0 for success")
+}

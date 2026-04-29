@@ -1,0 +1,48 @@
+<div id="source-browser-modal" class="hidden fixed inset-0 z-50 overflow-hidden bg-black/50 dark:bg-neutral-500/35 p-4" onclick="closeSourceBrowser(event)">
+    <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl dark:shadow-2xl dark:shadow-black/70 w-full h-full max-w-7xl mx-auto flex flex-col border border-gray-200 dark:border-gray-800" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between gap-4 px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+            <div class="min-w-0">
+                <h3 id="source-browser-title" class="text-sm font-semibold text-gray-900 dark:text-white truncate">Source</h3>
+                <div id="source-browser-subtitle" class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate"></div>
+            </div>
+            <div class="flex items-center gap-2">
+                <button type="button" id="source-browser-copy-btn" onclick="copySourceBrowserContent()" class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
+                    Copy
+                </button>
+                <button type="button" onclick="closeSourceBrowser()" aria-label="Close source browser" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1" title="Close">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 min-h-0 flex flex-col md:flex-row">
+            <aside class="w-full md:w-80 md:flex-shrink-0 border-b md:border-b-0 md:border-r border-gray-200 dark:border-gray-800 flex flex-col max-h-64 md:max-h-none">
+                <div class="p-3 border-b border-gray-200 dark:border-gray-800">
+                    <input id="source-browser-filter" type="search" placeholder="Filter files..." oninput="filterSourceBrowserFiles()" class="w-full px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-hot-red-500 focus:border-hot-red-500">
+                </div>
+                <div class="p-3 border-b border-gray-200 dark:border-gray-800">
+                    <div class="flex items-center rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 focus-within:ring-2 focus-within:ring-hot-red-500 focus-within:border-hot-red-500">
+                        <input id="source-browser-search" type="search" placeholder="Search" oninput="searchSourceBrowserFiles()" class="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none">
+                        <button id="source-browser-case-toggle" type="button" onclick="toggleSourceBrowserCaseSensitive()" class="mr-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded px-1.5 text-[10px] leading-none text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100" title="Match Case">Aa</button>
+                        <button id="source-browser-regex-toggle" type="button" onclick="toggleSourceBrowserRegex()" class="mr-1 inline-flex h-6 min-w-6 items-center justify-center rounded px-1.5 text-xs leading-none text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100" title="Use Regular Expression">.*</button>
+                    </div>
+                    <div id="source-browser-search-message" class="hidden mt-1 text-xs text-gray-500 dark:text-gray-400"></div>
+                </div>
+                <div id="source-browser-tree" class="flex-1 min-h-0 overflow-auto p-2 text-sm"></div>
+                <div id="source-browser-search-results" class="hidden flex-1 min-h-0 overflow-auto p-2 text-sm"></div>
+            </aside>
+
+            <section class="flex-1 min-w-0 min-h-0 flex flex-col">
+                <div id="source-browser-status" class="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900"></div>
+                <div id="source-browser-code-wrap" class="flex-1 min-h-0 overflow-auto bg-gray-50 dark:bg-gray-950">
+                    <div id="source-browser-empty" class="p-6 text-sm text-gray-500 dark:text-gray-400">Select a source file to view it.</div>
+                    <table id="source-browser-code-table" class="hidden min-w-full border-separate border-spacing-0 font-mono text-xs">
+                        <tbody id="source-browser-code-body"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,13 @@
+::slack::integration::files ns
+meta ["test"]
+
+test-files-list
+meta ["test"]
+fn () {
+  response ::slack::files/files-list(::slack::files/FilesListRequest({
+    count: 5
+  }))
+
+  assert(response.ok, `files.list should succeed. response=${to-json(response)}`)
+  // Note: files may be empty if no files have been uploaded
+}

@@ -1,0 +1,267 @@
+::ffmpeg::test ns
+meta ["test"]
+
+build-thumbnail-args ::ffmpeg/build-thumbnail-args
+build-transcode-args ::ffmpeg/build-transcode-args
+build-extract-audio-args ::ffmpeg/build-extract-audio-args
+build-probe-args ::ffmpeg/build-probe-args
+parse-probe-output ::ffmpeg/parse-probe-output
+file-ext ::ffmpeg/file-ext
+TranscodeOpts ::ffmpeg/TranscodeOpts
+
+// ============================================================================
+// file-ext tests
+// ============================================================================
+
+test-file-ext-mp4
+meta ["test"] fn () {
+    assert-eq("mp4", file-ext("hot://uploads/video.mp4"))
+}
+
+test-file-ext-nested-path
+meta ["test"] fn () {
+    assert-eq("mov", file-ext("hot://users/123/media/clip.mov"))
+}
+
+test-file-ext-multiple-dots
+meta ["test"] fn () {
+    assert-eq("gz", file-ext("archive.tar.gz"))
+}
+
+// ============================================================================
+// build-thumbnail-args tests
+// ============================================================================
+
+test-thumbnail-args-defaults
+meta ["test"] fn () {
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:01", null, null, 2)
+    assert-eq(["-y", "-i", "/tmp/input.mp4", "-ss", "00:00:01", "-vframes", "1", "-q:v", "2", "/tmp/output.jpg"], args)
+}
+
+test-thumbnail-args-with-width
+meta ["test"] fn () {
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:05", 320, null, 2)
+    assert(in("-vf", args), "should contain -vf flag")
+    assert(in("scale=320:-1", args), "should scale width with auto height")
+}
+
+test-thumbnail-args-with-both-dimensions
+meta ["test"] fn () {
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.png", "00:00:10", 640, 480, 5)
+    assert(in("-vf", args), "should contain -vf flag")
+    assert(in("scale=640:480", args), "should scale to exact dimensions")
+    assert(in("-q:v", args), "should have quality flag")
+    assert(in("5", args), "quality should be 5")
+}
+
+test-thumbnail-args-with-height-only
+meta ["test"] fn () {
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:01", null, 240, 2)
+    assert(in("scale=-1:240", args), "should scale height with auto width")
+}
+
+test-thumbnail-args-custom-time
+meta ["test"] fn () {
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:01:30", null, null, 2)
+    assert(in("00:01:30", args), "should use custom seek time")
+}
+
+// ============================================================================
+// build-transcode-args tests
+// ============================================================================
+
+test-transcode-args-minimal
+meta ["test"] fn () {
+    opts TranscodeOpts({
+        format: "mp4", codec: null, audio-codec: null,
+        bitrate: null, audio-bitrate: null, resolution: null,
+        preset: null, crf: null, extra-args: null,
+        image: null, size: null,
+    })
+    args build-transcode-args("/tmp/input.mov", "/tmp/output.mp4", opts)
+    assert-eq("-y", first(args), "should start with -y")
+    assert(in("-i", args), "should have -i flag")
+    assert(in("/tmp/input.mov", args), "should have input path")
+    assert-eq("/tmp/output.mp4", last(args), "should end with output path")
+}
+
+test-transcode-args-full
+meta ["test"] fn () {
+    opts TranscodeOpts({
+        format: "mp4", codec: "libx264", audio-codec: "aac",
+        bitrate: "2M", audio-bitrate: "128k", resolution: null,
+        preset: "fast", crf: 23, extra-args: null,
+        image: null, size: null,
+    })
+    args build-transcode-args("/tmp/input.mov", "/tmp/output.mp4", opts)
+    assert(in("-c:v", args), "should have video codec flag")
+    assert(in("libx264", args), "should have x264 codec")
+    assert(in("-c:a", args), "should have audio codec flag")
+    assert(in("aac", args), "should have aac codec")
+    assert(in("-b:v", args), "should have video bitrate flag")
+    assert(in("2M", args), "should have 2M bitrate")
+    assert(in("-b:a", args), "should have audio bitrate flag")
+    assert(in("128k", args), "should have 128k audio bitrate")
+    assert(in("-preset", args), "should have preset flag")
+    assert(in("fast", args), "should have fast preset")
+    assert(in("-crf", args), "should have crf flag")
+    assert(in("23", args), "should have crf value 23")
+}
+
+test-transcode-args-with-resolution
+meta ["test"] fn () {
+    opts TranscodeOpts({
+        format: "mp4", codec: null, audio-codec: null,
+        bitrate: null, audio-bitrate: null, resolution: "1280x720",
+        preset: null, crf: null, extra-args: null,
+        image: null, size: null,
+    })
+    args build-transcode-args("/tmp/input.mov", "/tmp/output.mp4", opts)
+    assert(in("-vf", args), "should have -vf flag for resolution")
+    assert(in("scale=1280:720", args), "should scale to 1280x720")
+}
+
+test-transcode-args-with-extra-args
+meta ["test"] fn () {
+    opts TranscodeOpts({
+        format: "webm", codec: null, audio-codec: null,
+        bitrate: null, audio-bitrate: null, resolution: null,
+        preset: null, crf: null, extra-args: ["-threads", "4"],
+        image: null, size: null,
+    })
+    args build-transcode-args("/tmp/input.mp4", "/tmp/output.webm", opts)
+    assert(in("-threads", args), "should have extra -threads flag")
+    assert(in("4", args), "should have 4 threads")
+}
+
+// ============================================================================
+// build-extract-audio-args tests
+// ============================================================================
+
+test-extract-audio-args-defaults
+meta ["test"] fn () {
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.mp3", "192k", null, null)
+    assert-eq(["-y", "-i", "/tmp/input.mp4", "-vn", "-b:a", "192k", "/tmp/output.mp3"], args)
+}
+
+test-extract-audio-args-with-sample-rate
+meta ["test"] fn () {
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.wav", "192k", 16000, null)
+    assert(in("-ar", args), "should have sample rate flag")
+    assert(in("16000", args), "should have 16000 Hz sample rate")
+}
+
+test-extract-audio-args-with-channels
+meta ["test"] fn () {
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.mp3", "320k", null, 1)
+    assert(in("-ac", args), "should have channels flag")
+    assert(in("1", args), "should be mono")
+    assert(in("-b:a", args), "should have bitrate flag")
+    assert(in("320k", args), "should have 320k bitrate")
+}
+
+test-extract-audio-args-all-options
+meta ["test"] fn () {
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.flac", "256k", 48000, 2)
+    assert(in("-ar", args), "should have sample rate flag")
+    assert(in("48000", args), "should have 48kHz")
+    assert(in("-ac", args), "should have channels flag")
+    assert(in("2", args), "should be stereo")
+}
+
+// ============================================================================
+// build-probe-args tests
+// ============================================================================
+
+test-probe-args
+meta ["test"] fn () {
+    args build-probe-args("/tmp/input.mp4")
+    assert-eq(["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "/tmp/input.mp4"], args)
+}
+
+// ============================================================================
+// parse-probe-output tests
+// ============================================================================
+
+test-parse-probe-output-basic
+meta ["test"] fn () {
+    json """{"format":{"filename":"test.mp4","duration":"10.5","bit_rate":"2000000"},"streams":[{"codec_name":"h264","width":1920,"height":1080}]}"""
+    result parse-probe-output(json)
+    assert-eq("test.mp4", result.format.filename)
+    assert-eq("10.5", result.format.duration)
+    assert-eq("2000000", result.format.bit_rate)
+    assert-eq(1, length(result.streams))
+    assert-eq("h264", first(result.streams).codec_name)
+    assert-eq(1920, first(result.streams).width)
+    assert-eq(1080, first(result.streams).height)
+}
+
+test-parse-probe-output-multiple-streams
+meta ["test"] fn () {
+    json """{"format":{"duration":"60.0"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}"""
+    result parse-probe-output(json)
+    assert-eq(2, length(result.streams))
+    assert-eq("video", first(result.streams).codec_type)
+    assert-eq("audio", last(result.streams).codec_type)
+}
+
+test-parse-probe-output-with-whitespace
+meta ["test"] fn () {
+    json """
+    {"format":{"duration":"5.0"},"streams":[]}
+    """
+    result parse-probe-output(json)
+    assert-eq("5.0", result.format.duration)
+    assert-eq(0, length(result.streams))
+}
+
+// ============================================================================
+// Type construction tests
+// ============================================================================
+
+test-thumbnail-opts-construction
+meta ["test"] fn () {
+    opts ::ffmpeg/ThumbnailOpts({
+        time: "00:00:05", width: 320, height: 240,
+        format: "png", quality: 3, size: "medium",
+    })
+    assert-eq("00:00:05", opts.time)
+    assert-eq(320, opts.width)
+    assert-eq(240, opts.height)
+    assert-eq("png", opts.format)
+    assert-eq(3, opts.quality)
+    assert-eq("medium", opts.size)
+}
+
+test-thumbnail-opts-nullable-fields
+meta ["test"] fn () {
+    opts ::ffmpeg/ThumbnailOpts({time: "00:00:01"})
+    assert-eq("00:00:01", opts.time)
+}
+
+test-transcode-opts-construction
+meta ["test"] fn () {
+    opts TranscodeOpts({
+        format: "webm", codec: "libvpx-vp9", audio-codec: "libopus",
+        bitrate: "2M", audio-bitrate: "128k", resolution: "1280x720",
+        preset: "medium", crf: 30, extra-args: ["-threads", "2"],
+        image: null, size: "large",
+    })
+    assert-eq("webm", opts.format)
+    assert-eq("libvpx-vp9", opts.codec)
+    assert-eq("libopus", opts.audio-codec)
+    assert-eq("large", opts.size)
+    assert-eq(2, length(opts.extra-args))
+}
+
+test-extract-audio-opts-construction
+meta ["test"] fn () {
+    opts ::ffmpeg/ExtractAudioOpts({
+        format: "flac", bitrate: "320k", sample-rate: 48000,
+        channels: 2, image: null, size: null,
+    })
+    assert-eq("flac", opts.format)
+    assert-eq("320k", opts.bitrate)
+    assert-eq(48000, opts.sample-rate)
+    assert-eq(2, opts.channels)
+}

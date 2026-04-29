@@ -1,0 +1,49 @@
+::openai::complete ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+CompleteUploadRequest type {
+    part_ids: Vec<Str>,
+    md5: Str?
+}
+
+Upload type {
+    id: Str,
+    created_at: Int,
+    filename: Str,
+    bytes: Int,
+    purpose: Str,
+    status: "pending" | "completed" | "cancelled" | "expired",
+    expires_at: Int,
+    object: "upload",
+    file: Any?
+}
+
+CompleteUploadRequest type {
+    part_ids: Vec<Str>,
+    md5: Str?
+}
+
+CompleteUploadResponse type {
+    id: Str,
+    created_at: Int,
+    filename: Str,
+    bytes: Int,
+    purpose: Str,
+    status: "pending" | "completed" | "cancelled" | "expired",
+    expires_at: Int,
+    object: "upload",
+    file: Any?
+}
+
+
+complete-upload
+meta {
+    doc: """POST /uploads/{upload_id}/complete - Complete a multi-part upload by providing the ordered list of part IDs."""
+}
+fn (upload-id: Str, request: CompleteUploadRequest): CompleteUploadResponse {
+  response api-request("POST", `${::openai/BASE_URL}/uploads/${upload-id}/complete`, {}, request)
+  if(is-ok-response(response), CompleteUploadResponse(response.body), err(HttpError(response)))
+}

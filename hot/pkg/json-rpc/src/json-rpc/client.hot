@@ -1,0 +1,238 @@
+::json-rpc::client ns
+meta {
+    doc: """JSON-RPC 2.0 client for HTTP transports. Supports standard request/response and SSE streaming."""
+}
+
+::types ::json-rpc::types
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+request-stream ::hot::http/request-stream
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+// ============================================================================
+// Message Builders
+// ============================================================================
+
+// Build a JSON-RPC request with a UUIDv7 id
+request
+meta {
+    doc: """
+Build a JSON-RPC 2.0 request message with an auto-generated UUIDv7 id.
+
+Each request gets a unique id for response correlation. Pass null for
+params if the method takes no arguments.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+req ::rpc/request("tools/list", {})
+req.jsonrpc // => "2.0"
+req.id      // => auto-generated UUIDv7
+req.method  // => "tools/list"
+
+// With null params
+req ::rpc/request("ping", null)
+```
+"""
+}
+fn (method: Str, params: Map?): ::types/Request {
+  ::types/Request({
+    jsonrpc: "2.0",
+    id: Str(Uuid(7)),
+    method: method,
+    params: params
+  })
+}
+
+// Build a notification (no id, no response expected)
+notification
+meta {
+    doc: """
+Build a JSON-RPC 2.0 notification (fire-and-forget, no response expected).
+
+Unlike requests, notifications have no `id` field and the server
+does not send a response.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+notif ::rpc/notification("notifications/initialized", null)
+notif.jsonrpc // => "2.0"
+notif.method  // => "notifications/initialized"
+```
+"""
+}
+fn (method: Str, params: Map?): ::types/Notification {
+  ::types/Notification({
+    jsonrpc: "2.0",
+    method: method,
+    params: params
+  })
+}
+
+// ============================================================================
+// Response Parsing
+// ============================================================================
+
+// Parse a response map into a typed Response.
+// Returns err() if the response carries a JSON-RPC error.
+parse-response
+meta {
+    doc: """
+Parse a raw response map into a typed Response.
+
+Returns err() if the response carries a JSON-RPC error object.
+Successful responses have a `result` field; error responses trigger
+automatic error propagation via Hot's Result system.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+
+// Successful response
+raw {jsonrpc: "2.0", id: "abc-123", result: {tools: []}}
+response ::rpc/parse-response(raw)
+response.result // => {tools: []}
+
+// Error response returns err()
+raw-err {jsonrpc: "2.0", id: "abc-123", error: {code: -32601, message: "Method not found"}}
+result ::rpc/parse-response(raw-err)
+is-err(result) // => true
+```
+"""
+}
+fn (data: Map): ::types/Response {
+  response ::types/Response(data)
+  if(is-some(response.error),
+    err(response.error),
+    response)
+}
+
+// ============================================================================
+// Transport: HTTP
+// ============================================================================
+
+// Send a JSON-RPC request and wait for the response.
+send
+meta {
+    doc: """
+Send a JSON-RPC request over HTTP and return the parsed response.
+
+Posts the request as JSON and parses the response. Returns err() for
+HTTP errors or JSON-RPC error responses. Pass additional headers as the
+second argument (e.g. session or auth headers).
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+req ::rpc/request("initialize", {
+  protocolVersion: "2025-11-25",
+  capabilities: {},
+  clientInfo: {name: "my-app", version: "1.0.0"}
+})
+response ::rpc/send("https://server.example.com/rpc", {}, req)
+response.result.serverInfo // => {name: "...", version: "..."}
+
+// With session headers
+headers {"Mcp-Protocol-Version": "2025-11-25"}
+response ::rpc/send(url, headers, req)
+```
+"""
+}
+fn (url: Str, headers: Map, req: ::types/Request): ::types/Response {
+  body to-json(untype(req))
+  response http-request(HttpRequest({
+    method: "POST",
+    url: url,
+    headers: merge({
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream"
+    }, headers),
+    body: body
+  }))
+  if(is-ok-response(response),
+    parse-response(response.body),
+    err(::types/Error({
+      code: ::types/INTERNAL_ERROR,
+      message: `HTTP ${response.status}`,
+      data: response.body
+    })))
+}
+
+// Send a JSON-RPC request expecting an SSE stream back.
+// Returns a StreamingHttpResponse whose .body is an iterator
+// yielding parsed SSE events (each with .event, .data, .id fields).
+send-stream
+meta {
+    doc: """
+Send a JSON-RPC request expecting an SSE stream response.
+
+Returns a StreamingHttpResponse whose `.body` is an iterator
+yielding parsed SSE events with `.event`, `.data`, and `.id` fields.
+Use `collect` to gather all events or iterate to process in real time.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+req ::rpc/request("tools/call", {name: "long_task", arguments: {}})
+response ::rpc/send-stream("https://server.example.com/rpc", {}, req)
+
+// Collect all SSE events
+events collect(response.body)
+// Each event => {event: "message", data: "<json-rpc-json>", id: "..."}
+```
+"""
+}
+fn (url: Str, headers: Map, req: ::types/Request): StreamingHttpResponse {
+  body to-json(untype(req))
+  request-stream(HttpRequest({
+    method: "POST",
+    url: url,
+    headers: merge({
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream"
+    }, headers),
+    body: body
+  }), "sse")
+}
+
+// Fire-and-forget a notification over HTTP.
+notify
+meta {
+    doc: """
+Send a JSON-RPC notification over HTTP (fire-and-forget, no response expected).
+
+Returns true if the HTTP request was successful. The server does not
+send a response body for notifications.
+
+**Example**
+
+```hot
+::rpc ::json-rpc::client
+notif ::rpc/notification("notifications/initialized", null)
+headers {"Mcp-Protocol-Version": "2025-11-25"}
+result ::rpc/notify("https://server.example.com/rpc", headers, notif)
+// result => true
+```
+"""
+}
+fn (url: Str, headers: Map, notif: ::types/Notification): Bool {
+  body to-json(untype(notif))
+  response http-request(HttpRequest({
+    method: "POST",
+    url: url,
+    headers: merge({
+      "Content-Type": "application/json"
+    }, headers),
+    body: body
+  }))
+  is-ok-response(response)
+}

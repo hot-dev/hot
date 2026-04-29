@@ -1,0 +1,37 @@
+::xai::integration::models ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for xAI Models API
+// =============================================================================
+// These tests require XAI_API_KEY to be set in context
+
+test-models-list
+meta ["test"]
+fn () {
+    models ::xai::models/list()
+
+    assert(is-vec(models.data), "Response should have data array")
+    assert(gt(length(models.data), 0), "Should have at least one model")
+
+    // Check first model has expected fields
+    first-model first(models.data)
+    assert(first-model.id, "Model should have id")
+}
+
+test-models-get
+meta ["test"]
+fn () {
+    model ::xai::models/get("grok-3-mini")
+
+    assert-eq("grok-3-mini", model.id, "Model id should match")
+    assert(model.object, "Model should have object field")
+}
+
+test-models-get-grok3
+meta ["test"]
+fn () {
+    model ::xai::models/get("grok-3")
+
+    assert-eq("grok-3", model.id, "Model id should match")
+}

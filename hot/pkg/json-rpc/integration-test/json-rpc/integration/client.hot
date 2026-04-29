@@ -1,0 +1,147 @@
+::json-rpc::integration::client ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for JSON-RPC Client
+// =============================================================================
+// These tests require an MCP-compatible JSON-RPC server.
+// Set MCP_TEST_SERVER_URL in .env (e.g. http://localhost:4681/mcp/local/my-service)
+
+::rpc ::json-rpc::client
+::types ::json-rpc::types
+
+MCP_TEST_SERVER_URL ::hot::env/get("MCP_TEST_SERVER_URL", "")
+
+// -----------------------------------------------------------------------------
+// Message Builder Tests (no server required)
+// -----------------------------------------------------------------------------
+
+test-request-builds-valid-message
+meta ["test"]
+fn () {
+  req ::rpc/request("test/method", {foo: "bar"})
+  assert-eq("2.0", req.jsonrpc, "jsonrpc should be 2.0")
+  assert(req.id, "request should have an id")
+  assert(is-uuid(req.id), "id should be a valid UUID")
+  assert-eq("test/method", req.method, "method should match")
+  assert-eq("bar", req.params.foo, "params should be passed through")
+}
+
+test-request-with-null-params
+meta ["test"]
+fn () {
+  req ::rpc/request("ping", null)
+  assert-eq("2.0", req.jsonrpc, "jsonrpc should be 2.0")
+  assert-eq("ping", req.method, "method should be ping")
+  assert(is-null(req.params), "params should be null")
+}
+
+test-notification-has-no-id
+meta ["test"]
+fn () {
+  notif ::rpc/notification("notifications/initialized", null)
+  assert-eq("2.0", notif.jsonrpc, "jsonrpc should be 2.0")
+  assert-eq("notifications/initialized", notif.method, "method should match")
+}
+
+test-request-ids-are-unique
+meta ["test"]
+fn () {
+  req1 ::rpc/request("test", {})
+  req2 ::rpc/request("test", {})
+  req3 ::rpc/request("test", {})
+  assert(ne(req1.id, req2.id), "request ids should be unique (1 vs 2)")
+  assert(ne(req2.id, req3.id), "request ids should be unique (2 vs 3)")
+  assert(ne(req1.id, req3.id), "request ids should be unique (1 vs 3)")
+}
+
+// -----------------------------------------------------------------------------
+// Response Parsing Tests (no server required)
+// -----------------------------------------------------------------------------
+
+test-parse-success-response
+meta ["test"]
+fn () {
+  raw {jsonrpc: "2.0", id: "abc-123", result: {tools: []}}
+  response ::rpc/parse-response(raw)
+  assert-eq("2.0", response.jsonrpc, "jsonrpc should be 2.0")
+  assert-eq("abc-123", response.id, "id should match")
+  assert(is-some(response.result), "result should be present")
+}
+
+test-parse-error-response
+meta ["test"]
+fn () {
+  raw {jsonrpc: "2.0", id: "abc-123", error: {code: -32601, message: "Method not found"}}
+  result ::rpc/parse-response(raw)
+  assert(is-err(result), "error response should return err()")
+}
+
+// -----------------------------------------------------------------------------
+// Server Tests (require MCP_TEST_SERVER_URL)
+// -----------------------------------------------------------------------------
+
+test-send-initialize-request
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for JSON-RPC integration tests")
+
+  req ::rpc/request("initialize", {
+    protocolVersion: "2025-11-25",
+    capabilities: {},
+    clientInfo: {name: "json-rpc-test", version: "1.0.0"}
+  })
+
+  response ::rpc/send(MCP_TEST_SERVER_URL, {}, req)
+
+  assert-eq("2.0", response.jsonrpc, "response should be JSON-RPC 2.0")
+  assert(is-some(response.result), "initialize should return a result")
+  assert(response.result.serverInfo, "result should contain serverInfo")
+  assert(response.result.protocolVersion, "result should contain protocolVersion")
+}
+
+test-send-invalid-method-returns-error
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for JSON-RPC integration tests")
+
+  // First initialize a session
+  init-req ::rpc/request("initialize", {
+    protocolVersion: "2025-11-25",
+    capabilities: {},
+    clientInfo: {name: "json-rpc-test", version: "1.0.0"}
+  })
+  init-response ::rpc/send(MCP_TEST_SERVER_URL, {}, init-req)
+
+  // Send initialized notification
+  session-headers {"Mcp-Protocol-Version": "2025-11-25"}
+  ::rpc/notify(MCP_TEST_SERVER_URL, session-headers, ::rpc/notification("notifications/initialized", null))
+
+  // Now send a completely invalid method
+  bad-req ::rpc/request("totally/bogus/method", {})
+  result ::rpc/send(MCP_TEST_SERVER_URL, session-headers, bad-req)
+
+  assert(is-err(result), "invalid method should return an error")
+}
+
+test-notify-fires-without-error
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for JSON-RPC integration tests")
+
+  // Initialize first
+  init-req ::rpc/request("initialize", {
+    protocolVersion: "2025-11-25",
+    capabilities: {},
+    clientInfo: {name: "json-rpc-test", version: "1.0.0"}
+  })
+  ::rpc/send(MCP_TEST_SERVER_URL, {}, init-req)
+
+  // Send a notification — should succeed (fire-and-forget)
+  result ::rpc/notify(
+    MCP_TEST_SERVER_URL,
+    {"Mcp-Protocol-Version": "2025-11-25"},
+    ::rpc/notification("notifications/initialized", null)
+  )
+  assert(result, "notify should return true for a successful send")
+}

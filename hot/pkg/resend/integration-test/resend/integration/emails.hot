@@ -1,0 +1,71 @@
+::resend::integration::emails ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Resend Emails API
+// =============================================================================
+// These tests require resend.api.key (full_access) to be set in context
+// Also requires RESEND_TEST_FROM_EMAIL and RESEND_TEST_TO_EMAIL env vars
+
+::env ::hot::env
+
+from-email ::env/get("RESEND_TEST_FROM_EMAIL", "")
+to-email ::env/get("RESEND_TEST_TO_EMAIL", "")
+
+// -----------------------------------------------------------------------------
+// Send & Retrieve Email
+// -----------------------------------------------------------------------------
+
+test-send-and-retrieve-email
+meta ["test"]
+fn () {
+    // Send an HTML email with tags and reply-to
+    send-response ::resend::emails/send-email(::resend::emails/POSTEmailsRequest({
+        from: from-email,
+        to: [to-email],
+        subject: "Hot Integration Test - Send & Retrieve",
+        html: "<html><body><p>Test email from <strong>Hot Resend</strong> integration tests.</p></body></html>",
+        text: "Test email from Hot Resend integration tests.",
+        reply_to: from-email,
+        tags: [
+            ::resend::emails/Tag({name: "source", value: "integration-test"})
+        ]
+    }))
+
+    assert(send-response.id, "Send response should have an id")
+
+    // Retrieve the sent email by id
+    email ::resend::emails/retrieve-single-email(::resend::emails/GETEmailsEmailIdRequest({
+        email-id: send-response.id
+    }))
+
+    assert-eq(send-response.id, email.id, "Retrieved email id should match sent email id")
+    assert(email.from, "Retrieved email should have a from field")
+    assert(email.subject, "Retrieved email should have a subject field")
+}
+
+// -----------------------------------------------------------------------------
+// Batch Emails — Resend expects a raw JSON array, not {value: [...]}
+// -----------------------------------------------------------------------------
+
+test-send-batch-emails
+meta ["test"]
+fn () {
+    response ::resend::emails/send-batch-emails([
+        ::resend::emails/SendEmailRequest({
+            from: from-email,
+            to: [to-email],
+            subject: "Hot Integration Test - Batch 1",
+            text: "Batch email 1 from Hot Resend integration tests."
+        }),
+        ::resend::emails/SendEmailRequest({
+            from: from-email,
+            to: [to-email],
+            subject: "Hot Integration Test - Batch 2",
+            text: "Batch email 2 from Hot Resend integration tests."
+        })
+    ])
+
+    assert(response.data, "Batch response should have data field")
+    assert-eq(2, length(response.data), "Should have 2 results for 2 emails")
+}

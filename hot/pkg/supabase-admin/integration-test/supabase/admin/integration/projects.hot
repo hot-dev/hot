@@ -1,0 +1,51 @@
+::supabase::admin::integration::projects ns
+meta ["test"]
+
+::projects ::supabase::admin::projects
+
+test-list-projects
+meta ["test"]
+fn () {
+  projects ::projects/list-projects()
+  assert(is-vec(projects), "should return a vec of projects")
+}
+
+test-get-project
+meta ["test"]
+fn () {
+  projects ::projects/list-projects()
+  assert(not(is-empty(projects)), "need at least one project to test get-project")
+
+  project-ref first(projects).id
+  project ::projects/get-project(project-ref)
+
+  assert(project.id, "project should have an id")
+  assert(project.name, "project should have a name")
+  assert(project.region, "project should have a region")
+}
+
+test-get-api-keys
+meta ["test"]
+fn () {
+  projects ::projects/list-projects()
+  assert(not(is-empty(projects)), "need at least one project to test get-api-keys")
+
+  project-ref first(projects).id
+  api-keys ::projects/get-api-keys(project-ref)
+
+  assert(not(is-empty(api-keys)), "should return at least one API key")
+  found-anon some(api-keys, (k) { eq(k.name, "anon") })
+  assert(found-anon, "should have an anon key")
+}
+
+test-get-project-health
+meta ["test"]
+fn () {
+  projects ::projects/list-projects()
+  assert(not(is-empty(projects)), "need at least one project")
+
+  project-ref first(projects).id
+  health ::projects/get-project-health(project-ref)
+
+  assert(is-vec(health), "health should return an array of service statuses")
+}

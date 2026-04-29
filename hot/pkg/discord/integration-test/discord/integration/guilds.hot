@@ -1,0 +1,51 @@
+::discord::integration::guilds ns
+meta ["test"]
+
+DISCORD_TEST_GUILD_ID ::hot::env/get("DISCORD_TEST_GUILD_ID", "")
+
+test-get-guild
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_GUILD_ID, "Set DISCORD_TEST_GUILD_ID in .env for Discord integration tests")
+
+  response ::discord::guilds/get-guild(::discord::guilds/GetGuildRequest({
+    guild_id: DISCORD_TEST_GUILD_ID,
+    with_counts: true
+  }))
+
+  assert(response.id, "get-guild should return id")
+  assert-eq(DISCORD_TEST_GUILD_ID, response.id, "guild id should match requested id")
+  assert(response.name, "guild should have name")
+}
+
+test-get-guild-roles
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_GUILD_ID, "Set DISCORD_TEST_GUILD_ID in .env for Discord integration tests")
+
+  response ::discord::guilds/get-guild-roles(::discord::guilds/GetGuildRolesRequest({
+    guild_id: DISCORD_TEST_GUILD_ID
+  }))
+
+  assert(gt(length(response), 0), "guild should have at least one role (@everyone)")
+
+  everyone-role find-first(response, (r) { eq(r.name, "@everyone") })
+  assert(everyone-role, "guild should have @everyone role")
+}
+
+test-list-guild-members
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_GUILD_ID, "Set DISCORD_TEST_GUILD_ID in .env for Discord integration tests")
+
+  response ::discord::guilds/list-guild-members(::discord::guilds/ListGuildMembersRequest({
+    guild_id: DISCORD_TEST_GUILD_ID,
+    limit: 10
+  }))
+
+  assert(gt(length(response), 0), "guild should have at least one member")
+
+  first-member first(response)
+  assert(first-member.user, "member should have user object")
+  assert(first-member.user.id, "member user should have id")
+}

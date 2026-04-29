@@ -1,0 +1,468 @@
+::hot::test::iter ns
+meta {doc: "Tests for iterator functionality."}
+
+// Test from-vec creates an iterator
+test-from-vec-basic
+meta ["test"] fn () {
+    items [1, 2, 3]
+    iter ::hot::iter/Iter(items)
+
+    // Verify it's an iterator
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(iter), "from-vec should create an iterator")
+
+    // Get first value
+    result1 ::hot::iter/next(iter)
+    ::hot::test/assert-eq(1, result1.value, "first value should be 1")
+    ::hot::test/assert-eq(false, result1.done, "should not be done after first")
+
+    // Get second value
+    result2 ::hot::iter/next(iter)
+    ::hot::test/assert-eq(2, result2.value, "second value should be 2")
+
+    // Get third value
+    result3 ::hot::iter/next(iter)
+    ::hot::test/assert-eq(3, result3.value, "third value should be 3")
+
+    // Iterator should be done
+    result4 ::hot::iter/next(iter)
+    ::hot::test/assert-eq(true, result4.done, "should be done after all values")
+}
+
+// Test collect on from-vec
+test-from-vec-collect
+meta ["test"] fn () {
+    items [10, 20, 30, 40, 50]
+    iter ::hot::iter/Iter(items)
+    collected ::hot::iter/collect(iter)
+
+    ::hot::test/assert-eq(items, collected, "collected should equal original")
+}
+
+// Test range iterator with single argument
+test-range-single-arg
+meta ["test"] fn () {
+    iter ::hot::iter/range(5)
+    collected ::hot::iter/collect(iter)
+
+    ::hot::test/assert-eq([0, 1, 2, 3, 4], collected, "range(5) should be 0..5")
+}
+
+// Test range iterator with two arguments
+test-range-two-args
+meta ["test"] fn () {
+    iter ::hot::iter/range(3, 8)
+    collected ::hot::iter/collect(iter)
+
+    ::hot::test/assert-eq([3, 4, 5, 6, 7], collected, "range(3, 8) should be 3..8")
+}
+
+// Test range iterator with step
+test-range-with-step
+meta ["test"] fn () {
+    iter ::hot::iter/range(0, 10, 2)
+    collected ::hot::iter/collect(iter)
+
+    ::hot::test/assert-eq([0, 2, 4, 6, 8], collected, "range(0, 10, 2) should be evens")
+}
+
+// Test range with negative step
+test-range-negative-step
+meta ["test"] fn () {
+    iter ::hot::iter/range(10, 0, -2)
+    collected ::hot::iter/collect(iter)
+
+    ::hot::test/assert-eq([10, 8, 6, 4, 2], collected, "range(10, 0, -2) should count down")
+}
+
+// Test for-each with side effects (uses TCO)
+test-for-each
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+    iter ::hot::iter/Iter(items)
+
+    // Count how many times we iterate
+    count-holder { count: 0 }
+
+    // Note: This uses TCO internally
+    ::hot::iter/for-each(iter, (x) {
+        // We can't easily mutate in Hot, so just verify it runs
+        null
+    })
+
+    // Just verify it completes without error
+    ::hot::test/assert-eq(true, true, "for-each should complete")
+}
+
+// Test map transformation
+test-map
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+    iter ::hot::iter/Iter(items)
+
+    doubled ::hot::coll/map(iter, (x) { ::hot::math/mul(x, 2) })
+
+    ::hot::test/assert-eq([2, 4, 6, 8, 10], doubled, "map should double values")
+}
+
+// Test filter predicate
+test-filter
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    iter ::hot::iter/Iter(items)
+
+    evens ::hot::coll/filter(iter, (x) {
+        ::hot::cmp/eq(::hot::math/mod(x, 2), 0)
+    })
+
+    ::hot::test/assert-eq([2, 4, 6, 8, 10], evens, "filter should keep evens")
+}
+
+// Test take limits
+test-take
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    iter ::hot::iter/Iter(items)
+
+    first5 ::hot::iter/take(iter, 5)
+
+    ::hot::test/assert-eq([1, 2, 3, 4, 5], first5, "take(5) should get first 5")
+}
+
+// Test take more than available
+test-take-more-than-available
+meta ["test"] fn () {
+    items [1, 2, 3]
+    iter ::hot::iter/Iter(items)
+
+    result ::hot::iter/take(iter, 10)
+
+    ::hot::test/assert-eq([1, 2, 3], result, "take(10) on 3 items should return all 3")
+}
+
+// Test reduce accumulation
+test-reduce
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+    iter ::hot::iter/Iter(items)
+
+    sum ::hot::coll/reduce(iter, (acc, x) { ::hot::math/add(acc, x) }, 0)
+
+    ::hot::test/assert-eq(15, sum, "reduce should sum to 15")
+}
+
+// Test reduce with multiplication (product)
+test-reduce-product
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+    iter ::hot::iter/Iter(items)
+
+    product ::hot::coll/reduce(iter, (acc, x) { ::hot::math/mul(acc, x) }, 1)
+
+    ::hot::test/assert-eq(120, product, "reduce should compute factorial (5! = 120)")
+}
+
+// Test deep iteration with range (TCO stress test)
+test-iter-deep-range
+meta ["test"] fn () {
+    // Sum of 1 to 1000 using range iterator
+    // This would stack overflow without TCO
+    numbers ::hot::iter/range(1, 1001)
+    sum ::hot::coll/reduce(numbers, (acc, n) { ::hot::math/add(acc, n) }, 0)
+
+    // Sum of 1 to 1000 = 1000 * 1001 / 2 = 500500
+    ::hot::test/assert-eq(500500, sum, "sum(1..1000) should be 500500")
+}
+
+// Test map on range
+test-range-map
+meta ["test"] fn () {
+    numbers ::hot::iter/range(1, 6)
+    squared ::hot::coll/map(numbers, (n) { ::hot::math/mul(n, n) })
+
+    ::hot::test/assert-eq([1, 4, 9, 16, 25], squared, "squares of 1-5")
+}
+
+// Test chained operations
+test-chained-operations
+meta ["test"] fn () {
+    // Filter evens, then double them
+    numbers ::hot::iter/range(1, 11)
+
+    evens ::hot::coll/filter(numbers, (n) {
+        ::hot::cmp/eq(::hot::math/mod(n, 2), 0)
+    })
+
+    // evens is now a vector, need to iterate again
+    evens-iter ::hot::iter/Iter(evens)
+    doubled ::hot::coll/map(evens-iter, (n) { ::hot::math/mul(n, 2) })
+
+    ::hot::test/assert-eq([4, 8, 12, 16, 20], doubled, "evens doubled")
+}
+
+// Test empty iterator
+test-empty-iterator
+meta ["test"] fn () {
+    items []
+    iter ::hot::iter/Iter(items)
+
+    collected ::hot::iter/collect(iter)
+    ::hot::test/assert-eq([], collected, "empty iterator should collect to empty")
+}
+
+// Test empty range
+test-empty-range
+meta ["test"] fn () {
+    iter ::hot::iter/range(5, 5)
+    collected ::hot::iter/collect(iter)
+
+    ::hot::test/assert-eq([], collected, "range(5, 5) should be empty")
+}
+
+// Test is-iter on non-iterators
+test-is-iter-false-cases
+meta ["test"] fn () {
+    ::hot::test/assert-eq(false, ::hot::iter/is-iter([1, 2, 3]), "vector is not iterator")
+    ::hot::test/assert-eq(false, ::hot::iter/is-iter("hello"), "string is not iterator")
+    ::hot::test/assert-eq(false, ::hot::iter/is-iter(42), "int is not iterator")
+    ::hot::test/assert-eq(false, ::hot::iter/is-iter({}), "map is not iterator")
+}
+
+// ============================================================================
+// Tests for polymorphic iter() function
+// ============================================================================
+
+// Test iter on vector
+test-iter-vec
+meta ["test"] fn () {
+    items [10, 20, 30]
+    it ::hot::iter/Iter(items)
+
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(it), "iter(vec) should create an iterator")
+
+    collected ::hot::iter/collect(it)
+    ::hot::test/assert-eq([10, 20, 30], collected, "iter(vec) should yield elements")
+}
+
+// Test iter on map (yields [key, value] pairs)
+test-iter-map
+meta ["test"] fn () {
+    m {"a": 1, "b": 2, "c": 3}
+    it ::hot::iter/Iter(m)
+
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(it), "iter(map) should create an iterator")
+
+    collected ::hot::iter/collect(it)
+    // Check that we got 3 pairs
+    ::hot::test/assert-eq(3, ::hot::coll/length(collected), "should have 3 pairs")
+
+    // Check the first pair is a [key, value] vector
+    first-pair ::hot::coll/first(collected)
+    ::hot::test/assert-eq(2, ::hot::coll/length(first-pair), "each pair should have 2 elements")
+}
+
+// Test iter on string (yields characters)
+test-iter-str
+meta ["test"] fn () {
+    s "hello"
+    it ::hot::iter/Iter(s)
+
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(it), "iter(str) should create an iterator")
+
+    collected ::hot::iter/collect(it)
+    ::hot::test/assert-eq(["h", "e", "l", "l", "o"], collected, "iter(str) should yield characters")
+}
+
+// Test iter on empty string
+test-iter-empty-str
+meta ["test"] fn () {
+    s ""
+    it ::hot::iter/Iter(s)
+    collected ::hot::iter/collect(it)
+
+    ::hot::test/assert-eq([], collected, "iter('') should be empty")
+}
+
+// Test iter on iterator (returns same iterator)
+test-iter-on-iterator
+meta ["test"] fn () {
+    original ::hot::iter/range(3)
+    it ::hot::iter/Iter(original)
+
+    // Should be the same iterator
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(it), "iter(iter) should be an iterator")
+}
+
+// ============================================================================
+// Tests for iterating over keys() and vals()
+// ============================================================================
+
+// Test iterating over keys
+test-keys-iter
+meta ["test"] fn () {
+    m {"x": 10, "y": 20, "z": 30}
+    key-iter ::hot::iter/Iter(::hot::coll/keys(m))
+
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(key-iter), "Iter(keys(m)) should create an iterator")
+
+    collected ::hot::iter/collect(key-iter)
+    ::hot::test/assert-eq(3, ::hot::coll/length(collected), "should have 3 keys")
+    // Keys are in insertion order (IndexMap)
+    ::hot::test/assert-eq(["x", "y", "z"], collected, "keys should be in insertion order")
+}
+
+// Test iterating over vals
+test-vals-iter
+meta ["test"] fn () {
+    m {"x": 10, "y": 20, "z": 30}
+    val-iter ::hot::iter/Iter(::hot::coll/vals(m))
+
+    ::hot::test/assert-eq(true, ::hot::iter/is-iter(val-iter), "Iter(vals(m)) should create an iterator")
+
+    collected ::hot::iter/collect(val-iter)
+    ::hot::test/assert-eq([10, 20, 30], collected, "vals should be in insertion order")
+}
+
+// Test keys on empty map
+test-keys-empty-iter
+meta ["test"] fn () {
+    m {}
+    key-iter ::hot::iter/Iter(::hot::coll/keys(m))
+    collected ::hot::iter/collect(key-iter)
+
+    ::hot::test/assert-eq([], collected, "keys of empty map should be empty")
+}
+
+// Test vals on empty map
+test-vals-empty-iter
+meta ["test"] fn () {
+    m {}
+    val-iter ::hot::iter/Iter(::hot::coll/vals(m))
+    collected ::hot::iter/collect(val-iter)
+
+    ::hot::test/assert-eq([], collected, "vals of empty map should be empty")
+}
+
+// Test map function on keys iterator
+test-keys-map-iter
+meta ["test"] fn () {
+    m {"a": 1, "b": 2, "c": 3}
+    key-iter ::hot::iter/Iter(::hot::coll/keys(m))
+
+    // Convert keys to uppercase
+    upper-keys ::hot::coll/map(key-iter, (k) { ::hot::str/uppercase(k) })
+
+    ::hot::test/assert-eq(["A", "B", "C"], upper-keys, "should uppercase keys")
+}
+
+// Test reduce on vals iterator
+test-vals-reduce-iter
+meta ["test"] fn () {
+    m {"a": 10, "b": 20, "c": 30}
+    val-iter ::hot::iter/Iter(::hot::coll/vals(m))
+
+    sum ::hot::coll/reduce(val-iter, (acc, v) { ::hot::math/add(acc, v) }, 0)
+
+    ::hot::test/assert-eq(60, sum, "sum of vals should be 60")
+}
+
+// Test iter vs from-vec equivalence
+test-iter-vs-from-vec
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+
+    from-vec-result ::hot::iter/collect(::hot::iter/Iter(items))
+    iter-result ::hot::iter/collect(::hot::iter/Iter(items))
+
+    ::hot::test/assert-eq(from-vec-result, iter-result, "iter and from-vec should be equivalent for vectors")
+}
+
+// ============================================================================
+// Tests for flow-based lambda syntax: serial(x) { ... }, parallel(x) { ... }
+// ============================================================================
+
+// Test serial flow-based lambda with map
+test-flow-lambda-serial-map
+meta ["test"] fn () {
+    items [1, 2, 3]
+    iter ::hot::iter/Iter(items)
+
+    // Use serial(x) { body } syntax for lambda
+    doubled ::hot::coll/map(iter, serial(x) { ::hot::math/mul(x, 2) })
+
+    ::hot::test/assert-eq([2, 4, 6], doubled, "serial flow lambda should work with map")
+}
+
+// Test serial flow-based lambda with reduce
+test-flow-lambda-serial-reduce
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+    iter ::hot::iter/Iter(items)
+
+    // Use serial(acc, x) { body } syntax for lambda
+    sum ::hot::coll/reduce(iter, serial(acc, x) { ::hot::math/add(acc, x) }, 0)
+
+    ::hot::test/assert-eq(15, sum, "serial flow lambda should work with reduce")
+}
+
+// Test serial flow-based lambda with filter
+test-flow-lambda-serial-filter
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5, 6]
+    iter ::hot::iter/Iter(items)
+
+    // Use serial(x) { body } syntax for lambda
+    evens ::hot::coll/filter(iter, serial(x) {
+        ::hot::cmp/eq(::hot::math/mod(x, 2), 0)
+    })
+
+    ::hot::test/assert-eq([2, 4, 6], evens, "serial flow lambda should work with filter")
+}
+
+// Test parallel flow-based lambda syntax parses correctly
+// Note: parallel flows return results as maps, so the result is different from serial
+test-flow-lambda-parallel-syntax
+meta ["test"] fn () {
+    items [10]
+    iter ::hot::iter/Iter(items)
+
+    // Use parallel(x) { body } syntax for lambda - just verify it parses and runs
+    result ::hot::coll/map(iter, parallel(x) { ::hot::math/div(x, 2) })
+
+    // Parallel flows return results differently, just verify we got a result
+    ::hot::test/assert-eq(1, ::hot::coll/length(result), "parallel flow lambda should execute and return 1 item")
+}
+
+// Test cond flow-based lambda with map
+test-flow-lambda-cond-map
+meta ["test"] fn () {
+    items [1, 2, 3, 4, 5]
+    iter ::hot::iter/Iter(items)
+
+    // Use cond(x) { conditions } syntax for lambda
+    categorized ::hot::coll/map(iter, cond(x) {
+        ::hot::cmp/lt(x, 3) => { "small" }
+        ::hot::cmp/gte(x, 3) => { "big" }
+    })
+
+    ::hot::test/assert-eq(["small", "small", "big", "big", "big"], categorized, "cond flow lambda should work with map")
+}
+
+// Test cond-all flow-based lambda with map
+test-flow-lambda-cond-all-map
+meta ["test"] fn () {
+    items [1, 5, 10]
+    iter ::hot::iter/Iter(items)
+
+    // Use cond-all(x) { conditions } syntax for lambda - all matching branches execute
+    tagged ::hot::coll/map(iter, cond-all(x) {
+        ::hot::cmp/lt(x, 10) => { "under-10" }
+        ::hot::cmp/lt(x, 6) => { "under-6" }
+        => { "default" }
+    })
+
+    // cond-all returns multiple values when multiple conditions match
+    // For x=1: matches "under-10" and "under-6"
+    // For x=5: matches "under-10" and "under-6"
+    // For x=10: only matches "default"
+    ::hot::test/assert-eq(3, ::hot::coll/length(tagged), "cond-all flow lambda should produce one result per input")
+}

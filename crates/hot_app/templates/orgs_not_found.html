@@ -1,0 +1,39 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-4">
+    <!-- Back button and title -->
+    <div class="flex items-center mb-6">
+        <a href="/orgs" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 mr-4">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+            </svg>
+        </a>
+        <h1 class="text-xl font-semibold flex items-center">
+            Organization Not Found
+        </h1>
+    </div>
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md">
+        <div class="p-6 text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 dark:bg-red-900 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-red-600 dark:text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Organization Not Found</h3>
+            <p class="text-gray-500 dark:text-gray-400 mb-4">
+                The organization <span class="font-mono">@{{ org_slug }}</span> could not be found. It may have been deleted or the handle is incorrect.
+            </p>
+            <div class="flex items-center justify-center space-x-3">
+                <a href="/orgs" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    Back to Organizations
+                </a>
+                <a href="/orgs/new" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-200">
+                    Create New Organization
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

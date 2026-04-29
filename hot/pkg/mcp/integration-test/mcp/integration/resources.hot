@@ -1,0 +1,104 @@
+::mcp::integration::resources ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for MCP Resources
+// =============================================================================
+// These tests require an MCP server.
+// Set MCP_TEST_SERVER_URL in .env (e.g. http://localhost:4681/mcp/local/my-service)
+
+::mcp ::mcp::client
+::resources ::mcp::resources
+::types ::mcp::types
+
+MCP_TEST_SERVER_URL ::hot::env/get("MCP_TEST_SERVER_URL", "")
+
+// Helper: initialize a session for each test
+init-session fn (): ::types/Session {
+  ::mcp/initialize(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    null
+  )
+}
+
+// -----------------------------------------------------------------------------
+// Resource Listing
+// -----------------------------------------------------------------------------
+
+test-list-resources
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  resources ::resources/list(session)
+
+  assert(gte(length(resources), 0), "resources/list should return a Vec (even if empty)")
+}
+
+test-list-resources-page
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  page ::resources/list-page(session, null)
+
+  assert(page.resources, "list-page should return a map with resources")
+  assert(gte(length(page.resources), 0), "resources should be a Vec")
+}
+
+test-list-all-resources
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  all-resources ::resources/list-all(session)
+
+  assert(gte(length(all-resources), 0), "list-all should return all resources")
+}
+
+// -----------------------------------------------------------------------------
+// Resource Reading
+// -----------------------------------------------------------------------------
+
+test-read-resource
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  resources ::resources/list(session)
+
+  if(gt(length(resources), 0), {
+    resource first(resources)
+    println(`Reading resource: ${resource.uri}`)
+
+    contents ::resources/read(session, resource.uri)
+
+    assert(gt(length(contents), 0), "read should return at least one content item")
+
+    content first(contents)
+    assert(content.uri, "content should have a uri")
+    assert(or(is-some(content.text), is-some(content.blob)), "content should have text or blob")
+  }, {
+    println("No resources available, skipping resource read test")
+  })
+}
+
+// -----------------------------------------------------------------------------
+// Resource Templates
+// -----------------------------------------------------------------------------
+
+test-list-templates
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  templates ::resources/list-templates(session)
+
+  assert(gte(length(templates), 0), "list-templates should return a Vec (even if empty)")
+}

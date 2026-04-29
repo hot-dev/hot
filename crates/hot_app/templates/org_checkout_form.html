@@ -1,0 +1,182 @@
+{% extends "public_layout.html" %}
+{% block content %}
+<div class="flex justify-center items-center min-h-[70vh]">
+  <div class="max-w-lg w-full mx-4">
+    <div class="text-center mb-8">
+      {% if plan.base_price_monthly_cents == 0 %}
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Activate Your Free Plan</h1>
+      <p class="text-gray-600 dark:text-gray-400 mt-2">Verify your card to activate <strong>{{ org.name }}</strong></p>
+      <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">No charge &mdash; card verification only</p>
+      {% else %}
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Complete Your Subscription</h1>
+      <p class="text-gray-600 dark:text-gray-400 mt-2">Activate <strong>{{ org.name }}</strong> with Hot Cloud</p>
+      {% endif %}
+    </div>
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-lg">
+      <form id="checkout-form" method="post" action="/@{{ org.slug }}/billing/checkout">
+        <!-- Billing Period Selection -->
+        <div class="mb-6">
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Billing Period</label>
+          <div class="flex gap-4">
+            <label class="flex items-center cursor-pointer">
+              <input type="radio" name="billing_period" value="monthly"
+                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                     {% if billing_period != "annual" %}checked{% endif %}
+                     onchange="updatePrices()">
+              <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Monthly</span>
+            </label>
+            <label class="flex items-center cursor-pointer">
+              <input type="radio" name="billing_period" value="annual"
+                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                     {% if billing_period == "annual" %}checked{% endif %}
+                     onchange="updatePrices()">
+              <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-600">(Save ~17%)</span></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Plan Selection -->
+        <div class="mb-6">
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Select Plan</label>
+          <div class="space-y-3">
+            {% for p in all_plans %}
+            {% if let Some(pid) = p.plan_id.as_ref() %}
+            <label class="relative flex items-center p-4 border rounded-lg cursor-pointer hover:border-red-500 transition-colors plan-option
+                          {% if plan.plan_id.as_deref() == Some(pid.as_str()) %}border-red-500 bg-red-50 dark:bg-red-900/20{% else %}border-gray-300 dark:border-gray-700{% endif %}"
+                   data-plan-id="{{ pid }}"
+                   data-monthly-price="{{ p.monthly_price_dollars() }}"
+                   data-annual-price="{{ p.annual_price_dollars() }}"
+                   data-annual-savings="{{ p.annual_savings_percent() as i32 }}">
+              <input type="radio" name="plan_id" value="{{ pid }}"
+                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                     {% if plan.plan_id.as_deref() == Some(pid.as_str()) %}checked{% endif %}
+                     onchange="updateSelection(this)">
+              <div class="ml-3 flex-1">
+                <div class="flex items-center justify-between">
+                  <span class="font-medium text-gray-900 dark:text-white">{{ p.plan_name }}</span>
+                  <span class="font-semibold text-gray-900 dark:text-white plan-price">
+                    {% if p.base_price_monthly_cents == 0 %}
+                      Free
+                    {% elif billing_period == "annual" %}
+                      ${{ p.annual_price_dollars() }}/yr
+                    {% else %}
+                      ${{ p.monthly_price_dollars() }}/mo
+                    {% endif %}
+                  </span>
+                </div>
+              </div>
+            </label>
+            {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+
+        <!-- Selected Plan Summary -->
+        <div class="text-center mb-6 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+          <div class="text-sm text-gray-600 dark:text-gray-400">Selected plan</div>
+          <div id="summary-plan" class="text-xl font-semibold text-gray-900 dark:text-white">{{ plan.plan_name }}</div>
+          <div id="summary-price" class="text-3xl font-bold text-gray-900 dark:text-white mt-1">
+            {% if plan.base_price_monthly_cents == 0 %}
+              $0<span class="text-base font-normal text-gray-500">/month</span>
+            {% elif billing_period == "annual" %}
+              ${{ plan.annual_price_dollars() }}<span class="text-base font-normal text-gray-500">/year</span>
+            {% else %}
+              ${{ plan.monthly_price_dollars() }}<span class="text-base font-normal text-gray-500">/month</span>
+            {% endif %}
+          </div>
+          <div id="summary-savings" class="text-sm text-green-600 font-medium mt-1 {% if billing_period != "annual" %}hidden{% endif %}">
+            Save {{ plan.annual_savings_percent() as i32 }}% vs monthly
+          </div>
+        </div>
+
+        <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white font-semibold py-3 px-6 rounded-md transition shadow-sm">
+          {% if plan.base_price_monthly_cents == 0 %}
+          Verify Card & Activate
+          {% else %}
+          Continue to Payment
+          {% endif %}
+        </button>
+      </form>
+
+      <p class="text-xs text-gray-500 dark:text-gray-400 text-center mt-4">
+        {% if plan.base_price_monthly_cents == 0 %}
+        You'll be redirected to securely verify your card
+        {% else %}
+        You'll be redirected to securely complete your payment
+        {% endif %}
+      </p>
+    </div>
+
+    <div class="text-center mt-6">
+      <p class="text-sm text-gray-500 dark:text-gray-400">
+        Questions? <a href="mailto:{{ page_context.support_email }}" class="text-blue-600 dark:text-blue-400 hover:underline">Contact support</a>
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+function updatePrices() {
+  const isAnnual = document.querySelector('input[name="billing_period"]:checked').value === 'annual';
+  const planOptions = document.querySelectorAll('.plan-option');
+
+  planOptions.forEach(option => {
+    const priceEl = option.querySelector('.plan-price');
+    const monthlyPrice = parseFloat(option.dataset.monthlyPrice);
+    const annualPrice = parseFloat(option.dataset.annualPrice);
+
+    if (monthlyPrice === 0) {
+      priceEl.textContent = 'Free';
+    } else if (isAnnual) {
+      priceEl.textContent = '$' + annualPrice + '/yr';
+    } else {
+      priceEl.textContent = '$' + monthlyPrice + '/mo';
+    }
+  });
+
+  updateSummary();
+}
+
+function updateSelection(radio) {
+  // Update visual selection
+  document.querySelectorAll('.plan-option').forEach(option => {
+    option.classList.remove('border-red-500', 'bg-red-50', 'dark:bg-red-900/20');
+    option.classList.add('border-gray-300', 'dark:border-gray-700');
+  });
+
+  const selectedOption = radio.closest('.plan-option');
+  selectedOption.classList.remove('border-gray-300', 'dark:border-gray-700');
+  selectedOption.classList.add('border-red-500', 'bg-red-50', 'dark:bg-red-900/20');
+
+  updateSummary();
+}
+
+function updateSummary() {
+  const selectedRadio = document.querySelector('input[name="plan_id"]:checked');
+  if (!selectedRadio) return;
+  const selectedOption = selectedRadio.closest('.plan-option');
+  const isAnnual = document.querySelector('input[name="billing_period"]:checked').value === 'annual';
+
+  const planName = selectedOption.querySelector('.font-medium').textContent;
+  const monthlyPrice = parseFloat(selectedOption.dataset.monthlyPrice);
+  const annualPrice = parseFloat(selectedOption.dataset.annualPrice);
+  const annualSavings = selectedOption.dataset.annualSavings;
+  const isFree = monthlyPrice === 0;
+
+  document.getElementById('summary-plan').textContent = planName;
+
+  if (isFree) {
+    document.getElementById('summary-price').innerHTML = '$0<span class="text-base font-normal text-gray-500">/month</span>';
+    document.getElementById('summary-savings').classList.add('hidden');
+  } else if (isAnnual) {
+    document.getElementById('summary-price').innerHTML = '$' + annualPrice + '<span class="text-base font-normal text-gray-500">/year</span>';
+    document.getElementById('summary-savings').textContent = 'Save ' + annualSavings + '% vs monthly';
+    document.getElementById('summary-savings').classList.remove('hidden');
+  } else {
+    document.getElementById('summary-price').innerHTML = '$' + monthlyPrice + '<span class="text-base font-normal text-gray-500">/month</span>';
+    document.getElementById('summary-savings').classList.add('hidden');
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,25 @@
+<!--
+  Issues Banner - Compact alert when there are failures or unhandled events.
+
+  Rendered hidden on first paint; `updateHeroMetricsUI()` unhides the banner
+  (and each child link) once the hero-metrics fetch returns counts > 0.
+  No SSR data is needed.
+-->
+<div id="issues-banner" class="hidden bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3 flex flex-wrap items-center gap-4">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-red-500 dark:text-red-400 flex-shrink-0">
+        <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
+    </svg>
+    <span class="text-sm font-medium text-red-800 dark:text-red-200">Issues:</span>
+    <a id="issues-banner-failed-runs" href="#issues-failed-runs" class="hidden inline-flex items-center gap-1 text-sm font-semibold text-red-700 dark:text-red-300 hover:underline">
+        <span class="inline-block w-2 h-2 rounded-full bg-red-500"></span>
+        0 Failed Runs
+    </a>
+    <a id="issues-banner-failed-tasks" href="#issues-failed-tasks" class="hidden inline-flex items-center gap-1 text-sm font-semibold text-pink-700 dark:text-pink-300 hover:underline">
+        <span class="inline-block w-2 h-2 rounded-full bg-pink-500"></span>
+        0 Failed Tasks
+    </a>
+    <a id="issues-banner-unhandled" href="#issues-unhandled-events" class="hidden inline-flex items-center gap-1 text-sm font-semibold text-orange-700 dark:text-orange-300 hover:underline">
+        <span class="inline-block w-2 h-2 rounded-full bg-orange-500"></span>
+        0 Unhandled Events
+    </a>
+</div>

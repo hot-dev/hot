@@ -1,0 +1,105 @@
+::anthropic::test::live-smoke ns
+meta {
+    doc: """
+    Live network smoke tests for the Anthropic adapter.
+
+    These tests are gated by the `HOT_LIVE_TESTS` env var so they don't
+    run as part of the normal test suite (which is hermetic and offline).
+    They also require a real `ANTHROPIC_API_KEY`.
+
+    To run:
+
+    ```bash
+    HOT_LIVE_TESTS=1 ANTHROPIC_API_KEY=sk-... hot test ::anthropic::test::live-smoke
+    ```
+
+    When `HOT_LIVE_TESTS` is unset (the default) every test in this
+    namespace short-circuits with a passing assertion so CI stays green.
+    """
+}
+
+::env      ::hot::env
+::ct       ::anthropic::chat-tools
+::ai-chat  ::ai::chat
+::ai-tool  ::ai::tool
+
+LIVE_TESTS_ENV "HOT_LIVE_TESTS"
+ANTHROPIC_KEY_ENV "ANTHROPIC_API_KEY"
+SMOKE_MODEL "claude-3-5-haiku-latest"
+
+is-live-enabled fn (): Bool {
+    flag ::env/get(LIVE_TESTS_ENV, "")
+    key ::env/get(ANTHROPIC_KEY_ENV, "")
+    and(not(is-empty(flag)), not(is-empty(key)))
+}
+
+skip-if-not-live fn (test-name: Str): Bool {
+    cond {
+        is-live-enabled() => { false }
+        => {
+            tap(`[live-smoke] skipping ${test-name}: set ${LIVE_TESTS_ENV}=1 + ${ANTHROPIC_KEY_ENV} to run`)
+            true
+        }
+    }
+}
+
+add-int
+meta { doc: """Test fixture: pure addition for tool-use smoke.""" }
+fn (x: Int, y: Int): Int { add(x, y) }
+
+test-anthropic-chat-text-only
+meta ["test"]
+fn () {
+    cond {
+        skip-if-not-live("test-anthropic-chat-text-only") => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                chat-fn: ::ct/chat-with-tools,
+                model: SMOKE_MODEL,
+                system: "You are a terse assistant. Reply with one word.",
+                max-iterations: 1
+            })
+            reply ::ai-chat/run-loop(opts, "Say hello.")
+            assert(is-some(reply.text), "expected text reply")
+            assert(is-some(reply.usage), "expected usage info")
+            assert(gt(reply.usage.input-tokens, 0), "input-tokens > 0")
+            assert(gt(reply.usage.output-tokens, 0), "output-tokens > 0")
+        }
+    }
+}
+
+test-anthropic-chat-tool-use
+meta ["test"]
+fn () {
+    cond {
+        skip-if-not-live("test-anthropic-chat-tool-use") => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                chat-fn: ::ct/chat-with-tools,
+                model: SMOKE_MODEL,
+                system: "Use the add-int tool to compute sums. Don't guess.",
+                tools: [::ai-tool/from-fn(add-int, {description: "Adds two integers."})],
+                max-iterations: 4
+            })
+            reply ::ai-chat/run-loop(opts, "What is 17 + 25? Use the tool.")
+            assert(is-some(reply.text), "expected final text reply")
+            text reply.text
+            assert(contains(text, "42"), `expected "42" in reply, got: ${text}`)
+        }
+    }
+}
+
+test-anthropic-count-tokens
+meta ["test"]
+fn () {
+    cond {
+        skip-if-not-live("test-anthropic-count-tokens") => { assert(true) }
+        => {
+            messages [
+                ::ai-chat/Message({role: "user", content: "ping"})
+            ]
+            n ::ct/count-tokens(messages, SMOKE_MODEL)
+            assert(gt(n, 0), `expected positive token count, got ${n}`)
+        }
+    }
+}

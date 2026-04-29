@@ -1,0 +1,93 @@
+::postmark::edit ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+EditServerConfigurationRequest type {
+    Name: Str?,
+    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    RawEmailEnabled: Bool?,
+    DeliveryHookUrl: Str?,
+    SmtpApiActivated: Bool?,
+    InboundHookUrl: Str?,
+    BounceHookUrl: Str?,
+    OpenHookUrl: Str?,
+    PostFirstOpenOnly: Bool?,
+    TrackOpens: Bool?,
+    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    ClickHookUrl: Str?,
+    InboundDomain: Str?,
+    InboundSpamThreshold: Int?
+}
+
+ServerConfigurationResponse type {
+    ID: Int?,
+    Name: Str?,
+    ApiTokens: Vec<Str>?,
+    ServerLink: Str?,
+    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    InboundAddress: Str?,
+    RawEmailEnabled: Bool?,
+    DeliveryHookUrl: Str?,
+    SmtpApiActivated: Bool?,
+    InboundHookUrl: Str?,
+    BounceHookUrl: Str?,
+    OpenHookUrl: Str?,
+    PostFirstOpenOnly: Bool?,
+    TrackOpens: Bool?,
+    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    ClickHookUrl: Str?,
+    InboundDomain: Str?,
+    InboundHash: Str?,
+    InboundSpamThreshold: Int?
+}
+
+EditCurrentServerConfigurationRequest type {
+    Name: Str?,
+    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    RawEmailEnabled: Bool?,
+    DeliveryHookUrl: Str?,
+    SmtpApiActivated: Bool?,
+    InboundHookUrl: Str?,
+    BounceHookUrl: Str?,
+    OpenHookUrl: Str?,
+    PostFirstOpenOnly: Bool?,
+    TrackOpens: Bool?,
+    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    ClickHookUrl: Str?,
+    InboundDomain: Str?,
+    InboundSpamThreshold: Int?
+}
+
+EditCurrentServerConfigurationResponse type {
+    ID: Int?,
+    Name: Str?,
+    ApiTokens: Vec<Str>?,
+    ServerLink: Str?,
+    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    InboundAddress: Str?,
+    RawEmailEnabled: Bool?,
+    DeliveryHookUrl: Str?,
+    SmtpApiActivated: Bool?,
+    InboundHookUrl: Str?,
+    BounceHookUrl: Str?,
+    OpenHookUrl: Str?,
+    PostFirstOpenOnly: Bool?,
+    TrackOpens: Bool?,
+    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    ClickHookUrl: Str?,
+    InboundDomain: Str?,
+    InboundHash: Str?,
+    InboundSpamThreshold: Int?
+}
+
+
+edit-server-configuration
+meta {
+    doc: """Update the current server configuration including name, color, webhook URLs, and tracking settings."""
+}
+fn (request: EditCurrentServerConfigurationRequest): EditCurrentServerConfigurationResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/server`, {}, request)
+  if(is-ok-response(response), EditCurrentServerConfigurationResponse(response.body), err(HttpError(response)))
+}

@@ -1,0 +1,180 @@
+// HTTP service patterns
+::examples::http-service ns
+
+// Namespace aliases for cleaner code
+::http ::hot::http
+::env ::hot::env
+::ctx ::hot::ctx
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+api-base ::env/get("API_BASE", "https://api.example.com")
+api-key ::env/get("API_KEY")
+timeout: Int 30000
+
+// ============================================
+// TYPES
+// ============================================
+
+User type {
+    id: Str,
+    name: Str,
+    email: Str,
+    active: Bool
+}
+
+CreateUserRequest type {
+    name: Str,
+    email: Str
+}
+
+ApiResponse type {
+    success: Bool,
+    data: Any,
+    error: Str?
+}
+
+// ============================================
+// HTTP HELPERS
+// ============================================
+
+// Build headers with auth
+auth-headers fn (): Map {
+    {
+        "Authorization": `Bearer ${api-key}`,
+        "Content-Type": "application/json"
+    }
+}
+
+// Generic GET request (return type is the Ok value type)
+api-get fn (path: Str): Any {
+    response ::http/get(`${api-base}${path}`, auth-headers())
+
+    if(eq(response.status, 200),
+        ok(response.body),
+        err(`API error: ${response.status}`))
+}
+
+// Generic POST request
+api-post fn (path: Str, body: Map): Any {
+    response ::http/post(`${api-base}${path}`, body, auth-headers())
+
+    cond {
+        eq(response.status, 200) => { ok(response.body) }
+        eq(response.status, 201) => { ok(response.body) }
+        => { err(`API error: ${response.status} - ${response.body}`) }
+    }
+}
+
+// ============================================
+// USER API
+// ============================================
+
+// Get single user
+get-user fn (id: Str): User {
+    result api-get(`/users/${id}`)
+
+    match result {
+        Result.Ok => { ok(User(result)) }
+        Result.Err => { err(result) }
+    }
+}
+
+// List all users
+list-users fn (): Vec<User> {
+    result api-get("/users")
+
+    match result {
+        Result.Ok => { ok(map(result, User(%))) }
+        Result.Err => { err(result) }
+    }
+}
+
+// Create user
+create-user fn (request: CreateUserRequest): User {
+    body {
+        "name": request.name,
+        "email": request.email
+    }
+
+    result api-post("/users", body)
+
+    match result {
+        Result.Ok => { ok(User(result)) }
+        Result.Err => { err(result) }
+    }
+}
+
+// ============================================
+// PARALLEL FETCHING
+// ============================================
+
+// Fetch user with related data
+get-user-full fn parallel (id: Str): Map {
+    user api-get(`/users/${id}`)
+    posts api-get(`/users/${id}/posts`)
+    comments api-get(`/users/${id}/comments`)
+}
+
+// Fetch multiple users concurrently
+get-users-batch fn (ids: Vec<Str>): Vec<Result> {
+    pmap(ids, get-user(%))
+}
+
+// ============================================
+// ERROR HANDLING PATTERNS
+// ============================================
+
+// Validate before request
+create-user-safe fn (request: CreateUserRequest): User {
+    // Validate input
+    validation cond {
+        is-empty(request.name) => { err("Name is required") }
+        is-empty(request.email) => { err("Email is required") }
+        not(contains(request.email, "@")) => { err("Invalid email format") }
+        => { ok(request) }
+    }
+
+    // Only proceed if valid
+    match validation {
+        Result.Ok => { create-user(validation) }
+        Result.Err => { err(validation) }
+    }
+}
+
+// Retry on failure
+get-user-with-retry fn (id: Str, attempts: Int): User {
+    result get-user(id)
+
+    cond {
+        is-ok(result) => { result }
+        lte(attempts, 1) => { result }
+        => { get-user-with-retry(id, sub(attempts, 1)) }
+    }
+}
+
+// ============================================
+// RESPONSE TRANSFORMATIONS
+// ============================================
+
+// Transform API response to clean format
+format-user fn (user: User): Map {
+    {
+        "id": user.id,
+        "displayName": user.name,
+        "contact": user.email,
+        "status": if(user.active, "active", "inactive")
+    }
+}
+
+// Get formatted user list
+get-formatted-users fn (): Vec<Map> {
+    result list-users()
+
+    match result {
+        Result.Ok => { ok(map(result, format-user)) }
+        Result.Err => { err(result) }
+    }
+}

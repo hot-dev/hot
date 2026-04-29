@@ -1,0 +1,135 @@
+::anthropic::api ns
+
+// Namespace alias for ctx module
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+http-request-stream ::hot::http/request-stream
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an HTTP request with pre-filled Anthropic service headers.
+
+    Automatically includes the `x-api-key` and `anthropic-version` headers.
+    The API key is read from context (`anthropic.api.key`) by default, or can
+    be passed explicitly as the 5th argument. Additional headers can be
+    provided to merge/override defaults (e.g. beta feature headers).
+
+    **Example**
+
+    ```hot
+    // Simple GET request
+    response ::anthropic::api/request("GET", "https://api.anthropic.com/v1/models")
+
+    // POST with body
+    response ::anthropic::api/request("POST", "https://api.anthropic.com/v1/messages", {}, {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [{role: "user", content: "Hello!"}]
+    })
+
+    // With additional headers (e.g. beta features)
+    response ::anthropic::api/request("GET", "https://api.anthropic.com/v1/files", {
+        anthropic-beta: "files-api-2025-04-14"
+    })
+    ```
+    """,
+    ctx: {"anthropic.api.key": {}}
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default) — delegates to 5-arity
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("anthropic.api.key"))
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  default-headers {
+    x-api-key: api-key,
+    anthropic-version: "2023-06-01"
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: final-headers,
+    body: to-json(untype(body))
+  }))
+}
+
+request-stream
+meta {
+    doc: """
+    Make a streaming HTTP request with pre-filled Anthropic service headers.
+
+    Returns a `StreamingHttpResponse` whose body is an iterator that yields
+    parsed SSE or NDJSON events. The default format is `"sse"`. API key is
+    read from context by default, or can be passed explicitly as the 6th argument.
+
+    **Example**
+
+    ```hot
+    response ::anthropic::api/request-stream("POST", "https://api.anthropic.com/v1/messages", {}, {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        stream: true,
+        messages: [{role: "user", content: "Hello!"}]
+    })
+    // response.body is an iterator of parsed SSE events
+    events collect(response.body)
+    ```
+    """,
+    ctx: {"anthropic.api.key": {}}
+}
+fn
+(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, "sse")
+},
+// 5-arity: use ctx api key (default) — delegates to 6-arity
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, format, ::ctx/get("anthropic.api.key"))
+},
+// 6-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
+  default-headers {
+    x-api-key: api-key,
+    anthropic-version: "2023-06-01"
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  ::hot::http/request-stream(HttpRequest({
+    method,
+    url,
+    headers: final-headers,
+    body: to-json(untype(body))
+  }), format)
+}

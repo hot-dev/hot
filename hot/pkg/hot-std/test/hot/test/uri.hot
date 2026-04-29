@@ -1,0 +1,203 @@
+::hot::test::uri ns
+meta ["test"]
+
+// --- Percent-encoding ---
+
+test-encode-basic
+meta ["test"]
+fn () {
+    assert-eq("hello%20world", ::hot::uri/encode("hello world"), "spaces should be percent-encoded")
+}
+
+test-encode-special-chars
+meta ["test"]
+fn () {
+    assert-eq("a%3D1%26b%3D2", ::hot::uri/encode("a=1&b=2"), "= and & should be encoded")
+}
+
+test-encode-unreserved-preserved
+meta ["test"]
+fn () {
+    assert-eq("hello-world_test.v2~ok", ::hot::uri/encode("hello-world_test.v2~ok"), "unreserved chars should not be encoded")
+}
+
+test-decode-basic
+meta ["test"]
+fn () {
+    assert-eq("hello world", ::hot::uri/decode("hello%20world"), "percent-encoded space should decode")
+}
+
+test-encode-decode-roundtrip
+meta ["test"]
+fn () {
+    original "hello world / foo@bar?baz=qux#frag"
+    encoded ::hot::uri/encode(original)
+    decoded ::hot::uri/decode(encoded)
+    assert-eq(original, decoded, "encode then decode should round-trip")
+}
+
+// --- Query strings ---
+
+test-encode-query
+meta ["test"]
+fn () {
+    result ::hot::uri/encode-query({city: "Salt Lake City", days: 3})
+    assert(contains(result, "city=Salt+Lake+City"), "city should be form-encoded with + for spaces")
+    assert(contains(result, "days=3"), "int values should be stringified")
+}
+
+test-decode-query
+meta ["test"]
+fn () {
+    result ::hot::uri/decode-query("city=Salt+Lake+City&days=3")
+    assert-eq("Salt Lake City", result.city, "city should decode + as space")
+    assert-eq("3", result.days, "days should be a string value")
+}
+
+test-decode-query-strips-question-mark
+meta ["test"]
+fn () {
+    result ::hot::uri/decode-query("?foo=bar")
+    assert-eq("bar", result.foo, "leading ? should be stripped")
+}
+
+test-encode-query-decode-query-roundtrip
+meta ["test"]
+fn () {
+    original {name: "Alice & Bob", q: "hello=world"}
+    encoded ::hot::uri/encode-query(original)
+    decoded ::hot::uri/decode-query(encoded)
+    assert-eq("Alice & Bob", decoded.name, "name should round-trip")
+    assert-eq("hello=world", decoded.q, "q should round-trip")
+}
+
+// --- Parse ---
+
+test-parse-full-url
+meta ["test"]
+fn () {
+    uri ::hot::uri/parse("https://user:pass@example.com:8080/path?q=1#frag")
+    assert-eq("https", uri.scheme, "scheme")
+    assert-eq("user:pass", uri.userinfo, "userinfo")
+    assert-eq("example.com", uri.host, "host")
+    assert-eq(8080, uri.port, "port")
+    assert-eq("/path", uri.path, "path")
+    assert-eq("q=1", uri.query, "query")
+    assert-eq("frag", uri.fragment, "fragment")
+}
+
+test-parse-simple-url
+meta ["test"]
+fn () {
+    uri ::hot::uri/parse("https://example.com")
+    assert-eq("https", uri.scheme, "scheme")
+    assert-eq("example.com", uri.host, "host")
+    assert(is-null(uri.port), "port should be null")
+    assert(is-null(uri.query), "query should be null")
+    assert(is-null(uri.fragment), "fragment should be null")
+}
+
+test-parse-mailto
+meta ["test"]
+fn () {
+    uri ::hot::uri/parse("mailto:alice@example.com")
+    assert-eq("mailto", uri.scheme, "scheme should be mailto")
+    assert-eq("alice@example.com", uri.path, "path should be the email address")
+    assert(is-null(uri.host), "host should be null for mailto")
+}
+
+// --- Build ---
+
+test-build-basic
+meta ["test"]
+fn () {
+    result ::hot::uri/build({scheme: "https", host: "example.com", path: "/users"})
+    assert-eq("https://example.com/users", result, "should build basic URL")
+}
+
+test-build-with-query-map
+meta ["test"]
+fn () {
+    result ::hot::uri/build({scheme: "https", host: "example.com", path: "/search", query: {q: "hello world"}})
+    assert(contains(result, "q=hello+world"), "query map should be form-encoded")
+}
+
+test-build-with-port
+meta ["test"]
+fn () {
+    result ::hot::uri/build({scheme: "https", host: "example.com", port: 8080, path: "/api"})
+    assert-eq("https://example.com:8080/api", result, "should include port")
+}
+
+// --- Join ---
+
+test-join-path-segments
+meta ["test"]
+fn () {
+    result ::hot::uri/join("https://api.example.com", "users", "123")
+    assert-eq("https://api.example.com/users/123", result, "should join path segments")
+}
+
+test-join-relative-reference
+meta ["test"]
+fn () {
+    result ::hot::uri/join("https://example.com/a/b", "../c")
+    assert-eq("https://example.com/c", result, "should resolve relative reference")
+}
+
+// --- is-valid ---
+
+test-is-valid-true
+meta ["test"]
+fn () {
+    assert(::hot::uri/is-valid("https://example.com"), "valid URL should return true")
+}
+
+test-is-valid-false
+meta ["test"]
+fn () {
+    assert(not(::hot::uri/is-valid("://broken")), "invalid URL should return false")
+}
+
+// --- Uri type and coercion ---
+
+test-uri-constructor
+meta ["test"]
+fn () {
+    uri ::hot::uri/Uri("https://example.com/path")
+    assert-eq("https", uri.scheme, "scheme via constructor")
+    assert-eq("example.com", uri.host, "host via constructor")
+    assert-eq("/path", uri.path, "path via constructor")
+}
+
+test-uri-to-str-coercion
+meta ["test"]
+fn () {
+    uri ::hot::uri/Uri("https://example.com:8080/path?q=1#frag")
+    str-val Str(uri)
+    assert-eq("https://example.com:8080/path?q=1#frag", str-val, "Uri -> Str coercion should reconstruct the URI")
+}
+
+test-uri-round-trip-no-trailing-slash
+meta ["test"]
+fn () {
+    uri ::hot::uri/Uri("https://example.com")
+    str-val Str(uri)
+    assert-eq("https://example.com", str-val, "host-only URI should not gain a trailing slash")
+}
+
+test-uri-round-trip-with-query-preserves-path
+meta ["test"]
+fn () {
+    uri ::hot::uri/Uri("https://example.com/?q=1")
+    str-val Str(uri)
+    assert-eq("https://example.com/?q=1", str-val, "URI with query should keep the root path")
+}
+
+test-uri-in-template-literal
+meta ["test"]
+fn () {
+    uri ::hot::uri/Uri("https://example.com")
+    result `${Str(uri)}/api`
+    assert-eq("https://example.com/api", result, "Uri Str coercion should work in template strings without double slash")
+}

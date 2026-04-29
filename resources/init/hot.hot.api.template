@@ -1,0 +1,39 @@
+// Hot Configuration File - API Server
+// Configuration for running the API server component.
+// Run `hot conf generate all` to see all available options.
+
+::hot::conf ns
+
+::env ::hot::env
+
+// Database Configuration
+hot.db.uri ::env/get("HOT_DB_URI", "")
+hot.db.schema "hot"
+
+// Logging Configuration
+hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
+hot.log.target "stdout"
+hot.log.dir ".hot/log"
+
+// Redis Configuration
+hot.redis.uri ::env/get("HOT_REDIS_URI", "")
+hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
+
+// API Server Configuration
+// Use 0.0.0.0 for container/docker exposure
+hot.api.host Str(::env/get("HOT_API_HOST", "0.0.0.0"))
+hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
+
+// Build Storage Configuration
+hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "s3")
+hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
+hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "builds/")
+hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "us-east-1")
+hot.build.aws.access-key-id ::env/get("HOT_BUILD_AWS_ACCESS_KEY_ID", "")
+hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
+
+// Queue Configuration
+hot.queue.type "redis"
+
+// Daemon Mode
+hot.daemon true

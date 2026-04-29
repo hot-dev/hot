@@ -1,0 +1,312 @@
+::libreoffice ns
+meta {
+    doc: """
+    LibreOffice headless document conversion via Hot Box containers.
+
+    Convert between office formats (DOCX, PDF, XLSX, PPTX, HTML, TXT, and more)
+    using `libreoffice --headless` in isolated containers. Inputs use `hot://`
+    storage URLs; outputs are written back to `hot://` storage.
+
+    Uses `libreofficedocker/alpine` which has LibreOffice pre-installed on Alpine.
+    Override with a custom image via the `image` option.
+
+    **Quick Start**
+
+    ```hot
+    out ::libreoffice/convert("hot://uploads/report.docx", {format: "pdf"})
+    tap(out.url)
+
+    // With explicit output path
+    out ::libreoffice/convert("hot://uploads/report.docx", {
+        format: "pdf",
+        output: "hot://docs/report.pdf",
+    })
+
+    ver ::libreoffice/version()
+    tap(ver.version)
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+DEFAULT_IMAGE "libreofficedocker/alpine:3.22"
+FONT_INSTALL "apk add --no-cache ttf-freefont > /dev/null 2>&1 || true"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+ConvertOpts
+meta {
+    doc: """
+    Options for LibreOffice headless conversion.
+
+    **Fields**
+    - `format` — Output format, e.g. `"pdf"`, `"docx"`, `"xlsx"`, `"html"`, `"txt"`
+    - `filter` — Optional LibreOffice filter name, e.g. `"writer_pdf_Export"`; combined as `format:filter`
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Override Docker image (must have `libreoffice` in PATH)
+    - `size` — Box size override (default: `"medium"`)
+    """
+}
+type {
+    format: Str,
+    filter: Str?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+// ============================================================================
+// Command builders (internal, testable without Docker)
+// ============================================================================
+
+build-convert-args
+meta {
+    doc: "Build LibreOffice headless CLI arguments: --convert-to, --outdir, input path."
+}
+fn (input-path: Str, out-dir: Str, format: Str, filter: Str?, extra-args: Vec<Str>?): Vec<Str> {
+    convert-spec if(is-some(filter), `${format}:${filter}`, format)
+    extra or(extra-args, [])
+
+    [
+        "--headless",
+        "--convert-to", convert-spec,
+        "--outdir", out-dir,
+        ...extra,
+        input-path,
+    ]
+}
+
+build-version-args
+meta {
+    doc: "Build `libreoffice --version` arguments."
+}
+fn (): Vec<Str> {
+    ["--version"]
+}
+
+// ============================================================================
+// Output parsers (internal, testable without Docker)
+// ============================================================================
+
+parse-version-output
+meta {
+    doc: "Parse LibreOffice version from `libreoffice --version` stdout (first line)."
+}
+fn (stdout: Str?): Map {
+    raw or(stdout, "") |> trim()
+    first-line raw |> split("\n") |> first() |> trim()
+    parts split(first-line, " ")
+    version cond {
+        and(gt(length(parts), 1), eq(first(parts), "LibreOffice")) => { parts[1] }
+        => { first-line }
+    }
+
+    {version, raw,}
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+expected-output-name
+meta {
+    doc: "LibreOffice keeps the input basename and replaces the extension with the output format."
+}
+fn (input-path: Str, out-format: Str): Str {
+    segs split(input-path, "/")
+    file-name last(segs)
+    dot-parts split(file-name, ".")
+    stem-end sub(length(dot-parts), 1)
+    stem-parts slice(dot-parts, 0, stem-end)
+    stem if(is-empty(stem-parts), file-name, join(stem-parts, "."))
+
+    `${stem}.${out-format}`
+}
+
+run-libreoffice-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script concat(FONT_INSTALL, "\n", script)
+    info ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+    ::task/await(info.id)
+}
+
+start-libreoffice-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script concat(FONT_INSTALL, "\n", script)
+    ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+convert
+meta {
+    doc: """
+    Convert a document at a `hot://` URL using headless LibreOffice.
+
+    Returns `{url: Str, format: Str}` with the output file URL in Hot storage.
+
+    **Example**
+
+    ```hot
+    out ::libreoffice/convert("hot://uploads/notes.docx", {format: "pdf"})
+    out.url
+    out.format   // "pdf"
+
+    // Advanced filter
+    out ::libreoffice/convert("hot://uploads/doc.odt", {
+        format: "pdf",
+        filter: "writer_pdf_Export",
+    })
+    ```
+    """,
+    box: {min-size: "large"}
+}
+fn (input: Str, opts: ConvertOpts): Map {
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://libreoffice/${uuid}/output.${opts.format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-dir "/data/lo-out"
+
+    lo-args join-args(build-convert-args(in-path, out-dir, opts.format, opts.filter, opts.extra-args))
+    out-name expected-output-name(in-path, opts.format)
+    out-path `/data/lo-out/${out-name}`
+
+    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && libreoffice ${lo-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "large")
+    result run-libreoffice-box(script, box-size, opts.image, or(opts.timeout, 900))
+    check-box-result(result, "libreoffice")
+
+    {url: hot-output, format: opts.format,}
+}
+
+version
+meta {
+    doc: """
+    Return LibreOffice version from `libreoffice --version`.
+
+    **Example**
+
+    ```hot
+    ver ::libreoffice/version()
+    ver.version   // e.g. "24.2.7.2"
+    ```
+    """,
+    box: {min-size: "large"}
+}
+fn (): Map {
+    version(null)
+},
+(image: Str?): Map {
+    ver-args join-args(build-version-args())
+    script `libreoffice ${ver-args}`
+
+    result run-libreoffice-box(script, "medium", image, 900)
+    checked check-box-result(result, "libreoffice")
+
+    parse-version-output(or(checked.stdout, ""))
+}
+
+start-convert
+meta {
+    doc: """
+    Start a LibreOffice headless conversion without awaiting the result.
+
+    Returns the box task info map immediately. Use `::hot::task/await`
+    to retrieve the final result.
+
+    **Example**
+
+    ```hot
+    task ::libreoffice/start-convert("hot://uploads/report.docx", {format: "pdf"})
+    result ::hot::task/await(task.id)
+    ```
+    """,
+    box: {min-size: "large"}
+}
+fn (input: Str, opts: ConvertOpts): Map {
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://libreoffice/${uuid}/output.${opts.format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-dir "/data/lo-out"
+
+    lo-args join-args(build-convert-args(in-path, out-dir, opts.format, opts.filter, opts.extra-args))
+    out-name expected-output-name(in-path, opts.format)
+    out-path `/data/lo-out/${out-name}`
+
+    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && libreoffice ${lo-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "large")
+    info start-libreoffice-box(script, box-size, opts.image, or(opts.timeout, 900))
+    assoc(info, "data", {output: hot-output})
+}

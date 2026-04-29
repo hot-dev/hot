@@ -1,0 +1,51 @@
+{% extends "public_layout.html" %}
+{% block content %}
+<div class="flex justify-center items-center min-h-[70vh]">
+  <div class="max-w-md w-full mx-4">
+    <div class="text-center mb-8">
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Complete Your Subscription</h1>
+      <p class="text-gray-600 dark:text-gray-400 mt-2">One more step to get started with Hot Cloud</p>
+    </div>
+
+    {% if let Some(plan) = plan %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-lg">
+      <div class="text-center mb-6">
+        <h2 class="text-xl font-semibold text-gray-900 dark:text-white">{{ plan.plan_name }}</h2>
+        <div class="text-4xl font-bold text-gray-900 dark:text-white mt-2">
+          {% if billing_period == "annual" %}
+            ${{ plan.annual_price_dollars() }}<span class="text-lg font-normal text-gray-500">/year</span>
+            <div class="text-sm text-green-600 font-medium mt-1">Save {{ plan.annual_savings_percent() as i32 }}% vs monthly</div>
+          {% else %}
+            ${{ plan.monthly_price_dollars() }}<span class="text-lg font-normal text-gray-500">/month</span>
+          {% endif %}
+        </div>
+      </div>
+
+      <form method="post" action="/billing/create-checkout">
+        <input type="hidden" name="plan_id" value="{{ plan.plan_id.as_deref().unwrap_or("") }}">
+        <input type="hidden" name="billing_period" value="{{ billing_period }}">
+
+        <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white font-semibold py-3 px-6 rounded-md transition shadow-sm">
+          Continue to Payment
+        </button>
+      </form>
+
+      <p class="text-xs text-gray-500 dark:text-gray-400 text-center mt-4">
+        You'll be redirected to securely complete your payment
+      </p>
+    </div>
+
+    <div class="text-center mt-6">
+      <p class="text-sm text-gray-500 dark:text-gray-400">
+        Questions? <a href="mailto:{{ page_context.support_email }}" class="text-blue-600 dark:text-blue-400 hover:underline">Contact support</a>
+      </p>
+    </div>
+    {% else %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 text-center">
+      <p class="text-gray-600 dark:text-gray-400">Plan not found. Please try again or contact support.</p>
+      <a href="/" class="inline-block mt-4 text-blue-600 dark:text-blue-400 hover:underline">← Go to Dashboard</a>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

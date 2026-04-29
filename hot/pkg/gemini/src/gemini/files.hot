@@ -1,0 +1,181 @@
+::gemini::files ns
+
+api-request ::gemini::api/request
+HttpError ::gemini::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+Status type {
+    code: Int?,
+    message: Str?,
+    details: Vec<Map>?
+}
+
+VideoMetadata type {
+    videoDuration: Str?
+}
+
+UploadFileResponse type {
+    file: File?
+}
+
+File type {
+    name: Str?,
+    displayName: Str?,
+    mimeType: Str?,
+    sizeBytes: Str?,
+    createTime: Str?,
+    updateTime: Str?,
+    expirationTime: Str?,
+    sha256Hash: Str?,
+    uri: Str?,
+    state: "STATE_UNSPECIFIED" | "PROCESSING" | "ACTIVE" | "FAILED"?,
+    error: Status?,
+    videoMetadata: VideoMetadata?
+}
+
+ErrorResponse type {
+    error: Status?
+}
+
+ListFilesResponse type {
+    files: Vec<File>?,
+    nextPageToken: Str?
+}
+
+FilesGetRequest type {
+  name: Str
+}
+
+FilesGetResponse type {
+    name: Str?,
+    displayName: Str?,
+    mimeType: Str?,
+    sizeBytes: Str?,
+    createTime: Str?,
+    updateTime: Str?,
+    expirationTime: Str?,
+    sha256Hash: Str?,
+    uri: Str?,
+    state: "STATE_UNSPECIFIED" | "PROCESSING" | "ACTIVE" | "FAILED"?,
+    error: Status?,
+    videoMetadata: VideoMetadata?
+}
+
+
+get
+meta {
+    doc: """
+    Get metadata for a specific uploaded file by its resource name.
+
+    **Example**
+
+    ```hot
+    file ::gemini::files/get(FilesGetRequest({
+        name: "files/abc123"
+    }))
+
+    file.displayName // => "my-document.pdf"
+    file.mimeType    // => "application/pdf"
+    file.state       // => "ACTIVE"
+    ```
+    """
+}
+fn (request: FilesGetRequest): FilesGetResponse {
+  response api-request("GET", `${::gemini/BASE_URL}/v1/${request.name}`)
+  if(is-ok-response(response), FilesGetResponse(response.body), err(HttpError(response)))
+}
+
+FilesDeleteRequest type {
+  name: Str
+}
+
+FilesDeleteResponse type {
+    value: Map
+}
+
+
+delete
+meta {
+    doc: """
+    Delete an uploaded file by its resource name.
+
+    **Example**
+
+    ```hot
+    ::gemini::files/delete(FilesDeleteRequest({
+        name: "files/abc123"
+    }))
+    ```
+    """
+}
+fn (request: FilesDeleteRequest): FilesDeleteResponse {
+  response api-request("DELETE", `${::gemini/BASE_URL}/v1/${request.name}`)
+  if(is-ok-response(response), FilesDeleteResponse(response.body), err(HttpError(response)))
+}
+
+FilesListRequest type {
+  page-size: Str,
+  page-token: Str
+}
+
+FilesListResponse type {
+    files: Vec<File>?,
+    nextPageToken: Str?
+}
+
+
+list
+meta {
+    doc: """
+    List uploaded files. Returns a paginated list of file metadata.
+
+    **Example**
+
+    ```hot
+    result ::gemini::files/list(FilesListRequest({
+        page-size: "10",
+        page-token: ""
+    }))
+
+    // result.files is a Vec<File> or null if no files exist
+    files or(result.files, [])
+    ```
+    """
+}
+fn (request: FilesListRequest): FilesListResponse {
+  response api-request("GET", `${::gemini/BASE_URL}/v1/files?pageSize=${request.page-size}&pageToken=${request.page-token}`)
+  if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+}
+
+FilesUploadRequest type {
+    file: Str?,
+    metadata: Map?
+}
+
+FilesUploadResponse type {
+    file: File?
+}
+
+
+upload
+meta {
+    doc: """
+    Upload a file to be used with Gemini models. Uploaded files can be referenced in content generation requests.
+
+    **Example**
+
+    ```hot
+    result ::gemini::files/upload(FilesUploadRequest({
+        file: "path/to/document.pdf",
+        metadata: {displayName: "My Document"}
+    }))
+
+    result.file.name  // => "files/abc123"
+    result.file.state // => "PROCESSING"
+    ```
+    """
+}
+fn (request: FilesUploadRequest): FilesUploadResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/upload/v1/files`, {}, request)
+  if(is-ok-response(response), FilesUploadResponse(response.body), err(HttpError(response)))
+}

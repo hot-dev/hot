@@ -1,0 +1,410 @@
+{% extends "private_layout.html" %}
+
+{% block sse_data_attrs %}data-sse-mode="manual"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
+{% block content %}
+<script>
+// SSE refresh callback - used by the SSE status indicator component
+// For list pages, this is called when user clicks "New Data Available"
+window.sseRefreshCallback = function() {
+    if (window.streamsListComponent) {
+        window.streamsListComponent.applyFilters();
+    }
+};
+</script>
+
+<!-- Filters Section -->
+    <div class="mb-6 bg-white dark:bg-gray-800 shadow rounded-lg p-3">
+    <div x-data="{
+        project: '{{ selected_project }}',
+        timeRange: '{{ selected_time_range }}',
+        search: '{{ search_query }}',
+        searchTimeout: null,
+        currentPage: {{ current_page_num }},
+        projects: [
+            {% for proj in projects %}
+            { id: '{{ proj.project_id }}', name: '{{ proj.name }}' }{% if !loop.last %},{% endif %}
+            {% endfor %}
+        ],
+
+        init() {
+            // Watch for changes and apply filters automatically
+            this.$watch('project', () => { this.currentPage = 1; this.applyFilters(); });
+            this.$watch('timeRange', () => { this.currentPage = 1; this.applyFilters(); });
+            this.$watch('search', () => this.debouncedSearch());
+
+            // Expose this component globally for SSE callback
+            window.streamsListComponent = this;
+        },
+
+        debouncedSearch() {
+            clearTimeout(this.searchTimeout);
+            this.searchTimeout = setTimeout(() => { this.currentPage = 1; this.applyFilters(); }, 300);
+        },
+
+        getProjectName(projectId) {
+            if (!projectId || projectId === '') return 'All Projects';
+            const project = this.projects.find(p => p.id === projectId);
+            return project ? project.name : 'All Projects';
+        },
+
+        getTimeRangeLabel(range) {
+            const labels = {
+                'all': 'All Time',
+                'P1D': 'Last 24 Hours',
+                'P7D': 'Last 7 Days',
+                'P30D': 'Last 30 Days',
+                'P90D': 'Last 90 Days'
+            };
+            return labels[range] || 'All Time';
+        },
+
+        goToPage(page) {
+            this.currentPage = page;
+            this.applyFilters();
+        },
+
+        applyFilters() {
+            const params = new URLSearchParams();
+
+            // Update URL parameters
+            if (this.currentPage > 1) {
+                params.set('p', this.currentPage);
+            }
+
+            if (this.project && this.project !== '') {
+                params.set('project', this.project);
+            }
+
+            if (this.timeRange && this.timeRange !== 'all') {
+                params.set('time_range', this.timeRange);
+            }
+
+            if (this.search && this.search.trim() !== '') {
+                params.set('search', this.search.trim());
+            }
+
+            // Build URL for both HTMX and browser history
+            const queryString = params.toString();
+            const url = queryString ? `/streams?${queryString}` : '/streams';
+
+            // On mobile, do full page navigation since HTMX only updates the desktop table
+            if (window.innerWidth < 768) {
+                window.location.href = url;
+                return;
+            }
+
+            // Update browser URL without reload
+            history.pushState({}, '', url);
+
+            // Use HTMX to fetch and swap the table content
+            // Formatting (UUIDs, syntax highlighting) is applied automatically via global htmx:afterSwap listener
+            htmx.ajax('GET', url, {
+                target: '#streams-table-content',
+                swap: 'innerHTML'
+            });
+        }
+    }">
+        <!-- First Row: Search -->
+        <div class="mb-3">
+            <div class="relative">
+                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
+                        <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 100 13.5 6.75 6.75 0 000-13.5zM2.25 10.5a8.25 8.25 0 1114.59 5.28l4.69 4.69a.75.75 0 11-1.06 1.06l-4.69-4.69A8.25 8.25 0 012.25 10.5z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+                <input x-model="search" type="text" id="search" placeholder="Stream ID or Project..." class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+            </div>
+        </div>
+
+        <!-- Second Row: Filter Dropdowns -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <!-- Project Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <!-- Dropdown Button -->
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
+                            </svg>
+                            <span x-text="getProjectName(project)"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <!-- Dropdown Menu -->
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="project = ''; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>All Projects</span>
+                                    <svg x-show="project === ''" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            {% for proj in projects %}
+                            <a @click="project = '{{ proj.project_id }}'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>{{ proj.name }}</span>
+                                    <svg x-show="project === '{{ proj.project_id }}'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Time Range Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/>
+                                <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>
+                            </svg>
+                            <span x-text="getTimeRangeLabel(timeRange)"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="timeRange = 'all'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>All Time</span>
+                                    <svg x-show="timeRange === 'all'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P1D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 24 Hours</span>
+                                    <svg x-show="timeRange === 'P1D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P7D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 7 Days</span>
+                                    <svg x-show="timeRange === 'P7D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P30D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 30 Days</span>
+                                    <svg x-show="timeRange === 'P30D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P90D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 90 Days</span>
+                                    <svg x-show="timeRange === 'P90D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div>
+    <!-- Desktop Table View -->
+    <div class="hidden md:block rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+        <!-- HTMX target for table content updates -->
+        <div id="streams-table-content" class="responsive-table">
+            <table class="w-full table-fixed md:table-auto divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-800">
+                    <tr>
+                        <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Stream ID</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Start</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Last Activity</th>
+                        <th class="w-20 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Duration</th>
+                        <th class="w-16 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Runs</th>
+                        <th class="w-16 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Events</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Project</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for stream in streams %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
+                            <div class="uuid-container inline-flex items-center gap-1">
+                                <a href="/streams/{{ stream.stream_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all" data-full-uuid="{{ stream.stream_id }}" title="{{ stream.stream_id }}">{{ stream.stream_id|shortuuid }}</a>
+                                <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ stream.stream_id }}" title="Copy {{ stream.stream_id }} to clipboard">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            {{ stream.start_time }}
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            {{ stream.last_activity_at }}
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                            {{ stream.duration_ms }} ms
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            {{ stream.total_runs|commafy }}
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            {{ stream.total_events|commafy }}
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            {{ stream.project_names_display() }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if streams.len() == 0 %}
+                    <tr>
+                        <td colspan="7" class="px-6 py-4 text-center text-xs text-gray-500 dark:text-gray-400">
+                            No streams found.
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+
+        <!-- Pagination -->
+        {% if has_prev_page || has_next_page %}
+        <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+            <div class="flex items-center justify-between">
+                <div class="flex-1 flex justify-between sm:hidden">
+                    {% if has_prev_page %}
+                    <button onclick="window.streamsListComponent && window.streamsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</button>
+                    {% endif %}
+                    {% if has_next_page %}
+                    <button onclick="window.streamsListComponent && window.streamsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Next</button>
+                    {% endif %}
+                </div>
+                <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                    <div>
+                        <p class="text-sm text-gray-700 dark:text-gray-300">
+                            Showing <span class="font-medium">{{ streams.len() }}</span> of <span class="font-medium">{{ total_streams }}</span> streams
+                        </p>
+                    </div>
+                    <div>
+                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                            {% if has_prev_page %}
+                            <button onclick="window.streamsListComponent && window.streamsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                <span class="sr-only">Previous</span>
+                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                            {% endif %}
+
+                            {% for page_num in start_page..=end_page %}
+                            {% if page_num == current_page_num %}
+                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                            {% else %}
+                            <button onclick="window.streamsListComponent && window.streamsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</button>
+                            {% endif %}
+                            {% endfor %}
+
+                            {% if has_next_page %}
+                            <button onclick="window.streamsListComponent && window.streamsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                <span class="sr-only">Next</span>
+                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                            {% endif %}
+                        </nav>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        </div>
+    </div>
+
+    <!-- Mobile Card View -->
+    <div class="md:hidden p-4 overflow-auto">
+        <div class="space-y-4">
+        {% for stream in streams %}
+        <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+            <div class="flex justify-between items-start mb-3">
+                <div class="text-sm font-medium text-gray-900 dark:text-white">
+                    Stream <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ stream.stream_id }}" title="{{ stream.stream_id }}">{{ stream.stream_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ stream.stream_id }}" title="Copy {{ stream.stream_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Start:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ stream.start_time }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Last Activity:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ stream.last_activity_at }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Duration:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ stream.duration_ms }} ms</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Runs:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ stream.total_runs|commafy }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Events:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ stream.total_events|commafy }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Project:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ stream.project_names_display() }}</span>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                <a href="/streams/{{ stream.stream_id }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all duration-200 font-medium">View Details</a>
+            </div>
+        </div>
+        {% endfor %}
+        {% if streams.len() == 0 %}
+        <div class="text-center text-gray-500 dark:text-gray-400 py-8">
+            No streams found.
+        </div>
+        {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

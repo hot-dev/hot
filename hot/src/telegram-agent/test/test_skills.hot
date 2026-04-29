@@ -1,0 +1,174 @@
+::telegram-agent::test::test_skills ns
+meta ["test"]
+
+::chat   ::ai::chat
+::tool   ::ai::tool
+::skill  ::ai::skill
+::agent  ::telegram-agent::agent
+::tg     ::telegram-agent::telegram-adapter
+::sl     ::telegram-agent::slack-adapter
+
+ChatOptions ::chat/ChatOptions
+ChatReply   ::chat/ChatReply
+Message     ::chat/Message
+Tool        ::tool/Tool
+
+// ============================================================================
+// Mock chat-fns
+// ============================================================================
+//
+// `run-loop` ends a turn when the reply has no `tool-calls`, so each
+// mock returns a deterministic reply that won't trigger another round.
+
+mock-chat-echo-system
+meta {
+    doc: """
+    Mock chat-fn that returns the system prompt it received as text.
+    Lets tests assert the resolver index landed in `system`.
+    """
+}
+fn (model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?): ChatReply {
+    ChatReply({
+        text: or(system, ""),
+        tool-calls: null,
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null,
+    })
+}
+
+mock-chat-echo-tools
+meta {
+    doc: """
+    Mock chat-fn that returns the comma-joined names of every tool it
+    received. Asserts that `run-loop` extended the tool list with the
+    skill builtins (list_skills/read_skill/apply_skill).
+    """
+}
+fn (model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?): ChatReply {
+    names map(or(tools, []), %.name)
+    ChatReply({
+        text: join(names, ","),
+        tool-calls: null,
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null,
+    })
+}
+
+// ============================================================================
+// Helpers — build ChatOptions with the agent's actual skills attached
+// but a mock chat-fn so we don't hit the network.
+// ============================================================================
+
+opts-with-mock fn (chat-fn: Fn): ChatOptions {
+    ChatOptions({
+        chat-fn: chat-fn,
+        model: "mock-model",
+        system: "You are Team Brain (test).",
+        skills: ::agent/agent-skills,
+    })
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test-agent-skills-bound
+meta ["test"]
+fn () {
+    skills ::agent/agent-skills
+    assert(gte(length(skills), 3),
+        `expected at least 3 skills wired (telegram-tone, coach-on-stats, group-summary), got ${length(skills)}`)
+}
+
+test-resolver-index-includes-all-three-skills
+meta ["test"]
+fn () {
+    result ::chat/run-loop(opts-with-mock(mock-chat-echo-system), "hi")
+    assert(contains(result, "Available skills"),
+        "system prompt should include the resolver header")
+    assert(contains(result, "telegram-tone"),
+        `system prompt should list telegram-tone; got: ${result}`)
+    assert(contains(result, "coach-on-stats"),
+        `system prompt should list coach-on-stats; got: ${result}`)
+    assert(contains(result, "group-summary"),
+        `system prompt should list group-summary; got: ${result}`)
+}
+
+test-original-system-prompt-preserved
+meta ["test"]
+fn () {
+    result ::chat/run-loop(opts-with-mock(mock-chat-echo-system), "hi")
+    assert(contains(result, "You are Team Brain (test)."),
+        "original system prompt should still appear above the resolver index")
+}
+
+test-skill-builtin-tools-injected
+meta ["test"]
+fn () {
+    result ::chat/run-loop(opts-with-mock(mock-chat-echo-tools), "hi")
+    assert(contains(result, "list_skills"),
+        `list_skills builtin should be present; got: ${result}`)
+    assert(contains(result, "read_skill"),
+        `read_skill builtin should be present; got: ${result}`)
+    assert(contains(result, "apply_skill"),
+        `apply_skill builtin should be present; got: ${result}`)
+}
+
+// ============================================================================
+// Transport-aware skill resolver
+// ============================================================================
+//
+// `session-skill-resolver` filters tone skills by the active session's
+// transport. These tests verify the filter without going through
+// `run-loop` — they exercise the resolver's `list-fn` directly so the
+// expectation is local to one function.
+
+// `contains` is string-only in Hot; for Vec membership we use
+// `find-first(... eq ...)` and check non-null.
+has-name fn (names: Vec<Str>, name: Str): Bool {
+    not(is-null(find-first(names, (n) { eq(n, name) })))
+}
+
+test-skills-for-telegram-session-hides-slack-tone
+meta ["test"]
+fn () {
+    session ::tg/session-from-chat-id(-1001234567890)
+    visible ::agent/skills-for-session(session)
+    names   map(visible, (s) { s.name })
+    assert(has-name(names, "telegram-tone"),
+        `telegram session should see telegram-tone; got: ${to-json(names)}`)
+    assert(not(has-name(names, "slack-tone")),
+        `telegram session should NOT see slack-tone; got: ${to-json(names)}`)
+}
+
+test-skills-for-slack-session-hides-telegram-tone
+meta ["test"]
+fn () {
+    session ::sl/session-from-channel("T-TEST", "C-TEST")
+    visible ::agent/skills-for-session(session)
+    names   map(visible, (s) { s.name })
+    assert(has-name(names, "slack-tone"),
+        `slack session should see slack-tone; got: ${to-json(names)}`)
+    assert(not(has-name(names, "telegram-tone")),
+        `slack session should NOT see telegram-tone; got: ${to-json(names)}`)
+}
+
+test-transport-agnostic-skills-always-visible
+meta ["test"]
+fn () {
+    tg-session ::tg/session-from-chat-id(-1001234567890)
+    sl-session ::sl/session-from-channel("T-TEST", "C-TEST")
+    tg-names   map(::agent/skills-for-session(tg-session), (s) { s.name })
+    sl-names   map(::agent/skills-for-session(sl-session), (s) { s.name })
+
+    assert(has-name(tg-names, "coach-on-stats"),
+        "coach-on-stats should be visible in telegram session")
+    assert(has-name(sl-names, "coach-on-stats"),
+        "coach-on-stats should be visible in slack session")
+    assert(has-name(tg-names, "group-summary"),
+        "group-summary should be visible in telegram session")
+    assert(has-name(sl-names, "group-summary"),
+        "group-summary should be visible in slack session")
+}

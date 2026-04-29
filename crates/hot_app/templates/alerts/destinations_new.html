@@ -1,0 +1,291 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2">
+    <div class="max-w-2xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                <h2 class="text-lg font-medium text-gray-900 dark:text-white">New Alert Destination</h2>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Create a new destination for receiving alerts.
+                </p>
+            </div>
+            
+            {% if !error_message.is_empty() %}
+            <div class="mx-6 mt-4 rounded-md bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 p-4">
+                <div class="flex">
+                    <div class="flex-shrink-0">
+                        <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.168 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <div class="ml-3">
+                        <p class="text-sm text-yellow-700 dark:text-yellow-300">{{ error_message }}</p>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <form action="/settings/alerts/destinations" method="POST" class="px-6 py-4 space-y-6">
+                <div>
+                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        Name
+                    </label>
+                    <input type="text" name="name" id="name" required
+                        class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                               bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                               focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                        placeholder="e.g., Team Slack Channel">
+                </div>
+
+                <div>
+                    <label for="destination_type" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        Destination Type
+                    </label>
+                    <select name="destination_type" id="destination_type" required
+                        class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                               bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                               focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                        onchange="updateConfigFields()">
+                        <option value="email">Email</option>
+                        <option value="slack">Slack</option>
+                        <option value="pagerduty">PagerDuty</option>
+                        <option value="webhook">Webhook</option>
+                    </select>
+                </div>
+
+                <!-- Email Configuration -->
+                <div id="config-email" class="config-section space-y-4">
+                    <div>
+                        <label for="email_target" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Send To
+                        </label>
+                        <select name="email_target" id="email_target"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            onchange="updateEmailTargetFields()">
+                            <option value="address">Specific Email Address</option>
+                            <option value="org">Everyone in Org</option>
+                            <option value="team">Everyone in Team</option>
+                            <option value="user">Specific User</option>
+                        </select>
+                    </div>
+
+                    <!-- Email Address (for "address" target) -->
+                    <div id="email-target-address" class="email-target-section">
+                        <label for="email_address" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Email Address
+                        </label>
+                        <input type="email" name="email_address" id="email_address"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            placeholder="alerts@example.com">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            A verification email will be sent to this address. Alerts won't be delivered until the recipient confirms.
+                        </p>
+                    </div>
+
+                    <!-- Org info (for "org" target) -->
+                    <div id="email-target-org" class="email-target-section hidden">
+                        <p class="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 rounded-md p-3 border border-gray-200 dark:border-gray-700">
+                            Alerts will be emailed to all active members of this organization.
+                            Individual users can opt out via their <span class="font-medium">Account &gt; Notifications</span> settings.
+                        </p>
+                    </div>
+
+                    <!-- Team selector (for "team" target) -->
+                    <div id="email-target-team" class="email-target-section hidden">
+                        <label for="email_team_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Team
+                        </label>
+                        <select name="email_team_id" id="email_team_id"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
+                            <option value="">Select a team...</option>
+                            {% for team in teams %}
+                            <option value="{{ team.id }}">{{ team.name }}</option>
+                            {% endfor %}
+                        </select>
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Alerts will be emailed to all active members of this team.
+                        </p>
+                    </div>
+
+                    <!-- User selector (for "user" target) -->
+                    <div id="email-target-user" class="email-target-section hidden">
+                        <label for="email_user_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            User
+                        </label>
+                        <select name="email_user_id" id="email_user_id"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
+                            <option value="">Select a user...</option>
+                            {% for user in users %}
+                            <option value="{{ user.id }}">{{ user.name }}</option>
+                            {% endfor %}
+                        </select>
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Alerts will be emailed to this user's current email address.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Slack Configuration -->
+                <div id="config-slack" class="config-section space-y-4 hidden">
+                    <div>
+                        <label for="slack_webhook_url" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Webhook URL
+                        </label>
+                        <input type="url" name="slack_webhook_url" id="slack_webhook_url"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            placeholder="https://hooks.slack.com/services/...">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Create an <a href="https://api.slack.com/messaging/webhooks" target="_blank" class="text-hot-red-500 hover:text-hot-red-600">Incoming Webhook</a> in your Slack workspace.
+                        </p>
+                    </div>
+                    <div>
+                        <label for="slack_channel" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Channel Override <span class="text-gray-400 font-normal">(optional)</span>
+                        </label>
+                        <input type="text" name="slack_channel" id="slack_channel"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            placeholder="#alerts">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Leave blank to use the webhook's default channel.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- PagerDuty Configuration -->
+                <div id="config-pagerduty" class="config-section space-y-4 hidden">
+                    <div>
+                        <label for="pagerduty_routing_key" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Routing Key (Integration Key)
+                        </label>
+                        <input type="text" name="pagerduty_routing_key" id="pagerduty_routing_key"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            placeholder="your-integration-key">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Find this in PagerDuty under Service → Integrations → Events API v2.
+                        </p>
+                    </div>
+                    <div>
+                        <label for="pagerduty_severity" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Severity
+                        </label>
+                        <select name="pagerduty_severity" id="pagerduty_severity"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
+                            <option value="critical">Critical</option>
+                            <option value="error" selected>Error</option>
+                            <option value="warning">Warning</option>
+                            <option value="info">Info</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Webhook Configuration -->
+                <div id="config-webhook" class="config-section space-y-4 hidden">
+                    <div>
+                        <label for="webhook_url" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Webhook URL
+                        </label>
+                        <input type="url" name="webhook_url" id="webhook_url"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            placeholder="https://api.example.com/webhook/alerts">
+                    </div>
+                    <div>
+                        <label for="webhook_headers" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Custom Headers <span class="text-gray-400 font-normal">(optional, JSON)</span>
+                        </label>
+                        <textarea name="webhook_headers" id="webhook_headers" rows="3"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                                   bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-sm
+                                   focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
+                            placeholder='{"Authorization": "Bearer your-token"}'></textarea>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-end space-x-3 pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <a href="/settings/alerts/destinations" 
+                       class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium 
+                              text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+                        Cancel
+                    </a>
+                    {% if page_context.is_local_dev %}
+                    <button type="button" data-local-dev-restricted
+                        class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium 
+                               text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 
+                               focus:ring-offset-2 focus:ring-hot-red-500 cursor-pointer">
+                        Create Destination
+                    </button>
+                    {% else %}
+                    <button type="submit"
+                        class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium 
+                               text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 
+                               focus:ring-offset-2 focus:ring-hot-red-500">
+                        Create Destination
+                    </button>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+function updateConfigFields() {
+    const type = document.getElementById('destination_type').value;
+    
+    // Hide all config sections
+    document.querySelectorAll('.config-section').forEach(el => {
+        el.classList.add('hidden');
+    });
+    
+    // Show the selected type's config section
+    const section = document.getElementById('config-' + type);
+    if (section) {
+        section.classList.remove('hidden');
+    }
+
+    // Reset email target fields when switching to email
+    if (type === 'email') {
+        updateEmailTargetFields();
+    }
+}
+
+function updateEmailTargetFields() {
+    const target = document.getElementById('email_target').value;
+    
+    // Hide all email target sections
+    document.querySelectorAll('.email-target-section').forEach(el => {
+        el.classList.add('hidden');
+    });
+    
+    // Show the selected target's section
+    const section = document.getElementById('email-target-' + target);
+    if (section) {
+        section.classList.remove('hidden');
+    }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    updateConfigFields();
+    updateEmailTargetFields();
+});
+</script>
+{% endblock %}

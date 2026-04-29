@@ -1,0 +1,60 @@
+{% extends "public_layout.html" %}
+
+{% block content %}
+<div class="flex justify-center items-center mt-10">
+    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg text-center">
+        <div class="mb-6">
+            <!-- Email Icon -->
+            <div class="mx-auto w-16 h-16 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-red-600 dark:text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z" />
+                    <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z" />
+                </svg>
+            </div>
+
+            <h1 class="text-xl font-bold mb-2">Check your email</h1>
+
+            {% if already_pending %}
+            <p class="text-gray-600 dark:text-gray-400">
+                We've already sent a verification email to:
+            </p>
+            {% else %}
+            <p class="text-gray-600 dark:text-gray-400">
+                We've sent a verification email to:
+            </p>
+            {% endif %}
+
+            <p class="font-mono text-red-600 dark:text-red-400 mt-2 mb-4">{{ email }}</p>
+
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+                Click the link in the email to verify your account and complete your registration.
+            </p>
+
+            {% if is_free_plan %}
+            <p class="text-xs text-gray-500 dark:text-gray-500 mt-3">
+                After verifying, you'll add a card for verification &mdash; you won't be charged.
+            </p>
+            {% endif %}
+        </div>
+
+        <div class="border-t border-gray-200 dark:border-gray-700 pt-6">
+            <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                Didn't receive the email? Check your spam folder or request a new one.
+            </p>
+
+            <form action="/resend-verification" method="post">
+                <input type="hidden" name="email" value="{{ email }}">
+                <button type="submit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 text-sm font-medium">
+                    Resend verification email
+                </button>
+            </form>
+        </div>
+
+        <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-800 text-center">
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+                Wrong email? <a href="/signup" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Start over</a>
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}

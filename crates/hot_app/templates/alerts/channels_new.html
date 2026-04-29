@@ -1,0 +1,68 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2">
+    <div class="max-w-2xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <h2 class="text-lg font-medium text-gray-900 dark:text-white mb-6">Create New Alert Channel</h2>
+            
+            <form action="/settings/alerts/channels" method="POST" class="space-y-6">
+                <div>
+                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Channel Name
+                    </label>
+                    <input type="text" name="name" id="name" required
+                           class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-700 dark:text-white"
+                           placeholder="e.g., high-priority-failures">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                        A descriptive name for this channel.
+                    </p>
+                </div>
+
+                <div>
+                    <label for="pattern" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Pattern (Regex)
+                    </label>
+                    <input type="text" name="pattern" id="pattern" required
+                           class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-700 dark:text-white font-mono"
+                           placeholder="e.g., run:failed">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                        A regex pattern to match alert types. Examples:
+                    </p>
+                    <ul class="mt-2 text-sm text-gray-500 dark:text-gray-400 list-disc list-inside">
+                        <li><code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">run:.*</code> - Match all run events</li>
+                        <li><code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">.*:failed</code> - Match all failure events</li>
+                        <li><code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">deploy:(failed|succeeded)</code> - Match specific deploy events</li>
+                    </ul>
+                </div>
+
+                <div class="flex items-center">
+                    <input type="checkbox" name="env_specific" id="env_specific" value="true"
+                           class="h-4 w-4 text-hot-red-500 focus:ring-hot-red-500 border-gray-300 rounded">
+                    <label for="env_specific" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                        Environment-specific (only applies to current environment)
+                    </label>
+                </div>
+
+                <div class="flex items-center justify-end space-x-3 pt-4">
+                    <a href="/settings/alerts/channels" 
+                       class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white">
+                        Cancel
+                    </a>
+                    {% if page_context.is_local_dev %}
+                    <button type="button" data-local-dev-restricted
+                            class="px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500 cursor-pointer">
+                        Create Channel
+                    </button>
+                    {% else %}
+                    <button type="submit" 
+                            class="px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500">
+                        Create Channel
+                    </button>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

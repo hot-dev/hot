@@ -1,0 +1,218 @@
+::sox::test ns
+meta ["test"]
+
+build-convert-args ::sox/build-convert-args
+build-effect-args ::sox/build-effect-args
+build-normalize-args ::sox/build-normalize-args
+build-audio-trim-args ::sox/build-audio-trim-args
+build-info-args ::sox/build-info-args
+parse-info-output ::sox/parse-info-output
+file-ext ::sox/file-ext
+ConvertOpts ::sox/ConvertOpts
+EffectOpts ::sox/EffectOpts
+NormalizeOpts ::sox/NormalizeOpts
+TrimOpts ::sox/TrimOpts
+
+// ============================================================================
+// file-ext
+// ============================================================================
+
+test-file-ext-wav
+meta ["test"] fn () {
+    assert-eq("wav", file-ext("hot://uploads/track.wav"))
+}
+
+test-file-ext-nested-path
+meta ["test"] fn () {
+    assert-eq("flac", file-ext("hot://users/1/audio/master.flac"))
+}
+
+test-file-ext-multiple-dots
+meta ["test"] fn () {
+    assert-eq("gz", file-ext("archive.tar.gz"))
+}
+
+// ============================================================================
+// build-convert-args
+// ============================================================================
+
+test-convert-args-minimal
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "mp3", sample-rate: null, channels: null,
+        bitrate: null, image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.wav", "/tmp/out.mp3", opts)
+    assert-eq("/tmp/in.wav", first(args), "should start with input path")
+    assert-eq("/tmp/out.mp3", last(args), "should end with output path")
+    assert-eq(2, length(args), "no optional flags")
+}
+
+test-convert-args-sample-rate-and-channels
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "wav", sample-rate: 48000, channels: 2,
+        bitrate: null, image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.wav", "/tmp/out.wav", opts)
+    assert(in("-r", args), "should have -r")
+    assert(in("48000", args), "should have sample rate")
+    assert(in("-c", args), "should have -c")
+    assert(in("2", args), "should have channel count")
+}
+
+test-convert-args-with-bitrate
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "mp3", sample-rate: 44100, channels: 1,
+        bitrate: "192", image: null, size: null,
+    })
+    args build-convert-args("/tmp/a.wav", "/tmp/b.mp3", opts)
+    assert(in("-C", args), "should have -C for compression/bitrate")
+    assert(in("192", args), "should pass bitrate value")
+}
+
+// ============================================================================
+// build-effect-args
+// ============================================================================
+
+test-effect-args-reverb-chain
+meta ["test"] fn () {
+    opts EffectOpts({
+        effects: ["reverb", "50", "50"],
+        format: null, image: null, size: null,
+    })
+    args build-effect-args("/tmp/in.wav", "/tmp/out.wav", opts)
+    assert-eq("/tmp/in.wav", first(args))
+    assert-eq("/tmp/out.wav", get(args, 1))
+    assert(in("reverb", args), "should include reverb effect")
+    assert(in("50", args), "should include effect parameters")
+}
+
+test-effect-args-empty-effects
+meta ["test"] fn () {
+    opts EffectOpts({effects: [], format: null, image: null, size: null,})
+    args build-effect-args("/tmp/x.wav", "/tmp/y.wav", opts)
+    assert-eq(2, length(args))
+}
+
+// ============================================================================
+// build-normalize-args
+// ============================================================================
+
+test-normalize-args-default-level
+meta ["test"] fn () {
+    args build-normalize-args("/tmp/in.wav", "/tmp/out.wav", null)
+    assert(in("gain", args), "should use gain effect")
+    assert(in("-n", args), "should normalize")
+}
+
+test-normalize-args-with-headroom
+meta ["test"] fn () {
+    args build-normalize-args("/tmp/in.wav", "/tmp/out.wav", "-3")
+    assert(in("gain", args), "should use gain effect")
+    assert(in("-n", args), "should normalize")
+    assert(in("-3", args), "should pass level")
+}
+
+// ============================================================================
+// build-trim-args
+// ============================================================================
+
+test-trim-args-start-and-end
+meta ["test"] fn () {
+    opts TrimOpts({
+        start: "0:00", end: "0:30",
+        format: null, image: null, size: null,
+    })
+    args build-audio-trim-args("/tmp/in.wav", "/tmp/out.wav", opts)
+    assert(in("trim", args), "should use trim effect")
+    assert(in("0:00", args), "should have start time")
+    assert(in("=0:30", args), "should have absolute end marker")
+}
+
+// ============================================================================
+// build-info-args
+// ============================================================================
+
+test-info-args
+meta ["test"] fn () {
+    args build-info-args("/tmp/input.wav")
+    assert-eq(["/tmp/input.wav"], args)
+}
+
+// ============================================================================
+// parse-info-output
+// ============================================================================
+
+test-parse-info-output-sample
+meta ["test"] fn () {
+    text """
+Input File     : 'input.wav'
+Channels       : 2
+Sample Rate    : 44100
+Precision      : 16-bit
+Duration       : 00:00:10.00 = 441000 samples = 750 CDDA sectors
+File Size      : 1.76M
+Bit Rate       : 1.41M
+Sample Encoding: 16-bit Signed Integer PCM
+"""
+    m parse-info-output(text)
+    assert-eq("input.wav", get(m, "Input File"))
+    assert-eq("2", get(m, "Channels"))
+    assert-eq("44100", get(m, "Sample Rate"))
+    assert(contains(get(m, "Duration"), "00:00:10.00"), "duration line preserved")
+    assert-eq("16-bit Signed Integer PCM", get(m, "Sample Encoding"))
+}
+
+test-parse-info-output-skips-blanks
+meta ["test"] fn () {
+    text "Channels       : 1\n\nSample Rate    : 8000\n"
+    m parse-info-output(text)
+    assert-eq("1", get(m, "Channels"))
+    assert-eq("8000", get(m, "Sample Rate"))
+}
+
+// ============================================================================
+// Type construction
+// ============================================================================
+
+test-convert-opts-construction
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "flac", sample-rate: 96000, channels: 2,
+        bitrate: null, image: "custom:sox", size: "medium",
+    })
+    assert-eq("flac", opts.format)
+    assert-eq(96000, opts.sample-rate)
+    assert-eq("medium", opts.size)
+}
+
+test-effect-opts-construction
+meta ["test"] fn () {
+    opts EffectOpts({
+        effects: ["highpass", "100"],
+        format: "ogg", image: null, size: "small",
+    })
+    assert-eq(2, length(opts.effects))
+    assert-eq("ogg", opts.format)
+}
+
+test-normalize-opts-construction
+meta ["test"] fn () {
+    opts NormalizeOpts({
+        level: "-6", format: "wav", image: null, size: null,
+    })
+    assert-eq("-6", opts.level)
+}
+
+test-trim-opts-construction
+meta ["test"] fn () {
+    opts TrimOpts({
+        start: "0:05", end: "1:00",
+        format: "mp3", image: null, size: null,
+    })
+    assert-eq("0:05", opts.start)
+    assert-eq("1:00", opts.end)
+    assert-eq("mp3", opts.format)
+}

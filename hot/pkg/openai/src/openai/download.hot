@@ -1,0 +1,23 @@
+::openai::download ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+DownloadFileRequest type {
+  file-id: Str
+}
+
+DownloadFileResponse type {
+    value: Str
+}
+
+
+retrieve-file-content
+meta {
+    doc: """GET /files/{file_id}/content - Download the contents of an uploaded file."""
+}
+fn (request: DownloadFileRequest): DownloadFileResponse {
+  response api-request("GET", `${::openai/BASE_URL}/files/${request.file-id}/content`)
+  if(is-ok-response(response), DownloadFileResponse(response.body), err(HttpError(response)))
+}

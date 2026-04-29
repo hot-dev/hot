@@ -1,0 +1,68 @@
+::ai::session ns
+meta {
+    doc: "Session and Identity types for multi-tenant, multi-participant agents. Lightweight handles with scoping helpers for store names."
+}
+
+Session
+meta {
+    doc: "Conversation container. A Slack channel, Telegram group, DM thread, etc."
+}
+type {
+    id: Str,
+    meta: Map?
+}
+
+Identity
+meta { doc: "A specific participant. Persistent across sessions." }
+type {
+    id: Str,
+    name: Str?,
+    meta: Map?
+}
+
+session-key
+meta {
+    doc: "Build a session-scoped store name: `agent:{agent}:session:{sid}:{suffix}`."
+}
+fn (agent-name: Str, session: Session, suffix: Str): Str {
+    `agent:${agent-name}:session:${session.id}:${suffix}`
+}
+
+user-key
+meta {
+    doc: """
+    Build a user-scoped store name: `agent:{agent}:user:{uid}:{suffix}`.
+
+    Use this for data that genuinely follows the user across every
+    session — e.g. global preferences, language, opt-out flags. For
+    anything tied to a specific conversation (per-chat conversation
+    threads, per-channel role / tone), use `session-user-key` instead
+    so the same person in two different sessions doesn't collide.
+    """
+}
+fn (agent-name: Str, identity: Identity, suffix: Str): Str {
+    `agent:${agent-name}:user:${identity.id}:${suffix}`
+}
+
+session-user-key
+meta {
+    doc: """
+    Build a (session, user)-scoped store name:
+    `agent:{agent}:session:{sid}:user:{uid}:{suffix}`.
+
+    Use this for anything that's "this user, in this session" — most
+    notably per-user conversation threads (`/ask` multi-turn context)
+    and per-(session, user) profile data. Without this scoping, a
+    person who's in a Telegram group AND a Slack channel would have
+    their `/ask` follow-ups bleed across the two.
+    """
+}
+fn (agent-name: Str, session: Session, identity: Identity, suffix: Str): Str {
+    `agent:${agent-name}:session:${session.id}:user:${identity.id}:${suffix}`
+}
+
+agent-key
+meta { doc: "Build an agent-scoped store name: `agent:{agent}:{suffix}`." }
+fn (agent-name: Str, suffix: Str): Str {
+    `agent:${agent-name}:${suffix}`
+}

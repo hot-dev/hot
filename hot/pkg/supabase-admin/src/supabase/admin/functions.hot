@@ -1,0 +1,122 @@
+::supabase::admin::functions ns
+
+::api ::supabase::admin::api
+
+// ============================================================================
+// Edge Functions Management
+// ============================================================================
+
+list-functions
+meta {
+    doc: """
+List all edge functions for a project.
+
+**Example**
+
+```hot
+::functions ::supabase::admin::functions
+
+fns ::functions/list-functions("my-project-ref")
+// => [{id: "...", slug: "hello-world", name: "hello-world", status: "ACTIVE", ...}, ...]
+```
+"""
+}
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/functions`)
+}
+
+get-function
+meta {
+    doc: """Get details for a specific edge function by slug."""
+}
+fn (project-ref: Str, function-slug: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}`)
+}
+
+CreateFunctionRequest type {
+  project_ref: Str,
+  slug: Str,
+  name: Str,
+  body: Str,
+  verify_jwt: Bool?,
+  import_map: Bool?,
+  entrypoint_path: Str?,
+  import_map_path: Str?
+}
+
+create-function
+meta {
+    doc: """
+Create and deploy a new edge function. `body` is the function source code. `slug` is the URL path segment.
+
+**Example**
+
+```hot
+::functions ::supabase::admin::functions
+
+fn-result ::functions/create-function(::functions/CreateFunctionRequest({
+  project_ref: "my-project-ref",
+  slug: "hello-world",
+  name: "hello-world",
+  body: "Deno.serve(() => new Response('Hello from Hot!'))",
+  verify_jwt: true
+}))
+```
+"""
+}
+fn (request: CreateFunctionRequest): Map {
+  body {
+    slug: request.slug,
+    name: request.name,
+    body: request.body
+  }
+    |> assoc-some("verify_jwt", request.verify_jwt)
+    |> assoc-some("import_map", request.import_map)
+    |> assoc-some("entrypoint_path", request.entrypoint_path)
+    |> assoc-some("import_map_path", request.import_map_path)
+
+  ::api/request("POST", `/projects/${request.project_ref}/functions`, {}, body)
+}
+
+UpdateFunctionRequest type {
+  project_ref: Str,
+  function_slug: Str,
+  body: Str?,
+  name: Str?,
+  verify_jwt: Bool?,
+  import_map: Bool?,
+  entrypoint_path: Str?,
+  import_map_path: Str?
+}
+
+update-function
+meta {
+    doc: """Update an existing edge function. Only provided fields are updated."""
+}
+fn (request: UpdateFunctionRequest): Map {
+  body {}
+    |> assoc-some("body", request.body)
+    |> assoc-some("name", request.name)
+    |> assoc-some("verify_jwt", request.verify_jwt)
+    |> assoc-some("import_map", request.import_map)
+    |> assoc-some("entrypoint_path", request.entrypoint_path)
+    |> assoc-some("import_map_path", request.import_map_path)
+
+  ::api/request("PATCH", `/projects/${request.project_ref}/functions/${request.function_slug}`, {}, body)
+}
+
+delete-function
+meta {
+    doc: """Delete an edge function by slug."""
+}
+fn (project-ref: Str, function-slug: Str): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/functions/${function-slug}`)
+}
+
+get-function-body
+meta {
+    doc: """Get the source code of an edge function."""
+}
+fn (project-ref: Str, function-slug: Str): Any {
+  ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}/body`)
+}

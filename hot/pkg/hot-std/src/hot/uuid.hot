@@ -1,0 +1,53 @@
+::hot::uuid ns
+meta {doc: """UUID generation and validation."""}
+
+Uuid
+meta {
+    core: true,
+    doc: """
+    Universally unique identifier. Supports v4 (random) and v7 (time-based).
+
+    **Example**
+
+    ```hot
+    id Uuid()           // Random v4 UUID
+    id Uuid(4)          // Explicit v4 UUID
+    id Uuid(7)          // Time-ordered v7 UUID
+    id Uuid(null)       // Nil UUID (all zeros)
+    Str(id)             // "550e8400-e29b-41d4-a716-446655440000"
+    ```
+    """
+}
+type fn
+(): Uuid { call-lib(::hot::uuid/uuid-v4, []) },
+(version: Int | Null): Uuid {
+    cond {
+        eq(version, 4) => { call-lib(::hot::uuid/uuid-v4, []) }
+        eq(version, 7) => { call-lib(::hot::uuid/uuid-v7, []) }
+        eq(version, null) => { call-lib(::hot::uuid/uuid-nil, []) }
+        => { err("Invalid UUID version") }
+    }
+}
+
+
+Uuid -> Str fn (uuid: Uuid): Str { call-lib(::hot::uuid/uuid-to-str, [uuid]) }
+
+is-uuid
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is a valid UUID or UUID string.
+
+    **Example**
+
+    ```hot
+    is-uuid(Uuid())                                     // true
+    is-uuid("550e8400-e29b-41d4-a716-446655440000")    // true
+    is-uuid("not-a-uuid")                              // false
+    is-uuid(123)                                        // false
+    ```
+    """
+}
+fn (value: Any): Bool {
+    call-lib(::hot::uuid/is-uuid, [value])
+}

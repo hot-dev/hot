@@ -1,0 +1,67 @@
+::hot::meta ns
+meta {doc: """Metadata and source location introspection."""}
+
+get
+meta {
+    doc: """
+    Get metadata attached to `var`.
+
+    **Example**
+
+    ```hot
+    // Given a function with metadata:
+    // greet meta {"doc": "Say hello", "core": true}
+    // fn (name) { ... }
+
+    ::hot::meta/get(greet)
+    // {"doc": "Say hello", "core": true}
+    ```
+    """
+}
+fn (lazy var: Any): Any {
+    call-lib(::hot::meta/get, [var])
+}
+
+
+Source
+meta {
+    doc: """
+    Source location information for a variable or function.
+
+    **Example**
+
+    ```hot
+    src source(my-function)
+    src.file      // "src/myapp/handlers.hot"
+    src.line      // 42
+    src.column    // 1
+    src.position  // 1024 (byte offset)
+    ```
+    """
+}
+type {
+    file: Str?,
+    line: Int?,
+    column: Int?,
+    position: Int?
+}
+
+source
+meta {
+    core: true,
+    doc: """
+    Get source file and position information for `var`.
+
+    **Example**
+
+    ```hot
+    src source(my-function)
+    // src.file = "src/myapp/handlers.hot"
+    // src.line = 42
+    // src.column = 1
+    ```
+    """
+}
+fn (lazy var: Any): Source {
+    call-lib(::hot::meta/source, [var])
+}

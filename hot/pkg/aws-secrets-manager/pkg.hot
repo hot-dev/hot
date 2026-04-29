@@ -1,0 +1,18 @@
+::hot::pkg ns
+
+hot.pkg.aws-secrets-manager {
+  name: "hot.dev/aws-secrets-manager",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "AWS Secrets Manager API bindings for secure secret storage and retrieval.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["cloud"],
+  deps: {
+    "hot.dev/hot-std": {},
+    "hot.dev/aws-core": "1.1.0"
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,167 @@
+::telegram::integration::messages ns
+meta ["test"]
+
+TELEGRAM_TEST_CHAT_ID ::hot::env/get("TELEGRAM_TEST_CHAT_ID", "")
+
+test-send-edit-delete-message
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  send-response ::telegram::messages/send-message(::telegram::messages/SendMessageRequest({
+    chat_id: chat-id,
+    text: "Hot integration test message"
+  }))
+
+  assert(send-response.message_id, `sendMessage should return message_id. response=${to-json(send-response)}`)
+  assert-eq("Hot integration test message", send-response.text, "text should match")
+
+  edit-response ::telegram::messages/edit-message-text(::telegram::messages/EditMessageTextRequest({
+    chat_id: chat-id,
+    message_id: send-response.message_id,
+    text: "Hot integration test message (updated)"
+  }))
+
+  assert-eq(send-response.message_id, edit-response.message_id, "message_id should match")
+
+  deleted ::telegram::messages/delete-message(::telegram::messages/DeleteMessageRequest({
+    chat_id: chat-id,
+    message_id: send-response.message_id
+  }))
+
+  assert(deleted, "deleteMessage should return true")
+}
+
+test-send-message-with-parse-mode
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  response ::telegram::messages/send-message(::telegram::messages/SendMessageRequest({
+    chat_id: chat-id,
+    text: "*bold* _italic_ `code`",
+    parse_mode: "Markdown"
+  }))
+
+  assert(response.message_id, "sendMessage with Markdown should return message_id")
+
+  ::telegram::messages/delete-message(::telegram::messages/DeleteMessageRequest({
+    chat_id: chat-id,
+    message_id: response.message_id
+  }))
+}
+
+test-send-chat-action
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  result ::telegram::messages/send-chat-action(::telegram::messages/SendChatActionRequest({
+    chat_id: chat-id,
+    action: "typing"
+  }))
+
+  assert(result, "sendChatAction should return true")
+}
+
+test-send-location
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  response ::telegram::messages/send-location(::telegram::messages/SendLocationRequest({
+    chat_id: chat-id,
+    latitude: 37.7749,
+    longitude: -122.4194
+  }))
+
+  assert(response.message_id, "sendLocation should return message_id")
+  assert(response.location, "sendLocation should return location")
+
+  ::telegram::messages/delete-message(::telegram::messages/DeleteMessageRequest({
+    chat_id: chat-id,
+    message_id: response.message_id
+  }))
+}
+
+test-send-dice
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  response ::telegram::messages/send-dice(::telegram::messages/SendDiceRequest({
+    chat_id: chat-id
+  }))
+
+  assert(response.message_id, "sendDice should return message_id")
+  assert(response.dice, "sendDice should return dice")
+  assert(between(response.dice.value, 1, 6), "dice value should be 1-6")
+
+  ::telegram::messages/delete-message(::telegram::messages/DeleteMessageRequest({
+    chat_id: chat-id,
+    message_id: response.message_id
+  }))
+}
+
+test-forward-message
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  original ::telegram::messages/send-message(::telegram::messages/SendMessageRequest({
+    chat_id: chat-id,
+    text: "Hot integration test — forward source"
+  }))
+
+  forwarded ::telegram::messages/forward-message(::telegram::messages/ForwardMessageRequest({
+    chat_id: chat-id,
+    from_chat_id: chat-id,
+    message_id: original.message_id
+  }))
+
+  assert(forwarded.message_id, "forwardMessage should return message_id")
+  assert(ne(forwarded.message_id, original.message_id), "forwarded message should have a new id")
+
+  ::telegram::messages/delete-messages(::telegram::messages/DeleteMessagesRequest({
+    chat_id: chat-id,
+    message_ids: [original.message_id, forwarded.message_id]
+  }))
+}
+
+test-copy-message
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  original ::telegram::messages/send-message(::telegram::messages/SendMessageRequest({
+    chat_id: chat-id,
+    text: "Hot integration test — copy source"
+  }))
+
+  copied ::telegram::messages/copy-message(::telegram::messages/CopyMessageRequest({
+    chat_id: chat-id,
+    from_chat_id: chat-id,
+    message_id: original.message_id
+  }))
+
+  assert(copied.message_id, "copyMessage should return message_id")
+
+  ::telegram::messages/delete-messages(::telegram::messages/DeleteMessagesRequest({
+    chat_id: chat-id,
+    message_ids: [original.message_id, copied.message_id]
+  }))
+}

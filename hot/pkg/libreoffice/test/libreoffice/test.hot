@@ -1,0 +1,140 @@
+::libreoffice::test ns
+meta ["test"]
+
+build-convert-args ::libreoffice/build-convert-args
+build-version-args ::libreoffice/build-version-args
+parse-version-output ::libreoffice/parse-version-output
+expected-output-name ::libreoffice/expected-output-name
+file-ext ::libreoffice/file-ext
+join-args ::libreoffice/join-args
+
+// ============================================================================
+// file-ext tests
+// ============================================================================
+
+test-file-ext-docx
+meta ["test"] fn () {
+    assert-eq("docx", file-ext("hot://uploads/report.docx"))
+}
+
+test-file-ext-nested-path
+meta ["test"] fn () {
+    assert-eq("odt", file-ext("hot://users/9/docs/note.odt"))
+}
+
+test-file-ext-multi-dot
+meta ["test"] fn () {
+    assert-eq("gz", file-ext("bundle.tar.gz"))
+}
+
+// ============================================================================
+// join-args tests
+// ============================================================================
+
+test-join-args-spaces
+meta ["test"] fn () {
+    s join-args(["--headless", "--convert-to", "pdf"])
+    assert-eq("--headless --convert-to pdf", s)
+}
+
+// ============================================================================
+// build-convert-args tests
+// ============================================================================
+
+test-build-convert-args-basic
+meta ["test"] fn () {
+    args build-convert-args("/tmp/input.docx", "/tmp/out", "pdf", null)
+    assert-eq(
+        ["--headless", "--convert-to", "pdf", "--outdir", "/tmp/out", "/tmp/input.docx"],
+        args,
+    )
+}
+
+test-build-convert-args-with-filter
+meta ["test"] fn () {
+    args build-convert-args("/tmp/input.odt", "/tmp/out", "pdf", "writer_pdf_Export")
+    assert-eq(
+        [
+            "--headless",
+            "--convert-to",
+            "pdf:writer_pdf_Export",
+            "--outdir",
+            "/tmp/out",
+            "/tmp/input.odt",
+        ],
+        args,
+    )
+}
+
+test-build-convert-args-html
+meta ["test"] fn () {
+    args build-convert-args("/tmp/input.xlsx", "/tmp/lo-out", "html", null)
+    assert(in("html", args), "convert-to should be html")
+    assert-eq("/tmp/lo-out", get(args, 4))
+}
+
+// ============================================================================
+// build-version-args tests
+// ============================================================================
+
+test-build-version-args
+meta ["test"] fn () {
+    assert-eq(["--version"], build-version-args())
+}
+
+// ============================================================================
+// expected-output-name tests
+// ============================================================================
+
+test-expected-output-name-simple
+meta ["test"] fn () {
+    assert-eq("report.pdf", expected-output-name("/tmp/report.docx", "pdf"))
+}
+
+test-expected-output-name-multi-dot
+meta ["test"] fn () {
+    assert-eq("data.tar.pdf", expected-output-name("/tmp/out/data.tar.gz", "pdf"))
+}
+
+test-expected-output-name-no-extension
+meta ["test"] fn () {
+    assert-eq("README.pdf", expected-output-name("/tmp/README", "pdf"))
+}
+
+// ============================================================================
+// parse-version-output tests
+// ============================================================================
+
+test-parse-version-output-standard
+meta ["test"] fn () {
+    out """LibreOffice 24.2.7.2 420(Build:2) libreoffice
+
+"""
+    m parse-version-output(out)
+    assert-eq("24.2.7.2", m.version)
+    assert(contains(m.raw, "LibreOffice"), "raw should contain banner")
+}
+
+test-parse-version-output-single-line
+meta ["test"] fn () {
+    m parse-version-output("LibreOffice 7.6.4.1 40(Build:1)")
+    assert-eq("7.6.4.1", m.version)
+}
+
+// ============================================================================
+// ConvertOpts construction
+// ============================================================================
+
+test-convert-opts-construction
+meta ["test"] fn () {
+    opts ::libreoffice/ConvertOpts({
+        format: "pdf",
+        filter: "writer_pdf_Export",
+        image: "myregistry/libreoffice:slim",
+        size: "large",
+    })
+    assert-eq("pdf", opts.format)
+    assert-eq("writer_pdf_Export", opts.filter)
+    assert-eq("myregistry/libreoffice:slim", opts.image)
+    assert-eq("large", opts.size)
+}

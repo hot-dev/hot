@@ -1,0 +1,67 @@
+::telegram::integration::chat ns
+meta ["test"]
+
+TELEGRAM_TEST_CHAT_ID ::hot::env/get("TELEGRAM_TEST_CHAT_ID", "")
+
+test-get-chat
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  response ::telegram::chat/get-chat(::telegram::chat/GetChatRequest({
+    chat_id: chat-id
+  }))
+
+  assert(response.id, "getChat should return chat id")
+  assert(response.type, "getChat should return chat type")
+}
+
+test-get-chat-member-count
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  count ::telegram::chat/get-chat-member-count(::telegram::chat/GetChatMemberCountRequest({
+    chat_id: chat-id
+  }))
+
+  assert(gte(count, 1), "chat should have at least 1 member")
+}
+
+test-get-chat-administrators
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+
+  admins ::telegram::chat/get-chat-administrators(::telegram::chat/GetChatAdministratorsRequest({
+    chat_id: chat-id
+  }))
+
+  assert(gte(length(admins), 1), "chat should have at least 1 administrator")
+  assert(first(admins).user, "administrator should have a user field")
+  assert(first(admins).status, "administrator should have a status field")
+}
+
+test-get-chat-member-bot
+meta ["test"]
+fn () {
+  assert(TELEGRAM_TEST_CHAT_ID, "Set TELEGRAM_TEST_CHAT_ID in .env for Telegram integration tests")
+
+  chat-id Int(TELEGRAM_TEST_CHAT_ID)
+  bot-info ::telegram::bot/get-me()
+
+  member ::telegram::chat/get-chat-member(::telegram::chat/GetChatMemberRequest({
+    chat_id: chat-id,
+    user_id: bot-info.id
+  }))
+
+  assert(member.status, "getChatMember should return member status")
+  assert(member.user, "getChatMember should return user info")
+  assert-eq(bot-info.id, member.user.id, "user id should match bot id")
+}

@@ -1,0 +1,66 @@
+::hot::test::resource ns
+meta {
+    doc: """
+    End-to-end Hot-level coverage for `::hot::resource` and
+    `::hot::md`. Backed by fixture files under
+    `./hot/pkg/hot-std/test/fixtures/resources`, registered through
+    the project conf in `hot.test.hot`.
+    """
+}
+
+::res ::hot::resource
+::md ::hot::md
+
+test-resource-load-str
+meta ["test"]
+fn () {
+    body ::res/load-str("prompts/welcome.md")
+    assert(::hot::str/contains(body, "Hello, **world**!"), "welcome.md body roundtrips")
+}
+
+test-resource-exists
+meta ["test"]
+fn () {
+    assert(::res/exists("prompts/welcome.md"), "known resource exists")
+    assert-eq(false, ::res/exists("nope.md"), "unknown resource does not exist")
+}
+
+test-resource-path
+meta ["test"]
+fn () {
+    p ::res/path("prompts/welcome.md")
+    assert-eq("hot://res/prompts/welcome.md", p, "canonical hot:// URI")
+}
+
+test-resource-list-non-empty
+meta ["test"]
+fn () {
+    entries ::res/list()
+    assert(::hot::cmp/gt(::hot::coll/length(entries), 0), "registry is populated")
+}
+
+test-resource-list-matching-glob
+meta ["test"]
+fn () {
+    skills ::res/list-matching("skills/*.skill.md")
+    assert-eq(1, ::hot::coll/length(skills), "one skill md fixture")
+    first ::hot::coll/first(skills)
+    assert-eq("skills/customer-tone.skill.md", first.path, "skill path matches")
+}
+
+test-md-parse-frontmatter
+meta ["test"]
+fn () {
+    raw ::res/load-str("skills/customer-tone.skill.md")
+    parsed ::md/parse-frontmatter(raw)
+    assert-eq("customer-tone", parsed.frontmatter.name, "frontmatter name")
+    assert-eq("Apply our customer voice rules", parsed.frontmatter.description, "frontmatter description")
+    assert(::hot::str/contains(parsed.body, "second-person"), "body retained")
+}
+
+test-md-parse-no-frontmatter
+meta ["test"]
+fn () {
+    parsed ::md/parse-frontmatter("# just markdown")
+    assert-eq("# just markdown", parsed.body, "raw body when no frontmatter")
+}

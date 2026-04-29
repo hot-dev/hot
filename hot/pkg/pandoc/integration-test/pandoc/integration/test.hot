@@ -1,0 +1,61 @@
+::pandoc::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::pandoc
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-pandoc
+// ============================================================================
+
+
+ConvertOpts ::pandoc/ConvertOpts
+
+SAMPLE_MD "# Pandoc integration\n\nHello **world**.\n"
+
+// Helper: write markdown content to hot:// storage for file-based convert tests
+setup-markdown-input fn (content: Str, name: Str): Str {
+    hot-path `hot://pandoc-test/${name}`
+    enc ::hot::base64/encode(Bytes(content))
+    cmd `echo '${enc}' | base64 -d > /tmp/in.md && hotbox cp /tmp/in.md '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 60,
+        size: "nano",
+    })
+    result ::hot::task/await(info.id)
+    hot-path
+}
+
+test-version-pandoc
+meta ["test"] fn () {
+    ver ::pandoc/version()
+    assert(is-some(ver.version), "should parse version string")
+    assert(gt(length(ver.version), 0), "version non-empty")
+    assert(contains(ver.raw, "pandoc"), "raw output mentions pandoc")
+}
+
+test-convert-text-markdown-to-html
+meta ["test"] fn () {
+    result ::pandoc/convert-text(SAMPLE_MD, ConvertOpts({
+        from: "markdown", to: "html", standalone: null, template: null,
+        toc: null, extra-args: null, image: null, size: null,
+    }))
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("html", result.format)
+    assert(starts-with(result.url, "hot://pandoc/"), "URL should be in pandoc namespace")
+    assert(contains(result.text, "Hello"), "html should contain converted text")
+    assert(contains(result.text, "world"), "html should contain bold content")
+}
+
+test-convert-file-markdown-to-html
+meta ["test"] fn () {
+    input setup-markdown-input(SAMPLE_MD, "file-convert.md")
+    result ::pandoc/convert(input, ConvertOpts({
+        from: "markdown", to: "html", standalone: true, template: null,
+        toc: null, extra-args: null, image: null, size: null,
+    }))
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("html", result.format)
+    assert(contains(result.url, ".html"), "URL should use html extension")
+}

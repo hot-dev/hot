@@ -1,0 +1,520 @@
+::anthropic::chat-tools ns
+meta {
+    doc: """
+    Anthropic adapter that satisfies the `::ai::chat/run-loop` contract:
+
+    ```
+    chat-with-tools(
+        model: Str,
+        messages: Vec<::ai::chat/Message>,
+        system: Str?,
+        tools: Vec<::ai::tool/Tool>?
+    ): ::ai::chat/ChatReply
+    ```
+
+    The function translates `::ai::chat/Message` records into
+    Anthropic's content-block shape, calls
+    `::anthropic::messages/post`, and normalizes the response into a
+    `::ai::chat/ChatReply` so that `run-loop` does not need to know
+    about Anthropic's wire format.
+    """
+}
+
+::messages ::anthropic::messages
+::ai-chat  ::ai::chat
+::ai-tool  ::ai::tool
+
+ReplyDelta         ::ai-chat/ReplyDelta
+TextDelta          ::ai-chat/TextDelta
+ToolUseStart       ::ai-chat/ToolUseStart
+ToolUseInputDelta  ::ai-chat/ToolUseInputDelta
+ToolUseEnd         ::ai-chat/ToolUseEnd
+StreamStop         ::ai-chat/StreamStop
+
+DEFAULT_MAX_TOKENS 1024
+
+// ============================================================================
+// Outbound: ::ai::chat/Message -> Anthropic content blocks
+// ============================================================================
+
+to-tool-use-block
+meta {
+    doc: """Convert a `::ai::tool/ToolCall` into an Anthropic `tool_use` content block."""
+}
+fn (call: ::ai-tool/ToolCall): Map {
+    {type: "tool_use", id: call.id, name: call.name, input: call.input}
+}
+
+to-anthropic-message
+meta {
+    doc: """
+    Convert a single normalized `::ai::chat/Message` into Anthropic's
+    `InputMessage` shape. Tool results are emitted as `user` turns
+    with a `tool_result` content block (Anthropic's wire convention).
+    """
+}
+fn cond (m: ::ai-chat/Message): Map {
+    eq(m.role, "tool") => {
+        {
+            role: "user",
+            content: [{
+                type: "tool_result",
+                tool_use_id: m.tool-call-id,
+                content: to-json(untype(m.content))
+            }]
+        }
+    }
+
+    eq(m.role, "assistant") => {
+        text-block if(
+            and(is-str(m.content), not(is-empty(m.content))),
+            [{type: "text", text: m.content}],
+            []
+        )
+        tool-blocks if(
+            is-null(m.tool-calls),
+            [],
+            map(m.tool-calls, to-tool-use-block)
+        )
+        {role: "assistant", content: concat(text-block, tool-blocks)}
+    }
+    => {
+        {role: m.role, content: m.content}
+    }
+}
+
+to-anthropic-tool
+meta {
+    doc: """
+    Convert a `::ai::tool/Tool` into Anthropic's `Tool` shape (rename
+    `input-schema` to `input_schema`, keep `name` and `description`).
+    """
+}
+fn (t: ::ai-tool/Tool): Map {
+    base {name: t.name, input_schema: t.input-schema}
+    if(is-null(t.description), base, assoc(base, "description", t.description))
+}
+
+// ============================================================================
+// Inbound: Anthropic response -> ::ai::chat/ChatReply
+// ============================================================================
+
+block-text
+meta { doc: """Text from a single content block, or empty string.""" }
+fn (b: Map): Str {
+    if(eq(b.type, "text"), or(b.text, ""), "")
+}
+
+block-tool-call
+meta {
+    doc: """Convert a `tool_use` content block into a `::ai::tool/ToolCall`, or null otherwise."""
+}
+fn (b: Map): ::ai-tool/ToolCall? {
+    if(
+        eq(b.type, "tool_use"),
+        ::ai-tool/ToolCall({id: b.id, name: b.name, input: or(b.input, {})}),
+        null
+    )
+}
+
+response-text
+meta { doc: """Concatenate text content blocks from an Anthropic response.""" }
+fn (blocks: Vec): Str {
+    join(map(blocks, block-text), "")
+}
+
+response-tool-calls
+meta {
+    doc: """Extract `::ai::tool/ToolCall` entries from a list of Anthropic content blocks."""
+}
+fn (blocks: Vec): Vec<::ai-tool/ToolCall> {
+    filter(
+        map(blocks, block-tool-call),
+        is-some
+    )
+}
+
+response-usage
+meta {
+    doc: """Normalize Anthropic's usage shape into `{input-tokens, output-tokens}`."""
+}
+fn (u: Any): Map? {
+    if(
+        is-null(u),
+        null,
+        {
+            input-tokens: or(get(u, "input_tokens"), 0),
+            output-tokens: or(get(u, "output_tokens"), 0)
+        }
+    )
+}
+
+// ============================================================================
+// Public entry point
+// ============================================================================
+
+chat-with-tools
+meta {
+    doc: """
+    Tools-aware chat function compatible with `::ai::chat/run-loop`.
+
+    Parameters
+
+    - `model` — Anthropic model id (e.g. `"claude-sonnet-4-5"`).
+    - `messages` — conversation history as `Vec<::ai::chat/Message>`.
+    - `system` — optional system prompt.
+    - `tools` — optional `Vec<::ai::tool/Tool>`. When non-null, tools
+      are advertised to the model and `tool_use` responses become
+      `ChatReply.tool-calls`.
+
+    Returns a normalized `::ai::chat/ChatReply` regardless of the
+    underlying response shape.
+
+    **Example**
+
+    ```hot
+    ::tool ::ai::tool
+
+    add fn (x: Int, y: Int): Int { add(x, y) }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::anthropic::chat-tools/chat-with-tools,
+        model: "claude-sonnet-4-5",
+        tools: [::tool/from-fn(add)]
+    })
+
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+    anth-messages map(messages, to-anthropic-message)
+    anth-tools if(is-null(tools), null, map(tools, to-anthropic-tool))
+
+    base {
+        model: model,
+        messages: anth-messages,
+        max_tokens: DEFAULT_MAX_TOKENS
+    }
+
+    with-system if(is-null(system), base, assoc(base, "system", system))
+    with-tools if(is-null(anth-tools), with-system, assoc(with-system, "tools", anth-tools))
+
+    response ::messages/post(::messages/MessagesPostRequest(with-tools))
+
+    blocks or(response.content, [])
+    text response-text(blocks)
+    calls response-tool-calls(blocks)
+    stop or(response.stop_reason, "end_turn")
+
+    ::ai-chat/ChatReply({
+        text: if(is-empty(text), null, text),
+        tool-calls: if(is-empty(calls), null, calls),
+        stop-reason: stop,
+        usage: response-usage(response.usage),
+        raw: response
+    })
+}
+
+// ============================================================================
+// Token counting
+// ============================================================================
+
+::beta-messages ::anthropic::beta::messages
+
+count-tokens
+meta {
+    doc: """
+    Count the input tokens a `Vec<::ai::chat/Message>` would consume
+    against `model`, using Anthropic's stable
+    `/v1/messages/count_tokens` endpoint. Returns the exact count
+    Anthropic would charge.
+
+    Compatible with the `count-tokens-fn` slot on
+    `::ai::chat/ChatOptions`:
+
+    ```
+    (messages: Vec<Message>, model: Str): Int
+    ```
+
+    System prompt and tools are not currently included by this
+    helper — pass them via a custom wrapper if you need to model
+    their cost. The caller's pre-call budget check should add the
+    model's reserved overhead separately.
+
+    Network calls cost nothing in API credits but they are not free
+    in latency; cache the result when checking budget repeatedly
+    against an unchanged history.
+    """
+}
+fn (messages: Vec<::ai-chat/Message>, model: Str): Int {
+    anth-messages map(messages, to-anthropic-message)
+    request ::beta-messages/BetaMessagesCountTokensPostRequest({
+        model: model,
+        messages: anth-messages
+    })
+    response ::beta-messages/count-tokens-post(request)
+    response.input_tokens
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+EMPTY_STATE {
+    text-blocks: {},
+    tool-blocks: {},
+    block-order: [],
+    stop-reason: null,
+    usage-input: 0,
+    usage-output: 0
+}
+
+handle-content-block-start
+meta {
+    doc: """Internal: dispatch a `content_block_start` SSE event into ReplyDelta + state."""
+}
+fn (state: Map, idx: Int, block: Map, on-delta: Fn): Map {
+    cond {
+        eq(block.type, "text") => {
+            assoc-in(state, ["text-blocks", idx], "")
+        }
+
+        eq(block.type, "tool_use") => {
+            id or(block.id, "")
+            name or(block.name, "")
+            on-delta(ReplyDelta.ToolUseStart(ToolUseStart({id: id, name: name})))
+            assoc-in(
+                assoc-in(state, ["tool-blocks", idx], {id: id, name: name, input-json: ""}),
+                ["block-order"],
+                concat(or(state.block-order, []), [idx])
+            )
+        }
+        => { state }
+    }
+}
+
+handle-content-block-delta
+meta {
+    doc: """Internal: dispatch a `content_block_delta` SSE event into ReplyDelta + state."""
+}
+fn (state: Map, idx: Int, delta: Map, on-delta: Fn): Map {
+    cond {
+        eq(delta.type, "text_delta") => {
+            text or(delta.text, "")
+            on-delta(ReplyDelta.TextDelta(TextDelta({text: text})))
+            current or(get-in(state, ["text-blocks", idx]), "")
+            assoc-in(state, ["text-blocks", idx], concat(current, text))
+        }
+
+        eq(delta.type, "input_json_delta") => {
+            partial or(delta.partial_json, "")
+            tool-block or(get-in(state, ["tool-blocks", idx]), {id: "", name: "", input-json: ""})
+            on-delta(ReplyDelta.ToolUseInputDelta(ToolUseInputDelta({id: tool-block.id, partial-input-json: partial})))
+            assoc-in(
+                state,
+                ["tool-blocks", idx],
+                {...tool-block, input-json: concat(or(tool-block.input-json, ""), partial)}
+            )
+        }
+        => { state }
+    }
+}
+
+handle-content-block-stop
+meta {
+    doc: """Internal: dispatch a `content_block_stop` SSE event into ReplyDelta + state."""
+}
+fn (state: Map, idx: Int, on-delta: Fn): Map {
+    tool-block get-in(state, ["tool-blocks", idx])
+    cond {
+        is-some(tool-block) => {
+            on-delta(ReplyDelta.ToolUseEnd(ToolUseEnd({id: tool-block.id})))
+            state
+        }
+        => { state }
+    }
+}
+
+handle-message-delta
+meta {
+    doc: """Internal: capture stop_reason and output token usage from a `message_delta` event."""
+}
+fn (state: Map, data: Map): Map {
+    delta or(data.delta, {})
+    usage or(data.usage, {})
+    {
+        ...state,
+        stop-reason: or(delta.stop_reason, state.stop-reason),
+        usage-output: add(or(state.usage-output, 0), or(usage.output_tokens, 0))
+    }
+}
+
+handle-message-start
+meta { doc: """Internal: capture initial input usage from a `message_start` event.""" }
+fn (state: Map, data: Map): Map {
+    msg or(data.message, {})
+    usage or(msg.usage, {})
+    {
+        ...state,
+        usage-input: add(or(state.usage-input, 0), or(usage.input_tokens, 0))
+    }
+}
+
+handle-event
+meta {
+    doc: """
+    Internal: dispatch a single SSE event from Anthropic's
+    `post-stream` into the appropriate ReplyDelta emissions and a
+    new accumulator state.
+    """
+}
+fn cond (state: Map, event: Map, on-delta: Fn): Map {
+    eq(event.event, "message_start") => {
+        handle-message-start(state, or(event.data, {}))
+    }
+
+    eq(event.event, "content_block_start") => {
+        data or(event.data, {})
+        handle-content-block-start(state, or(data.index, 0), or(data.content_block, {}), on-delta)
+    }
+
+    eq(event.event, "content_block_delta") => {
+        data or(event.data, {})
+        handle-content-block-delta(state, or(data.index, 0), or(data.delta, {}), on-delta)
+    }
+
+    eq(event.event, "content_block_stop") => {
+        data or(event.data, {})
+        handle-content-block-stop(state, or(data.index, 0), on-delta)
+    }
+
+    eq(event.event, "message_delta") => {
+        handle-message-delta(state, or(event.data, {}))
+    }
+    => { state }
+}
+
+drain-stream
+meta {
+    doc: """Internal: tail-recursively consume `iter`, accumulating ReplyDelta events into `state`."""
+}
+fn cond (iter: Any, on-delta: Fn, state: Map): Map {
+    => {
+        n next(iter)
+        cond {
+            n.done => { state }
+            => { drain-stream(iter, on-delta, handle-event(state, n.value, on-delta)) }
+        }
+    }
+}
+
+finalize-state
+meta {
+    doc: """
+    Internal: convert accumulated stream state into a `ChatReply`.
+    Concatenates text blocks in index order, parses the buffered
+    tool-input JSON for each tool block, and assembles the final
+    usage map.
+    """
+}
+fn (state: Map): ::ai-chat/ChatReply {
+    text-block-keys sort(keys(or(state.text-blocks, {})))
+    text-parts map(text-block-keys, (k) { or(get-in(state, ["text-blocks", k]), "") })
+    text join(text-parts, "")
+
+    tool-indices or(state.block-order, [])
+    calls map(tool-indices, (idx) {
+        block get-in(state, ["tool-blocks", idx])
+        json-str or(block.input-json, "")
+        parsed cond {
+            is-empty(json-str) => { {} }
+            => {
+                decoded from-json(json-str)
+                if(is-err(decoded), {}, decoded)
+            }
+        }
+
+        ::ai-tool/ToolCall({id: block.id, name: block.name, input: parsed})
+    })
+
+    stop or(state.stop-reason, "end_turn")
+    usage {
+        input-tokens: or(state.usage-input, 0),
+        output-tokens: or(state.usage-output, 0)
+    }
+
+    ::ai-chat/ChatReply({
+        text: if(is-empty(text), null, text),
+        tool-calls: if(is-empty(calls), null, calls),
+        stop-reason: stop,
+        usage: usage,
+        raw: null
+    })
+}
+
+chat-with-tools-stream
+meta {
+    doc: """
+    Streaming counterpart to `chat-with-tools`, compatible with
+    `::ai::chat/run-loop-stream`. Translates Anthropic SSE events
+    into provider-agnostic `::ai::chat/ReplyDelta` events delivered
+    via `on-delta`, and returns a fully-aggregated `ChatReply` once
+    the stream terminates.
+
+    Parameters
+
+    - `model` — Anthropic model id.
+    - `messages` — conversation history as `Vec<::ai::chat/Message>`.
+    - `system` — optional system prompt.
+    - `tools` — optional `Vec<::ai::tool/Tool>`.
+    - `on-delta` — callback `(delta: ReplyDelta): Null` invoked for
+      every event during streaming. Use `::ai::chat/noop-on-delta`
+      if you only care about the final `ChatReply`.
+
+    **Example**
+
+    ```hot
+    on-text (delta) {
+        match delta {
+            ::ai::chat/TextDelta => { print(delta.text) }
+            => { null }
+        }
+    }
+
+    reply chat-with-tools-stream(
+        "claude-sonnet-4-5",
+        [::ai-chat/user-message("Hi")],
+        null,
+        null,
+        on-text
+    )
+    ```
+
+    Then `reply.text` holds the full assistant text, `reply.tool-calls`
+    holds any parsed tool calls (with their input maps reconstructed
+    from streamed JSON fragments), and `reply.usage` carries the
+    provider-reported token totals.
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+    anth-messages map(messages, to-anthropic-message)
+    anth-tools if(is-null(tools), null, map(tools, to-anthropic-tool))
+
+    base {
+        model: model,
+        messages: anth-messages,
+        max_tokens: DEFAULT_MAX_TOKENS
+    }
+
+    with-system if(is-null(system), base, assoc(base, "system", system))
+    with-tools if(is-null(anth-tools), with-system, assoc(with-system, "tools", anth-tools))
+
+    response ::messages/post-stream(::messages/MessagesPostRequest(with-tools))
+
+    final-state drain-stream(response.body, on-delta, EMPTY_STATE)
+    reply finalize-state(final-state)
+
+    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+    reply
+}

@@ -1,0 +1,52 @@
+::hot::info ns
+meta {doc: """Hot platform context types and version information."""}
+
+User type {
+    id: Uuid?
+}
+
+Org type {
+    id: Uuid?,
+    slug: Str?
+}
+
+Project type {
+    id: Uuid?,
+    name: Str?
+}
+
+Build type {
+    id: Uuid?,
+    hash: Str?
+}
+
+Env type {
+    id: Uuid?,
+    name: Str?
+}
+
+Version type {
+    version: Str,
+    git-sha: Str
+}
+
+version
+meta {
+    core: true,
+    doc: """
+    Return the current Hot version and git SHA.
+
+    Returns a `Version` with `version` (semver string) and `git-sha` (full 40-character SHA).
+
+    **Example**
+
+    ```hot
+    v ::hot::info/version()
+    v.version   // "1.0.33"
+    v.git-sha   // "abc123..."
+    ```
+    """
+}
+fn (): Version {
+    call-lib(::hot::info/version, [])
+}

@@ -1,0 +1,63 @@
+::gemini::integration::embeddings ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Gemini Embeddings API
+// =============================================================================
+// These tests require GEMINI_API_KEY to be set in context
+
+test-embed-content-simple
+meta ["test"]
+fn () {
+    response ::gemini::models/embed-content("text-embedding-004", ::gemini::models/ModelsEmbedContentRequest({
+        content: ::gemini::models/Content({
+            role: "user",
+            parts: [::gemini::models/Part({text: "The quick brown fox jumps over the lazy dog"})]
+        })
+    }))
+
+    assert(response.embedding, "Response should have embedding")
+    assert(response.embedding.values, "Embedding should have values")
+    assert(gt(length(response.embedding.values), 0), "Embedding should have dimensions")
+}
+
+test-embed-content-with-task-type
+meta ["test"]
+fn () {
+    response ::gemini::models/embed-content("text-embedding-004", ::gemini::models/ModelsEmbedContentRequest({
+        content: ::gemini::models/Content({
+            role: "user",
+            parts: [::gemini::models/Part({text: "What is the meaning of life?"})]
+        }),
+        taskType: "RETRIEVAL_QUERY"
+    }))
+
+    assert(response.embedding, "Response should have embedding")
+    assert(response.embedding.values, "Embedding should have values")
+}
+
+test-batch-embed-contents
+meta ["test"]
+fn () {
+    // Batch embed requires model field in each request
+    url `${::gemini/BASE_URL}/v1/models/text-embedding-004:batchEmbedContents`
+    body {
+        requests: [
+            {model: "models/text-embedding-004", content: {role: "user", parts: [{text: "Hello world"}]}},
+            {model: "models/text-embedding-004", content: {role: "user", parts: [{text: "Goodbye world"}]}}
+        ]
+    }
+
+    response ::gemini::api/request("POST", url, {}, body)
+
+    cond {
+        ::hot::http/is-ok-response(response) => {
+            // Response should have embeddings array
+            assert(is-vec(response.body.embeddings), "Response should have embeddings array")
+            assert-eq(2, length(response.body.embeddings), "Should have two embeddings")
+        }
+        => {
+            assert(false, `Batch embed API failed: ${response.body}`)
+        }
+    }
+}

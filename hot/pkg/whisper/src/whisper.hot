@@ -1,0 +1,319 @@
+::whisper ns
+meta {
+    doc: """
+    OpenAI Whisper speech-to-text via Hot Box containers.
+
+    Runs the `whisper` CLI inside `onerahmet/openai-whisper-asr-webservice` (or a custom image)
+    to transcribe or translate audio referenced by `hot://` URLs. Outputs are
+    written back to Hot storage.
+
+    **Quick Start**
+
+    ```hot
+    out ::whisper/transcribe("hot://uploads/recording.mp3")
+    tap(out.text)
+    tap(out.url)
+
+    // With explicit output path
+    out ::whisper/transcribe("hot://uploads/recording.mp3", {
+        model: "small",
+        output: "hot://transcripts/recording.json",
+    })
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+// Image with whisper + ffmpeg pre-installed (no runtime install step).
+DEFAULT_IMAGE "onerahmet/openai-whisper-asr-webservice:v1.9.1"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+TranscribeOpts
+meta {
+    doc: """
+    Options for Whisper transcription.
+
+    **Fields**
+    - `model` — Model size: `"tiny"`, `"base"`, `"small"`, `"medium"`, `"large"` (default: `"base"`)
+    - `language` — Language code, e.g. `"en"`, `"fr"` (omit for auto-detect)
+    - `format` — Output file format: `"txt"`, `"json"`, `"srt"`, `"vtt"` (default: `"json"`)
+    - `task` — `"transcribe"` or `"translate"` (default: whisper default / transcribe)
+    - `temperature` — Sampling temperature as string, e.g. `"0"`
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with whisper CLI
+    - `size` — Box size override (default: derived from model)
+    """
+}
+type {
+    model: Str?,
+    language: Str?,
+    format: Str?,
+    task: Str?,
+    temperature: Str?,
+    word-timestamps: Bool?,
+    initial-prompt: Str?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+// ============================================================================
+// Command Builders (internal, testable without Docker)
+// ============================================================================
+
+build-transcribe-args
+meta {
+    doc: "Build whisper CLI arguments after the `whisper` executable name."
+}
+fn (input-path: Str, output-dir: Str, opts: TranscribeOpts): Vec<Str> {
+    model or(opts.model, "base")
+    format or(opts.format, "json")
+
+    base [
+        input-path,
+        "--model", model,
+        "--output_format", format,
+        "--output_dir", output-dir,
+    ]
+
+    lang-args if(is-some(opts.language), ["--language", opts.language], [])
+    task-args if(is-some(opts.task), ["--task", opts.task], [])
+    temp-args if(is-some(opts.temperature), ["--temperature", opts.temperature], [])
+    wts-args if(and(is-some(opts.word-timestamps), opts.word-timestamps), ["--word_timestamps", "True"], [])
+    prompt-args if(is-some(opts.initial-prompt), ["--initial_prompt", opts.initial-prompt], [])
+
+    [...base, ...lang-args, ...task-args, ...temp-args, ...wts-args, ...prompt-args]
+}
+
+// ============================================================================
+// Output Parsers (internal, testable without Docker)
+// ============================================================================
+
+parse-transcribe-output
+meta {
+    doc: "Parse whisper JSON output (full transcript, segments, detected language)."
+}
+fn (stdout: Str?): Map {
+    text or(stdout, "") |> trim()
+    if(is-empty(text), {}, from-json(text))
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+model-to-min-size fn (model: Str): Str {
+    m model |> trim() |> lowercase()
+    cond {
+        in(m, ["tiny", "base"]) => { "large" }
+        eq(m, "small") => { "xlarge" }
+        eq(m, "medium") => { "2xlarge" }
+        eq(m, "large") => { "4xlarge" }
+        => { "large" }
+    }
+}
+
+run-whisper-box fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    needs-entrypoint-reset eq(img, DEFAULT_IMAGE)
+    info ::box/start({
+        image: img,
+        script: shell-script,
+        entrypoint: if(needs-entrypoint-reset, [""]),
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+    ::task/await(info.id)
+}
+
+start-whisper-box fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    needs-entrypoint-reset eq(img, DEFAULT_IMAGE)
+    ::box/start({
+        image: img,
+        script: shell-script,
+        entrypoint: if(needs-entrypoint-reset, [""]),
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+transcribe
+meta {
+    doc: """
+    Transcribe (or translate) audio to text using OpenAI Whisper in a container.
+
+    Returns `{text: Str, language: Str?, segments: Vec?, url: Str}`.
+    With `format: "json"` (default), `text` is the full transcript, `segments`
+    holds timed segments, and `language` is the detected or forced language code.
+    `url` is the `hot://` URL of the output file (same format as requested).
+
+    Box size defaults from the model (`tiny`/`base` → small, `small` → medium, etc.).
+
+    **Example**
+
+    ```hot
+    out ::whisper/transcribe("hot://uploads/voice.mp3")
+    out ::whisper/transcribe("hot://uploads/voice.mp3", {
+        model: "small",
+        language: "en",
+        format: "json",
+    })
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    transcribe(input, TranscribeOpts({
+        model: null, language: null, format: null, task: null,
+        temperature: null, word-timestamps: null, initial-prompt: null,
+        output: null, image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: TranscribeOpts): Map {
+    stem "whisper-input"
+    out-dir "/data/whisper-out"
+    fmt or(opts.format, "json")
+
+    ext file-ext(input)
+    in-path `/data/${stem}.${ext}`
+    model or(opts.model, "base")
+    box-size or(opts.size, model-to-min-size(model))
+
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://whisper/${uuid}/transcript.${fmt}`)
+
+    whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
+    out-file `${out-dir}/${stem}.${fmt}`
+    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+
+    result run-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
+    checked check-box-result(result, "whisper")
+
+    cond {
+        eq(fmt, "json") => {
+            parsed parse-transcribe-output(checked.stdout)
+            {
+                text: or(parsed.text, ""),
+                language: parsed.language,
+                segments: parsed.segments,
+                url: hot-output,
+            }
+        }
+        => {
+            {
+                text: trim(or(checked.stdout, "")),
+                language: null,
+                segments: null,
+                url: hot-output,
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Async (start-*) API
+// ============================================================================
+
+start-transcribe
+meta {
+    doc: """
+    Start a Whisper transcription in a container without waiting for completion.
+
+    Returns the box task info from `::box/start`. Use `::task/await` on the
+    returned id to wait for the result.
+
+    **Example**
+
+    ```hot
+    info ::whisper/start-transcribe("hot://uploads/voice.mp3", {model: "small", language: "en"})
+    result ::task/await(info.id)
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-transcribe(input, TranscribeOpts({
+        model: null, language: null, format: null, task: null,
+        temperature: null, word-timestamps: null, initial-prompt: null,
+        output: null, image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: TranscribeOpts): Map {
+    stem "whisper-input"
+    out-dir "/data/whisper-out"
+    fmt or(opts.format, "json")
+
+    ext file-ext(input)
+    in-path `/data/${stem}.${ext}`
+    model or(opts.model, "base")
+    box-size or(opts.size, model-to-min-size(model))
+
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://whisper/${uuid}/transcript.${fmt}`)
+
+    whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
+    out-file `${out-dir}/${stem}.${fmt}`
+    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+
+    info start-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
+    assoc(info, "data", {output: hot-output})
+}

@@ -1,0 +1,37 @@
+::hot::md ns
+meta {
+    doc: """
+    Lightweight Markdown helpers. Currently focused on YAML
+    frontmatter so that resources like skill cards or prompt
+    libraries can be authored as plain `.md` files and consumed
+    structurally from Hot code.
+    """
+}
+
+parse-frontmatter
+meta {
+    doc: """
+    Split a Markdown string into `{frontmatter, body}`. When no
+    `---`-delimited YAML block is present at the start of `s`,
+    `frontmatter` is an empty Map and `body` is the original string.
+
+    **Example**
+
+    ```hot
+    raw \"\"\"---
+    title: Welcome
+    tags: [intro, agent]
+    ---
+
+    Hello, world!
+    \"\"\"
+
+    parsed parse-frontmatter(raw)
+    parsed.frontmatter.title  // "Welcome"
+    parsed.body               // "Hello, world!\n"
+    ```
+    """
+}
+fn (s: Str): Map {
+    call-lib(::hot::md/parse-frontmatter, [s])
+}

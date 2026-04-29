@@ -1,0 +1,79 @@
+::hot::test::cmp ns
+meta ["test"]
+
+test-cmp
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+    assert ::hot::test/assert
+
+    // Test eq function
+    assert(eq(1, 1), "eq(1, 1) returns true")
+    assert-eq(false, eq(1, 2), "eq(1, 2) returns false")
+    assert(eq("hello", "hello"), "eq string equality")
+
+    assert(ne(1, 2), "ne(1, 2) returns true")
+    assert-eq(false, ne(1, 1), "ne(1, 1) returns false")
+    assert(ne("hello", "world"), "ne(hello, world) returns true")
+
+    // Test gt function
+    assert-eq(false, gt(1, 2), "gt(1, 2) returns false")
+    assert(gt(2, 1), "gt(2, 1) returns true")
+    assert-eq(false, gt(1, 1), "gt(1, 1) returns false")
+    // Test gte function
+    assert(gte(1, 1), "gte(1, 1) returns true")
+    assert(gte(2, 1), "gte(2, 1) returns true")
+    assert-eq(false, gte(1, 2), "gte(1, 2) returns false")
+
+    // Test lt function
+    assert(lt(1, 2), "lt(1, 2) returns true")
+    assert-eq(false, lt(2, 1), "lt(2, 1) returns false")
+    assert-eq(false, lt(1, 1), "lt(1, 1) returns false")
+    // Test lte function
+    assert(lte(1, 1), "lte(1, 1) returns true")
+    assert(lte(1, 2), "lte(1, 2) returns true")
+    assert-eq(false, lte(2, 1), "lte(2, 1) returns false")
+    assert-eq(false, lte(1, 0), "lte(1, 0) returns false")
+
+}
+
+
+test-between
+meta ["test"] fn () {
+    // Basic inclusive range checks
+    assert(between(5, 1, 10), "between(5, 1, 10) is true")
+    assert(between(1, 1, 10), "between: low bound inclusive")
+    assert(between(10, 1, 10), "between: high bound inclusive")
+    assert-eq(false, between(0, 1, 10), "between: below range")
+    assert-eq(false, between(11, 1, 10), "between: above range")
+
+    // Dec values
+    assert(between(3.14, 3.0, 4.0), "between with decimals")
+    assert-eq(false, between(2.99, 3.0, 4.0), "between: dec below range")
+
+    // Negative ranges
+    assert(between(-5, -10, 0), "between with negatives")
+    assert-eq(false, between(-11, -10, 0), "between: negative below range")
+
+    // Single point range
+    assert(between(5, 5, 5), "between: x equals low equals high")
+}
+
+
+test-in
+meta ["test"] fn () {
+    // Basic membership
+    assert(in(2, [1, 2, 3]), "in: element present")
+    assert-eq(false, in(4, [1, 2, 3]), "in: element absent")
+
+    // String elements
+    assert(in("a", ["a", "b", "c"]), "in: string present")
+    assert-eq(false, in("d", ["a", "b", "c"]), "in: string absent")
+
+    // Empty collection
+    assert-eq(false, in(1, []), "in: empty vec always false")
+
+    // Mixed types
+    assert(in(1, [1, "two", true]), "in: mixed type vec")
+    assert(in(true, [1, "two", true]), "in: bool in mixed vec")
+    assert-eq(false, in(null, [1, 2, 3]), "in: null not in int vec")
+}

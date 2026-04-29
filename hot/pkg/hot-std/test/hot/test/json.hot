@@ -1,0 +1,55 @@
+::hot::test::json ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+to-json ::hot::json/to-json
+from-json ::hot::json/from-json
+
+test-json-basic
+meta ["test"] fn () {
+
+    // Test to-json with simple values
+    assert-eq("42", to-json(42), "to-json(42) returns \"42\"")
+    assert-eq("\"hello\"", to-json("hello"), "to-json(\"hello\") returns \"\\\"hello\\\"\"")
+    assert-eq("true", to-json(true), "to-json(true) returns \"true\"")
+    assert-eq("false", to-json(false), "to-json(false) returns \"false\"")
+    assert-eq("null", to-json(null), "to-json(null) returns \"null\"")
+    // Test to-json with collections
+    assert-eq("[1,2,3]", to-json([1, 2, 3]), "to-json([1, 2, 3]) returns \"[1,2,3]\"")
+    // Test from-json with simple values
+    assert-eq(42, from-json("42"), "from-json(\"42\") returns 42")
+    assert-eq("hello", from-json("\"hello\""), "from-json(\"\\\"hello\\\"\") returns \"hello\"")
+    assert-eq(true, from-json("true"), "from-json(\"true\") returns true")
+    assert-eq(false, from-json("false"), "from-json(\"false\") returns false")
+    assert-eq(null, from-json("null"), "from-json(\"null\") returns null")
+    // Test from-json with collections
+    assert-eq([1, 2, 3], from-json("[1,2,3]"), "from-json(\"[1,2,3]\") returns [1, 2, 3]")
+}
+
+test-json-roundtrip
+meta ["test"] fn () {
+
+    // Test round-trip conversion
+    original {
+        name: "John",
+        age: 30,
+        active: true,
+        scores: [95, 87, 92],
+        metadata: null
+    }
+
+    json-str to-json(original)
+    restored from-json(json-str)
+    assert-eq(original, restored, "Round-trip JSON conversion should preserve data")
+}
+
+test-json-decimal-precision
+meta ["test"] fn () {
+
+    // Test that decimal precision is preserved
+    decimal-val 12.34
+    json-str to-json(decimal-val)
+    restored from-json(json-str)
+    assert-eq(decimal-val, restored, "Decimal precision should be preserved in JSON round-trip")
+}

@@ -1,0 +1,212 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+    <!-- Info: project docs vs general docs -->
+    <p class="mb-4 text-xs text-gray-500 dark:text-gray-400">
+        Docs for your project's code and dependencies. For platform and language docs, see
+        <a href="{{ page_context.web_url }}/docs" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+            Hot Docs
+            <svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3 w-3 ml-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+        </a>
+    </p>
+
+    <!-- Project Selector -->
+    <div class="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div class="w-full sm:w-64">
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
+                            </svg>
+                            <span>{% if selected_project.is_some() %}{{ selected_project.as_ref().unwrap().name }}{% else %}Select a project{% endif %}</span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600 max-h-60 overflow-y-auto">
+                        <div class="py-1">
+                            {% for project in projects %}
+                            <a href="/docs?project={{ project.name }}" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>{{ project.name }}</span>
+                                    {% if selected_project.is_some() && selected_project.as_ref().unwrap().project_id == project.project_id %}
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    {% endif %}
+                                </div>
+                            </a>
+                            {% endfor %}
+                            {% if projects.is_empty() %}
+                            <div class="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">No projects found</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {% if build_info.is_some() %}
+            <div class="sm:self-end">
+                <span class="inline-flex items-center px-3 py-0.5 rounded-full text-sm font-medium bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-100">
+                    {{ build_info.as_ref().unwrap() }}
+                </span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if selected_project.is_none() %}
+    <!-- No project selected state -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+        <div class="text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Select a project</h3>
+            <p class="text-gray-500 dark:text-gray-400">
+                Choose a project from the dropdown above to view its documentation.
+            </p>
+        </div>
+    </div>
+    {% else %}
+        {% if has_docs %}
+            {% if docs_generating %}
+                <!-- Loading indicator for docs being generated -->
+                <div class="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+                    <div class="flex items-center">
+                        <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600 dark:text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <div>
+                            <p class="text-blue-800 dark:text-blue-200 font-medium">Generating documentation...</p>
+                            <p class="text-blue-600 dark:text-blue-300 text-sm">This may take a moment. The page will auto-refresh when ready.</p>
+                        </div>
+                    </div>
+                </div>
+                <script>
+                    // Auto-refresh page after a few seconds to check if docs are ready
+                    setTimeout(function() { location.reload(); }, 5000);
+                </script>
+            {% endif %}
+            <!-- Project Namespaces -->
+            <div class="mb-6">
+                <h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Project Namespaces</h2>
+                {% if project_namespaces.is_empty() && !docs_generating %}
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg shadow">
+                        No documentation found for this project's own source code.
+                    </div>
+                {% else if project_namespaces.is_empty() && docs_generating %}
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg shadow">
+                        <div class="flex items-center justify-center">
+                            <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Loading...
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {% for ns in project_namespaces %}
+                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/project/{{ ns.path }}" class="block bg-white dark:bg-gray-800 shadow-sm rounded-lg p-6 hover:shadow-md transition-shadow duration-200">
+                                <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ ns.name }}</h3>
+                                {% if ns.description.is_some() %}
+                                    <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ ns.description.as_ref().unwrap() }}</p>
+                                {% else %}
+                                    <p class="text-sm text-gray-400 dark:text-gray-500 mb-3 italic">No description provided.</p>
+                                {% endif %}
+                                <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                                    <span>{{ ns.function_count }} Functions</span>
+                                    <span>{{ ns.type_count }} Types</span>
+                                </div>
+                            </a>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+
+            <!-- Packages -->
+            <div class="mb-6">
+                <h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-4">
+                    Packages
+                    {% if docs_generating && !dependencies.is_empty() %}
+                        <span class="ml-2 inline-flex items-center text-sm font-normal text-gray-500 dark:text-gray-400">
+                            <svg class="animate-spin h-4 w-4 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            loading more...
+                        </span>
+                    {% endif %}
+                </h2>
+                {% if dependencies.is_empty() && docs_generating %}
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg shadow">
+                        <div class="flex items-center justify-center">
+                            <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Loading packages...
+                        </div>
+                    </div>
+                {% else if dependencies.is_empty() %}
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg shadow">
+                        No documented packages found for this project.
+                    </div>
+                {% else %}
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {% for dep in dependencies %}
+                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/pkg/{{ dep.name }}" class="block bg-white dark:bg-gray-800 shadow-sm rounded-lg p-6 hover:shadow-md transition-shadow duration-200">
+                                <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ dep.display_name }} <span class="text-sm font-normal text-gray-500 dark:text-gray-400">v{{ dep.version }}</span></h3>
+                                {% if dep.description.is_some() %}
+                                    <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ dep.description.as_ref().unwrap() }}</p>
+                                {% else %}
+                                    <p class="text-sm text-gray-400 dark:text-gray-500 mb-3 italic">No description provided.</p>
+                                {% endif %}
+                                <div class="text-xs text-gray-500 dark:text-gray-400">
+                                    {{ dep.namespace_count }} Namespaces
+                                </div>
+                            </a>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+
+            <!-- Hot-Std Note (shown if hot-std is not in dependencies yet) -->
+            {% if docs_generating %}
+            <div class="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
+                <p>The <span class="font-mono">hot-std</span> standard library documentation will appear in Packages when loaded.</p>
+            </div>
+            {% endif %}
+
+        {% else %}
+            <div class="text-center py-12 bg-white dark:bg-gray-800 shadow-sm rounded-lg">
+                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <h3 class="mt-2 text-lg font-medium text-gray-900 dark:text-gray-100">No Documentation Available</h3>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    This project does not have an active build with generated documentation.
+                </p>
+                <div class="mt-6">
+                    <a href="/projects/{{ selected_project.as_ref().unwrap().name }}/builds" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                        View Builds
+                    </a>
+                </div>
+            </div>
+        {% endif %}
+    {% endif %}
+</div>
+{% endblock %}

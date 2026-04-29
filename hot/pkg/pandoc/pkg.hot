@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.pandoc {
+  name: "hot.dev/pandoc",
+  version: "1.1.0",
+  hot-min-version: "1.2.4",
+  description: "Pandoc document conversion via Hot Box containers. Convert between Markdown, HTML, PDF, DOCX, and many more formats.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["documents"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,528 @@
+::openai::chat-tools ns
+meta {
+    doc: """
+    OpenAI adapter that satisfies the `::ai::chat/run-loop` contract:
+
+    ```
+    chat-with-tools(
+        model: Str,
+        messages: Vec<::ai::chat/Message>,
+        system: Str?,
+        tools: Vec<::ai::tool/Tool>?
+    ): ::ai::chat/ChatReply
+    ```
+
+    Translates `::ai::chat/Message` records into OpenAI's chat
+    completions wire format, calls `::openai::chat/complete`, and
+    normalizes the response into a `::ai::chat/ChatReply` so that
+    `run-loop` does not need to know about OpenAI's specifics.
+    """
+}
+
+::oai-chat ::openai::chat
+::ai-chat  ::ai::chat
+::ai-tool  ::ai::tool
+
+ReplyDelta         ::ai-chat/ReplyDelta
+TextDelta          ::ai-chat/TextDelta
+ToolUseStart       ::ai-chat/ToolUseStart
+ToolUseInputDelta  ::ai-chat/ToolUseInputDelta
+ToolUseEnd         ::ai-chat/ToolUseEnd
+StreamStop         ::ai-chat/StreamStop
+
+DEFAULT_MAX_TOKENS 1024
+
+// ============================================================================
+// Outbound: ::ai::chat/Message -> OpenAI Message
+// ============================================================================
+
+to-openai-tool-call
+meta { doc: """Convert a `::ai::tool/ToolCall` into OpenAI's `tool_calls` entry.""" }
+fn (call: ::ai-tool/ToolCall): Map {
+    {
+        id: call.id,
+        type: "function",
+        function: {
+            name: call.name,
+            arguments: to-json(untype(or(call.input, {})))
+        }
+    }
+}
+
+to-openai-message
+meta {
+    doc: """
+    Convert a single normalized `::ai::chat/Message` into OpenAI's
+    chat completion `Message`. `role: "tool"` maps to OpenAI's tool
+    response shape and uses `tool_call_id` for correlation.
+    """
+}
+fn cond (m: ::ai-chat/Message): Map {
+    eq(m.role, "tool") => {
+        {
+            role: "tool",
+            content: if(is-str(m.content), m.content, to-json(untype(m.content))),
+            tool_call_id: m.tool-call-id
+        }
+    }
+
+    eq(m.role, "assistant") => {
+        base {role: "assistant", content: if(is-str(m.content), m.content, "")}
+        if(
+            is-null(m.tool-calls),
+            base,
+            assoc(base, "tool_calls", map(m.tool-calls, to-openai-tool-call))
+        )
+    }
+    => {
+        {role: m.role, content: m.content}
+    }
+}
+
+to-openai-tool
+meta {
+    doc: """
+    Convert a `::ai::tool/Tool` into OpenAI's tool definition shape:
+    `{type: "function", function: {name, description?, parameters}}`.
+    """
+}
+fn (t: ::ai-tool/Tool): Map {
+    function-base {name: t.name, parameters: t.input-schema}
+    function if(
+        is-null(t.description),
+        function-base,
+        assoc(function-base, "description", t.description)
+    )
+    {type: "function", function: function}
+}
+
+// ============================================================================
+// Inbound: OpenAI response -> ::ai::chat/ChatReply
+// ============================================================================
+
+parse-tool-call
+meta {
+    doc: """
+    Convert one OpenAI `tool_calls` entry into a `::ai::tool/ToolCall`.
+    OpenAI ships function arguments as a JSON string; we decode it
+    into a Map. A non-JSON or empty payload becomes `{}`.
+    """
+}
+fn (tc: Map): ::ai-tool/ToolCall {
+    func or(tc.function, {})
+    args-str or(func.arguments, "")
+    parsed cond {
+        is-empty(args-str) => { {} }
+        => {
+            decoded from-json(args-str)
+            if(is-err(decoded), {}, decoded)
+        }
+    }
+
+    ::ai-tool/ToolCall({
+        id: or(tc.id, ""),
+        name: or(func.name, ""),
+        input: parsed
+    })
+}
+
+response-text
+meta { doc: """Extract assistant text content from an OpenAI choice's message.""" }
+fn (msg: Map): Str {
+    or(msg.content, "")
+}
+
+response-tool-calls
+meta {
+    doc: """Extract `::ai::tool/ToolCall` entries from an OpenAI choice's message."""
+}
+fn (msg: Map): Vec<::ai-tool/ToolCall> {
+    raw or(msg.tool_calls, [])
+    map(raw, parse-tool-call)
+}
+
+response-usage
+meta {
+    doc: """Normalize OpenAI's usage shape into `{input-tokens, output-tokens}`."""
+}
+fn (u: Any): Map? {
+    if(
+        is-null(u),
+        null,
+        {
+            input-tokens: or(get(u, "prompt_tokens"), 0),
+            output-tokens: or(get(u, "completion_tokens"), 0)
+        }
+    )
+}
+
+// ============================================================================
+// Public entry point
+// ============================================================================
+
+chat-with-tools
+meta {
+    doc: """
+    Tools-aware chat function compatible with `::ai::chat/run-loop`.
+
+    Parameters
+
+    - `model` — OpenAI model id (e.g. `"gpt-4o-mini"`).
+    - `messages` — conversation history as `Vec<::ai::chat/Message>`.
+    - `system` — optional system prompt; prepended as a `system`
+      `::ai::chat/Message` if provided.
+    - `tools` — optional `Vec<::ai::tool/Tool>`. When non-null, tools
+      are advertised to the model and any `tool_calls` in the
+      response become `ChatReply.tool-calls`.
+
+    Returns a normalized `::ai::chat/ChatReply` regardless of the
+    underlying response shape.
+
+    **Example**
+
+    ```hot
+    ::tool ::ai::tool
+
+    add fn (x: Int, y: Int): Int { add(x, y) }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::openai::chat-tools/chat-with-tools,
+        model: "gpt-4o-mini",
+        tools: [::tool/from-fn(add)]
+    })
+
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+    sys-prefix if(
+        is-null(system),
+        [],
+        [{role: "system", content: system}]
+    )
+    body-msgs map(messages, to-openai-message)
+    oai-messages concat(sys-prefix, body-msgs)
+    oai-tools if(is-null(tools), null, map(tools, to-openai-tool))
+
+    base {
+        model: model,
+        messages: oai-messages,
+        max_completion_tokens: DEFAULT_MAX_TOKENS
+    }
+
+    with-tools if(is-null(oai-tools), base, assoc(base, "tools", oai-tools))
+
+    response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(with-tools))
+
+    choices or(response.choices, [])
+    first-msg if(is-empty(choices), {}, or(choices[0].message, {}))
+    text response-text(first-msg)
+    calls response-tool-calls(first-msg)
+    finish if(is-empty(choices), "stop", or(choices[0].finish_reason, "stop"))
+
+    ::ai-chat/ChatReply({
+        text: if(is-empty(text), null, text),
+        tool-calls: if(is-empty(calls), null, calls),
+        stop-reason: finish,
+        usage: response-usage(response.usage),
+        raw: response
+    })
+}
+
+// ============================================================================
+// Token counting (heuristic)
+// ============================================================================
+
+CHARS_PER_TOKEN_HEURISTIC 4
+PER_MESSAGE_OVERHEAD_TOKENS 4
+
+count-message-chars
+meta {
+    doc: """Internal: serialize a single Message to a char-count for the heuristic."""
+}
+fn (m: ::ai-chat/Message): Int {
+    body cond {
+        is-str(m.content) => { m.content }
+        is-null(m.content) => { "" }
+        => { to-json(untype(m.content)) }
+    }
+
+    role-chars length(or(m.role, ""))
+    body-chars length(body)
+    tool-chars cond {
+        is-null(m.tool-calls) => { 0 }
+        => { length(to-json(untype(m.tool-calls))) }
+    }
+
+    add(add(role-chars, body-chars), tool-chars)
+}
+
+count-tokens
+meta {
+    doc: """
+    **Heuristic** token counter for OpenAI chat models.
+
+    OpenAI does not expose a server-side counter, so this function
+    estimates using `ceil(total_chars / 4) + per_message_overhead`,
+    where 4 chars/token tracks the cl100k tokenizer to within ~10%
+    for English prose. Code, JSON, or non-Latin text will skew
+    further. For exact counts, embed `tiktoken` (e.g. via a
+    Python/JS Box) and pass the result via
+    `ChatOptions.count-tokens-fn`.
+
+    Compatible with the `count-tokens-fn` slot on
+    `::ai::chat/ChatOptions`:
+
+    ```
+    (messages: Vec<Message>, model: Str): Int
+    ```
+    """
+}
+fn (messages: Vec<::ai-chat/Message>, model: Str): Int {
+    char-total reduce(messages, (acc, m) { add(acc, count-message-chars(m)) }, 0)
+    overhead mul(length(messages), PER_MESSAGE_OVERHEAD_TOKENS)
+    add(ceil(div(char-total, CHARS_PER_TOKEN_HEURISTIC)), overhead)
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+EMPTY_STREAM_STATE {
+    text: "",
+    tool-blocks: {},
+    tool-order: [],
+    finish-reason: null,
+    usage-input: 0,
+    usage-output: 0
+}
+
+handle-tool-call-delta
+meta {
+    doc: """
+    Internal: fold one OpenAI `tool_calls` delta entry into stream
+    state. OpenAI streams tool calls indexed by an `index` field;
+    the same index across multiple chunks contributes to a single
+    call's id/name/arguments.
+    """
+}
+fn (state: Map, tc: Map, on-delta: Fn): Map {
+    idx or(tc.index, 0)
+    existing or(get-in(state, ["tool-blocks", idx]), {id: "", name: "", input-json: ""})
+    func or(tc.function, {})
+
+    new-id or(tc.id, existing.id)
+    new-name or(func.name, existing.name)
+    args-frag or(func.arguments, "")
+
+    cond {
+        and(eq(existing.id, ""), not(eq(new-id, ""))) => {
+            on-delta(ReplyDelta.ToolUseStart(ToolUseStart({id: new-id, name: new-name})))
+        }
+
+        and(eq(existing.name, ""), not(eq(new-name, ""))) => {
+            on-delta(ReplyDelta.ToolUseStart(ToolUseStart({id: new-id, name: new-name})))
+        }
+        => { null }
+    }
+
+    cond {
+        not(is-empty(args-frag)) => {
+            on-delta(ReplyDelta.ToolUseInputDelta(ToolUseInputDelta({id: new-id, partial-input-json: args-frag})))
+        }
+        => { null }
+    }
+
+    new-block {
+        id: new-id,
+        name: new-name,
+        input-json: concat(or(existing.input-json, ""), args-frag)
+    }
+
+    order or(state.tool-order, [])
+    new-order if(in(idx, order), order, concat(order, [idx]))
+    {
+        ...state,
+        tool-blocks: assoc(or(state.tool-blocks, {}), idx, new-block),
+        tool-order: new-order
+    }
+}
+
+handle-stream-event
+meta {
+    doc: """
+    Internal: dispatch one OpenAI streaming SSE event into ReplyDelta
+    emissions and an updated accumulator state.
+    """
+}
+fn (state: Map, event: Map, on-delta: Fn): Map {
+    data event.data
+    cond {
+        is-null(data) => { state }
+        eq(data, "[DONE]") => { state }
+        => {
+            choices or(data.choices, [])
+            usage data.usage
+
+            with-usage cond {
+                is-null(usage) => { state }
+                => {
+                    {
+                        ...state,
+                        usage-input: add(or(state.usage-input, 0), or(usage.prompt_tokens, 0)),
+                        usage-output: add(or(state.usage-output, 0), or(usage.completion_tokens, 0))
+                    }
+                }
+            }
+
+            cond {
+                is-empty(choices) => { with-usage }
+                => {
+                    choice choices[0]
+                    delta or(choice.delta, {})
+                    finish choice.finish_reason
+
+                    text-frag or(delta.content, "")
+                    after-text cond {
+                        is-empty(text-frag) => { with-usage }
+                        => {
+                            on-delta(ReplyDelta.TextDelta(TextDelta({text: text-frag})))
+                            {...with-usage, text: concat(with-usage.text, text-frag)}
+                        }
+                    }
+
+                    tcs or(delta.tool_calls, [])
+                    after-tools reduce(tcs, (acc, tc) { handle-tool-call-delta(acc, tc, on-delta) }, after-text)
+
+                    cond {
+                        is-null(finish) => { after-tools }
+                        => { {...after-tools, finish-reason: finish} }
+                    }
+                }
+            }
+        }
+    }
+}
+
+drain-openai-stream
+meta {
+    doc: """Internal: tail-recursively consume OpenAI's SSE iterator into accumulator state."""
+}
+fn cond (iter: Any, on-delta: Fn, state: Map): Map {
+    => {
+        n next(iter)
+        cond {
+            n.done => { state }
+            => { drain-openai-stream(iter, on-delta, handle-stream-event(state, n.value, on-delta)) }
+        }
+    }
+}
+
+emit-tool-use-ends
+meta {
+    doc: """Internal: emit a `ToolUseEnd` for every accumulated tool block in stream order."""
+}
+fn (state: Map, on-delta: Fn): Null {
+    for-each(or(state.tool-order, []), (idx) {
+        block get-in(state, ["tool-blocks", idx])
+        cond {
+            is-some(block) => {
+                on-delta(ReplyDelta.ToolUseEnd(ToolUseEnd({id: block.id})))
+            }
+            => { null }
+        }
+    })
+}
+
+finalize-stream-state
+meta {
+    doc: """
+    Internal: convert accumulated OpenAI stream state into a
+    `ChatReply`. Parses each tool block's accumulated arguments
+    JSON and concatenates the text fragments.
+    """
+}
+fn (state: Map): ::ai-chat/ChatReply {
+    text or(state.text, "")
+    tool-indices or(state.tool-order, [])
+    calls map(tool-indices, (idx) {
+        block get-in(state, ["tool-blocks", idx])
+        json-str or(block.input-json, "")
+        parsed cond {
+            is-empty(json-str) => { {} }
+            => {
+                decoded from-json(json-str)
+                if(is-err(decoded), {}, decoded)
+            }
+        }
+
+        ::ai-tool/ToolCall({id: block.id, name: block.name, input: parsed})
+    })
+
+    finish or(state.finish-reason, "stop")
+    usage {
+        input-tokens: or(state.usage-input, 0),
+        output-tokens: or(state.usage-output, 0)
+    }
+
+    ::ai-chat/ChatReply({
+        text: if(is-empty(text), null, text),
+        tool-calls: if(is-empty(calls), null, calls),
+        stop-reason: finish,
+        usage: usage,
+        raw: null
+    })
+}
+
+chat-with-tools-stream
+meta {
+    doc: """
+    Streaming counterpart to `chat-with-tools`, compatible with
+    `::ai::chat/run-loop-stream`. Translates OpenAI SSE events into
+    provider-agnostic `::ai::chat/ReplyDelta` events delivered via
+    `on-delta`, and returns a fully-aggregated `ChatReply` once
+    the stream terminates.
+
+    To get usage totals, OpenAI requires
+    `stream_options: {include_usage: true}` — this adapter sets that
+    automatically.
+
+    Parameters
+
+    - `model` — OpenAI model id.
+    - `messages` — conversation history as `Vec<::ai::chat/Message>`.
+    - `system` — optional system prompt.
+    - `tools` — optional `Vec<::ai::tool/Tool>`.
+    - `on-delta` — callback `(delta: ReplyDelta): Null` invoked for
+      every event during streaming.
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+    sys-prefix if(
+        is-null(system),
+        [],
+        [{role: "system", content: system}]
+    )
+    body-msgs map(messages, to-openai-message)
+    oai-messages concat(sys-prefix, body-msgs)
+    oai-tools if(is-null(tools), null, map(tools, to-openai-tool))
+
+    base {
+        model: model,
+        messages: oai-messages,
+        max_completion_tokens: DEFAULT_MAX_TOKENS,
+        stream_options: {include_usage: true}
+    }
+
+    with-tools if(is-null(oai-tools), base, assoc(base, "tools", oai-tools))
+
+    response ::oai-chat/complete-stream(::oai-chat/ChatCompletionRequest(with-tools))
+
+    final-state drain-openai-stream(response.body, on-delta, EMPTY_STREAM_STATE)
+    emit-tool-use-ends(final-state, on-delta)
+    reply finalize-stream-state(final-state)
+
+    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+    reply
+}

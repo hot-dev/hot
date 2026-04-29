@@ -1,0 +1,29 @@
+::postmark::retry ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+StandardPostmarkResponse type {
+    ErrorCode: Int?,
+    Message: Str?
+}
+
+RetryInboundMessageProcessingRequest type {
+  messageid: Str
+}
+
+RetryInboundMessageProcessingResponse type {
+    ErrorCode: Int?,
+    Message: Str?
+}
+
+
+retry-failed-inbound-message-processing
+meta {
+    doc: """Retry processing of a failed inbound message, re-triggering the inbound webhook."""
+}
+fn (request: RetryInboundMessageProcessingRequest): RetryInboundMessageProcessingResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/retry`)
+  if(is-ok-response(response), RetryInboundMessageProcessingResponse(response.body), err(HttpError(response)))
+}

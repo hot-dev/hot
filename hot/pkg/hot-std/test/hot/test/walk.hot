@@ -1,0 +1,180 @@
+::hot::test::walk ns
+untype ::hot::type/untype
+postwalk ::hot::coll/postwalk
+prewalk ::hot::coll/prewalk
+is-type ::hot::type/is-type
+uppercase ::hot::str/uppercase
+assert-eq ::hot::test/assert-eq
+if ::hot::bool/if
+
+// Test data with Hot type metadata
+typed-structure {
+    "$type": "MessagesPostRequest",
+    model: "claude-3-5-sonnet-20241022",
+    messages: [
+        {
+            "$type": "InputMessage",
+            role: "user",
+            content: "Hello, Claude!"
+        }
+    ],
+    max_tokens: 100
+}
+
+nested-typed-structure {
+    "$type": "Response",
+    "$val": {
+        status: "ok",
+        data: {
+            "$type": "UserData",
+            name: "John",
+            age: 30,
+            preferences: {
+                "$type": "Preferences",
+                "$val": {
+                    theme: "dark",
+                    notifications: true
+                }
+            }
+        }
+    }
+}
+
+test-untype-simple
+meta ["test"] fn () {
+    result untype(typed-structure)
+    expected {
+        model: "claude-3-5-sonnet-20241022",
+        messages: [
+            {
+                role: "user",
+                content: "Hello, Claude!"
+            }
+        ],
+        max_tokens: 100
+    }
+
+    assert-eq(expected, result)
+}
+
+test-untype-nested
+meta ["test"] fn () {
+    result untype(nested-typed-structure)
+    expected {
+        status: "ok",
+        data: {
+            name: "John",
+            age: 30,
+            preferences: {
+                theme: "dark",
+                notifications: true
+            }
+        }
+    }
+
+    assert-eq(expected, result)
+}
+
+// Test postwalk - should apply function after walking children
+test-postwalk
+meta ["test"] fn () {
+    data {name: "alice", items: ["apple", "banana"]}
+    result postwalk((x) {
+            if(is-type(x, Str), uppercase(x), x)
+        }, data)
+    expected {name: "ALICE", items: ["APPLE", "BANANA"]}
+    assert-eq(expected, result)
+}
+
+// Test prewalk - should apply function before walking children
+test-prewalk
+meta ["test"] fn () {
+    data {x: 1, items: [2, 3]}
+    result prewalk((x) {
+            if(is-type(x, Int), mul(x, 10), x)
+        }, data)
+    expected {x: 10, items: [20, 30]}
+    assert-eq(expected, result, "prewalk transforms ints before recursing")
+}
+
+test-prewalk-strings
+meta ["test"] fn () {
+    data ["hello", ["world", "foo"]]
+    result prewalk((x) {
+            if(is-type(x, Str), uppercase(x), x)
+        }, data)
+    expected ["HELLO", ["WORLD", "FOO"]]
+    assert-eq(expected, result, "prewalk uppercases all strings in nested structure")
+}
+
+test-untype-anthropic-request
+meta ["test"] fn () {
+    anthropic-request {
+        "$type": "MessagesPostRequest",
+        model: {
+            "$type": "Model",
+            "$val": "claude-3-5-sonnet-20241022"
+        },
+        messages: [
+            {
+                "$type": "InputMessage",
+                role: "user",
+                content: "Hello, Claude!"
+            }
+        ],
+        max_tokens: 100,
+        "$metadata": "should be removed"
+    }
+
+    result untype(anthropic-request)
+    expected {
+        model: "claude-3-5-sonnet-20241022",
+        messages: [
+            {
+                role: "user",
+                content: "Hello, Claude!"
+            }
+        ],
+        max_tokens: 100
+    }
+
+    assert-eq(expected, result)
+}
+
+test-transform-hot-to-simple
+meta ["test"] fn () {
+    // This is what you might get from Hot type constructors
+    hot-typed-data {
+        "$type": "ApiRequest",
+        endpoint: "/api/users",
+        payload: {
+            "$type": "UserPayload",
+            "$val": {
+                name: "John Doe",
+                email: "john@example.com",
+                metadata: {
+                    "$type": "Metadata",
+                    created_at: "2024-01-01",
+                    source: "web"
+                }
+            }
+        }
+    }
+
+    // Transform to simple structure for JSON serialization or external APIs
+    simple-data untype(hot-typed-data)
+
+    expected-simple {
+        endpoint: "/api/users",
+        payload: {
+            name: "John Doe",
+            email: "john@example.com",
+            metadata: {
+                created_at: "2024-01-01",
+                source: "web"
+            }
+        }
+    }
+
+    assert-eq(expected-simple, simple-data)
+}

@@ -1,0 +1,105 @@
+::openai::test::live-smoke ns
+meta {
+    doc: """
+    Live network smoke tests for the OpenAI adapter.
+
+    These tests are gated by the `HOT_LIVE_TESTS` env var so they don't
+    run as part of the normal test suite (which is hermetic and offline).
+    They also require a real `OPENAI_API_KEY`.
+
+    To run:
+
+    ```bash
+    HOT_LIVE_TESTS=1 OPENAI_API_KEY=sk-... hot test ::openai::test::live-smoke
+    ```
+
+    When `HOT_LIVE_TESTS` is unset (the default) every test in this
+    namespace short-circuits with a passing assertion so CI stays green.
+    """
+}
+
+::env      ::hot::env
+::ct       ::openai::chat-tools
+::ai-chat  ::ai::chat
+::ai-tool  ::ai::tool
+
+LIVE_TESTS_ENV "HOT_LIVE_TESTS"
+OPENAI_KEY_ENV "OPENAI_API_KEY"
+SMOKE_MODEL "gpt-4o-mini"
+
+is-live-enabled fn (): Bool {
+    flag ::env/get(LIVE_TESTS_ENV, "")
+    key ::env/get(OPENAI_KEY_ENV, "")
+    and(not(is-empty(flag)), not(is-empty(key)))
+}
+
+skip-if-not-live fn (test-name: Str): Bool {
+    cond {
+        is-live-enabled() => { false }
+        => {
+            tap(`[live-smoke] skipping ${test-name}: set ${LIVE_TESTS_ENV}=1 + ${OPENAI_KEY_ENV} to run`)
+            true
+        }
+    }
+}
+
+add-int
+meta { doc: """Test fixture: pure addition for tool-use smoke.""" }
+fn (x: Int, y: Int): Int { add(x, y) }
+
+test-openai-chat-text-only
+meta ["test"]
+fn () {
+    cond {
+        skip-if-not-live("test-openai-chat-text-only") => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                chat-fn: ::ct/chat-with-tools,
+                model: SMOKE_MODEL,
+                system: "You are a terse assistant. Reply with one word.",
+                max-iterations: 1
+            })
+            reply ::ai-chat/run-loop(opts, "Say hello.")
+            assert(is-some(reply.text), "expected text reply")
+            assert(is-some(reply.usage), "expected usage info")
+            assert(gt(reply.usage.input-tokens, 0), "input-tokens > 0")
+            assert(gt(reply.usage.output-tokens, 0), "output-tokens > 0")
+        }
+    }
+}
+
+test-openai-chat-tool-use
+meta ["test"]
+fn () {
+    cond {
+        skip-if-not-live("test-openai-chat-tool-use") => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                chat-fn: ::ct/chat-with-tools,
+                model: SMOKE_MODEL,
+                system: "Use the add-int tool to compute sums. Don't guess.",
+                tools: [::ai-tool/from-fn(add-int, {description: "Adds two integers."})],
+                max-iterations: 4
+            })
+            reply ::ai-chat/run-loop(opts, "What is 17 + 25? Use the tool.")
+            assert(is-some(reply.text), "expected final text reply")
+            text reply.text
+            assert(contains(text, "42"), `expected "42" in reply, got: ${text}`)
+        }
+    }
+}
+
+test-openai-count-tokens-heuristic
+meta ["test"]
+fn () {
+    cond {
+        skip-if-not-live("test-openai-count-tokens-heuristic") => { assert(true) }
+        => {
+            messages [
+                ::ai-chat/Message({role: "user", content: "ping"})
+            ]
+            n ::ct/count-tokens(messages, SMOKE_MODEL)
+            assert(gt(n, 0), `expected positive token count, got ${n}`)
+        }
+    }
+}

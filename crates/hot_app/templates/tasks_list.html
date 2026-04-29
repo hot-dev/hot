@@ -1,0 +1,424 @@
+{% extends "private_layout.html" %}
+
+{% block sse_data_attrs %}data-sse-mode="manual"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
+{% block content %}
+<div>
+    <!-- Filter Controls -->
+    <div x-data="tasksListFilters"
+         data-selected-statuses="{{ selected_statuses.join(",") }}"
+         data-selected-task-types="{{ selected_task_types.join(",") }}"
+         data-selected-time-range="{{ selected_time_range }}"
+         data-search-query="{{ search_query }}"
+         data-current-page="{{ current_page_num }}"
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <!-- First Row: Search -->
+        <div class="mb-3">
+            <div class="relative">
+                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
+                        <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 100 13.5 6.75 6.75 0 000-13.5zM2.25 10.5a8.25 8.25 0 1114.59 5.28l4.69 4.69a.75.75 0 11-1.06 1.06l-4.69-4.69A8.25 8.25 0 012.25 10.5z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+                <input
+                    type="text"
+                    x-model="searchQuery"
+                    placeholder="Search by Task ID, Function, Image, Args, Stream ID, or Type..."
+                    class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+            </div>
+        </div>
+
+        <!-- Second Row: Filter Dropdowns -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <!-- Task Status Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M2.25 13.5a8.25 8.25 0 0 1 8.25-8.25.75.75 0 0 1 .75.75v6.75H18a.75.75 0 0 1 .75.75 8.25 8.25 0 0 1-16.5 0Z" clip-rule="evenodd" />
+                                <path fill-rule="evenodd" d="M12.75 3a.75.75 0 0 1 .75-.75 8.25 8.25 0 0 1 8.25 8.25.75.75 0 0 1-.75.75h-7.5V3Z" clip-rule="evenodd" />
+                            </svg>
+                            <span x-text="selectedStatuses.length === 5 ? 'All Statuses' : selectedStatuses.length + ' selected'"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="toggleStatus('queued')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Queued</span>
+                                    <svg x-show="selectedStatuses.includes('queued')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('running')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Running</span>
+                                    <svg x-show="selectedStatuses.includes('running')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('completed')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Completed</span>
+                                    <svg x-show="selectedStatuses.includes('completed')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('failed')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Failed</span>
+                                    <svg x-show="selectedStatuses.includes('failed')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('timed_out')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Timed Out</span>
+                                    <svg x-show="selectedStatuses.includes('timed_out')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Task Type Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>
+                            </svg>
+                            <span x-text="selectedTaskTypes.length === 2 ? 'All Task Types' : selectedTaskTypes.length + ' selected'"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="toggleTaskType('code')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Code</span>
+                                    <svg x-show="selectedTaskTypes.includes('code')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleTaskType('container')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Container</span>
+                                    <svg x-show="selectedTaskTypes.includes('container')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Time Range Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/>
+                                <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>
+                            </svg>
+                            <span x-text="getTimeRangeText()"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="timeRange = 'all'; open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>All Time</span>
+                                    <svg x-show="timeRange === 'all'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P90D'; open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 90 Days</span>
+                                    <svg x-show="timeRange === 'P90D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P30D'; open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 30 Days</span>
+                                    <svg x-show="timeRange === 'P30D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P7D'; open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 7 Days</span>
+                                    <svg x-show="timeRange === 'P7D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="timeRange = 'P1D'; open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 24 Hours</span>
+                                    <svg x-show="timeRange === 'P1D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Desktop Table View -->
+    <div class="hidden md:block rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+        <div id="tasks-table-content" class="responsive-table overflow-auto">
+            {% include "components/tasks_table_content.html" %}
+        </div>
+    </div>
+
+    <!-- Mobile Card View -->
+    <div class="md:hidden">
+        <div id="tasks-mobile-content" class="space-y-4">
+        {% for task in tasks %}
+        <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+            <div class="flex justify-between items-start mb-3">
+                <div class="text-sm font-medium text-gray-900 dark:text-white">
+                    Task <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ task.task_id }}" title="Copy {{ task.task_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                {% if task.status == "completed" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ task.status }}</span>
+                {% else if task.status == "running" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">{{ task.status }}</span>
+                {% else if task.status == "failed" || task.status == "timed_out" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ task.status }}</span>
+                {% else if task.status == "queued" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ task.status }}</span>
+                {% else %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">{{ task.status }}</span>
+                {% endif %}
+            </div>
+
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between items-center">
+                    <span class="text-gray-600 dark:text-gray-400">Type:</span>
+                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ task.task_type }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">FN:</span>
+                    <span class="text-gray-700 dark:text-gray-300">
+                        <code class="language-hot text-xs">{{ task.function_name }}</code>
+                    </span>
+                </div>
+                {% if let Some(image) = task.container_image %}
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Image:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs truncate max-w-[60%]" title="{{ image }}">{{ image }}</span>
+                </div>
+                {% endif %}
+                {% if let Some(snippet) = task.container_cmd_snippet %}
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Cmd:</span>
+                    <span class="text-gray-700 dark:text-gray-300 text-xs font-mono truncate max-w-[60%]" title="{{ snippet }}">{{ snippet }}</span>
+                </div>
+                {% endif %}
+                {% match task.origin_run_fn %}
+                {% when Some with (fn_name) %}
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Origin FN:</span>
+                    <span class="text-gray-700 dark:text-gray-300">
+                        <code class="language-hot text-xs">{{ fn_name }}</code>
+                    </span>
+                </div>
+                {% when None %}
+                {% endmatch %}
+                {% match task.origin_run_id %}
+                {% when Some with (run_id) %}
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Origin Run:</span>
+                    <span class="text-gray-700 dark:text-gray-300">
+                        <div class="uuid-container inline-flex items-center gap-1">
+                            <a href="/runs/{{ run_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all text-xs" data-full-uuid="{{ run_id }}" title="{{ run_id }}">{{ run_id|shortuuid }}</a>
+                        </div>
+                    </span>
+                </div>
+                {% when None %}
+                {% endmatch %}
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Created:</span>
+                    <span class="text-gray-700 dark:text-gray-300">{{ task.created_at_formatted }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Duration:</span>
+                    <span class="text-gray-700 dark:text-gray-300">{{ task.duration_formatted }}</span>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                <a href="/tasks/{{ task.task_id }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all duration-200 font-medium">View Details</a>
+            </div>
+        </div>
+        {% endfor %}
+        {% if tasks.is_empty() %}
+        <div class="text-center text-gray-500 dark:text-gray-400 py-8">
+            No tasks found.
+        </div>
+        {% endif %}
+    </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('tasksListFilters', function() {
+        return {
+            searchQuery: this.$el.dataset.searchQuery || '',
+            selectedStatuses: (this.$el.dataset.selectedStatuses || '').split(',').filter(s => s),
+            selectedTaskTypes: (this.$el.dataset.selectedTaskTypes || '').split(',').filter(s => s),
+            timeRange: this.$el.dataset.selectedTimeRange || 'all',
+            currentPage: parseInt(this.$el.dataset.currentPage) || 1,
+            _debounceTimer: null,
+
+            init() {
+                window.tasksListComponent = this;
+
+                this.$watch('selectedStatuses', () => { this.currentPage = 1; this.applyFilters(); });
+                this.$watch('selectedTaskTypes', () => { this.currentPage = 1; this.applyFilters(); });
+                this.$watch('timeRange', () => { this.currentPage = 1; this.applyFilters(); });
+                this.$watch('searchQuery', () => { this.debouncedSearch(); });
+            },
+
+            debouncedSearch() {
+                clearTimeout(this._debounceTimer);
+                this._debounceTimer = setTimeout(() => {
+                    this.currentPage = 1;
+                    this.applyFilters();
+                }, 300);
+            },
+
+            toggleStatus(status) {
+                if (this.selectedStatuses.includes(status)) {
+                    this.selectedStatuses = this.selectedStatuses.filter(s => s !== status);
+                } else {
+                    this.selectedStatuses.push(status);
+                }
+            },
+
+            toggleTaskType(type) {
+                if (this.selectedTaskTypes.includes(type)) {
+                    this.selectedTaskTypes = this.selectedTaskTypes.filter(t => t !== type);
+                } else {
+                    this.selectedTaskTypes.push(type);
+                }
+            },
+
+            getTimeRangeText() {
+                const map = { 'all': 'All Time', 'P90D': 'Last 90 Days', 'P30D': 'Last 30 Days', 'P7D': 'Last 7 Days', 'P1D': 'Last 24 Hours' };
+                return map[this.timeRange] || 'All Time';
+            },
+
+            goToPage(page) {
+                this.currentPage = page;
+                this.applyFilters();
+            },
+
+            applyFilters() {
+                const params = new URLSearchParams();
+
+                if (this.currentPage > 1) params.set('p', this.currentPage);
+                if (this.selectedStatuses.length > 0 && this.selectedStatuses.length < 5) {
+                    params.set('statuses', this.selectedStatuses.join(','));
+                }
+                if (this.selectedTaskTypes.length > 0 && this.selectedTaskTypes.length < 2) {
+                    params.set('task_types', this.selectedTaskTypes.join(','));
+                }
+                if (this.timeRange !== 'all') params.set('time_range', this.timeRange);
+                if (this.searchQuery && this.searchQuery.trim() !== '') {
+                    params.set('search', this.searchQuery.trim());
+                }
+
+                const baseUrl = '/tasks';
+                const queryString = params.toString();
+                const url = queryString ? `${baseUrl}?${queryString}` : baseUrl;
+
+                // On mobile, do full page navigation since HTMX only updates the desktop table
+                if (window.innerWidth < 768) {
+                    window.location.href = url;
+                    return;
+                }
+
+                history.pushState({}, '', url);
+
+                htmx.ajax('GET', url, {
+                    target: '#tasks-table-content',
+                    swap: 'innerHTML'
+                }).then(() => {
+                    if (typeof initializeUuidDisplays === 'function') initializeUuidDisplays();
+                    if (typeof initializeCopyButtons === 'function') initializeCopyButtons();
+                    if (typeof Prism !== 'undefined') {
+                        document.querySelectorAll('#tasks-table-content code.language-hot').forEach(el => Prism.highlightElement(el));
+                    }
+                });
+            }
+        };
+    });
+});
+
+window.sseRefreshCallback = function() {
+    if (window.tasksListComponent) {
+        window.tasksListComponent.applyFilters();
+    }
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof initializeUuidDisplays === 'function') initializeUuidDisplays();
+    if (typeof initializeCopyButtons === 'function') initializeCopyButtons();
+    if (typeof Prism !== 'undefined') {
+        document.querySelectorAll('code.language-hot').forEach(el => Prism.highlightElement(el));
+    }
+});
+</script>
+{% endblock %}

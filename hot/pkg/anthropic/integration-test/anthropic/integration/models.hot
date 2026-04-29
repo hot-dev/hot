@@ -1,0 +1,50 @@
+::anthropic::integration::models ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Anthropic Models API
+// =============================================================================
+// These tests require ANTHROPIC_API_KEY to be set in context (via ctx.hot or conf)
+
+test-models-list
+meta ["test"]
+fn () {
+    models ::anthropic::models/list()
+
+    assert(models.data, "Response should have data array")
+    assert(gt(length(models.data), 0), "Should have at least one model")
+
+    // Check first model has expected fields
+    first-model first(models.data)
+    assert(first-model.id, "Model should have id")
+    assert(first-model.display_name, "Model should have display_name")
+    assert(first-model.created_at, "Model should have created_at")
+}
+
+test-models-list-with-limit
+meta ["test"]
+fn () {
+    models ::anthropic::models/list(2)
+
+    assert(models.data, "Response should have data array")
+    assert(lte(length(models.data), 2), "Should respect limit parameter")
+}
+
+test-models-get
+meta ["test"]
+fn () {
+    model ::anthropic::models/get("claude-3-haiku-20240307")
+
+    assert-eq("claude-3-haiku-20240307", model.id, "Model id should match")
+    assert(model.display_name, "Model should have display_name")
+    assert(model.created_at, "Model should have created_at")
+}
+
+test-models-get-sonnet
+meta ["test"]
+fn () {
+    model ::anthropic::models/get("claude-sonnet-4-20250514")
+
+    assert-eq("claude-sonnet-4-20250514", model.id, "Model id should match")
+    assert(model.display_name, "Model should have display_name")
+}

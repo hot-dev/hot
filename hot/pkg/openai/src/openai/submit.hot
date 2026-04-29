@@ -1,0 +1,106 @@
+::openai::submit ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// Response format: "auto", or {type: "json_object"}, or {type: "json_schema", json_schema: {...}}
+AssistantsApiResponseFormatOption type Any
+
+// Run status identifier (e.g. "queued", "in_progress", "completed", "failed", "cancelled", "expired")
+RunStatus type Str
+
+// Whether to allow parallel function calls during tool use
+ParallelToolCalls type Bool
+
+SubmitToolOutputsRunRequest type {
+    tool_outputs: Vec<Map>,
+    stream: Bool?
+}
+
+RunObject type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+// Tool definition for an assistant (code_interpreter, file_search, or function)
+AssistantTool type Map
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+RunCompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int
+}
+
+SubmitToolOuputsToRunRequest type {
+    tool_outputs: Vec<Map>,
+    stream: Bool?
+}
+
+SubmitToolOuputsToRunResponse type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+
+submit-tool-outputs-run
+meta {
+    doc: """POST /threads/{thread_id}/runs/{run_id}/submit_tool_outputs - Submit tool call outputs to continue a run that requires action."""
+}
+fn (thread-id: Str, run-id: Str, request: SubmitToolOuputsToRunRequest): SubmitToolOuputsToRunResponse {
+  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/runs/${run-id}/submit_tool_outputs`, {}, request)
+  if(is-ok-response(response), SubmitToolOuputsToRunResponse(response.body), err(HttpError(response)))
+}

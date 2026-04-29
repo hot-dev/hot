@@ -1,0 +1,175 @@
+<!--
+  Issues Section - Failed Runs, Failed Tasks & Unhandled Events.
+
+  All three tables render a small set of pulsing skeleton rows on first
+  paint. The actual rows are loaded by the JS task queue in dashboard.html
+  via `/dashboard/widgets/{failed-runs,failed-tasks,unhandled-events}`,
+  which replaces the entire `*-container` innerHTML.
+-->
+<div class="space-y-6">
+    <!-- Failed Runs -->
+    <div id="issues-failed-runs" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4">
+        <div class="flex items-center space-x-3 mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-red-600 dark:text-red-400">
+                <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
+            </svg>
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">Failed Runs</h3>
+        </div>
+        <div id="failed-runs-container">
+            <div class="overflow-x-auto hidden md:block rounded-lg border border-gray-200 dark:border-gray-700">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-900/50">
+                        <tr>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Run ID</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Start Time</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody id="failed-runs-list" class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="failed-runs-mobile" class="md:hidden space-y-3">
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                    <div class="h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                    <div class="h-3 w-48 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                </div>
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                    <div class="h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                    <div class="h-3 w-48 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Failed Tasks -->
+    <div id="issues-failed-tasks" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4">
+        <div class="flex items-center space-x-3 mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-pink-600 dark:text-pink-400">
+                <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
+            </svg>
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">Failed Tasks</h3>
+        </div>
+        <div id="failed-tasks-container">
+            <div class="overflow-x-auto hidden md:block rounded-lg border border-gray-200 dark:border-gray-700">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-900/50">
+                        <tr>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Task ID</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Origin FN</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody id="failed-tasks-list" class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="failed-tasks-mobile" class="md:hidden space-y-3">
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                    <div class="h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                    <div class="h-3 w-48 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                </div>
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                    <div class="h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                    <div class="h-3 w-48 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unhandled Events -->
+    <div id="issues-unhandled-events" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4">
+        <div class="flex items-center space-x-3 mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-orange-600 dark:text-orange-400">
+                <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
+            </svg>
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white">Unhandled Events</h3>
+        </div>
+        <div id="unhandled-events-container">
+            <div class="overflow-x-auto hidden md:block rounded-lg border border-gray-200 dark:border-gray-700">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-900/50">
+                        <tr>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Event ID</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Event Time</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Type</th>
+                            <th scope="col" class="px-3 py-2 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
+                        </tr>
+                    </thead>
+                    <tbody id="unhandled-events-list" class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-20 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-20 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                        <tr>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-24 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-20 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                            <td class="px-3 py-3"><span class="inline-block h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="unhandled-events-mobile" class="md:hidden space-y-3">
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                    <div class="h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                    <div class="h-3 w-48 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                </div>
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3 space-y-2">
+                    <div class="h-3 w-32 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                    <div class="h-3 w-48 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

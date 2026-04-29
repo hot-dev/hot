@@ -1,0 +1,981 @@
+{% extends "private_layout.html" %}
+
+{% block head %}
+<style>
+/* Docs content styling */
+.docs-content {
+  color: rgb(55 65 81);
+  line-height: 1.7;
+}
+.dark .docs-content {
+  color: rgb(209 213 219);
+}
+
+.docs-content h1 {
+  font-size: 1.875rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  color: rgb(17 24 39);
+}
+.dark .docs-content h1 {
+  color: rgb(255 255 255);
+}
+
+.docs-content h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgb(229 231 235);
+  color: rgb(17 24 39);
+}
+.dark .docs-content h2 {
+  border-bottom-color: #333;
+  color: rgb(255 255 255);
+}
+
+.docs-content h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: rgb(17 24 39);
+}
+.dark .docs-content h3 {
+  color: rgb(255 255 255);
+}
+
+.docs-content h3 code {
+  font-size: 1.125rem;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.docs-content p {
+  margin: 1rem 0;
+}
+
+/* Inline code */
+.docs-content code:not(pre code) {
+  background-color: rgb(243 244 246);
+  color: rgb(220 38 38);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  font-family: 'Fira Code', ui-monospace, monospace;
+}
+.dark .docs-content code:not(pre code) {
+  background-color: #1a1a1a;
+  color: #ffa4a4;
+}
+
+/* Code blocks - Light mode */
+.docs-content pre {
+  background-color: #f6f8fa;
+  border: 1px solid #d1d5db;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+.docs-content pre code {
+  background: none;
+  color: #24292f;
+  padding: 0;
+  font-size: 0.875rem;
+  font-family: 'Fira Code', ui-monospace, monospace;
+  line-height: 1.6;
+}
+
+/* Code blocks - Dark mode */
+.dark .docs-content pre {
+  background-color: #0d0d0d;
+  border-color: #333;
+}
+.dark .docs-content pre code {
+  color: #e6edf3;
+}
+
+/* Function signature blocks - distinct blue-tinted background */
+.docs-content pre.fn-signature,
+.docs-content pre.fn-signature[class*="language-"] {
+  background: #eef4fc !important;
+  border: 1px solid #bfdbfe !important;
+  border-left: 3px solid #3b82f6 !important;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0 1rem 0;
+  font-size: 0.9rem;
+  border-radius: 0.375rem;
+}
+.dark .docs-content pre.fn-signature,
+.dark .docs-content pre.fn-signature[class*="language-"] {
+  background: #172033 !important;
+  border-color: #1e3a5f !important;
+  border-left-color: #3b82f6 !important;
+}
+
+/* Core badge */
+.docs-content .core-badge {
+  background: rgb(229 231 235);
+  color: rgb(75 85 99);
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.dark .docs-content .core-badge {
+  background: rgb(55 65 81);
+  color: rgb(156 163 175);
+}
+
+/* Meta indicator badges */
+.docs-content .meta-badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 9999px;
+  font-size: 0.65rem;
+  font-weight: 500;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+.docs-content .meta-badge-sm {
+  font-size: 0.6rem;
+  padding: 0.05rem 0.35rem;
+}
+.docs-content .schedule-badge { background: rgb(224 231 255); color: rgb(67 56 202); }
+.docs-content .event-badge { background: rgb(237 233 254); color: rgb(109 40 217); }
+.docs-content .webhook-badge { background: rgb(255 237 213); color: rgb(194 65 12); }
+.docs-content .mcp-badge { background: rgb(204 251 241); color: rgb(17 94 89); }
+.docs-content .sends-badge { background: rgb(224 231 255); color: rgb(79 70 229); }
+.dark .docs-content .schedule-badge { background: rgb(49 46 129 / 0.4); color: rgb(165 180 252); }
+.dark .docs-content .event-badge { background: rgb(76 29 149 / 0.4); color: rgb(196 181 253); }
+.dark .docs-content .webhook-badge { background: rgb(124 45 18 / 0.4); color: rgb(253 186 116); }
+.dark .docs-content .mcp-badge { background: rgb(19 78 74 / 0.4); color: rgb(94 234 212); }
+.dark .docs-content .sends-badge { background: rgb(49 46 129 / 0.4); color: rgb(165 180 252); }
+.docs-content .ns-meta-pills { margin-left: 0.5rem; }
+.docs-content .ns-meta-pills .meta-badge { margin-left: 0.25rem; }
+.docs-content .meta-details {
+  background: rgb(249 250 251);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+}
+.dark .docs-content .meta-details {
+  background: rgb(31 41 55);
+  border-color: rgb(55 65 81);
+}
+.docs-content .meta-detail {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+.docs-content .meta-detail code {
+  font-size: 0.8rem;
+  background: none;
+  padding: 0;
+}
+
+/* Breadcrumb */
+.docs-content .breadcrumb {
+  color: #6b7280;
+  margin-bottom: 0.5rem;
+  font-family: 'Fira Code', monospace;
+}
+.dark .docs-content .breadcrumb {
+  color: #9ca3af;
+}
+.docs-content .breadcrumb a {
+  color: #cf2425;
+}
+.dark .docs-content .breadcrumb a {
+  color: #ffa4a4;
+}
+.docs-content .breadcrumb .ns-current {
+  color: #374151;
+}
+.dark .docs-content .breadcrumb .ns-current {
+  color: #e5e7eb;
+}
+
+/* Context Variables section styling */
+.docs-content .ctx-requirements {
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-left: 3px solid #22c55e;
+  border-radius: 0.375rem;
+  padding: 1rem;
+  margin: 0.5rem 0 1.5rem 0;
+}
+.dark .docs-content .ctx-requirements {
+  background: #052e16;
+  border-color: #166534;
+  border-left-color: #22c55e;
+}
+.docs-content .ctx-section {
+  margin-bottom: 0.5rem;
+}
+.docs-content .ctx-section:last-child {
+  margin-bottom: 0;
+}
+.docs-content .ctx-label {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  margin-bottom: 0.25rem;
+}
+.docs-content .ctx-required {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.dark .docs-content .ctx-required {
+  background: #450a0a;
+  color: #fca5a5;
+}
+.docs-content .ctx-optional {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.dark .docs-content .ctx-optional {
+  background: #172554;
+  color: #93c5fd;
+}
+.docs-content .ctx-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0.25rem 0 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.docs-content .ctx-list li {
+  margin: 0;
+}
+.docs-content .ctx-list code {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.85rem;
+}
+.dark .docs-content .ctx-list code {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Function-level context vars (inline) */
+.docs-content .ctx-fn-requirements {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin: 0.5rem 0;
+  padding: 0.25rem 0;
+}
+.dark .docs-content .ctx-fn-requirements {
+  color: #9ca3af;
+}
+.docs-content .ctx-fn-label {
+  font-weight: 600;
+  color: #374151;
+}
+.dark .docs-content .ctx-fn-label {
+  color: #d1d5db;
+}
+.docs-content .ctx-fn-requirements code.ctx-req {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+}
+.dark .docs-content .ctx-fn-requirements code.ctx-req {
+  background: #450a0a;
+  color: #fca5a5;
+}
+.docs-content .ctx-fn-requirements code.ctx-opt {
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+}
+.dark .docs-content .ctx-fn-requirements code.ctx-opt {
+  background: #172554;
+  color: #93c5fd;
+}
+
+/* Tables */
+.docs-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.875rem;
+}
+.docs-content th {
+  background-color: rgb(243 244 246);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid rgb(229 231 235);
+}
+.dark .docs-content th {
+  background-color: #1a1a1a;
+  border-bottom-color: #333;
+}
+.docs-content td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgb(229 231 235);
+}
+.dark .docs-content td {
+  border-bottom-color: #333;
+}
+.docs-content tbody tr:hover {
+  background-color: rgb(249 250 251);
+}
+.dark .docs-content tbody tr:hover {
+  background-color: #111;
+}
+
+/* Namespace badge in tables */
+.docs-content code.namespace-badge {
+  background: rgb(243 244 246);
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  display: inline-block;
+}
+.dark .docs-content code.namespace-badge {
+  background: #333;
+}
+.docs-content code.namespace-badge a {
+  color: #cf2425;
+  text-decoration: none;
+}
+.docs-content code.namespace-badge a:hover {
+  text-decoration: underline;
+}
+.dark .docs-content code.namespace-badge a {
+  color: #ffa4a4;
+}
+
+/* Lists */
+.docs-content ul, .docs-content ol {
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+}
+.docs-content ul {
+  list-style-type: disc;
+}
+.docs-content ol {
+  list-style-type: decimal;
+}
+.docs-content li {
+  margin: 0.25rem 0;
+}
+
+/* Package metadata */
+.docs-content .pkg-meta {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: rgb(249 250 251);
+  border-radius: 0.5rem;
+  border: 1px solid rgb(229 231 235);
+}
+.dark .docs-content .pkg-meta {
+  background: #1a1a1a;
+  border-color: #333;
+}
+.docs-content .pkg-meta p {
+  margin: 0.25rem 0;
+}
+
+/* Add to project section */
+.add-to-project {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.75rem;
+}
+html.dark .add-to-project {
+  background: rgba(31, 41, 55, 0.5);
+  border-color: #374151;
+}
+.add-to-project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+.add-to-project-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #374151;
+  margin: 0;
+}
+html.dark .add-to-project-header h3 {
+  color: #d1d5db;
+}
+.add-to-project-header h3 svg {
+  width: 1rem;
+  height: 1rem;
+}
+.add-to-project .copy-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  color: #6b7280;
+  background: transparent;
+  border: none;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.add-to-project .copy-btn:hover {
+  color: #ef4444;
+  background: #f3f4f6;
+}
+html.dark .add-to-project .copy-btn:hover {
+  background: #374151;
+}
+.add-to-project .copy-btn svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.add-to-project .copy-btn .check-icon {
+  color: #22c55e;
+}
+.add-to-project .hidden {
+  display: none;
+}
+.add-to-project-note {
+  margin-top: 0.75rem;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+html.dark .add-to-project-note {
+  color: #9ca3af;
+}
+.add-to-project-note code {
+  padding: 0.125rem 0.25rem;
+  background: #e5e7eb;
+  border-radius: 0.25rem;
+  font-family: 'Fira Code', ui-monospace, monospace;
+}
+html.dark .add-to-project-note code {
+  background: #374151;
+}
+
+/* Deps code block - custom styling for install section */
+.deps-code-block,
+.docs-content .deps-code-block,
+.docs-content pre.deps-code-block {
+  background: #1e1e1e !important;
+  border: 1px solid #333 !important;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin: 0;
+  overflow-x: auto;
+  font-family: 'Fira Code', ui-monospace, monospace;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: #d4d4d4 !important;
+}
+.deps-code-block code,
+.docs-content .deps-code-block code,
+.docs-content pre.deps-code-block code {
+  background: none !important;
+  padding: 0;
+  color: #d4d4d4 !important;
+}
+.deps-code-block .dep-key,
+.docs-content .deps-code-block .dep-key {
+  color: #9cdcfe !important;
+}
+.deps-code-block .dep-string,
+.docs-content .deps-code-block .dep-string {
+  color: #ce9178 !important;
+}
+html.dark .deps-code-block,
+html.dark .docs-content .deps-code-block,
+html.dark .docs-content pre.deps-code-block {
+  background: #0d0d0d !important;
+  border-color: #333 !important;
+}
+
+/* Package description in h1 */
+.docs-content .pkg-description {
+  font-weight: 400;
+  font-size: 0.65em;
+  color: #6b7280;
+}
+.dark .docs-content .pkg-description {
+  color: #9ca3af;
+}
+
+/* Namespace header in tables */
+.docs-content .namespace-header {
+  font-family: 'Fira Code', monospace;
+  color: #6b7280;
+  margin-top: 1.5rem;
+}
+.dark .docs-content .namespace-header {
+  color: #9ca3af;
+}
+
+/* Prism.js syntax highlighting tokens - Light mode */
+.docs-content .token.comment { color: #6a737d !important; font-style: italic; }
+.docs-content .token.string, .docs-content .token.string-template { color: #0a3069 !important; }
+.docs-content .token.keyword { color: #cf222e !important; font-weight: 600; }
+.docs-content .token.boolean, .docs-content .token.null { color: #0550ae !important; font-weight: 600; }
+.docs-content .token.number { color: #0550ae !important; }
+.docs-content .token.special-identifier { color: #8250df !important; font-weight: 600; }
+.docs-content .token.namespace { color: #116329 !important; }
+.docs-content .token.function { color: #8250df !important; }
+.docs-content .token.type-constructor, .docs-content .token.class-name { color: #953800 !important; font-weight: 600; }
+.docs-content .token.meta-annotation { color: #953800 !important; }
+.docs-content .token.flow-modifier { color: #cf222e !important; font-weight: 600; }
+.docs-content .token.operator { color: #cf222e !important; }
+.docs-content .token.punctuation { color: #57606a !important; }
+.docs-content .token.property { color: #0550ae !important; }
+
+/* Prism.js syntax highlighting tokens - Dark mode */
+.dark .docs-content .token.comment { color: #8b949e !important; font-style: italic; }
+.dark .docs-content .token.string, .dark .docs-content .token.string-template { color: #a5d6ff !important; }
+.dark .docs-content .token.keyword { color: #ff7b72 !important; font-weight: 600; }
+.dark .docs-content .token.boolean, .dark .docs-content .token.null { color: #79c0ff !important; font-weight: 600; }
+.dark .docs-content .token.number { color: #79c0ff !important; }
+.dark .docs-content .token.special-identifier { color: #d2a8ff !important; font-weight: 600; }
+.dark .docs-content .token.namespace { color: #7ee787 !important; }
+.dark .docs-content .token.function { color: #d2a8ff !important; }
+.dark .docs-content .token.type-constructor, .dark .docs-content .token.class-name { color: #ffa657 !important; font-weight: 600; }
+.dark .docs-content .token.meta-annotation { color: #ffa657 !important; }
+.dark .docs-content .token.flow-modifier { color: #ff7b72 !important; font-weight: 600; }
+.dark .docs-content .token.operator { color: #ff7b72 !important; }
+.dark .docs-content .token.punctuation { color: #8b949e !important; }
+.dark .docs-content .token.property { color: #79c0ff !important; }
+
+/* Type links in signatures */
+.docs-content .type-link {
+  color: #953800 !important;
+  text-decoration: none;
+  font-weight: 600;
+}
+.docs-content .type-link:hover {
+  text-decoration: underline;
+}
+.dark .docs-content .type-link {
+  color: #ffa657 !important;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Search Modal -->
+<div id="search-modal" class="fixed inset-0 z-50 hidden">
+    <div class="fixed inset-0 bg-black/50" onclick="closeSearch()"></div>
+    <div class="fixed top-[10%] left-1/2 -translate-x-1/2 w-full max-w-xl mx-auto px-4">
+        <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <!-- Search input -->
+            <div class="flex items-center px-4 border-b border-gray-200 dark:border-gray-700">
+                <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <input id="search-input" type="text" placeholder="Search functions, types, namespaces..."
+                       class="w-full px-3 py-4 bg-transparent text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none text-lg"
+                       oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)">
+                <kbd class="hidden sm:inline-flex items-center px-2 py-1 text-xs text-gray-400 bg-gray-100 dark:bg-gray-700 rounded">ESC</kbd>
+            </div>
+            <!-- Results -->
+            <div id="search-results" class="max-h-[60vh] overflow-y-auto">
+                <div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
+                    Type to search functions, types, and namespaces
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="flex">
+    <!-- Left Sidebar Navigation -->
+    <aside class="hidden lg:block w-64 flex-shrink-0 border-r border-gray-200 dark:border-gray-700">
+        <div class="sticky top-0 h-screen overflow-y-auto p-4">
+            <!-- Search button -->
+            <button onclick="openSearch()" class="w-full flex items-center gap-2 px-3 py-2 mb-4 text-sm text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors border border-gray-200 dark:border-gray-700">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <span>Search...</span>
+                <kbd class="ml-auto text-xs text-gray-400 bg-white dark:bg-gray-900 px-1.5 py-0.5 rounded border border-gray-200 dark:border-gray-600">⌘K</kbd>
+            </button>
+
+            <!-- README and LICENSE links (for dependencies) -->
+            {% if is_dependency %}
+            <div class="mb-4 flex gap-2 text-xs">
+                <a href="/docs/{{ project_name }}/pkg/{{ dep_name }}/readme" class="flex items-center gap-1 px-2 py-1 rounded {% if current_path.ends_with("/readme") %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400{% endif %} transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    README
+                </a>
+                <a href="/docs/{{ project_name }}/pkg/{{ dep_name }}/license" class="flex items-center gap-1 px-2 py-1 rounded {% if current_path.ends_with("/license") %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400{% endif %} transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                    </svg>
+                    LICENSE
+                </a>
+            </div>
+            {% endif %}
+
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">
+                {% if is_dependency %}
+                {{ dep_name }}
+                {% else %}
+                Project Namespaces
+                {% endif %}
+            </h3>
+            <nav class="space-y-1">
+                {% for item in nav %}
+                {% if item.path.is_some() %}
+                {% let item_path = item.path.as_ref().unwrap() %}
+                <a href="{{ item_path }}"
+                   class="flex items-center px-3 py-2 text-sm rounded-md transition-all duration-200
+                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 dark:text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium{% else %}text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-[#222]/50{% endif %}">
+                    {{ item.title }}
+                </a>
+                {% else %}
+                <div class="px-3 py-2 text-sm font-medium text-gray-500 dark:text-gray-400 mt-4">
+                    {{ item.title }}
+                </div>
+                {% endif %}
+                {% for child in item.children %}
+                {% if child.path.is_some() %}
+                {% let child_path = child.path.as_ref().unwrap() %}
+                <a href="{{ child_path }}"
+                   class="flex items-center pl-6 pr-3 py-1.5 text-sm rounded-md transition-all duration-200
+                          {% if current_path == child_path.as_str() %}text-red-600 dark:text-red-400 dark:text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500{% else %}text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-[#222]/50 border-l border-gray-200 dark:border-gray-700{% endif %}">
+                    {{ child.title }}
+                </a>
+                {% endif %}
+                {% endfor %}
+                {% endfor %}
+            </nav>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 min-w-0 px-4 sm:px-8 py-8">
+        <div class="max-w-4xl docs-content">
+            {{ content|safe }}
+        </div>
+
+        <!-- Prev/Next Navigation -->
+        {% if prev_page.is_some() || next_page.is_some() %}
+        <div class="max-w-4xl mt-12 pt-8 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center text-sm">
+            {% match prev_page %}
+            {% when Some with (prev) %}
+            <a href="{{ prev.path.as_ref().unwrap() }}" class="flex items-center text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+                </svg>
+                {{ prev.title }}
+            </a>
+            {% when None %}
+            <span></span>
+            {% endmatch %}
+
+            {% match next_page %}
+            {% when Some with (next) %}
+            <a href="{{ next.path.as_ref().unwrap() }}" class="flex items-center text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+                {{ next.title }}
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+            </a>
+            {% when None %}
+            <span></span>
+            {% endmatch %}
+        </div>
+        {% endif %}
+    </main>
+
+    <!-- Right Sidebar TOC -->
+    {% if !toc.is_empty() %}
+    <aside class="hidden xl:block w-56 flex-shrink-0">
+        <div class="sticky top-0 h-screen overflow-y-auto p-4">
+            <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">On this page</h3>
+            <nav class="space-y-1">
+                {% for section in toc %}
+                <div class="mb-3">
+                    <div class="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-2">
+                        {{ section.title }}
+                    </div>
+                    {% for item in section.items %}
+                    <a href="#{{ item.anchor }}"
+                       class="block px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors rounded"
+                       style="{% if item.indent > 0 %}padding-left: {{ item.indent * 12 + 8 }}px{% endif %}">
+                        {{ item.name }}
+                        {% if item.is_core %}
+                        <span class="ml-1 text-xs text-red-600 dark:text-red-400">core</span>
+                        {% endif %}
+                        {% for badge in item.badges %}<span class="meta-badge {{ badge }}-badge meta-badge-sm" style="margin-left:2px">{{ badge }}</span>{% endfor %}
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endfor %}
+            </nav>
+        </div>
+    </aside>
+    {% endif %}
+</div>
+
+<script>
+// Search state
+var searchIndex = null;
+var searchResults = [];
+var selectedIndex = 0;
+var currentQuery = '';
+var projectName = '{{ project_name }}';
+
+// Syntax highlighting and type linking
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof Prism !== 'undefined') {
+        Prism.highlightAll();
+        // After Prism highlights, add type links to fn-signature blocks
+        linkifyTypesInSignatures();
+    }
+
+    // Add copy buttons to code blocks
+    document.querySelectorAll('pre code').forEach(function(codeBlock) {
+        var pre = codeBlock.parentElement;
+        if (pre.classList.contains('fn-signature')) return;
+
+        var wrapper = document.createElement('div');
+        wrapper.style.position = 'relative';
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(pre);
+
+        var btn = document.createElement('button');
+        btn.className = 'copy-btn absolute top-2 right-2 px-2 py-1 text-xs rounded bg-gray-700/50 hover:bg-gray-600/50 text-gray-300 transition-colors';
+        btn.textContent = 'Copy';
+        btn.onclick = function() {
+            navigator.clipboard.writeText(codeBlock.textContent).then(function() {
+                btn.textContent = 'Copied!';
+                setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+            });
+        };
+        wrapper.appendChild(btn);
+    });
+});
+
+// Type linking in function signatures
+function linkifyTypesInSignatures() {
+    // Get type registry from page data (if present)
+    var registryEl = document.getElementById('type-registry-data');
+    if (!registryEl) return;
+
+    var registry = {};
+    try {
+        registry = JSON.parse(registryEl.textContent || '{}');
+    } catch (e) {
+        return;
+    }
+
+    // Find all class-name tokens in fn-signature blocks
+    document.querySelectorAll('pre.fn-signature .token.class-name').forEach(function(span) {
+        var typeName = span.textContent;
+        var url = registry[typeName];
+        if (url) {
+            var link = document.createElement('a');
+            link.href = url;
+            link.className = 'type-link';
+            link.textContent = typeName;
+            span.textContent = '';
+            span.appendChild(link);
+        }
+    });
+}
+
+// Keyboard shortcut for search
+document.addEventListener('keydown', function(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        openSearch();
+    }
+    if (e.key === 'Escape') {
+        closeSearch();
+    }
+});
+
+function openSearch() {
+    document.getElementById('search-modal').classList.remove('hidden');
+    document.getElementById('search-input').focus();
+    document.body.style.overflow = 'hidden';
+
+    if (!searchIndex) {
+        loadSearchIndex();
+    }
+}
+
+function closeSearch() {
+    document.getElementById('search-modal').classList.add('hidden');
+    document.getElementById('search-input').value = '';
+    document.getElementById('search-results').innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">Type to search functions, types, and namespaces</div>';
+    document.body.style.overflow = '';
+    searchResults = [];
+    selectedIndex = 0;
+}
+
+function loadSearchIndex() {
+    fetch('/api/docs/' + projectName + '/search')
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            searchIndex = data.items || [];
+        })
+        .catch(function(err) {
+            console.error('Failed to load search index:', err);
+            searchIndex = [];
+        });
+}
+
+function onSearchInput(query) {
+    if (!searchIndex || query.length < 2) {
+        document.getElementById('search-results').innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">Type to search functions, types, and namespaces</div>';
+        searchResults = [];
+        currentQuery = '';
+        return;
+    }
+
+    currentQuery = query.toLowerCase();
+    var results = searchIndex.filter(function(item) {
+        return item.name.toLowerCase().includes(currentQuery) ||
+               item.namespace.toLowerCase().includes(currentQuery) ||
+               item.summary.toLowerCase().includes(currentQuery);
+    }).slice(0, 20);
+
+    searchResults = results;
+    selectedIndex = 0;
+    renderSearchResults();
+}
+
+function renderSearchResults() {
+    var resultsDiv = document.getElementById('search-results');
+
+    if (searchResults.length === 0) {
+        resultsDiv.innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">No results found</div>';
+        return;
+    }
+
+    var html = '<div class="py-2">';
+    for (var i = 0; i < searchResults.length; i++) {
+        var item = searchResults[i];
+        var isSelected = i === selectedIndex;
+        var kindIcon = getKindIcon(item.kind);
+        var kindBadge = getKindBadge(item.kind);
+
+        html += '<a href="' + item.path + '" class="block px-4 py-3 ' +
+            (isSelected ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-100 dark:hover:bg-[#222]/50') +
+            ' transition-colors cursor-pointer" data-index="' + i + '">' +
+            '<div class="flex items-start gap-3">' +
+            '<span class="flex-shrink-0 mt-0.5">' + kindIcon + '</span>' +
+            '<div class="min-w-0 flex-1">' +
+            '<div class="flex items-center gap-2">' +
+            '<span class="font-medium text-gray-900 dark:text-white">' + escapeHtml(item.name) + '</span>' +
+            kindBadge +
+            (item.is_core ? '<span class="px-1.5 py-0.5 text-xs font-medium bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded">core</span>' : '') +
+            '</div>' +
+            '<div class="text-sm text-gray-500 dark:text-gray-400 truncate">' + escapeHtml(item.namespace) + ' · ' + escapeHtml(item.pkg) + '</div>' +
+            (item.signature ? '<div class="text-xs text-gray-400 dark:text-gray-500 font-mono truncate mt-1">' + escapeHtml(item.signature) + '</div>' : '') +
+            (item.summary ? '<div class="text-sm text-gray-500 dark:text-gray-400 truncate mt-1">' + escapeHtml(item.summary) + '</div>' : '') +
+            '</div></div></a>';
+    }
+    html += '</div>';
+    resultsDiv.innerHTML = html;
+}
+
+function getKindIcon(kind) {
+    if (kind === 'function') {
+        return '<svg class="w-4 h-4 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>';
+    } else if (kind === 'type') {
+        return '<svg class="w-4 h-4 text-purple-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>';
+    } else {
+        return '<svg class="w-4 h-4 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>';
+    }
+}
+
+function getKindBadge(kind) {
+    var colors = {
+        'function': 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400',
+        'type': 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400',
+        'namespace': 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+    };
+    return '<span class="px-1.5 py-0.5 text-xs font-medium rounded ' + (colors[kind] || '') + '">' + kind + '</span>';
+}
+
+function escapeHtml(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function onSearchKeydown(event) {
+    if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (selectedIndex < searchResults.length - 1) {
+            selectedIndex++;
+            renderSearchResults();
+        }
+    } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (selectedIndex > 0) {
+            selectedIndex--;
+            renderSearchResults();
+        }
+    } else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (searchResults[selectedIndex]) {
+            window.location.href = searchResults[selectedIndex].path;
+        }
+    } else if (event.key === 'Escape') {
+        closeSearch();
+    }
+}
+
+// Copy deps to clipboard (for package index page)
+function copyDepsToClipboard() {
+    var addToProject = document.querySelector('.add-to-project');
+    if (!addToProject) return;
+
+    var codeEl = addToProject.querySelector('.deps-code-block code');
+    if (!codeEl) return;
+
+    var text = codeEl.textContent || codeEl.innerText;
+    navigator.clipboard.writeText(text).then(function() {
+        // Show check icon
+        var copyIcon = addToProject.querySelector('.copy-icon');
+        var checkIcon = addToProject.querySelector('.check-icon');
+        var copyText = addToProject.querySelector('.copy-text');
+
+        if (copyIcon) copyIcon.classList.add('hidden');
+        if (checkIcon) checkIcon.classList.remove('hidden');
+        if (copyText) copyText.textContent = 'Copied!';
+
+        // Reset after 2 seconds
+        setTimeout(function() {
+            if (copyIcon) copyIcon.classList.remove('hidden');
+            if (checkIcon) checkIcon.classList.add('hidden');
+            if (copyText) copyText.textContent = 'Copy';
+        }, 2000);
+    });
+}
+</script>
+{% endblock %}

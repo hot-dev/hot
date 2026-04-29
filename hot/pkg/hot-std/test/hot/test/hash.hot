@@ -1,0 +1,70 @@
+::hot::test::hash ns
+meta ["test"]
+
+// Test SHA-256 hash
+test-sha256
+meta ["test"] fn () {
+    // Known test vector
+    result ::hot::hash/sha256("hello")
+    assert-eq(
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        result,
+        "sha256('hello') should match known hash"
+    )
+
+    // Empty string
+    empty-result ::hot::hash/sha256("")
+    assert-eq(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        empty-result,
+        "sha256('') should match empty string hash"
+    )
+}
+
+// Test SHA-512 hash
+test-sha512
+meta ["test"] fn () {
+    result ::hot::hash/sha512("hello")
+    // SHA-512 produces 128 hex chars
+    assert-eq(128, ::hot::str/length(result), "sha512 should produce 128 hex chars")
+}
+
+// Test BLAKE3 hash
+test-blake3
+meta ["test"] fn () {
+    result ::hot::hash/blake3("hello")
+    // BLAKE3 produces 64 hex chars (256 bits)
+    assert-eq(64, ::hot::str/length(result), "blake3 should produce 64 hex chars")
+
+    // Different inputs should produce different hashes
+    result2 ::hot::hash/blake3("world")
+    assert(not(eq(result, result2)), "Different inputs should produce different hashes")
+}
+
+// Test SHA-1 hash (legacy)
+test-sha1
+meta ["test"] fn () {
+    result ::hot::hash/sha1("hello")
+    // SHA-1 produces 40 hex chars (160 bits)
+    assert-eq(40, ::hot::str/length(result), "sha1 should produce 40 hex chars")
+}
+
+// Test MD5 hash (legacy)
+test-md5
+meta ["test"] fn () {
+    result ::hot::hash/md5("hello")
+    assert-eq(
+        "5d41402abc4b2a76b9719d911017c592",
+        result,
+        "md5('hello') should match known hash"
+    )
+}
+
+// Test hashing bytes
+test-hash-bytes
+meta ["test"] fn () {
+    bytes Bytes("hello")
+    str-result ::hot::hash/sha256("hello")
+    bytes-result ::hot::hash/sha256(bytes)
+    assert-eq(str-result, bytes-result, "Hashing string and bytes of same content should be equal")
+}

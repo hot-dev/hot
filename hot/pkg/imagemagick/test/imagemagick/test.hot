@@ -1,0 +1,204 @@
+::imagemagick::test ns
+meta ["test"]
+
+build-resize-args ::imagemagick/build-resize-args
+build-convert-args ::imagemagick/build-convert-args
+build-optimize-args ::imagemagick/build-optimize-args
+build-identify-args ::imagemagick/build-identify-args
+parse-identify-output ::imagemagick/parse-identify-output
+file-ext ::imagemagick/file-ext
+ConvertOpts ::imagemagick/ConvertOpts
+ResizeOpts ::imagemagick/ResizeOpts
+OptimizeOpts ::imagemagick/OptimizeOpts
+
+// ============================================================================
+// file-ext tests
+// ============================================================================
+
+test-file-ext-jpg
+meta ["test"] fn () {
+    assert-eq("jpg", file-ext("hot://uploads/photo.jpg"))
+}
+
+test-file-ext-path-with-dots
+meta ["test"] fn () {
+    assert-eq("png", file-ext("hot://bucket/v1.0/asset.final.png"))
+}
+
+// ============================================================================
+// build-resize-args tests
+// ============================================================================
+
+test-resize-args-width-only
+meta ["test"] fn () {
+    opts ResizeOpts({
+        width: 800, height: null, fit: null, quality: null,
+        format: null, image: null, size: null,
+    })
+    args build-resize-args("/tmp/in.jpg", "/tmp/out.jpg", opts)
+    assert-eq("convert", first(args))
+    assert(in("-resize", args), "should resize")
+    assert(in("800x", args), "should set width geometry")
+    assert-eq("/tmp/out.jpg", last(args))
+}
+
+test-resize-args-both-dimensions-contain
+meta ["test"] fn () {
+    opts ResizeOpts({
+        width: 300, height: 200, fit: null, quality: null,
+        format: null, image: null, size: null,
+    })
+    args build-resize-args("/tmp/in.png", "/tmp/out.png", opts)
+    assert(in("300x200", args), "contain default uses WxH")
+    assert(not(contains(join(args, " "), "^")), "contain should not use cover suffix")
+}
+
+test-resize-args-cover
+meta ["test"] fn () {
+    opts ResizeOpts({
+        width: 300, height: 200, fit: "cover", quality: null,
+        format: null, image: null, size: null,
+    })
+    args build-resize-args("/tmp/in.png", "/tmp/out.png", opts)
+    assert(in("300x200^", args), "cover uses ^ geometry")
+    assert(in("-extent", args), "cover uses extent")
+    assert(in("center", args), "cover uses center gravity")
+}
+
+test-resize-args-fill
+meta ["test"] fn () {
+    opts ResizeOpts({
+        width: 100, height: 50, fit: "fill", quality: 80,
+        format: null, image: null, size: null,
+    })
+    args build-resize-args("/tmp/in.jpg", "/tmp/out.jpg", opts)
+    assert(in("100x50!", args), "fill uses ! forced geometry")
+    assert(in("-quality", args), "should pass quality")
+    assert(in("80", args), "quality value")
+}
+
+// ============================================================================
+// build-convert-args tests
+// ============================================================================
+
+test-convert-args-minimal
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "webp", quality: null, density: null, strip: null,
+        image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.jpg", "/tmp/out.webp", opts)
+    assert-eq(["convert", "/tmp/in.jpg", "/tmp/out.webp"], args)
+}
+
+test-convert-args-with-options
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "png", quality: 92, density: 150, strip: true,
+        image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.pdf", "/tmp/out.png", opts)
+    assert(in("-density", args), "density flag")
+    assert(in("150", args), "density value")
+    assert(in("-quality", args), "quality flag")
+    assert(in("92", args), "quality value")
+    assert(in("-strip", args), "strip when true")
+}
+
+test-convert-args-strip-false-omitted
+meta ["test"] fn () {
+    opts ConvertOpts({
+        format: "jpg", quality: null, density: null, strip: false,
+        image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.png", "/tmp/out.jpg", opts)
+    assert(not(in("-strip", args)), "strip false should omit -strip")
+}
+
+// ============================================================================
+// build-optimize-args tests
+// ============================================================================
+
+test-optimize-args-defaults
+meta ["test"] fn () {
+    opts OptimizeOpts({quality: null, strip: null, format: null, image: null, size: null})
+    args build-optimize-args("/tmp/in.jpg", "/tmp/out.jpg", opts)
+    assert-eq("convert", first(args))
+    assert(in("-strip", args), "default strip true")
+    assert(in("-quality", args), "default quality")
+    assert(in("85", args), "default quality 85")
+}
+
+test-optimize-args-custom
+meta ["test"] fn () {
+    opts OptimizeOpts({quality: 70, strip: false, format: null, image: null, size: null})
+    args build-optimize-args("/tmp/a.webp", "/tmp/b.webp", opts)
+    assert(in("70", args), "custom quality")
+    assert(not(in("-strip", args)), "strip false omits -strip")
+}
+
+// ============================================================================
+// build-identify-args tests
+// ============================================================================
+
+test-identify-args-structure
+meta ["test"] fn () {
+    args build-identify-args("/tmp/sample.jpg")
+    assert-eq("-format", first(args))
+    assert-eq("/tmp/sample.jpg", last(args))
+    fmt get(args, 1, "")
+    assert(contains(fmt, "%w"), "format has width")
+    assert(contains(fmt, "%h"), "format has height")
+    assert(contains(fmt, "%[colorspace]"), "format has colorspace")
+}
+
+// ============================================================================
+// parse-identify-output tests
+// ============================================================================
+
+test-parse-identify-output-basic
+meta ["test"] fn () {
+    out """640
+480
+JPEG
+8
+sRGB
+125KB"""
+    m parse-identify-output(out)
+    assert-eq(640, m.width)
+    assert-eq(480, m.height)
+    assert-eq("JPEG", m.format)
+    assert-eq("8", m.depth)
+    assert-eq("sRGB", m.colorspace)
+    assert-eq("125KB", m.filesize)
+}
+
+test-parse-identify-output-trims-whitespace
+meta ["test"] fn () {
+    out """
+800
+600
+PNG
+8
+sRGB
+12.3KB
+"""
+    m parse-identify-output(out)
+    assert-eq(800, m.width)
+    assert-eq(600, m.height)
+}
+
+// ============================================================================
+// Type construction tests
+// ============================================================================
+
+test-resize-opts-construction
+meta ["test"] fn () {
+    opts ResizeOpts({
+        width: 1024, height: 768, fit: "cover", quality: 90,
+        format: "webp", image: null, size: "medium",
+    })
+    assert-eq(1024, opts.width)
+    assert-eq("cover", opts.fit)
+    assert-eq("webp", opts.format)
+}

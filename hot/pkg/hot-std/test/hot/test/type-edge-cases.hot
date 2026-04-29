@@ -1,0 +1,287 @@
+::hot::test::type-edge-cases ns
+meta ["test"]
+
+// Type-system declarations (`type`, `enum`, `->`) live at top level: arrows
+// mutate the global implementation registry, so a nested arrow would be a
+// hidden global side effect. Each test below uses a top-level (type, arrow)
+// pair declared in this same namespace.
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+Str ::hot::type/Str
+
+// ============================================================================
+// Test 1: Null Handling in Type Implementations
+// ============================================================================
+
+OptionalData type {
+    value: Str,
+    description: Str
+}
+
+OptionalData -> Str fn (data: OptionalData): Str {
+    safe_value if(is-null(data.value), "N/A", data.value)
+    safe_desc if(is-null(data.description), "No description", data.description)
+    `Value: ${safe_value}, Description: ${safe_desc}`
+}
+
+test-null-handling
+meta ["test"] fn () {
+    complete OptionalData({value: "test", description: "A test value"})
+    complete_str Str(complete)
+    assert-eq("Value: test, Description: A test value", complete_str, "Complete data should work")
+
+    partial OptionalData({value: "test", description: null})
+    partial_str Str(partial)
+    assert-eq("Value: test, Description: No description", partial_str, "Null handling should work")
+}
+
+// ============================================================================
+// Test 2: Empty Collection Handling
+// ============================================================================
+
+Playlist type {
+    name: Str,
+    songs: Vec
+}
+
+Playlist -> Str fn (playlist: Playlist): Str {
+    song_count ::hot::coll/length(playlist.songs)
+    count_text cond {
+        ::hot::cmp/eq(song_count, 0) => { "empty" }
+        ::hot::cmp/eq(song_count, 1) => { "1 song" }
+        => { `${song_count} songs` }
+    }
+    `${playlist.name} (${count_text})`
+}
+
+test-empty-collections
+meta ["test"] fn () {
+    empty_playlist Playlist({name: "My Mix", songs: []})
+    single_playlist Playlist({name: "Favorites", songs: ["Song 1"]})
+    multi_playlist Playlist({name: "Top Hits", songs: ["Song 1", "Song 2", "Song 3"]})
+
+    empty_str Str(empty_playlist)
+    single_str Str(single_playlist)
+    multi_str Str(multi_playlist)
+
+    assert-eq("My Mix (empty)", empty_str, "Empty playlist should work")
+    assert-eq("Favorites (1 song)", single_str, "Single song playlist should work")
+    assert-eq("Top Hits (3 songs)", multi_str, "Multi song playlist should work")
+}
+
+// ============================================================================
+// Test 3: Large Data Structure Handling
+// ============================================================================
+
+Report type {
+    title: Str,
+    data: Vec,
+    summary: Str
+}
+
+Report -> Str fn (report: Report): Str {
+    data_size ::hot::coll/length(report.data)
+    truncated_summary cond {
+        ::hot::cmp/gt(::hot::str/length(report.summary), 50) => {
+            truncated ::hot::str/slice(report.summary, 0, 47)
+            `${truncated}...`
+        }
+        => { report.summary }
+    }
+    `${report.title} [${data_size} records]: ${truncated_summary}`
+}
+
+test-large-structures
+meta ["test"] fn () {
+    small_report Report({
+            title: "Daily Sales",
+            data: [1, 2, 3],
+            summary: "Good performance"
+        })
+
+    large_report Report({
+            title: "Annual Report",
+            data: ::hot::coll/range(100),
+            summary: "This is a very long summary that exceeds fifty characters and should be truncated properly"
+        })
+
+    small_str Str(small_report)
+    large_str Str(large_report)
+
+    assert-eq("Daily Sales [3 records]: Good performance", small_str, "Small report should work")
+    assert(::hot::str/contains(large_str, "Annual Report [100 records]"), "Large report should show correct count")
+    assert(::hot::str/ends-with(large_str, "..."), "Long summary should be truncated")
+}
+
+// ============================================================================
+// Test 4: Nested Type Property Access
+// ============================================================================
+
+City type {
+    name: Str,
+    population: Int
+}
+
+State type {
+    name: Str,
+    capital: City
+}
+
+Country type {
+    name: Str,
+    states: Vec
+}
+
+Country -> Str fn (country: Country): Str {
+    state_count ::hot::coll/length(country.states)
+    first_state ::hot::coll/first(country.states)
+    capital_name first_state.capital.name
+    `${country.name} (${state_count} states, capital region includes ${capital_name})`
+}
+
+test-nested-properties
+meta ["test"] fn () {
+    capital_city City({name: "Capital City", population: 500000})
+    first_state State({name: "First State", capital: capital_city})
+    country Country({name: "Test Country", states: [first_state]})
+
+    country_str Str(country)
+    expected "Test Country (1 states, capital region includes Capital City)"
+    assert-eq(expected, country_str, "Nested property access should work")
+}
+
+// ============================================================================
+// Test 5: Error Recovery in Implementations
+// ============================================================================
+
+DataPoint type {
+    x: Dec,
+    y: Dec
+}
+
+DataPoint -> Str fn (point: DataPoint): Str {
+    ratio ::hot::math/div(point.y, point.x)
+    ratio_str if(is-err(ratio), "undefined", `${ratio}`)
+    `Point(${point.x}, ${point.y}) ratio: ${ratio_str}`
+}
+
+test-error-recovery
+meta ["test"] fn () {
+    normal_point DataPoint({x: 5, y: 10})
+    zero_point DataPoint({x: 0, y: 10})
+
+    normal_str Str(normal_point)
+    zero_str Str(zero_point)
+
+    assert-eq("Point(5, 10) ratio: 2", normal_str, "Normal calculation should work")
+    assert-eq("Point(0, 10) ratio: undefined", zero_str, "Zero division should be handled")
+}
+
+// ============================================================================
+// Test 6: Type Implementation with Flow Control
+// ============================================================================
+
+TaskStatus type {
+    id: Str,
+    completed: Bool,
+    priority: Int,
+    tags: Vec
+}
+
+TaskStatus -> Str fn (task: TaskStatus): Str {
+    status_icon if(task.completed, "✓", "○")
+
+    priority_text cond {
+        ::hot::cmp/gte(task.priority, 8) => { "HIGH" }
+        ::hot::cmp/gte(task.priority, 5) => { "MED" }
+        => { "LOW" }
+    }
+
+    tag_count ::hot::coll/length(task.tags)
+    tag_info cond {
+        ::hot::cmp/eq(tag_count, 0) => { "" }
+        ::hot::cmp/eq(tag_count, 1) => { ` [${::hot::coll/first(task.tags)}]` }
+        => { ` [${tag_count} tags]` }
+    }
+
+    `${status_icon} ${task.id} (${priority_text})${tag_info}`
+}
+
+test-flow-control
+meta ["test"] fn () {
+    completed_task TaskStatus({
+            id: "TASK-001",
+            completed: true,
+            priority: 9,
+            tags: ["urgent", "bug"]
+        })
+
+    pending_task TaskStatus({
+            id: "TASK-002",
+            completed: false,
+            priority: 3,
+            tags: []
+        })
+
+    completed_str Str(completed_task)
+    pending_str Str(pending_task)
+
+    assert-eq("✓ TASK-001 (HIGH) [2 tags]", completed_str, "Completed high priority task should work")
+    assert-eq("○ TASK-002 (LOW)", pending_str, "Pending low priority task should work")
+}
+
+// ============================================================================
+// Test 7: Type Implementation Performance with Large Data
+// ============================================================================
+
+Dataset type {
+    name: Str,
+    values: Vec
+}
+
+Dataset -> Str fn (dataset: Dataset): Str {
+    total_count ::hot::coll/length(dataset.values)
+
+    stats cond {
+        ::hot::cmp/gt(total_count, 1000) => {
+            `${total_count} items (large dataset)`
+        }
+
+        ::hot::cmp/gt(total_count, 0) => {
+            sum ::hot::coll/reduce(dataset.values, (acc, val) { ::hot::math/add(acc, val) }, 0)
+            avg ::hot::math/div(sum, total_count)
+            `${total_count} items, avg: ${avg}`
+        }
+        => { "empty dataset" }
+    }
+
+    `${dataset.name}: ${stats}`
+}
+
+test-performance-large-data
+meta ["test"] fn () {
+    small_dataset Dataset({
+            name: "Test Data",
+            values: [1, 2, 3, 4, 5]
+        })
+
+    empty_dataset Dataset({
+            name: "Empty Data",
+            values: []
+        })
+
+    large_values ::hot::coll/range(0, 50)
+    large_dataset Dataset({
+            name: "Large Data",
+            values: large_values
+        })
+
+    small_str Str(small_dataset)
+    empty_str Str(empty_dataset)
+    large_str Str(large_dataset)
+
+    assert-eq("Test Data: 5 items, avg: 3", small_str, "Small dataset should show stats")
+    assert-eq("Empty Data: empty dataset", empty_str, "Empty dataset should be handled")
+    assert(::hot::str/contains(large_str, "Large Data: 50 items"), "Large dataset should be processed")
+}

@@ -1,0 +1,65 @@
+name: "Rust setup with cache, sccache, and Tailwind"
+description: "Installs Rust toolchain, enables rust-cache and sccache, and installs Tailwind CLI without npm"
+inputs:
+  rust-toolchain:
+    description: "Rust toolchain version (e.g., 1.95.0)"
+    required: true
+  tailwind-version:
+    description: "Tailwind CLI version (e.g., v3.4.13)"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        components: clippy
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        # Cache key based on Cargo files and toolchain
+        key: ${{ inputs.rust-toolchain }}
+        # Save cache even on failure
+        save-if: true
+
+    - name: Cache Tailwind CSS CLI
+      id: tailwind-cache
+      uses: actions/cache@v5
+      with:
+        path: ~/.local/bin/tailwindcss
+        key: tailwindcss-linux-x64-${{ inputs.tailwind-version }}
+
+    - name: Install Tailwind CSS CLI
+      if: steps.tailwind-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/.local/bin
+        curl -sL -o tailwindcss https://github.com/tailwindlabs/tailwindcss/releases/download/${{ inputs.tailwind-version }}/tailwindcss-linux-x64
+        chmod +x tailwindcss
+        mv tailwindcss ~/.local/bin/tailwindcss
+
+    - name: Add Tailwind to PATH
+      shell: bash
+      run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Verify Tailwind version
+      shell: bash
+      run: tailwindcss --version
+
+    - name: Setup Cargo optimizations
+      shell: bash
+      run: |
+        mkdir -p ~/.cargo
+        cat > ~/.cargo/config.toml << 'EOF'
+        [build]
+        jobs = 4
+
+        [net]
+        retry = 2
+        git-fetch-with-cli = true
+
+        [registries.crates-io]
+        index = "sparse+https://index.crates.io/"
+        EOF

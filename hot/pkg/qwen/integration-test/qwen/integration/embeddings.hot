@@ -1,0 +1,56 @@
+::qwen::integration::embeddings ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Qwen Embeddings API
+// =============================================================================
+// These tests require qwen.api.key (DASHSCOPE_API_KEY) to be set in context.
+
+test-embeddings-create-single
+meta ["test"]
+fn () {
+    response ::qwen::embeddings/create(::qwen::embeddings/EmbeddingRequest({
+        input: "The quick brown fox jumps over the lazy dog",
+        model: "text-embedding-v4"
+    }))
+
+    assert(is-vec(response.data), "Response should have data array")
+    assert-eq(1, length(response.data), "Should have exactly one embedding")
+
+    first-embedding first(response.data)
+    assert(is-vec(first-embedding.embedding), "Embedding should be a Vec")
+    assert(gt(length(first-embedding.embedding), 0), "Embedding should be non-empty")
+}
+
+test-embeddings-create-batch
+meta ["test"]
+fn () {
+    response ::qwen::embeddings/create(::qwen::embeddings/EmbeddingRequest({
+        input: ["Hello", "World", "Test"],
+        model: "text-embedding-v4"
+    }))
+
+    assert-eq(3, length(response.data), "Should have three embeddings")
+}
+
+test-embeddings-custom-dimensions
+meta ["test"]
+fn () {
+    response ::qwen::embeddings/create(::qwen::embeddings/EmbeddingRequest({
+        input: "Test text",
+        model: "text-embedding-v4",
+        dimensions: 256
+    }))
+
+    first-embedding first(response.data)
+    assert-eq(256, length(first-embedding.embedding), "Embedding should have 256 dimensions")
+}
+
+test-embed-convenience
+meta ["test"]
+fn () {
+    vector ::qwen::embeddings/embed("Hello world")
+
+    assert(is-vec(vector), "embed() should return a Vec")
+    assert(gt(length(vector), 0), "embed() should return a non-empty vector")
+}

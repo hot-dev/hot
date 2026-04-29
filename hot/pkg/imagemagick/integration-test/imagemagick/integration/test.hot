@@ -1,0 +1,65 @@
+::imagemagick::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::imagemagick
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-imagemagick
+// ============================================================================
+
+
+// Small PNG test image (W3C, stable URL)
+TEST_IMAGE_URL "https://www.w3.org/People/mimasa/test/imgformat/img/w3c_home_2.png"
+
+setup-test-input fn (url: Str, name: Str): Str {
+    hot-path `hot://imagemagick-test/${name}`
+    cmd `wget -q -O /tmp/test-file '${url}' && hotbox cp /tmp/test-file '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 60,
+        size: "nano",
+        network: "internet",
+    })
+    result ::hot::task/await(info.id)
+    hot-path
+}
+
+test-identify-real-image
+meta ["test"] fn () {
+    input setup-test-input(TEST_IMAGE_URL, "identify-test.png")
+    meta ::imagemagick/identify(input)
+    assert(gt(meta.width, 0), "width should be positive")
+    assert(gt(meta.height, 0), "height should be positive")
+    assert(is-some(meta.format), "format should be set")
+}
+
+test-resize-real-image
+meta ["test"] fn () {
+    input setup-test-input(TEST_IMAGE_URL, "resize-test.png")
+    result ::imagemagick/resize(input, {
+        width: 120,
+        height: 80,
+        fit: "cover",
+        format: "png",
+    })
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("png", result.format)
+    assert(starts-with(result.url, "hot://imagemagick/"), "URL should use imagemagick prefix")
+}
+
+test-convert-real-image
+meta ["test"] fn () {
+    input setup-test-input(TEST_IMAGE_URL, "convert-test.png")
+    result ::imagemagick/convert(input, {format: "jpg", quality: 88, strip: true})
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("jpg", result.format)
+}
+
+test-optimize-real-image
+meta ["test"] fn () {
+    input setup-test-input(TEST_IMAGE_URL, "optimize-test.png")
+    result ::imagemagick/optimize(input)
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("png", result.format)
+}

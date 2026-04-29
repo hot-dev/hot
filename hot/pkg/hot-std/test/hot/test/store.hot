@@ -1,0 +1,199 @@
+::hot::test::store ns
+meta ["test"]
+
+::store ::hot::store
+
+settings ::store/Map({name: "test-settings"})
+
+test-put-and-get
+meta ["test"] fn () {
+    ::store/put(settings, "host", "localhost")
+    assert-eq("localhost", ::store/get(settings, "host"), "get returns the put value")
+}
+
+test-get-missing-returns-null
+meta ["test"] fn () {
+    s ::store/Map({name: "test-missing"})
+    assert(is-null(::store/get(s, "nonexistent")), "get on missing key returns null")
+}
+
+test-get-with-default
+meta ["test"] fn () {
+    s ::store/Map({name: "test-default"})
+    assert-eq("fallback", ::store/get(s, "nope", "fallback"), "get with default returns default")
+}
+
+test-delete
+meta ["test"] fn () {
+    s ::store/Map({name: "test-delete"})
+    ::store/put(s, "k", "v")
+    assert(::store/delete(s, "k"), "delete returns true for existing key")
+    assert(not(::store/delete(s, "k")), "delete returns false for missing key")
+    assert(is-null(::store/get(s, "k")), "get after delete returns null")
+}
+
+test-keys-and-vals
+meta ["test"] fn () {
+    s ::store/Map({name: "test-keys-vals"})
+    ::store/put(s, "a", 1)
+    ::store/put(s, "b", 2)
+    ::store/put(s, "c", 3)
+    assert-eq(["a", "b", "c"], ::store/keys(s), "keys returns all keys in order")
+    assert-eq([1, 2, 3], ::store/vals(s), "vals returns all values in order")
+}
+
+test-length-and-is-empty
+meta ["test"] fn () {
+    s ::store/Map({name: "test-length"})
+    assert(::store/is-empty(s), "new store is empty")
+    assert-eq(0, ::store/length(s), "new store has length 0")
+    ::store/put(s, "a", 1)
+    assert(not(::store/is-empty(s)), "store with entry is not empty")
+    assert-eq(1, ::store/length(s), "store has length 1 after put")
+}
+
+test-first-and-last
+meta ["test"] fn () {
+    s ::store/Map({name: "test-first-last"})
+    assert(is-null(::store/first(s)), "first on empty store is null")
+    assert(is-null(::store/last(s)), "last on empty store is null")
+    ::store/put(s, "x", 10)
+    ::store/put(s, "y", 20)
+    ::store/put(s, "z", 30)
+    f ::store/first(s)
+    assert-eq("x", f.key, "first returns the first inserted key")
+    assert-eq(10, f.value, "first returns the first inserted value")
+    l ::store/last(s)
+    assert-eq("z", l.key, "last returns the last inserted key")
+    assert-eq(30, l.value, "last returns the last inserted value")
+}
+
+test-merge-and-put-many
+meta ["test"] fn () {
+    s ::store/Map({name: "test-merge"})
+    count ::store/merge(s, {"a": 1, "b": 2, "c": 3})
+    assert-eq(3, count, "merge returns the number of entries written")
+    assert-eq(3, ::store/length(s), "store has 3 entries after merge")
+    assert-eq(2, ::store/get(s, "b"), "merged value is accessible")
+}
+
+test-list
+meta ["test"] fn () {
+    s ::store/Map({name: "test-list"})
+    ::store/merge(s, {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5})
+    all ::store/list(s)
+    assert-eq(5, length(all), "list returns all entries")
+    page ::store/list(s, {limit: 2, offset: 1})
+    assert-eq(2, length(page), "list with limit returns correct count")
+    assert-eq("b", get(page, 0).key, "list offset works")
+}
+
+test-clear
+meta ["test"] fn () {
+    s ::store/Map({name: "test-clear"})
+    ::store/put(s, "a", 1)
+    ::store/put(s, "b", 2)
+    ::store/clear(s)
+    assert(::store/is-empty(s), "store is empty after clear")
+}
+
+test-destroy
+meta ["test"] fn () {
+    s ::store/Map({name: "test-destroy"})
+    ::store/put(s, "a", 1)
+    ::store/destroy(s)
+    assert-eq(0, ::store/length(s), "length is 0 after destroy")
+}
+
+test-upsert-preserves-order
+meta ["test"] fn () {
+    s ::store/Map({name: "test-upsert"})
+    ::store/put(s, "a", 1)
+    ::store/put(s, "b", 2)
+    ::store/put(s, "a", 99)
+    assert-eq(["a", "b"], ::store/keys(s), "upsert preserves insertion order")
+    assert-eq(99, ::store/get(s, "a"), "upsert updates the value")
+}
+
+test-map-values
+meta ["test"] fn () {
+    s ::store/Map({name: "test-map-vals"})
+    ::store/put(s, "user1", {name: "Alice", age: 30})
+    ::store/put(s, "user2", {name: "Bob", age: 25})
+    user ::store/get(s, "user1")
+    assert-eq("Alice", user.name, "map values are stored and retrieved correctly")
+    assert-eq(30, user.age, "nested map fields accessible")
+}
+
+test-slice
+meta ["test"] fn () {
+    s ::store/Map({name: "test-slice"})
+    ::store/merge(s, {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5})
+    sliced ::store/slice(s, 1, 3)
+    assert-eq(2, length(sliced), "slice returns correct number of entries")
+    assert-eq("b", get(sliced, 0).key, "slice starts at correct offset")
+    assert-eq("c", get(sliced, 1).key, "slice ends at correct position")
+}
+
+test-filter
+meta ["test"] fn () {
+    s ::store/Map({name: "test-filter"})
+    ::store/merge(s, {"alice": {age: 30}, "bob": {age: 17}, "carol": {age: 25}, "dave": {age: 15}})
+    adults ::store/filter(s, (k, v) { gte(v.age, 18) })
+    assert-eq(2, length(adults), "filter returns matching entries")
+    adult-keys map(adults, (entry) { entry.key })
+    assert-eq(["alice", "carol"], adult-keys, "filter keeps correct entries")
+}
+
+test-filter-none-match
+meta ["test"] fn () {
+    s ::store/Map({name: "test-filter-none"})
+    ::store/merge(s, {"a": 1, "b": 2})
+    result ::store/filter(s, (k, v) { gt(v, 100) })
+    assert-eq(0, length(result), "filter with no matches returns empty")
+}
+
+test-find-first
+meta ["test"] fn () {
+    s ::store/Map({name: "test-find-first"})
+    ::store/merge(s, {"x": 10, "y": 20, "z": 30})
+    found ::store/find-first(s, (k, v) { gt(v, 15) })
+    assert-eq("y", found.key, "find-first returns first matching key")
+    assert-eq(20, found.value, "find-first returns first matching value")
+}
+
+test-find-first-no-match
+meta ["test"] fn () {
+    s ::store/Map({name: "test-find-first-none"})
+    ::store/merge(s, {"a": 1, "b": 2})
+    result ::store/find-first(s, (k, v) { gt(v, 100) })
+    assert(is-null(result), "find-first returns null when no match")
+}
+
+test-reduce
+meta ["test"] fn () {
+    s ::store/Map({name: "test-reduce"})
+    ::store/merge(s, {"a": 10, "b": 20, "c": 30})
+    total ::store/reduce(s, (acc, k, v) { add(acc, v) }, 0)
+    assert-eq(60, total, "reduce sums all values")
+}
+
+test-reduce-to-map
+meta ["test"] fn () {
+    s ::store/Map({name: "test-reduce-map"})
+    ::store/merge(s, {"first": "Alice", "second": "Bob"})
+    inverted ::store/reduce(s, (acc, k, v) { assoc(acc, v, k) }, {})
+    assert-eq("first", get(inverted, "Alice"), "reduce builds inverted map")
+    assert-eq("second", get(inverted, "Bob"), "reduce builds inverted map")
+}
+
+test-put-many
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-many"})
+    count ::store/put-many(s, {"x": 1, "y": 2, "z": 3})
+    assert-eq(3, count, "put-many returns count of entries written")
+    assert-eq(3, ::store/length(s), "put-many stores all entries")
+    assert-eq(1, ::store/get(s, "x"), "put-many entries are accessible")
+    assert-eq(2, ::store/get(s, "y"), "put-many entries are accessible")
+    assert-eq(3, ::store/get(s, "z"), "put-many entries are accessible")
+}

@@ -1,0 +1,648 @@
+::ai::skill ns
+meta {
+    doc: """
+    Skills are LLM-judgment-routed prompt augmentations: named bundles
+    of instructions (and optionally bundled tools) that an agent can
+    pull into its context on demand. Prompt-only skills can be built
+    directly as `Skill({...})` records. Executable or function-backed
+    skills can also be declared by adding `meta {skill: {...}}` to a
+    Hot function; `::ai::skill/from-fn` uses the compiler-harvested
+    metadata to build the same `Skill` shape at runtime.
+
+    Three built-in tools (`list_skills`, `read_skill`, `apply_skill`)
+    are auto-added by `::ai::chat/run-loop` so the model can discover
+    and pull skills on demand without exhausting context up front.
+
+    **Example**
+
+    ```hot
+    customer-tone
+    meta {skill: {
+        description: "Apply our customer voice rules",
+        when: ["customer reply", "marketing copy", "support email"],
+        body: \"\"\"
+        Use a warm, plain-language tone. Avoid jargon. Always close
+        with a clear next step.
+        \"\"\"
+    }}
+    fn () { {} }
+
+    generated-tone Skill({
+        name: "generated-tone",
+        description: "A prompt-only generated skill",
+        when: ["generated guidance"],
+        body: "Use this body directly."
+    })
+    ```
+    """
+}
+
+::tool ::ai::tool
+
+// ============================================================================
+// Skill type
+// ============================================================================
+
+Skill
+meta {
+    doc: """
+    A reusable prompt augmentation. Most fields are optional:
+
+    - `name` — unique identifier the model uses with `read_skill` /
+      `apply_skill`. Defaults to the qualified Hot function name.
+    - `description` — short summary the model uses to decide when to
+      pull the skill. Required for any useful skill.
+    - `when` — trigger phrases that hint when this skill applies.
+      Joined into the resolver index injected into the system prompt.
+    - `body` — inline instructions returned by `read_skill`. May be
+      loaded from a resource via `::hot::resource/load-str`.
+    - `body-fn` — alternative to `body`: a function `(ctx: Map) -> Str`
+      that produces context-aware instructions.
+    - `tools` — bundled tools that become available to the model
+      whenever the skill is read.
+    - `requires` — names of other skills this one depends on.
+    - `fn` — back-reference to the Hot function the skill was harvested
+      from. Preserved for callers that need to round-trip to the source
+      function; built-in `read_skill` / `apply_skill` resolve `body` or
+      `body-fn` rather than calling this function.
+    """
+}
+type {
+    name: Str,
+    description: Str,
+    when: Vec<Str>?,
+    body: Str?,
+    body-fn: Fn?,
+    tools: Vec<::tool/Tool>?,
+    requires: Vec<Str>?,
+    fn: Fn?
+}
+
+// ============================================================================
+// Construction
+// ============================================================================
+
+from-fn
+meta {
+    doc: """
+    Build a `Skill` from a Hot function annotated with
+    `meta {skill: {...}}`. The annotation map is merged with sensible
+    defaults: `name` falls back to the qualified function name, `when`
+    defaults to `[]`.
+
+    **Example**
+
+    ```hot
+    tone
+    meta {skill: {description: "Customer tone", when: ["reply"], body: "..."}}
+    fn () { {} }
+
+    skill ::ai::skill/from-fn(tone)
+    // => Skill({name: "::myapp/tone", description: "Customer tone", ...})
+    ```
+    """
+}
+fn (f: Fn): Skill {
+    raw ::hot::internal::skill/meta-from-fn(f)
+    Skill({
+        name: or(get(raw, "name"), raw.fn-name),
+        description: or(get(raw, "description"), ""),
+        when: or(get(raw, "when"), []),
+        body: get(raw, "body"),
+        body-fn: get(raw, "body-fn"),
+        tools: get(raw, "tools"),
+        requires: get(raw, "requires"),
+        fn: f
+    })
+}
+
+for-agent
+meta {
+    doc: """
+    Normalize an agent's `skills:` list (a mix of Hot function refs
+    and pre-built `Skill` records) into a `Vec<Skill>` ready for
+    `::ai::chat/run-loop`. Per the design, agents must list every
+    skill function explicitly — there is no namespace glob.
+
+    **Example**
+
+    ```hot
+    skills ::ai::skill/for-agent([customer-tone, escalation-policy])
+    ```
+    """
+}
+fn (entries: Vec<Any>): Vec<Skill> {
+    map(entries, (entry) {
+        if(is-type(entry, Skill), entry, from-fn(entry))
+    })
+}
+
+// ============================================================================
+// Body resolution
+// ============================================================================
+
+load-body
+meta {
+    doc: """
+    Resolve the body of a `Skill` for a given invocation context.
+
+    Resolution order:
+    1. If `skill.body-fn` is non-null, call it with `ctx` and return
+       the resulting string.
+    2. Otherwise return `skill.body` (or `""` if absent).
+
+    Errors from `body-fn` propagate as `Result.Err`.
+
+    **Example**
+
+    ```hot
+    text ::ai::skill/load-body(skill, {topic: "refund"})
+    ```
+    """
+}
+fn (skill: Skill, ctx: Map): Str {
+    body-fn skill.body-fn
+    body skill.body
+    cond {
+        not(is-null(body-fn)) => {
+            ::hot::internal::mcp/invoke-with-input(body-fn, ctx)
+        }
+
+        not(is-null(body)) => { body }
+        => { "" }
+    }
+}
+
+// ============================================================================
+// Resolver index
+// ============================================================================
+
+index-line
+meta {
+    doc: """
+    Render a single skill as one line in the resolver index, e.g.
+    `"  - customer-tone: Apply our voice (when: reply, marketing)"`.
+    Trigger phrases are comma-joined; missing fields are omitted.
+    """
+}
+fn (skill: Skill): Str {
+    when-str cond {
+        is-null(skill.when) => { "" }
+        is-empty(skill.when) => { "" }
+        => { ` (when: ${join(skill.when, ", ")})` }
+    }
+    `  - ${skill.name}: ${skill.description}${when-str}`
+}
+
+build-index
+meta {
+    doc: """
+    Build a system-prompt fragment that lists every skill available to
+    the agent, formatted so an LLM can decide which skills to read
+    next. Prepended with a short header describing the `read_skill`
+    contract.
+
+    **Example**
+
+    ```hot
+    index ::ai::skill/build-index([tone, escalation])
+    // => \"\"\"
+    //    Available skills you can read with read_skill(name):
+    //      - customer-tone: Apply our voice (when: reply, marketing)
+    //      - escalation: Decide when to escalate (when: refund, angry)
+    //    \"\"\"
+    ```
+    """
+}
+fn (skills: Vec<Skill>): Str {
+    cond {
+        is-empty(skills) => { "" }
+        => {
+            header "Available skills you can read with read_skill(name):"
+            lines map(skills, index-line)
+            join(concat([header], lines), "\n")
+        }
+    }
+}
+
+// ============================================================================
+// Built-in tools
+// ============================================================================
+
+find-skill
+meta { doc: """Look up a skill by `name`, returning `null` when no match.""" }
+fn (skills: Vec<Skill>, name: Str): Skill? {
+    find-first(skills, eq(%.name, name))
+}
+
+list-skills-of
+meta {
+    doc: """
+    Build the body for a `list_skills` tool call: a vector of
+    `{name, description, when}` maps suitable for an LLM to scan.
+    """
+}
+fn (skills: Vec<Skill>): Vec<Map> {
+    map(skills, (s) {
+        {
+            name: s.name,
+            description: s.description,
+            when: or(s.when, [])
+        }
+    })
+}
+
+builtin-list-skills
+meta {
+    doc: """
+    Construct the `list_skills` built-in tool over the given skill
+    set. Used internally by `builtins`; exposed for callers that want
+    to wire individual built-ins by hand.
+    """
+}
+fn (skills: Vec<Skill>): ::tool/Tool {
+    ::tool/Tool({
+        name: "list_skills",
+        description: "List every skill available to this agent.",
+        input-schema: {type: "object", properties: {}, required: []},
+        output-schema: null,
+        fn: () { list-skills-of(skills) }
+    })
+}
+
+builtin-read-skill
+meta {
+    doc: """
+    Construct the `read_skill` built-in tool over the given skill set.
+    Returns the resolved body for the named skill, or an error string
+    when the name is unknown.
+    """
+}
+fn (skills: Vec<Skill>): ::tool/Tool {
+    ::tool/Tool({
+        name: "read_skill",
+        description: "Return the full instructions for a single skill by name.",
+        input-schema: {
+            type: "object",
+            properties: {name: {type: "string"}},
+            required: ["name"]
+        },
+        output-schema: null,
+        fn: (name: Str): Str {
+            s find-skill(skills, name)
+            if(is-null(s), `Unknown skill: ${name}`, load-body(s, {}))
+        }
+    })
+}
+
+builtin-apply-skill
+meta {
+    doc: """
+    Construct the `apply_skill` built-in tool over the given skill
+    set. Like `read_skill` but lets the model pass a `ctx` map that
+    reaches the skill's `body-fn` (when present).
+    """
+}
+fn (skills: Vec<Skill>): ::tool/Tool {
+    ::tool/Tool({
+        name: "apply_skill",
+        description: "Resolve a skill against an optional context map and return its body.",
+        input-schema: {
+            type: "object",
+            properties: {
+                name: {type: "string"},
+                ctx: {type: "object"}
+            },
+            required: ["name"]
+        },
+        output-schema: null,
+        fn: (name: Str, ctx: Map): Str {
+            s find-skill(skills, name)
+            if(is-null(s), `Unknown skill: ${name}`, load-body(s, or(ctx, {})))
+        }
+    })
+}
+
+builtins
+meta {
+    doc: """
+    Return the three built-in tools (`list_skills`, `read_skill`,
+    `apply_skill`) bound over `skills`. Concatenated into the agent's
+    `tools` list by `::ai::chat/run-loop` whenever the agent declares
+    one or more skills.
+
+    Equivalent to `builtins-with-resolver(in-memory-resolver(skills))`
+    minus the optional `search_skills` tool. Kept for backwards
+    compatibility with callers that wire skill toolsets directly.
+    """
+}
+fn (skills: Vec<Skill>): Vec<::tool/Tool> {
+    [
+        builtin-list-skills(skills),
+        builtin-read-skill(skills),
+        builtin-apply-skill(skills)
+    ]
+}
+
+// ============================================================================
+// SkillResolver — pluggable strategy for skill discovery
+// ============================================================================
+
+SkillResolver
+meta {
+    doc: """
+    Pluggable strategy for picking which skills are visible to the
+    model on a given turn. `::ai::chat/run-loop` calls into a resolver
+    at three fixed points:
+
+    - `list-fn(ctx)` — once per turn, when building the system-prompt
+      skill index. Returns the `Vec<Skill>` to advertise this turn.
+      `ctx` is a map carrying the turn's `messages`, `system` prompt,
+      and `model`; resolvers may inspect any of these to decide what
+      to surface (e.g. embed the last user message and rank a store).
+    - `read-fn(name)` — invoked from the `read_skill` and `apply_skill`
+      built-in tools when the model asks for a specific skill body.
+      Should return `null` for unknown names. Note this is decoupled
+      from `list-fn`: a store-backed resolver may know about more
+      skills than it surfaces in any single turn.
+    - `search-fn(query, opts)` — optional. When set, `run-loop` adds a
+      fourth `search_skills` tool that lets the model query the
+      resolver directly. Useful when the index is too large to inline
+      every turn.
+
+    Built-in factories:
+
+    - `in-memory-resolver(skills)` — current behaviour, no search.
+    - `searchable-resolver(skills)` — like `in-memory-resolver` but
+      with a substring-rank `search-fn` over name/description/when.
+      Pair with a small or empty `list-fn` output to scale to many
+      skills without inflating the system prompt.
+
+    Custom resolvers (Postgres, Pinecone, LLM-judged routing, etc.)
+    are constructed by passing your own `Fn` slots to
+    `SkillResolver({...})` directly.
+    """
+}
+type {
+    list-fn: Fn,
+    read-fn: Fn,
+    search-fn: Fn?
+}
+
+// ----------------------------------------------------------------------------
+// Substring search helper
+// ----------------------------------------------------------------------------
+
+skill-search-score
+meta {
+    doc: """
+    Internal: case-insensitive substring score for one skill against a
+    query. Counts hits in `name` (×3), `description` (×2), and
+    `when` triggers (×1). Returns `0` for no match.
+    """,
+    no-doc: true
+}
+fn (skill: Skill, query: Str): Int {
+    q lowercase(trim(query))
+    cond {
+        is-empty(q) => { 0 }
+        => {
+            name-hits if(contains(lowercase(skill.name), q), 3, 0)
+            desc-hits if(contains(lowercase(skill.description), q), 2, 0)
+            when-hits cond {
+                is-null(skill.when) => { 0 }
+                => {
+                    matched filter(skill.when, contains(lowercase(%), q))
+                    length(matched)
+                }
+            }
+            add(add(name-hits, desc-hits), when-hits)
+        }
+    }
+}
+
+search-skills-of
+meta {
+    doc: """
+    Rank `skills` against a free-text `query` using a lightweight
+    case-insensitive substring scorer. `opts.limit` caps the result
+    (default 10); `opts.min-score` filters out weak hits (default 1).
+    Returns the highest-scoring `Skill` records, ties broken by input
+    order.
+    """
+}
+fn (skills: Vec<Skill>, query: Str, opts: Map): Vec<Skill> {
+    limit or(get(opts, "limit"), 10)
+    min-score or(get(opts, "min-score"), 1)
+    skills
+        |> map((s) { {skill: s, score: skill-search-score(s, query)} })
+        |> filter(gte(%.score, min-score))
+        |> sort-by(sub(0, %.score))
+        |> slice(0, limit)
+        |> map(%.skill)
+}
+
+// ----------------------------------------------------------------------------
+// Factories
+// ----------------------------------------------------------------------------
+
+in-memory-resolver
+meta {
+    doc: """
+    Default `SkillResolver`: `list-fn` returns the full `skills`
+    vector every turn, `read-fn` does an in-memory name lookup, and
+    `search-fn` is `null`. Mirrors the pre-resolver behaviour of
+    `::ai::chat/run-loop` exactly, so wrapping `opts.skills` in this
+    resolver is a no-op for the model.
+    """
+}
+fn (skills: Vec<Skill>): SkillResolver {
+    SkillResolver({
+        list-fn: (ctx: Map): Vec<Skill> { skills },
+        read-fn: (name: Str): Skill? { find-skill(skills, name) },
+        search-fn: null
+    })
+}
+
+searchable-resolver
+meta {
+    doc: """
+    `SkillResolver` over a fixed `Vec<Skill>` that also exposes a
+    substring-rank `search-fn`. `run-loop` will surface a fourth
+    `search_skills` tool so the model can query for relevant skills
+    on demand.
+
+    `opts.always-on` (default `[]`) are skills returned from
+    `list-fn` every turn regardless of search; the rest of `skills`
+    are reachable only via `search_skills` and `read_skill`. This
+    keeps the system-prompt index small while still letting the
+    model find the long tail.
+    """
+}
+fn (skills: Vec<Skill>, opts: Map): SkillResolver {
+    always-on or(get(opts, "always-on"), [])
+    SkillResolver({
+        list-fn: (ctx: Map): Vec<Skill> { always-on },
+        read-fn: (name: Str): Skill? { find-skill(skills, name) },
+        search-fn: (query: Str, search-opts: Map): Vec<Skill> {
+            search-skills-of(skills, query, or(search-opts, {}))
+        }
+    })
+}
+
+// ----------------------------------------------------------------------------
+// Resolver-aware built-in tools
+// ----------------------------------------------------------------------------
+
+builtin-list-skills-r
+meta {
+    doc: """
+    Resolver-aware variant of `builtin-list-skills`. The bound
+    `list_skills` tool consults the resolver's `list-fn` on every
+    invocation, so resolvers that change their output over time (e.g.
+    a hybrid resolver that re-ranks after new context arrives) stay
+    in sync with what the model sees.
+    """
+}
+fn (resolver: SkillResolver): ::tool/Tool {
+    ::tool/Tool({
+        name: "list_skills",
+        description: "List every skill currently available to this agent.",
+        input-schema: {type: "object", properties: {}, required: []},
+        output-schema: null,
+        fn: () { list-skills-of(resolver.list-fn({})) }
+    })
+}
+
+builtin-read-skill-r
+meta {
+    doc: """
+    Resolver-aware variant of `builtin-read-skill`. Routes name
+    lookups through `resolver.read-fn`, so a store-backed resolver
+    can serve skills it never surfaced in the index.
+    """
+}
+fn (resolver: SkillResolver): ::tool/Tool {
+    ::tool/Tool({
+        name: "read_skill",
+        description: "Return the full instructions for a single skill by name.",
+        input-schema: {
+            type: "object",
+            properties: {name: {type: "string"}},
+            required: ["name"]
+        },
+        output-schema: null,
+        fn: (name: Str): Str {
+            s resolver.read-fn(name)
+            if(is-null(s), `Unknown skill: ${name}`, load-body(s, {}))
+        }
+    })
+}
+
+builtin-apply-skill-r
+meta {
+    doc: """
+    Resolver-aware variant of `builtin-apply-skill`. Like
+    `builtin-read-skill-r` but lets the model pass a `ctx` map that
+    reaches the skill's `body-fn` (when present).
+    """
+}
+fn (resolver: SkillResolver): ::tool/Tool {
+    ::tool/Tool({
+        name: "apply_skill",
+        description: "Resolve a skill against an optional context map and return its body.",
+        input-schema: {
+            type: "object",
+            properties: {
+                name: {type: "string"},
+                ctx: {type: "object"}
+            },
+            required: ["name"]
+        },
+        output-schema: null,
+        fn: (name: Str, ctx: Map): Str {
+            s resolver.read-fn(name)
+            if(is-null(s), `Unknown skill: ${name}`, load-body(s, or(ctx, {})))
+        }
+    })
+}
+
+builtin-search-skills-r
+meta {
+    doc: """
+    Built-in `search_skills` tool. Only constructed when the resolver
+    declares a `search-fn`; built around `resolver.search-fn(query,
+    opts)` so any backing strategy (substring, embeddings, vendor
+    APIs) works without changes here.
+    """
+}
+fn (resolver: SkillResolver): ::tool/Tool {
+    ::tool/Tool({
+        name: "search_skills",
+        description: "Search available skills by free-text query. \
+                      Returns the top matches as {name, description, when} maps. \
+                      Use this when the system prompt does not list a skill \
+                      that seems relevant.",
+        input-schema: {
+            type: "object",
+            properties: {
+                query: {type: "string"},
+                limit: {type: "integer"}
+            },
+            required: ["query"]
+        },
+        output-schema: null,
+        fn: (query: Str, limit: Int?): Vec<Map> {
+            opts if(is-null(limit), {}, {limit: limit})
+            hits resolver.search-fn(query, opts)
+            list-skills-of(hits)
+        }
+    })
+}
+
+builtins-with-resolver
+meta {
+    doc: """
+    Build the per-turn skill toolset from a `SkillResolver`. Always
+    emits `list_skills`, `read_skill`, and `apply_skill`; appends a
+    fourth `search_skills` tool when the resolver provides a
+    `search-fn`. Used by `::ai::chat/run-loop` whenever an agent
+    declares either `opts.skills` or `opts.skill-resolver`.
+    """
+}
+fn (resolver: SkillResolver): Vec<::tool/Tool> {
+    base [
+        builtin-list-skills-r(resolver),
+        builtin-read-skill-r(resolver),
+        builtin-apply-skill-r(resolver)
+    ]
+    if(is-null(resolver.search-fn),
+       base,
+       concat(base, [builtin-search-skills-r(resolver)]))
+}
+
+// ----------------------------------------------------------------------------
+// Resolver helper for run-loop integration
+// ----------------------------------------------------------------------------
+
+effective-resolver
+meta {
+    doc: """
+    Resolve which `SkillResolver` `::ai::chat/run-loop` should use on
+    a given call. Precedence:
+
+    1. `opts.skill-resolver` (when non-null) wins outright.
+    2. Otherwise `opts.skills` is materialized via `for-agent` and
+       wrapped in `in-memory-resolver`.
+    3. When neither is set, returns `null` — `run-loop` skips the
+       skill index and skill builtins entirely.
+    """
+}
+fn (skill-resolver: SkillResolver?, skills: Vec<Any>?): SkillResolver? {
+    cond {
+        not(is-null(skill-resolver)) => { skill-resolver }
+        is-null(skills) => { null }
+        is-empty(skills) => { null }
+        => { in-memory-resolver(for-agent(skills)) }
+    }
+}

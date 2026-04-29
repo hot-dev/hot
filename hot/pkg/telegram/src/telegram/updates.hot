@@ -1,0 +1,149 @@
+::telegram::updates ns
+
+api-request ::telegram::api/request
+
+// ============================================================================
+// Webhook Management
+// ============================================================================
+
+SetWebhookRequest type {
+  url: Str,
+  certificate: Str?,
+  ip_address: Str?,
+  max_connections: Int?,
+  allowed_updates: Vec<Str>?,
+  drop_pending_updates: Bool?,
+  secret_token: Str?
+}
+
+set-webhook
+meta {
+    doc: """
+setWebhook - Register a URL to receive incoming updates via webhook. Telegram will POST JSON updates to this URL.
+
+Set `secret_token` (1-256 characters) to receive it in the `X-Telegram-Bot-Api-Secret-Token` header for verification. `allowed_updates` filters which update types are delivered (e.g. `["message", "callback_query"]`).
+
+**Example**
+
+```hot
+::updates ::telegram::updates
+
+::updates/set-webhook(::updates/SetWebhookRequest({
+  url: "https://myapp.hot.dev/telegram/webhook",
+  secret_token: "my-secret-token",
+  allowed_updates: ["message", "callback_query", "inline_query"]
+}))
+```
+"""
+}
+fn (request: SetWebhookRequest): Bool {
+  api-request("setWebhook", untype(request))
+}
+
+DeleteWebhookRequest type {
+  drop_pending_updates: Bool?
+}
+
+delete-webhook
+meta {
+    doc: """deleteWebhook - Remove the webhook integration. Set `drop_pending_updates: true` to discard any pending updates."""
+}
+fn (request: DeleteWebhookRequest): Bool {
+  api-request("deleteWebhook", untype(request))
+}
+
+get-webhook-info
+meta {
+    doc: """
+getWebhookInfo - Get current webhook status. Returns the webhook URL, pending update count, last error, and allowed update types.
+
+**Example**
+
+```hot
+::updates ::telegram::updates
+
+response ::updates/get-webhook-info()
+response.url                    // => "https://myapp.hot.dev/telegram/webhook"
+response.pending_update_count   // => 0
+response.last_error_date        // => null (no errors)
+```
+"""
+}
+fn (): Map {
+  api-request("getWebhookInfo")
+}
+
+// ============================================================================
+// Polling (alternative to webhooks)
+// ============================================================================
+
+GetUpdatesRequest type {
+  offset: Int?,
+  limit: Int?,
+  timeout: Int?,
+  allowed_updates: Vec<Str>?
+}
+
+get-updates
+meta {
+    doc: """
+getUpdates - Receive incoming updates via long polling. Use `offset` to acknowledge processed updates (set to last update_id + 1). `timeout` (in seconds) enables long polling (recommended: 30). `limit` (1-100) controls batch size.
+
+**Example**
+
+```hot
+::updates ::telegram::updates
+
+response ::updates/get-updates(::updates/GetUpdatesRequest({
+  timeout: 30,
+  limit: 10
+}))
+// => [{update_id: 123, message: {chat: {id: ...}, text: "hello"}}, ...]
+```
+"""
+}
+fn (request: GetUpdatesRequest): Vec<Map> {
+  api-request("getUpdates", untype(request))
+}
+
+// ============================================================================
+// Webhook Verification
+// ============================================================================
+
+verify-request
+meta {
+    ctx: {"telegram.webhook.secret": {required: false}},
+    doc: """
+  Verify a Telegram webhook request using the secret token. Returns true if the `X-Telegram-Bot-Api-Secret-Token` header matches the expected secret.
+
+  Unlike Slack/Discord which use HMAC signatures, Telegram uses a simple shared secret comparison. Set `secret_token` when calling `setWebhook`, then verify incoming requests with this function.
+
+  Uses the `telegram.webhook.secret` context variable by default, or accepts an explicit secret as a second argument.
+
+  **Example**
+
+  ```hot
+  // Using context variable (1-arity)
+  is-valid ::telegram::updates/verify-request(request)
+
+  // With explicit secret (2-arity)
+  is-valid ::telegram::updates/verify-request(request, "my-secret-token")
+  ```
+  """
+}
+fn
+(request: Map): Bool {
+  secret or(::hot::ctx/get("telegram.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("telegram.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  token get(request.headers, "x-telegram-bot-api-secret-token", "")
+  cond {
+    is-empty(secret) => { false }
+    is-empty(token) => { false }
+    => { secure-compare(secret, token) }
+  }
+}

@@ -1,0 +1,42 @@
+::twilio::integration::messages ns
+meta ["test"]
+
+TWILIO_TEST_TO ::hot::env/get("TWILIO_TEST_TO", "")
+TWILIO_TEST_FROM ::hot::env/get("TWILIO_TEST_FROM", "")
+
+test-send-and-get-sms
+meta ["test"]
+fn () {
+  assert(TWILIO_TEST_TO, "Set TWILIO_TEST_TO in .env (a phone number you own, e.g. +15558675310)")
+  assert(TWILIO_TEST_FROM, "Set TWILIO_TEST_FROM in .env (your Twilio number, e.g. +15017122661)")
+
+  // Step 1: Send an SMS
+  send-response ::twilio::messages/create-message(::twilio::messages/CreateMessageRequest({
+    To: TWILIO_TEST_TO,
+    From: TWILIO_TEST_FROM,
+    Body: "Hot integration test message"
+  }))
+
+  assert(send-response.sid, `create-message should return SID. response=${to-json(send-response)}`)
+  assert(starts-with(send-response.sid, "SM"), "message SID should start with SM")
+  assert-eq(TWILIO_TEST_TO, send-response.to, "to should match requested number")
+
+  // Step 2: Fetch the message
+  get-response ::twilio::messages/get-message(::twilio::messages/GetMessageRequest({
+    sid: send-response.sid
+  }))
+
+  assert-eq(send-response.sid, get-response.sid, "get-message should return same SID")
+  assert(get-response.status, "message should have a status")
+  assert(get-response.body, "message should have a body")
+}
+
+test-list-messages
+meta ["test"]
+fn () {
+  response ::twilio::messages/list-messages(::twilio::messages/ListMessagesRequest({
+    PageSize: 5
+  }))
+
+  assert(response.messages, "list-messages should return messages array")
+}

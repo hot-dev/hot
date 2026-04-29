@@ -1,0 +1,577 @@
+::gemini::models ns
+
+api-request ::gemini::api/request
+HttpError ::gemini::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+FunctionCallingConfig type {
+    mode: "MODE_UNSPECIFIED" | "AUTO" | "ANY" | "NONE"?,
+    allowedFunctionNames: Vec<Str>?
+}
+
+GoogleSearchRetrieval type {
+    dynamicRetrievalConfig: DynamicRetrievalConfig?
+}
+
+GroundingSupport type {
+    segment: Segment?,
+    groundingChunkIndices: Vec<Int>?,
+    confidenceScores: Vec<Dec>?
+}
+
+RetrievalMetadata type {
+    googleSearchDynamicRetrievalScore: Dec?
+}
+
+LogprobsCandidate type {
+    token: Str?,
+    tokenId: Int?,
+    logProbability: Dec?
+}
+
+EmbedContentResponse type {
+    embedding: ContentEmbedding?
+}
+
+ErrorResponse type {
+    error: Status?
+}
+
+FunctionResponse type {
+    name: Str?,
+    response: Map?
+}
+
+ListModelsResponse type {
+    models: Vec<Model>?,
+    nextPageToken: Str?
+}
+
+Schema type {
+    type: "TYPE_UNSPECIFIED" | "STRING" | "NUMBER" | "INTEGER" | "BOOLEAN" | "ARRAY" | "OBJECT"?,
+    format: Str?,
+    description: Str?,
+    nullable: Bool?,
+    enum: Vec<Str>?,
+    items: Schema?,
+    properties: Map?,
+    required: Vec<Str>?
+}
+
+GroundingChunk type {
+    web: Web?,
+    retrievedContext: RetrievedContext?
+}
+
+CountTokensResponse type {
+    totalTokens: Int?,
+    cachedContentTokenCount: Int?
+}
+
+ToolConfig type {
+    functionCallingConfig: FunctionCallingConfig?
+}
+
+SafetySetting type {
+    category: "HARM_CATEGORY_UNSPECIFIED" | "HARM_CATEGORY_DEROGATORY" | "HARM_CATEGORY_TOXICITY" | "HARM_CATEGORY_VIOLENCE" | "HARM_CATEGORY_SEXUAL" | "HARM_CATEGORY_MEDICAL" | "HARM_CATEGORY_DANGEROUS" | "HARM_CATEGORY_HARASSMENT" | "HARM_CATEGORY_HATE_SPEECH" | "HARM_CATEGORY_SEXUALLY_EXPLICIT" | "HARM_CATEGORY_DANGEROUS_CONTENT" | "HARM_CATEGORY_CIVIC_INTEGRITY"?,
+    threshold: "HARM_BLOCK_THRESHOLD_UNSPECIFIED" | "BLOCK_LOW_AND_ABOVE" | "BLOCK_MEDIUM_AND_ABOVE" | "BLOCK_ONLY_HIGH" | "BLOCK_NONE" | "OFF"?
+}
+
+ContentEmbedding type {
+    values: Vec<Dec>?
+}
+
+Blob type {
+    mimeType: Str?,
+    data: Str?
+}
+
+GenerateContentResponse type {
+    candidates: Vec<Candidate>?,
+    promptFeedback: PromptFeedback?,
+    usageMetadata: UsageMetadata?,
+    modelVersion: Str?
+}
+
+CitationSource type {
+    startIndex: Int?,
+    endIndex: Int?,
+    uri: Str?,
+    license: Str?
+}
+
+GenerateContentRequest type {
+    contents: Vec<Content>,
+    systemInstruction: Content?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    safetySettings: Vec<SafetySetting>?,
+    generationConfig: GenerationConfig?,
+    cachedContent: Str?
+}
+
+GenerationConfig type {
+    stopSequences: Vec<Str>?,
+    responseMimeType: Str?,
+    responseSchema: Schema?,
+    candidateCount: Int?,
+    maxOutputTokens: Int?,
+    temperature: Dec?,
+    topP: Dec?,
+    topK: Int?,
+    presencePenalty: Dec?,
+    frequencyPenalty: Dec?,
+    responseLogprobs: Bool?,
+    logprobs: Int?
+}
+
+Web type {
+    uri: Str?,
+    title: Str?
+}
+
+Segment type {
+    partIndex: Int?,
+    startIndex: Int?,
+    endIndex: Int?,
+    text: Str?
+}
+
+FunctionCall type {
+    name: Str?,
+    args: Map?
+}
+
+PromptFeedback type {
+    blockReason: "BLOCK_REASON_UNSPECIFIED" | "SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT"?,
+    safetyRatings: Vec<SafetyRating>?
+}
+
+BatchEmbedContentsRequest type {
+    requests: Vec<EmbedContentRequest>
+}
+
+Model type {
+    name: Str?,
+    baseModelId: Str?,
+    version: Str?,
+    displayName: Str?,
+    description: Str?,
+    inputTokenLimit: Int?,
+    outputTokenLimit: Int?,
+    supportedGenerationMethods: Vec<Str>?,
+    temperature: Dec?,
+    maxTemperature: Dec?,
+    topP: Dec?,
+    topK: Int?
+}
+
+FileData type {
+    mimeType: Str?,
+    fileUri: Str?
+}
+
+SafetyRating type {
+    category: Str?,
+    probability: "HARM_PROBABILITY_UNSPECIFIED" | "NEGLIGIBLE" | "LOW" | "MEDIUM" | "HIGH"?,
+    blocked: Bool?
+}
+
+CodeExecutionResult type {
+    outcome: "OUTCOME_UNSPECIFIED" | "OUTCOME_OK" | "OUTCOME_FAILED" | "OUTCOME_DEADLINE_EXCEEDED"?,
+    output: Str?
+}
+
+UsageMetadata type {
+    promptTokenCount: Int?,
+    cachedContentTokenCount: Int?,
+    candidatesTokenCount: Int?,
+    totalTokenCount: Int?
+}
+
+Part type {
+    text: Str?,
+    inlineData: Blob?,
+    fileData: FileData?,
+    functionCall: FunctionCall?,
+    functionResponse: FunctionResponse?,
+    executableCode: ExecutableCode?,
+    codeExecutionResult: CodeExecutionResult?
+}
+
+Tool type {
+    functionDeclarations: Vec<FunctionDeclaration>?,
+    codeExecution: Map?,
+    googleSearch: Map?,
+    googleSearchRetrieval: GoogleSearchRetrieval?
+}
+
+Status type {
+    code: Int?,
+    message: Str?,
+    details: Vec<Map>?
+}
+
+EmbedContentRequest type {
+    content: Content,
+    taskType: "TASK_TYPE_UNSPECIFIED" | "RETRIEVAL_QUERY" | "RETRIEVAL_DOCUMENT" | "SEMANTIC_SIMILARITY" | "CLASSIFICATION" | "CLUSTERING" | "QUESTION_ANSWERING" | "FACT_VERIFICATION"?,
+    title: Str?,
+    outputDimensionality: Int?
+}
+
+ExecutableCode type {
+    language: "LANGUAGE_UNSPECIFIED" | "PYTHON"?,
+    code: Str?
+}
+
+FunctionDeclaration type {
+    name: Str?,
+    description: Str?,
+    parameters: Schema?
+}
+
+DynamicRetrievalConfig type {
+    mode: "MODE_UNSPECIFIED" | "MODE_DYNAMIC"?,
+    dynamicThreshold: Dec?
+}
+
+CountTokensRequest type {
+    contents: Vec<Content>?,
+    generateContentRequest: GenerateContentRequest?
+}
+
+GroundingMetadata type {
+    webSearchQueries: Vec<Str>?,
+    searchEntryPoint: SearchEntryPoint?,
+    groundingChunks: Vec<GroundingChunk>?,
+    groundingSupports: Vec<GroundingSupport>?,
+    retrievalMetadata: RetrievalMetadata?
+}
+
+LogprobsResult type {
+    topCandidates: Vec<TopCandidates>?,
+    chosenCandidates: Vec<LogprobsCandidate>?
+}
+
+Candidate type {
+    content: Content?,
+    finishReason: "FINISH_REASON_UNSPECIFIED" | "STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION" | "LANGUAGE" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "MALFORMED_FUNCTION_CALL"?,
+    safetyRatings: Vec<SafetyRating>?,
+    citationMetadata: CitationMetadata?,
+    tokenCount: Int?,
+    groundingMetadata: GroundingMetadata?,
+    avgLogprobs: Dec?,
+    logprobsResult: LogprobsResult?,
+    index: Int?
+}
+
+CitationMetadata type {
+    citationSources: Vec<CitationSource>?
+}
+
+SearchEntryPoint type {
+    renderedContent: Str?,
+    sdkBlob: Str?
+}
+
+Content type {
+    parts: Vec<Part>?,
+    role: "user" | "model"?
+}
+
+RetrievedContext type {
+    uri: Str?,
+    title: Str?
+}
+
+TopCandidates type {
+    candidates: Vec<LogprobsCandidate>?
+}
+
+BatchEmbedContentsResponse type {
+    embeddings: Vec<ContentEmbedding>?
+}
+
+ModelsListRequest type {
+  page-size: Str,
+  page-token: Str
+}
+
+ModelsListResponse type {
+    models: Vec<Model>?,
+    nextPageToken: Str?
+}
+
+
+list
+meta {
+    doc: """
+    List available Gemini models. Returns a paginated list of models with their capabilities.
+
+    **Example**
+
+    ```hot
+    models ::gemini::models/list(ModelsListRequest({
+        page-size: "10",
+        page-token: ""
+    }))
+
+    first-model first(models.models)
+    first-model.name // => "models/gemini-2.0-flash"
+    ```
+    """
+}
+fn (request: ModelsListRequest): ModelsListResponse {
+  response api-request("GET", `${::gemini/BASE_URL}/v1/models?pageSize=${request.page-size}&pageToken=${request.page-token}`)
+  if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+}
+
+ModelsGetRequest type {
+  model: Str
+}
+
+ModelsGetResponse type {
+    name: Str?,
+    baseModelId: Str?,
+    version: Str?,
+    displayName: Str?,
+    description: Str?,
+    inputTokenLimit: Int?,
+    outputTokenLimit: Int?,
+    supportedGenerationMethods: Vec<Str>?,
+    temperature: Dec?,
+    maxTemperature: Dec?,
+    topP: Dec?,
+    topK: Int?
+}
+
+
+get
+meta {
+    doc: """
+    Get details about a specific Gemini model, including its capabilities and token limits.
+
+    **Example**
+
+    ```hot
+    model ::gemini::models/get(ModelsGetRequest({
+        model: "gemini-2.0-flash"
+    }))
+
+    model.name             // => "models/gemini-2.0-flash"
+    model.displayName      // => "Gemini 2.0 Flash"
+    model.inputTokenLimit  // => 1048576
+    model.outputTokenLimit // => 8192
+    ```
+    """
+}
+fn (request: ModelsGetRequest): ModelsGetResponse {
+  response api-request("GET", `${::gemini/BASE_URL}/v1/models/${request.model}`)
+  if(is-ok-response(response), ModelsGetResponse(response.body), err(HttpError(response)))
+}
+
+ModelsGenerateContentRequest type {
+    contents: Vec<Content>,
+    systemInstruction: Content?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    safetySettings: Vec<SafetySetting>?,
+    generationConfig: GenerationConfig?,
+    cachedContent: Str?
+}
+
+ModelsGenerateContentResponse type {
+    candidates: Vec<Candidate>?,
+    promptFeedback: PromptFeedback?,
+    usageMetadata: UsageMetadata?,
+    modelVersion: Str?
+}
+
+
+generate-content
+meta {
+    doc: """
+    Generate content using a Gemini model (non-streaming). This is the low-level API; for a simpler interface, see `::gemini::chat/generate` or `::gemini::chat/chat`.
+
+    **Example**
+
+    ```hot
+    response ::gemini::models/generate-content("gemini-2.0-flash", ModelsGenerateContentRequest({
+        contents: [Content({
+            role: "user",
+            parts: [Part({text: "What is the capital of France?"})]
+        })],
+        generationConfig: GenerationConfig({maxOutputTokens: 100})
+    }))
+
+    text first(response.candidates).content.parts[0].text
+    ```
+    """
+}
+fn (model: Str, request: ModelsGenerateContentRequest): ModelsGenerateContentResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:generateContent`, {}, request)
+  if(is-ok-response(response), ModelsGenerateContentResponse(response.body), err(HttpError(response)))
+}
+
+ModelsStreamGenerateContentRequest type {
+    contents: Vec<Content>,
+    systemInstruction: Content?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    safetySettings: Vec<SafetySetting>?,
+    generationConfig: GenerationConfig?,
+    cachedContent: Str?
+}
+
+ModelsStreamGenerateContentResponse type {
+    candidates: Vec<Candidate>?,
+    promptFeedback: PromptFeedback?,
+    usageMetadata: UsageMetadata?,
+    modelVersion: Str?
+}
+
+
+stream-generate-content
+meta {
+    doc: """
+    Generate content with streaming. Requires an `alt` parameter (e.g. "sse") to specify the streaming format.
+
+    **Example**
+
+    ```hot
+    response ::gemini::models/stream-generate-content("gemini-2.0-flash", "sse", ModelsStreamGenerateContentRequest({
+        contents: [Content({
+            role: "user",
+            parts: [Part({text: "Count from 1 to 5."})]
+        })],
+        generationConfig: GenerationConfig({maxOutputTokens: 100})
+    }))
+    ```
+    """
+}
+fn (model: Str, alt: Str, request: ModelsStreamGenerateContentRequest): ModelsStreamGenerateContentResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:streamGenerateContent?alt=${alt}`, {}, request)
+  if(is-ok-response(response), ModelsStreamGenerateContentResponse(response.body), err(HttpError(response)))
+}
+
+ModelsCountTokensRequest type {
+    contents: Vec<Content>?,
+    generateContentRequest: GenerateContentRequest?
+}
+
+ModelsCountTokensResponse type {
+    totalTokens: Int?,
+    cachedContentTokenCount: Int?
+}
+
+
+count-tokens
+meta {
+    doc: """
+    Count the number of tokens in the provided content. Useful for estimating API usage before making a generation request.
+
+    **Example**
+
+    ```hot
+    response ::gemini::models/count-tokens("gemini-2.0-flash", ModelsCountTokensRequest({
+        contents: [Content({
+            role: "user",
+            parts: [Part({text: "Hello, world!"})]
+        })]
+    }))
+
+    response.totalTokens // => 3
+    ```
+    """
+}
+fn (model: Str, request: ModelsCountTokensRequest): ModelsCountTokensResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:countTokens`, {}, request)
+  if(is-ok-response(response), ModelsCountTokensResponse(response.body), err(HttpError(response)))
+}
+
+ModelsEmbedContentRequest type {
+    content: Content,
+    taskType: "TASK_TYPE_UNSPECIFIED" | "RETRIEVAL_QUERY" | "RETRIEVAL_DOCUMENT" | "SEMANTIC_SIMILARITY" | "CLASSIFICATION" | "CLUSTERING" | "QUESTION_ANSWERING" | "FACT_VERIFICATION"?,
+    title: Str?,
+    outputDimensionality: Int?
+}
+
+ModelsEmbedContentResponse type {
+    embedding: ContentEmbedding?
+}
+
+
+embed-content
+meta {
+    doc: """
+    Generate an embedding vector for the given content. Supports optional task type for optimized embeddings.
+
+    **Example**
+
+    ```hot
+    response ::gemini::models/embed-content("text-embedding-004", ModelsEmbedContentRequest({
+        content: Content({
+            role: "user",
+            parts: [Part({text: "The quick brown fox jumps over the lazy dog"})]
+        })
+    }))
+
+    response.embedding.values // => [0.0123, -0.0456, ...]
+    ```
+
+    **With task type**
+
+    ```hot
+    response ::gemini::models/embed-content("text-embedding-004", ModelsEmbedContentRequest({
+        content: Content({
+            role: "user",
+            parts: [Part({text: "What is the meaning of life?"})]
+        }),
+        taskType: "RETRIEVAL_QUERY"
+    }))
+    ```
+    """
+}
+fn (model: Str, request: ModelsEmbedContentRequest): ModelsEmbedContentResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:embedContent`, {}, request)
+  if(is-ok-response(response), ModelsEmbedContentResponse(response.body), err(HttpError(response)))
+}
+
+ModelsBatchEmbedContentsRequest type {
+    requests: Vec<EmbedContentRequest>
+}
+
+ModelsBatchEmbedContentsResponse type {
+    embeddings: Vec<ContentEmbedding>?
+}
+
+
+batch-embed-contents
+meta {
+    doc: """
+    Generate embeddings for multiple content items in a single request. More efficient than calling `embed-content` multiple times.
+
+    **Example**
+
+    ```hot
+    response ::gemini::models/batch-embed-contents("text-embedding-004", ModelsBatchEmbedContentsRequest({
+        requests: [
+            EmbedContentRequest({
+                content: Content({role: "user", parts: [Part({text: "Hello world"})]}),
+                model: "models/text-embedding-004"
+            }),
+            EmbedContentRequest({
+                content: Content({role: "user", parts: [Part({text: "Goodbye world"})]}),
+                model: "models/text-embedding-004"
+            })
+        ]
+    }))
+
+    length(response.embeddings) // => 2
+    ```
+    """
+}
+fn (model: Str, request: ModelsBatchEmbedContentsRequest): ModelsBatchEmbedContentsResponse {
+  response api-request("POST", `${::gemini/BASE_URL}/v1/models/${model}:batchEmbedContents`, {}, request)
+  if(is-ok-response(response), ModelsBatchEmbedContentsResponse(response.body), err(HttpError(response)))
+}

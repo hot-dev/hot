@@ -1,0 +1,58 @@
+::ai::test::math-extras ns
+meta ["test"]
+
+// Verifies that max, min, and abs (newly added to ::hot::math) work
+// correctly via the core auto-import mechanism.
+
+test-max-ints
+meta ["test"] fn () {
+    assert-eq(7, max(3, 7))
+    assert-eq(7, max(7, 3))
+    assert-eq(-1, max(-1, -5))
+    assert-eq(0, max(0, 0))
+}
+
+test-min-ints
+meta ["test"] fn () {
+    assert-eq(3, min(3, 7))
+    assert-eq(3, min(7, 3))
+    assert-eq(-5, min(-1, -5))
+    assert-eq(0, min(0, 0))
+}
+
+test-abs-ints
+meta ["test"] fn () {
+    assert-eq(5, abs(-5))
+    assert-eq(3, abs(3))
+    assert-eq(0, abs(0))
+}
+
+test-max-dec
+meta ["test"] fn () {
+    assert-eq(1.5, max(1.5, 1.4))
+    assert-eq(2.0, max(1.0, 2.0))
+}
+
+test-min-dec
+meta ["test"] fn () {
+    assert-eq(1.4, min(1.5, 1.4))
+    assert-eq(1.0, min(1.0, 2.0))
+}
+
+test-abs-dec
+meta ["test"] fn () {
+    assert-eq(2.5, abs(-2.5))
+    assert-eq(1.5, abs(1.5))
+}
+
+test-max-mixed
+meta ["test"] fn () {
+    assert-eq(5.0, max(5, 4.5))
+    assert-eq(5.0, max(4.5, 5))
+}
+
+test-min-mixed
+meta ["test"] fn () {
+    assert-eq(4.5, min(5, 4.5))
+    assert-eq(4.5, min(4.5, 5))
+}

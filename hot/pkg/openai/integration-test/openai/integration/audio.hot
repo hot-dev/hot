@@ -1,0 +1,43 @@
+::openai::integration::audio ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for OpenAI Audio API
+// =============================================================================
+// These tests require OPENAI_API_KEY to be set in context
+
+test-audio-speech-simple
+meta ["test"]
+fn () {
+    audio-bytes ::openai::audio/speech(::openai::audio/SpeechRequest({
+        model: "tts-1",
+        input: "Hello, this is a test.",
+        voice: "alloy"
+    }))
+
+    assert(audio-bytes, "Should get audio response")
+    // Audio response is bytes or string depending on how it's returned
+    assert(gt(length(audio-bytes), 100), "Audio should have substantial content")
+}
+
+test-audio-speech-different-voice
+meta ["test"]
+fn () {
+    audio-bytes ::openai::audio/speech(::openai::audio/SpeechRequest({
+        model: "tts-1",
+        input: "Testing with a different voice.",
+        voice: "nova"
+    }))
+
+    assert(audio-bytes, "Should get audio bytes")
+    assert(gt(length(audio-bytes), 0), "Audio should have content")
+}
+
+test-audio-speak-convenience
+meta ["test"]
+fn () {
+    audio-bytes ::openai::audio/speak("Hello world!")
+
+    assert(audio-bytes, "Should get audio bytes")
+    assert(gt(length(audio-bytes), 0), "Audio should have content")
+}

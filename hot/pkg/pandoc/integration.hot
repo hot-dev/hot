@@ -1,0 +1,20 @@
+::hot::conf ns
+
+// Ephemeral SQLite for test isolation
+hot.db.uri "sqlite:./.hot/test-integration.sqlite.db"
+hot.db.schema "hot"
+
+// In-memory queue (no Redis needed)
+hot.queue.type "memory"
+
+// Box/container support
+hot.box.enabled true
+hot.box.backend "docker"
+
+// File storage — "direct" mode (simple filesystem, no DB tracking)
+hot.file.mode "direct"
+hot.file.storage.type "local"
+hot.file.storage.path "./.hot/test-integration-files"
+
+// Services to start for this integration test
+hot.test.integration.services ["task-worker"]

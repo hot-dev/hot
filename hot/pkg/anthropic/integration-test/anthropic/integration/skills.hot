@@ -1,0 +1,29 @@
+::anthropic::integration::skills ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Anthropic Skills API (Beta)
+// =============================================================================
+// These tests require ANTHROPIC_API_KEY to be set in context (via ctx.hot or conf)
+// Note: Skills API is in beta and requires the skills-2025-10-02 header
+
+test-skills-list
+meta ["test"]
+fn () {
+    // List skills - may include both custom and Anthropic-provided skills
+    skills ::anthropic::skills/list()
+
+    // Response should have data array (may be empty)
+    assert(is-vec(skills.data), "Response should have data array")
+    // has_more should be a boolean
+    assert(is-bool(skills.has_more), "has_more should be boolean")
+}
+
+test-skills-list-with-limit
+meta ["test"]
+fn () {
+    skills ::anthropic::skills/list(5)
+
+    assert(is-vec(skills.data), "Response should have data array")
+    assert(lte(length(skills.data), 5), "Should respect limit parameter")
+}

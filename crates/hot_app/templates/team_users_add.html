@@ -1,0 +1,80 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        {% match page_context.current_org %}
+        {% when Some with (org) %}
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            Manage organization teams
+        </p>
+        {% when None %}
+        {% endmatch %}
+        {% include "org_tabs.html" %}
+    </div>
+
+            <!-- Header -->
+            <div class="mb-6">
+                <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Add User to {{ team.name }}</h1>
+            </div>
+
+            <!-- Add User Form -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+                {% if error_message != "" %}
+                <div class="mb-4 bg-red-50 dark:bg-red-900 border border-red-200 dark:border-red-700 rounded-md p-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-red-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-red-800 dark:text-red-200">Error</h3>
+                            <div class="mt-1 text-sm text-red-700 dark:text-red-300">{{ error_message }}</div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <form method="POST" class="space-y-6">
+                    <div>
+                        <label for="user_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">User</label>
+                        <select name="user_id" id="user_id" required class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 sm:text-sm dark:text-white">
+                            <option value="">Select a user</option>
+                            {% for user in available_users %}
+                            <option value="{{ user.user_id }}" {% if selected_user_id == Some(*user.user_id) %}selected{% endif %}>
+                                {{ user.name }} ({{ user.email }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div>
+                        <label for="role_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Role</label>
+                        <select name="role_id" id="role_id" required class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 sm:text-sm dark:text-white">
+                            <option value="1" {% if selected_role_id == 1 %}selected{% endif %}>Member</option>
+                            <option value="2" {% if selected_role_id == 2 %}selected{% endif %}>Admin</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center justify-end space-x-4">
+                        {% match page_context.current_org %}
+                        {% when Some with (org) %}
+                            <a href="/@{{ org.slug }}/teams/{{ team.team_id }}/users" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                                Cancel
+                            </a>
+                            <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                                </svg>
+                                Add User
+                            </button>
+                        {% when None %}
+                            <p class="text-sm text-gray-500 dark:text-gray-400">No organization selected</p>
+                        {% endmatch %}
+                    </div>
+                </form>
+            </div>
+</div>
+{% endblock %}

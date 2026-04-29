@@ -1,0 +1,141 @@
+::openai::update ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+CreateChatCompletionResponse type {
+    id: Str,
+    choices: Vec<Map>,
+    created: Int,
+    model: Str,
+    service_tier: ServiceTier?,
+    system_fingerprint: Str?,
+    object: "chat.completion",
+    usage: CompletionUsage?
+}
+
+VectorStoreFileObject type {
+    id: Str,
+    object: "vector_store.file",
+    usage_bytes: Int,
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    last_error: Map,
+    chunking_strategy: ChunkingStrategyResponse?,
+    attributes: VectorStoreFileAttributes?
+}
+
+Eval type {
+    object: "eval",
+    id: Str,
+    name: Str,
+    data_source_config: Map,
+    testing_criteria: Vec,
+    created_at: Int,
+    metadata: Metadata
+}
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+// Service tier for the request (e.g. "auto", "default", "scale", "flex")
+ServiceTier type Str
+
+// Custom key-value attributes for a vector store file (used for filtering)
+VectorStoreFileAttributes type Map
+
+// Chunking strategy used for a vector store file
+// Auto: {type: "auto"} - Server-chosen strategy
+// Static: {type: "static", static: {max_chunk_size_tokens: Int, chunk_overlap_tokens: Int}}
+ChunkingStrategyResponse type {
+    type: Str,
+    static: Map?
+}
+
+CompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int,
+    completion_tokens_details: Map?,
+    prompt_tokens_details: Map?
+}
+
+UpdateVectorStoreFileAttributesRequest type {
+    attributes: VectorStoreFileAttributes
+}
+
+UpdateChatCompletionRequest type {
+    metadata: Metadata
+}
+
+UpdateChatCompletionResponse type {
+    id: Str,
+    choices: Vec<Map>,
+    created: Int,
+    model: Str,
+    service_tier: ServiceTier?,
+    system_fingerprint: Str?,
+    object: "chat.completion",
+    usage: CompletionUsage?
+}
+
+
+update-chat-completion
+meta {
+    doc: """POST /chat/completions/{completion_id} - Update metadata on a stored chat completion."""
+}
+fn (completion-id: Str, request: UpdateChatCompletionRequest): UpdateChatCompletionResponse {
+  response api-request("POST", `${::openai/BASE_URL}/chat/completions/${completion-id}`, {}, request)
+  if(is-ok-response(response), UpdateChatCompletionResponse(response.body), err(HttpError(response)))
+}
+
+UpdateEvalRequest type {
+    name: Str?,
+    metadata: Metadata?
+}
+
+UpdateEvalResponse type {
+    object: "eval",
+    id: Str,
+    name: Str,
+    data_source_config: Map,
+    testing_criteria: Vec,
+    created_at: Int,
+    metadata: Metadata
+}
+
+
+update-eval
+meta {doc: """POST /evals/{eval_id} - Update the name or metadata of an evaluation."""}
+fn (eval-id: Str, request: UpdateEvalRequest): UpdateEvalResponse {
+  response api-request("POST", `${::openai/BASE_URL}/evals/${eval-id}`, {}, request)
+  if(is-ok-response(response), UpdateEvalResponse(response.body), err(HttpError(response)))
+}
+
+UpdateVectorStoreFileAttributesRequest type {
+    attributes: VectorStoreFileAttributes
+}
+
+UpdateVectorStoreFileAttributesResponse type {
+    id: Str,
+    object: "vector_store.file",
+    usage_bytes: Int,
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    last_error: Map,
+    chunking_strategy: ChunkingStrategyResponse?,
+    attributes: VectorStoreFileAttributes?
+}
+
+
+update-vector-store-file-attributes
+meta {
+    doc: """POST /vector_stores/{vector_store_id}/files/{file_id} - Update vector store file attributes"""
+}
+fn (vector-store-id: Str, file-id: Str, request: UpdateVectorStoreFileAttributesRequest): UpdateVectorStoreFileAttributesResponse {
+  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}/files/${file-id}`, {}, request)
+  if(is-ok-response(response), UpdateVectorStoreFileAttributesResponse(response.body), err(HttpError(response)))
+}

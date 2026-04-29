@@ -1,0 +1,318 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            Manage subscription and billing
+        </p>
+
+        {% include "org_tabs.html" %}
+    </div>
+
+    <!-- Billing Content -->
+    {% if success_message != "" && success_message != "processing" %}
+    <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-800 dark:text-green-200 px-4 py-3 rounded-lg mb-6">
+        {{ success_message }}
+    </div>
+    {% endif %}
+
+    {% if page_context.show_cloud_upsells %}
+        <!-- Local Development Plan -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+            <div class="flex items-start justify-between mb-6">
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
+                    <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">Local Development</p>
+                    <p class="text-gray-600 dark:text-gray-400">Free - Self-hosted</p>
+                </div>
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200">
+                    Local Dev
+                </span>
+            </div>
+
+            <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                    You are running Hot in local development mode. Billing is not available for local development instances.
+                </p>
+            </div>
+        </div>
+
+        <!-- Try Hot Cloud (local dev only) -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                    <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Try Hot Cloud</h3>
+                    <p class="text-sm text-gray-600 dark:text-gray-400">
+                        Get managed runs, team collaboration, and advanced observability — start free, upgrade anytime.
+                    </p>
+                </div>
+                <a href="{{ page_context.pricing_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition whitespace-nowrap">
+                    View Plans
+                </a>
+            </div>
+        </div>
+
+    {% else if page_context.is_self_host %}
+        <!-- Self-hosted Plan -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+            <div class="flex items-start justify-between mb-6">
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
+                    <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">Self-hosted</p>
+                    <p class="text-gray-600 dark:text-gray-400">Billing is not managed by this instance.</p>
+                </div>
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                    Self-hosted
+                </span>
+            </div>
+
+            <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                    You are running Hot in self-host mode. Cloud billing and plan changes are not available here.
+                </p>
+            </div>
+        </div>
+
+    {% else %}
+        {% if billing_provider_configured %}
+            {% if let Some(sub) = subscription %}
+                {# Show alert for incomplete subscriptions that need checkout #}
+                {% if !sub.is_active() %}
+                <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-600 rounded-lg p-6 mb-6">
+                    <div class="flex items-start">
+                        <svg class="h-6 w-6 text-yellow-400 dark:text-yellow-500 mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <div class="flex-1">
+                            {% if let Some(plan) = plan %}
+                                {% if plan.is_free_plan() %}
+                            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Finish Activating Your Free Plan</h3>
+                            <p class="text-sm text-yellow-700 dark:text-yellow-300 mb-4">
+                                Your organization is set up, but card verification is required to activate your subscription and access all features.
+                            </p>
+                                {% else %}
+                            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Complete Your Subscription</h3>
+                            <p class="text-sm text-yellow-700 dark:text-yellow-300 mb-4">
+                                Your organization is set up, but payment is required to activate your subscription and access all features.
+                            </p>
+                                {% endif %}
+                            <a href="/@{{ org.slug }}/billing/checkout?plan={{ plan.plan_id.as_deref().unwrap_or("") }}&billing={{ sub.billing_period }}"
+                               class="inline-flex items-center px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white font-medium rounded-md transition-colors shadow-sm">
+                                {% if plan.is_free_plan() %}
+                                Verify Card
+                                {% else %}
+                                Complete Payment
+                                {% endif %}
+                            </a>
+                            {% else %}
+                            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Complete Your Subscription</h3>
+                            <p class="text-sm text-yellow-700 dark:text-yellow-300 mb-4">
+                                Your organization is set up, but your subscription still needs to be activated before you can access all features.
+                            </p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if let Some(plan) = plan %}
+                <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+                    <div class="flex items-start justify-between mb-6">
+                        <div>
+                            <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
+                            <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">{{ plan.plan_name }}</p>
+                            <p class="text-gray-600 dark:text-gray-400">
+                                ${{ plan.monthly_price_dollars() }}{% if sub.billing_period == "monthly" %}/month{% else %}/year{% endif %}
+                            </p>
+                        </div>
+
+                        {% if sub.is_active() %}
+                            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">
+                                Active
+                            </span>
+                        {% else %}
+                            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                                {% if let Some(status) = sub.status() %}{{ status.as_str() }}{% else %}Unknown{% endif %}
+                            </span>
+                        {% endif %}
+                    </div>
+
+                    <!-- Plan Details -->
+                    <div class="mb-6">
+                        <h3 class="font-semibold text-gray-900 dark:text-white mb-3">Subscription Details</h3>
+                        <div class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+                            <p><span class="font-medium">Organization:</span> {{ org.name }}</p>
+                            <p><span class="font-medium">Plan:</span> {{ plan.plan_name }}</p>
+                            <p><span class="font-medium">Billing:</span> {{ sub.billing_period }}</p>
+                        </div>
+                    </div>
+
+                    <!-- Billing Period Info -->
+                    {% if let Some(period_end) = sub.current_period_end %}
+                    <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mb-4">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">
+                            Current period ends: <span class="font-medium text-gray-900 dark:text-white">{{ period_end.format("%B %d, %Y") }}</span>
+                        </p>
+                    </div>
+                    {% endif %}
+
+                    <!-- Actions -->
+                    <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+                            {% if plan.is_free_plan() %}
+                            <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition">
+                                Upgrade Plan
+                            </a>
+                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                                Add more compute, team members, and custom domains with a paid plan.
+                            </p>
+                            {% else %}
+                            <div class="flex items-center gap-3">
+                                <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition">
+                                    Change Plan
+                                </a>
+                                <button type="button" onclick="showCancelModal()" class="inline-flex items-center bg-white dark:bg-gray-800 border border-red-300 dark:border-red-600 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 font-medium px-4 py-2 rounded-md transition">
+                                    Cancel Subscription
+                                </button>
+                            </div>
+                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                                Your subscription will remain active until the end of the current billing period.
+                            </p>
+                            {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+
+            {% else %}
+                <!-- No subscription found -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+                    {% if success_message == "processing" %}
+                        <!-- Payment succeeded but subscription not yet visible - likely processing -->
+                        <div class="flex items-center mb-4">
+                            <svg class="animate-spin h-5 w-5 text-red-600 dark:text-red-400 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <p class="text-gray-600 dark:text-gray-400">Your subscription is being activated. This page will refresh automatically...</p>
+                        </div>
+                        <script>
+                            // Auto-refresh after a short delay to check subscription status
+                            setTimeout(function() {
+                                window.location.href = window.location.pathname;
+                            }, 3000);
+                        </script>
+                    {% else %}
+                        <p class="text-gray-600 dark:text-gray-400 mb-4">No active subscription found for {{ org.name }}.</p>
+                        <a href="/@{{ org.slug }}/billing/checkout" class="inline-block bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-6 py-3 rounded-md transition">
+                            Choose a Plan
+                        </a>
+                    {% endif %}
+                </div>
+            {% endif %}
+
+            <!-- Payment History -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+                <h3 class="font-semibold text-gray-900 dark:text-white mb-4">Payment History</h3>
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                    For detailed invoices and receipts, check your email or contact support.
+                </p>
+            </div>
+
+        {% else %}
+            <!-- Payment processing not configured -->
+            <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6">
+                <h3 class="font-semibold text-yellow-900 dark:text-yellow-200 mb-2">Billing Not Available</h3>
+                <p class="text-sm text-yellow-800 dark:text-yellow-300">
+                    Payment processing is not currently configured. Please contact support for assistance.
+                </p>
+            </div>
+        {% endif %}
+    {% endif %}
+</div>
+
+<!-- Cancel Subscription Confirmation Modal -->
+<div id="cancelModal" class="fixed inset-0 z-50 hidden overflow-y-auto" aria-labelledby="cancel-modal-title" role="dialog" aria-modal="true">
+    <!-- Background backdrop -->
+    <div class="fixed inset-0 bg-gray-900/75 backdrop-blur-sm transition-opacity" aria-hidden="true" onclick="closeCancelModal()"></div>
+
+    <!-- Modal panel -->
+    <div class="flex min-h-full items-center justify-center p-4">
+        <div class="relative transform overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-left shadow-xl transition-all w-full max-w-lg">
+            <!-- Header -->
+            <div class="bg-gradient-to-r from-red-500 to-red-600 px-6 py-4">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <svg class="h-8 w-8 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                    </div>
+                    <h3 class="ml-3 text-lg font-semibold text-white" id="cancel-modal-title">
+                        Cancel Subscription
+                    </h3>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div class="px-6 py-5">
+                <p class="text-gray-700 dark:text-gray-300 mb-4">
+                    Are you sure you want to cancel your subscription?
+                </p>
+
+                <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
+                    <h4 class="text-sm font-semibold text-yellow-900 dark:text-yellow-200 mb-2">
+                        What happens when you cancel:
+                    </h4>
+                    <ul class="text-sm text-yellow-800 dark:text-yellow-300 space-y-1.5 list-disc list-inside">
+                        <li>Your subscription will remain active until the end of your current billing period</li>
+                        <li>You won't be charged again after the current period ends</li>
+                        <li>You can reactivate your subscription at any time before it expires</li>
+                    </ul>
+                </div>
+
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                    If you're having issues or need help, please <a href="mailto:{{ page_context.support_email }}" class="text-red-600 dark:text-red-400 hover:underline">contact support</a> before cancelling.
+                </p>
+            </div>
+
+            <!-- Footer / Actions -->
+            <div class="bg-gray-50 dark:bg-gray-900 px-6 py-4 flex items-center justify-between">
+                <button type="button" onclick="closeCancelModal()" class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
+                    Keep Subscription
+                </button>
+                <form method="post" action="/@{{ org.slug }}/billing/cancel">
+                    <button type="submit" class="inline-flex items-center px-5 py-2.5 border border-transparent text-sm font-medium rounded-md text-white bg-red-500 hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                        Yes, Cancel Subscription
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Show the cancel modal
+    function showCancelModal() {
+        const modal = document.getElementById('cancelModal');
+        if (modal) {
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        }
+    }
+
+    // Close the cancel modal
+    function closeCancelModal() {
+        const modal = document.getElementById('cancelModal');
+        if (modal) {
+            modal.classList.add('hidden');
+            document.body.style.overflow = '';
+        }
+    }
+
+    // Handle keyboard events (Escape key)
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') {
+            closeCancelModal();
+        }
+    });
+</script>
+{% endblock %}

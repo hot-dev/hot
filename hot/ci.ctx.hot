@@ -1,0 +1,37 @@
+// CI context placeholders - allows CI builds to pass ctx requirements check
+// These are placeholder values for packages that require API keys
+// In CI, these endpoints won't actually be called - this just satisfies the compile-time check
+
+::hot::run::ctx ns
+
+::hot::ctx/set({
+  // AI Services
+  "anthropic.api.key": "PLACEHOLDER",
+  "openai.api.key": "PLACEHOLDER",
+  "gemini.api.key": "PLACEHOLDER",
+  "xai.api.key": "PLACEHOLDER",
+
+  // Email Services
+  "resend.api.key": "PLACEHOLDER",
+  "postmark.server.token": "PLACEHOLDER",
+
+  // Payments
+  "stripe.api.key": "PLACEHOLDER",
+
+  // Communication
+  "slack.api.key": "PLACEHOLDER",
+  "twilio.api.key": "PLACEHOLDER",
+  "discord.api.key": "PLACEHOLDER",
+
+  // AWS
+  "aws.access_key_id": "PLACEHOLDER",
+  "aws.secret_access_key": "PLACEHOLDER",
+  "aws.session_token": "PLACEHOLDER",
+  "aws.region": "us-east-1",
+
+  // Backend-as-a-Service
+   "supabase.api.key": "PLACEHOLDER",
+    // Telegram
+    "telegram.bot.token": "PLACEHOLDER",
+    "telegram.chat.id": "PLACEHOLDER",
+})

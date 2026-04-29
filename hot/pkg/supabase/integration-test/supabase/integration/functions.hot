@@ -1,0 +1,19 @@
+::supabase::integration::functions ns
+meta ["test"]
+
+::functions ::supabase::functions
+
+SUPABASE_TEST_FUNCTION ::hot::env/get("SUPABASE_TEST_FUNCTION", "")
+
+test-invoke-function
+meta ["test"]
+fn () {
+  assert(SUPABASE_TEST_FUNCTION, "Set SUPABASE_TEST_FUNCTION in .env (name of a deployed edge function)")
+
+  result ::functions/invoke(::functions/InvokeFunctionRequest({
+    name: SUPABASE_TEST_FUNCTION,
+    body: {message: "hello from Hot"}
+  }))
+
+  assert(is-some(result), "invoke should return a result")
+}

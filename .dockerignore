@@ -1,0 +1,60 @@
+# Target directories and build artifacts (exclude everything except AWS builds)
+target/
+!target/aws-builds/
+
+# Hot development directory (contains local SQLite DB and other dev files)
+.hot/
+
+# Git and version control
+.git/
+.gitignore
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS specific files
+.DS_Store
+
+# Docker files (avoid recursion)
+Dockerfile
+docker-compose.yml
+*.Dockerfile
+
+# Documentation and non-essential files
+README.md
+*.md
+docs/
+
+# Test files and examples
+examples/
+tests/
+
+# Temporary files
+*.tmp
+*.temp
+.env
+.env.local
+
+# Node modules (if any)
+node_modules/
+package*.json
+
+# Scripts directory (not needed for compilation)
+scripts/
+
+# GitHub workflows (not needed for compilation)
+.github/
+
+# Rust specific temporary files
+**/*.rs.bk
+
+# Build outputs from native builds
+hot-*
+*.exe
+*.dll
+*.so
+*.dylib

@@ -1,0 +1,46 @@
+::libreoffice::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::libreoffice
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-libreoffice
+// ============================================================================
+
+
+// Small plain-text document converted to PDF (no external download).
+setup-test-txt-input fn (): Str {
+    hot-path "hot://libreoffice-test/sample.txt"
+    cmd `printf '%s\n%s\n' 'Hello LibreOffice' 'Integration test.' > /tmp/sample.txt && hotbox cp /tmp/sample.txt '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 60,
+        size: "nano",
+    })
+    result ::hot::task/await(info.id)
+    assert-eq("completed", result.status, "setup box should complete")
+    hot-path
+}
+
+test-version-real-libreoffice
+meta ["test"] fn () {
+    ver ::libreoffice/version()
+    assert(is-some(ver.version), "version string should be present")
+    assert(contains(ver.version, "."), "version should look like a semver fragment")
+}
+
+test-convert-txt-to-pdf
+meta ["test"] fn () {
+    input setup-test-txt-input()
+    result ::libreoffice/convert(input, {
+        format: "pdf",
+        filter: null,
+        image: null,
+        size: "medium",
+    })
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("pdf", result.format)
+    assert(contains(result.url, ".pdf"), "URL should reference pdf output")
+    assert(starts-with(result.url, "hot://libreoffice/"), "URL should be in libreoffice namespace")
+}

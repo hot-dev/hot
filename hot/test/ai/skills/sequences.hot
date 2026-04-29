@@ -1,0 +1,333 @@
+// Test file for: resources/ai/skills/hot-language/references/sequences.md
+// All code snippets should be validated with `hot check`
+::hot::test::ai::skills::sequences ns
+meta ["test"]
+
+// =============================================================================
+// Stubs for examples (not shown in docs)
+// =============================================================================
+
+::http ::hot::http
+::iter ::hot::iter
+
+// Stub functions
+process fn (item: Any): Any { item }
+all-users [{active: true, name: "Alice"}, {active: false, name: "Bob"}]
+
+// =============================================================================
+// @doc: eager-map
+// =============================================================================
+
+// @doc: map-example
+map-example fn (): Vec {
+    numbers [1, 2, 3, 4, 5]
+    doubled map(numbers, (x) { mul(x, 2) })
+    doubled
+}
+// @end: map-example
+
+// =============================================================================
+// @doc: eager-filter
+// =============================================================================
+
+// @doc: filter-example
+filter-example fn (): Vec {
+    numbers [1, 2, 3, 4, 5]
+    evens filter(numbers, (x) { eq(mod(x, 2), 0) })
+    evens
+}
+// @end: filter-example
+
+// =============================================================================
+// @doc: eager-reduce
+// =============================================================================
+
+// @doc: reduce-example
+reduce-example fn (): Int {
+    numbers [1, 2, 3, 4, 5]
+    sum reduce(numbers, (acc, x) { add(acc, x) }, 0)
+    sum
+}
+// @end: reduce-example
+
+// =============================================================================
+// @doc: other-collection-functions
+// =============================================================================
+
+// @doc: collection-functions
+collection-functions-example fn (): Map {
+    {
+        first: first([1, 2, 3]),
+        last: last([1, 2, 3]),
+        rest: rest([1, 2, 3]),
+        len: length([1, 2, 3]),
+        reversed: reverse([1, 2, 3]),
+        sorted: sort([3, 1, 2]),
+        concatenated: concat([1, 2], [3, 4]),
+        flattened: flatten([[1, 2], [3]])
+    }
+}
+// @end: collection-functions
+
+// =============================================================================
+// @doc: collection-pipelines
+// =============================================================================
+
+// @doc: pipeline-example
+pipeline-example fn (): Int {
+    result [1, 2, 3, 4, 5]
+        |> map((x) { mul(x, 2) })
+        |> filter((x) { gt(x, 5) })
+        |> reduce((a, x) { add(a, x) }, 0)
+    result
+}
+// @end: pipeline-example
+
+// =============================================================================
+// @doc: creating-iterators
+// =============================================================================
+
+// @doc: iter-from-vec
+iter-from-vec-example fn (): Vec {
+    it Iter([1, 2, 3, 4, 5])
+    collect(it)
+}
+// @end: iter-from-vec
+
+// @doc: iter-from-range
+iter-from-range-example fn (): Vec {
+    numbers range(1, 6)
+    numbers
+}
+// @end: iter-from-range
+
+// =============================================================================
+// @doc: next-type
+// =============================================================================
+
+// @doc: next-example
+next-example fn (): Vec {
+    it Iter([1, 2, 3])
+
+    n1 next(it)
+    n2 next(it)
+    n3 next(it)
+    n4 next(it)
+
+    [n1, n2, n3, n4]
+}
+// @end: next-example
+
+// =============================================================================
+// @doc: consuming-iterators
+// =============================================================================
+
+// @doc: collect-after-next
+collect-after-next fn (): Vec {
+    it Iter([1, 2, 3, 4, 5])
+    next(it)
+    rest collect(it)
+    rest
+}
+// @end: collect-after-next
+
+// @doc: take-example
+take-example fn (): Vec {
+    it Iter([1, 2, 3, 4, 5])
+    first-three take(it, 3)
+    first-three
+}
+// @end: take-example
+
+// @doc: for-each-example
+for-each-example fn (): Int {
+    count 0
+    items [1, 2, 3]
+    it Iter(items)
+    for-each(it, (item) { add(count, item) })
+    // Note: for-each is for side effects, returns null
+    length(items)
+}
+// @end: for-each-example
+
+// =============================================================================
+// @doc: range-iterators
+// =============================================================================
+
+// @doc: range-examples
+range-examples fn (): Map {
+    {
+        end-only: range(5),
+        start-end: range(1, 6),
+        with-step: range(0, 10, 2),
+        reverse: range(5, 0, -1)
+    }
+}
+// @end: range-examples
+
+// =============================================================================
+// @doc: large-range
+// =============================================================================
+
+// @doc: reduce-large-range
+reduce-large-range fn (): Int {
+    sum reduce(range(1, 101), add, 0)
+    sum
+}
+// @end: reduce-large-range
+
+// =============================================================================
+// @doc: lazy-range
+// =============================================================================
+
+// @doc: lazy-range-example
+// Lazy range for memory-efficient large sequences
+lazy-range-sum fn (): Int {
+    big-range ::iter/range(1, 1001)
+    sum reduce(big-range, add, 0)
+    sum
+}
+// @end: lazy-range-example
+
+// =============================================================================
+// @doc: map-operations
+// =============================================================================
+
+// @doc: map-iteration
+map-iteration-example fn (): Map {
+    scores {"alice": 100, "bob": 95, "carol": 88}
+
+    formatted map(scores, (name, score) { `${name}: ${score}` })
+
+    high-scores filter(scores, (name, score) { gte(score, 90) })
+
+    {
+        formatted: formatted,
+        high-scores: high-scores,
+        all-keys: keys(scores),
+        all-vals: vals(scores)
+    }
+}
+// @end: map-iteration
+
+// =============================================================================
+// @doc: filter-active-users
+// =============================================================================
+
+// @doc: filter-users
+filter-users-example fn (): Vec {
+    active-users filter(all-users, (u) { u.active })
+    active-users
+}
+// @end: filter-users
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-map-example
+meta ["test"] fn () {
+    result map-example()
+    assert-eq([2, 4, 6, 8, 10], result, "map doubles each element")
+}
+
+test-filter-example
+meta ["test"] fn () {
+    result filter-example()
+    assert-eq([2, 4], result, "filter keeps even numbers")
+}
+
+test-reduce-example
+meta ["test"] fn () {
+    result reduce-example()
+    assert-eq(15, result, "reduce sums to 15")
+}
+
+test-collection-functions
+meta ["test"] fn () {
+    result collection-functions-example()
+    assert-eq(1, result.first, "first element")
+    assert-eq(3, result.last, "last element")
+    assert-eq([2, 3], result.rest, "rest elements")
+    assert-eq(3, result.len, "length")
+    assert-eq([3, 2, 1], result.reversed, "reversed")
+    assert-eq([1, 2, 3], result.sorted, "sorted")
+    assert-eq([1, 2, 3, 4], result.concatenated, "concatenated")
+    assert-eq([1, 2, 3], result.flattened, "flattened")
+}
+
+test-pipeline
+meta ["test"] fn () {
+    result pipeline-example()
+    assert-eq(24, result, "pipeline: double, filter >5, sum")
+}
+
+test-iter-from-vec
+meta ["test"] fn () {
+    result iter-from-vec-example()
+    assert-eq([1, 2, 3, 4, 5], result, "collect iterator from vec")
+}
+
+test-iter-from-range
+meta ["test"] fn () {
+    result iter-from-range-example()
+    assert-eq([1, 2, 3, 4, 5], result, "collect iterator from range")
+}
+
+test-next-example
+meta ["test"] fn () {
+    result next-example()
+    assert-eq(1, result[0].value, "first next value")
+    assert-eq(false, result[0].done, "first next not done")
+    assert-eq(3, result[2].value, "third next value")
+    assert-eq(true, result[3].done, "fourth next is done")
+}
+
+test-collect-after-next
+meta ["test"] fn () {
+    result collect-after-next()
+    assert-eq([2, 3, 4, 5], result, "collect remaining after next")
+}
+
+test-take
+meta ["test"] fn () {
+    result take-example()
+    assert-eq([1, 2, 3], result, "take first 3")
+}
+
+test-range-examples
+meta ["test"] fn () {
+    result range-examples()
+    assert-eq([0, 1, 2, 3, 4], result.end-only, "range(5)")
+    assert-eq([1, 2, 3, 4, 5], result.start-end, "range(1, 6)")
+    assert-eq([0, 2, 4, 6, 8], result.with-step, "range(0, 10, 2)")
+    assert-eq([5, 4, 3, 2, 1], result.reverse, "range(5, 0, -1)")
+}
+
+test-reduce-large-range
+meta ["test"] fn () {
+    result reduce-large-range()
+    assert-eq(5050, result, "sum 1 to 100 = 5050")
+}
+
+test-lazy-range-sum
+meta ["test"] fn () {
+    result lazy-range-sum()
+    assert-eq(500500, result, "lazy sum 1 to 1000 = 500500")
+}
+
+test-map-iteration
+meta ["test"] fn () {
+    result map-iteration-example()
+    assert-eq(3, length(result.formatted), "3 formatted strings")
+    assert-eq(2, length(result.high-scores), "2 high scores")
+    assert-eq(3, length(result.all-keys), "3 keys")
+    assert-eq(3, length(result.all-vals), "3 values")
+}
+
+test-filter-users
+meta ["test"] fn () {
+    result filter-users-example()
+    assert-eq(1, length(result), "1 active user")
+    assert-eq("Alice", result[0].name, "Alice is active")
+}

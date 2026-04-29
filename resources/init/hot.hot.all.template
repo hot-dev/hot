@@ -1,0 +1,267 @@
+// Hot Configuration File
+// This file configures your Hot application environment, database, services, and more.
+// Values can use ::env/get("ENV_NAME", "default") to pull from environment variables.
+
+::hot::conf ns
+
+// Namespace alias for env module
+::env ::hot::env
+
+// Profile Configuration
+// Defines which profile, project, and remote to use by default
+hot.set.profile "local-dev"
+hot.set.project "{{PROJECT_NAME}}"
+hot.set.remote "hot-dev"
+
+// Local Development Profile
+// These values are used when running locally
+hot.profile.local-dev.user.email "{{USER_EMAIL}}"
+hot.profile.local-dev.org.slug "{{ORG_SLUG}}"
+hot.profile.local-dev.env.name "{{ENV_NAME}}"
+
+// Remote API Configuration
+// Configure the Hot cloud API (hot.dev) for package management and deployment
+hot.remote.hot-dev.url ::env/get("HOT_API_URL", "https://api.hot.dev")
+hot.remote.hot-dev.key ::env/get("HOT_API_KEY", "")
+
+// Project Configuration
+// Define source paths, test paths, and dependencies for your project
+hot.project.{{PROJECT_NAME}}.src.paths ["./hot/src"]
+hot.project.{{PROJECT_NAME}}.test.paths ["./hot/test"]
+hot.project.{{PROJECT_NAME}}.test.capture true
+hot.project.{{PROJECT_NAME}}.deps {}
+
+// Resource Configuration
+// Files under these paths are bundled with the build and exposed to Hot
+// code via `::hot::resource/load(...)`. Resources can be Markdown
+// skills, prompts, JS/Python code shipped to Box containers, etc.
+hot.project.{{PROJECT_NAME}}.resources.paths ["./hot/resources"]
+hot.project.{{PROJECT_NAME}}.resources.excludes []
+
+// Skills Codegen Configuration
+// `*.skill.md` files found under `resources.paths` are compiled into
+// `*.skill.hot` stubs that export `::ai::skill/Skill` values. Projects
+// with Markdown skills must depend on `hot.dev/hot-ai`; codegen reports
+// an error if it finds `*.skill.md` sources without that dependency.
+// Generated files carry a `// HOT-CODEGEN:` ownership marker — remove
+// the marker line to take ownership and stop regeneration.
+//
+// All values are optional; the defaults below are applied automatically.
+//
+//   hot.project.{{PROJECT_NAME}}.skills.codegen.enabled   true
+//   hot.project.{{PROJECT_NAME}}.skills.codegen.paths     <resources.paths>
+//   hot.project.{{PROJECT_NAME}}.skills.codegen.out-dir   "hot/src/_skills"
+//   hot.project.{{PROJECT_NAME}}.skills.codegen.namespace "::skills"
+
+// Ignore Configuration
+// Project-wide ignore rules applied to source, test, and resource discovery.
+// `respect-gitignore` honors .gitignore + .hotignore (true by default).
+// `excludes` accepts standard glob patterns, applied on top of the above.
+hot.project.{{PROJECT_NAME}}.ignore.respect-gitignore true
+hot.project.{{PROJECT_NAME}}.ignore.excludes []
+
+// Database Configuration
+// Supports PostgreSQL and SQLite
+// PostgreSQL: "postgres://user:password@host:port/database"
+// SQLite: "sqlite:path/to/database.db"
+hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
+hot.db.schema "hot"
+
+// Local dev call data retention (days). Set to -1 to disable cleanup.
+// Automatically trims call/trace data older than this in local development.
+hot.db.local.retention.call.days Int(::env/get("HOT_DB_LOCAL_RETENTION_CALL_DAYS", "7"))
+
+// File Storage Configuration
+// Mode: "direct" (simple filesystem) or "service" (managed storage with DB tracking)
+hot.file.mode ::env/get("HOT_FILE_MODE", "service")
+// Type: "local" or "s3" (only used in "service" mode)
+hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "local")
+hot.file.storage.path ::env/get("HOT_FILE_STORAGE_PATH", "./.hot/file")
+
+// AWS S3 File Storage (when storage.type is "s3")
+hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
+hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
+hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
+
+// Logging Configuration
+// Level: "trace", "debug", "info", "warn", "error"
+// Target: "stdout", "file", or "none"
+// Rotation: "hourly", "daily", or "none"
+// Retention: number of log files to keep (0 = keep all)
+hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
+hot.log.target ::env/get("HOT_LOG_TARGET", "stdout")
+hot.log.dir ".hot/log"
+hot.log.rotation ::env/get("HOT_LOG_ROTATION", "daily")
+hot.log.retention Int(::env/get("HOT_LOG_RETENTION", "7"))
+
+// Redis Configuration
+// Used for queue and cache when enabled
+hot.redis.uri ::env/get("HOT_REDIS_URI", "redis://localhost:6379")
+hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
+
+// API Server Configuration
+hot.api.host Str(::env/get("HOT_API_HOST", "localhost"))
+hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
+
+// App Server Configuration
+hot.app.host Str(::env/get("HOT_APP_HOST", "localhost"))
+hot.app.port Int(::env/get("HOT_APP_PORT", "4680"))
+
+// App Session Configuration
+// Session timeout in hours (default: 24 hours)
+hot.app.session.timeout Int(::env/get("HOT_APP_SESSION_TIMEOUT", "24"))
+// Session secret for JWT signing (required in production)
+hot.app.session.secret ::env/get("HOT_APP_SESSION_SECRET", "")
+
+// Billing Configuration
+hot.product.experience ::env/get("HOT_PRODUCT_EXPERIENCE", "local-dev")
+hot.product.web-url ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev")
+hot.product.pricing-url ::env/get("HOT_PRODUCT_PRICING_URL", "https://hot.dev/pricing")
+hot.product.support-email ::env/get("HOT_PRODUCT_SUPPORT_EMAIL", "support@hot.dev")
+hot.billing.enabled Bool(::env/get("HOT_BILLING_ENABLED", "false"))
+
+// Email Configuration
+// App/verification/invite emails are rendered from these values.
+hot.email.app-url ::env/get("HOT_APP_URL", "http://localhost:4680")
+hot.email.web-url ::env/get("HOT_EMAIL_WEB_URL", ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev"))
+hot.email.docs-url ::env/get("HOT_EMAIL_DOCS_URL", "https://hot.dev/docs")
+hot.email.logo-url ::env/get("HOT_EMAIL_LOGO_URL", "https://assets.hot.dev/email/hot_logo_email.png")
+hot.email.from ::env/get("HOT_EMAIL_FROM", "hi@notifications.hot.dev")
+hot.email.from-name ::env/get("HOT_EMAIL_FROM_NAME", "Hot Dev")
+hot.email.alerts.from ::env/get("HOT_EMAIL_ALERTS_FROM", "alerts@notifications.hot.dev")
+hot.email.alerts.from-name ::env/get("HOT_EMAIL_ALERTS_FROM_NAME", "Hot Alerts")
+
+// Stripe Configuration (when billing.enabled is true)
+hot.stripe.secret-key ::env/get("HOT_STRIPE_SECRET_KEY", "")
+hot.stripe.publishable-key ::env/get("HOT_STRIPE_PUBLISHABLE_KEY", "")
+hot.stripe.webhook-secret ::env/get("HOT_STRIPE_WEBHOOK_SECRET", "")
+
+// AWS Build Configuration (for deploying builds to S3)
+hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
+hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "")
+hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "")
+hot.build.aws.region ::env/get("HOT_BUILD_AWS_REGION", "")
+hot.build.aws.access-key-id ::env/get("HOT_BUILD_AWS_ACCESS_KEY_ID", "")
+hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
+
+// Build File Size Limit (in bytes)
+// Maximum size for build file uploads
+hot.build.file.max-bytes Int(::env/get("HOT_BUILD_FILE_MAX_BYTES", "104857600"))
+
+// Build-Time Secret-Shape Scanner Allowlist
+//
+// `hot build` / `hot deploy` scan bundled source + resources for shapes
+// that look like API keys, AWS credentials, PEM private keys, JWTs, etc.
+// Listed paths (gitignore-style globs, matched against the bundle-relative
+// path) are skipped. Use this for legitimate test fixtures that contain
+// example credentials.
+//
+// Set to `true` to skip the scan entirely (equivalent to passing
+// `--allow-secret-shape` to every build). Production secrets belong in
+// `::hot::ctx`, never in source.
+//
+//   hot.build.allow-secret-shape ["resources/fixtures/*.json"]
+//
+// Default: empty allowlist (full scan, no kill-switch).
+// hot.build.allow-secret-shape []
+
+// File Storage Configuration
+hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
+hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
+hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
+hot.file.aws.region ::env/get("HOT_FILE_AWS_REGION", "")
+hot.file.aws.access-key-id ::env/get("HOT_FILE_AWS_ACCESS_KEY_ID", "")
+hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
+
+// General File Size Limit (in bytes)
+// Config ceiling for file uploads — the effective limit is min(this, plan limit).
+// Set to -1 (default) to defer entirely to plan-based limits.
+// Useful for self-hosted deployments that want a lower cap than the plan allows.
+hot.file.max-bytes Int(::env/get("HOT_FILE_MAX_BYTES", "-1"))
+
+// Custom Domain Configuration (ACM + CloudFront provisioning)
+// Mode: "none" (disabled) or "aws" (ACM certificates + CloudFront distributions)
+hot.domain.mode ::env/get("HOT_DOMAIN_MODE", "none")
+hot.domain.aws.region ::env/get("HOT_DOMAIN_AWS_REGION", "us-east-1")
+hot.domain.aws.access-key-id ::env/get("HOT_DOMAIN_AWS_ACCESS_KEY_ID", "")
+hot.domain.aws.secret-access-key ::env/get("HOT_DOMAIN_AWS_SECRET_ACCESS_KEY", "")
+hot.domain.aws.cloudfront.origin ::env/get("HOT_DOMAIN_AWS_CLOUDFRONT_ORIGIN", "api.hot.dev")
+
+// Cache Configuration
+// Enables bytecode caching for faster execution
+hot.cache.enabled Bool(::env/get("HOT_CACHE_ENABLED", "false"))
+hot.cache.format "zstdjson"
+
+// Type Checker Configuration
+hot.check.format "pretty"
+hot.check.raw false
+hot.check.include-tests false
+
+// Event Emitter Configuration
+// Type: "db" (database), "console" (stdout), or "none" (disabled)
+hot.emitter.type ::env/get("HOT_EMITTER_TYPE", "db")
+
+// Execution Engine Configuration
+hot.engine.isolation Bool(::env/get("HOT_ENGINE_ISOLATION", "false"))
+hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
+
+// JIT Configuration
+// Mode: "enabled" (compile hot functions to native code) or "disabled"
+// Enabled by default on supported platforms (macOS, Linux, Windows x86_64/aarch64)
+hot.jit.mode ::env/get("HOT_JIT", "enabled")
+// Threshold: number of calls before a function is JIT-compiled (higher = less compile overhead)
+hot.jit.threshold Int(::env/get("HOT_JIT_THRESHOLD", "100"))
+
+// Queue Configuration
+// Type: "memory", "redis", or "none" (disabled)
+hot.queue.type ::env/get("HOT_QUEUE_TYPE", "memory")
+
+// Scheduler Configuration
+hot.scheduler.backfill Bool(::env/get("HOT_SCHEDULER_BACKFILL", "false"))
+hot.scheduler.sync-interval-seconds Int(::env/get("HOT_SCHEDULER_SYNC_INTERVAL_SECONDS", "30"))
+
+// Retry Configuration
+// Maximum number of retry attempts allowed (function meta "retry" values clamped to this)
+hot.retry.max-attempts Int(::env/get("HOT_RETRY_MAX_ATTEMPTS", "10"))
+// Maximum retry delay in milliseconds (function meta "retry-delay" values clamped to this)
+hot.retry.max-delay-ms Int(::env/get("HOT_RETRY_MAX_DELAY_MS", "3600000"))
+// Default retry delay in milliseconds when not specified in meta
+hot.retry.default-delay-ms Int(::env/get("HOT_RETRY_DEFAULT_DELAY_MS", "1000"))
+
+// Serialization Configuration
+// Type: "json" (default) or "zstdjson" (compressed, better for large payloads)
+hot.serialization.type "json"
+
+// LSP Configuration
+// Transport: "stdio" or "tcp"
+hot.lsp.transport "stdio"
+
+// File Watcher Configuration
+hot.watch.debounce Int(::env/get("HOT_WATCH_DEBOUNCE", "200"))
+hot.watch.include-tests false
+
+// Worker Configuration
+hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
+hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
+hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
+
+// Task Worker Configuration
+hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
+
+// Box (Container) Configuration
+hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "true"))
+hot.box.backend ::env/get("HOT_BOX_BACKEND", "docker")
+hot.box.containerd.socket ::env/get("HOT_BOX_CONTAINERD_SOCKET", "")
+hot.box.vmm ::env/get("HOT_BOX_VMM", "qemu")
+
+// Daemon Mode
+// Run services as background daemon
+hot.daemon Bool(::env/get("HOT_DAEMON", "false"))
+
+// Dev Server Configuration
+// Open browser to app URL when running `hot dev`
+hot.dev.open Bool(::env/get("HOT_DEV_OPEN", "false"))
+
+// Deployment Configuration
+// Auto-deploy on file changes during development
+hot.deploy.auto Bool(::env/get("HOT_DEPLOY_AUTO", "true"))

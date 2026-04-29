@@ -1,0 +1,29 @@
+::postmark::bypass ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+StandardPostmarkResponse type {
+    ErrorCode: Int?,
+    Message: Str?
+}
+
+BypassRulesForInboundMessageRequest type {
+  messageid: Str
+}
+
+BypassRulesForInboundMessageResponse type {
+    ErrorCode: Int?,
+    Message: Str?
+}
+
+
+bypass-rules-blocked-inbound-message
+meta {
+    doc: """Bypass inbound rules for a blocked message, allowing it to be processed by the inbound webhook."""
+}
+fn (request: BypassRulesForInboundMessageRequest): BypassRulesForInboundMessageResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/bypass`)
+  if(is-ok-response(response), BypassRulesForInboundMessageResponse(response.body), err(HttpError(response)))
+}

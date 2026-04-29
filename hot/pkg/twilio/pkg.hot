@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.twilio {
+  name: "hot.dev/twilio",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "Twilio API bindings for Hot. Send SMS/MMS, make voice calls, manage phone numbers, and verify webhooks.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["messaging"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

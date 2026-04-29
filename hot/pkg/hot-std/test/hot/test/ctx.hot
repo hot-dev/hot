@@ -1,0 +1,25 @@
+::hot::test::ctx ns
+meta ["test"]
+
+
+// Note: assert, assert-eq are core functions - no aliasing needed
+test-ctx
+meta ["test"] fn () {
+    // Test basic set and get
+    key "test-key"
+    value "test-value"
+    ::hot::ctx/set(key, value)
+    result ::hot::ctx/get(key)
+    assert-eq(value, result, "ctx set and get basic functionality")
+    // Test overwriting
+    new-value "new-test-value"
+    ::hot::ctx/set(key, new-value)
+    result2 ::hot::ctx/get(key)
+    assert-eq(new-value, result2, "ctx overwrite functionality")
+    // Test different key
+    key2 "test-key-2"
+    value2 "test-value-2"
+    ::hot::ctx/set(key2, value2)
+    result3 ::hot::ctx/get(key2)
+    assert-eq(value2, result3, "ctx multiple keys functionality")
+}

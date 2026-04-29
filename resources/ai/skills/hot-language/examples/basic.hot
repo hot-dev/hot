@@ -1,0 +1,136 @@
+// Basic Hot syntax patterns
+::examples::basic ns
+
+// ============================================
+// VARIABLES
+// ============================================
+
+// Simple assignment (no = sign)
+name "Alice"
+count 42
+ratio 3.14
+active true
+
+// With type annotations
+age: Int 30
+greeting: Str "Hello"
+
+// From expressions
+doubled mul(count, 2)
+message `Welcome, ${name}!`
+
+// ============================================
+// FUNCTIONS
+// ============================================
+
+// Basic function
+add-one fn (x: Int): Int {
+    add(x, 1)
+}
+
+// Function with multiple parameters
+greet fn (name: Str, greeting: Str): Str {
+    `${greeting}, ${name}!`
+}
+
+// Wrapper function with default value (Hot doesn't have default params)
+greet-default fn (name: Str): Str {
+    greet(name, "Hello")
+}
+
+// Lambda (anonymous function)
+numbers [1, 2, 3, 4, 5]
+doubled-numbers map(numbers, mul(%, 2))
+
+// Typed lambda
+parsed-numbers map(["1", "2", "3"], (s: Str): Int { Int(s) })
+
+// ============================================
+// CONDITIONALS
+// ============================================
+
+// if function (lazy evaluation)
+status if(gt(count, 0), "positive", "non-positive")
+
+// Nested if
+sign if(gt(count, 0), "positive", if(eq(count, 0), "zero", "negative"))
+
+// cond flow as function
+classify fn cond (x: Int): Str {
+    lt(x, 0) => { "negative" }
+    eq(x, 0) => { "zero" }
+    => { "positive" }
+}
+
+// ============================================
+// COLLECTIONS
+// ============================================
+
+// Vector operations
+items [1, 2, 3, 4, 5]
+first-item items[0]
+item-count length(items)
+has-three some(items, eq(%, 3))
+
+// Map operations
+person {"name": "Alice", "age": 30, "city": "NYC"}
+person-name person.name
+person-age get(person, "age")
+has-email not(is-null(get(person, "email")))
+
+// Collection transformations
+squares map(items, mul(%, %))
+evens filter(items, eq(mod(%, 2), 0))
+total reduce(items, (acc, x) { add(acc, x) }, 0)
+
+// ============================================
+// PIPE OPERATOR
+// ============================================
+
+// Piped value becomes FIRST argument
+result 10
+    |> add(5)      // add(10, 5) = 15
+    |> mul(2)      // mul(15, 2) = 30
+    |> sub(10)     // sub(30, 10) = 20
+
+// With collections
+processed [1, 2, 3, 4, 5]
+    |> map(mul(%, 2))
+    |> filter(gt(%, 5))
+    |> reduce((acc, x) { add(acc, x) }, 0)
+
+// ============================================
+// STRING OPERATIONS
+// ============================================
+
+text "  Hello, World!  "
+trimmed trim(text)
+upper uppercase(trimmed)
+words split(trimmed, ", ")
+joined join(words, " - ")
+
+// String interpolation
+user-name "Bob"
+user-age 25
+bio `${user-name} is ${user-age} years old`
+
+// ============================================
+// RESULT HANDLING
+// ============================================
+
+// Create results
+success ok(42)
+failure err("Something went wrong")
+
+// Check results
+is-success is-ok(success)
+is-failure is-err(failure)
+
+// Safe division (return type is the Ok value type, not Result)
+safe-divide fn (a: Int, b: Int): Int {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+
+// Use result
+division-result safe-divide(10, 2)
+value if(is-ok(division-result), division-result, 0)

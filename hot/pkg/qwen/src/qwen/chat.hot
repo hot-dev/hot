@@ -1,0 +1,501 @@
+::qwen::chat ns
+
+// ============================================================================
+// Qwen Chat Completions (OpenAI-compatible)
+// https://docs.qwencloud.com/api-reference/chat/openai-chat
+// ============================================================================
+
+api-request ::qwen::api/request
+api-request-stream ::qwen::api/request-stream
+HttpError ::qwen::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Literal union for chat message roles
+Role type "user" | "system" | "assistant" | "tool"
+
+// Literal union for finish reasons (Qwen: stop | length | tool_calls)
+FinishReason type "stop" | "length" | "tool_calls"
+
+// Chat message. `content` is Any because Qwen supports multimodal content
+// parts (arrays of {type: "text" | "image_url" | "input_audio" | "video" | "video_url", ...})
+// in addition to plain strings.
+Message type {
+    role: Role,
+    content: Any,
+    name: Str?,
+    tool_calls: Vec<Map>?,
+    tool_call_id: Str?
+}
+
+// Tool definition (function calling)
+Tool type {
+    type: Str,
+    function: FunctionDefinition
+}
+
+FunctionDefinition type {
+    name: Str,
+    description: Str?,
+    parameters: Any?
+}
+
+// Response format. Qwen supports text | json_object | json_schema.
+ResponseFormat type {
+    type: Str,
+    json_schema: Any?
+}
+
+// Chat completion request. Mirrors the OpenAI shape with the Qwen-specific
+// `enable_thinking`, `thinking_budget`, `enable_search`, `search_options`,
+// `enable_code_interpreter`, `top_k`, and `vl_high_resolution_images` fields
+// that DashScope forwards from `extra_body` in the OpenAI SDK.
+ChatCompletionRequest type {
+    model: Str,
+    messages: Vec<Message>,
+    max_tokens: Int?,
+    temperature: Dec?,
+    top_p: Dec?,
+    top_k: Int?,
+    n: Int?,
+    stream: Bool?,
+    stop: Any?,
+    presence_penalty: Dec?,
+    seed: Int?,
+    logprobs: Bool?,
+    top_logprobs: Int?,
+    user: Str?,
+    tools: Vec<Tool>?,
+    tool_choice: Any?,
+    parallel_tool_calls: Bool?,
+    response_format: ResponseFormat?,
+    enable_thinking: Bool?,
+    thinking_budget: Int?,
+    enable_search: Bool?,
+    search_options: Map?,
+    enable_code_interpreter: Bool?,
+    vl_high_resolution_images: Bool?
+}
+
+// Token usage
+Usage type {
+    prompt_tokens: Int,
+    completion_tokens: Int,
+    total_tokens: Int,
+    prompt_tokens_details: Map?,
+    completion_tokens_details: Map?
+}
+
+ChatChoice type {
+    index: Int,
+    message: Message,
+    finish_reason: FinishReason?,
+    logprobs: Any?
+}
+
+ChatCompletionResponse type {
+    id: Str,
+    object: Str,
+    created: Int,
+    model: Str,
+    choices: Vec<ChatChoice>,
+    usage: Usage?,
+    system_fingerprint: Str?
+}
+
+// Streaming delta (what arrives in each SSE chunk)
+Delta type {
+    role: Role?,
+    content: Str?,
+    // Qwen surfaces chain-of-thought here when thinking mode is enabled.
+    reasoning_content: Str?,
+    tool_calls: Vec<Map>?
+}
+
+StreamChoice type {
+    index: Int,
+    delta: Delta,
+    finish_reason: FinishReason?
+}
+
+ChatCompletionChunk type {
+    id: Str,
+    object: Str,
+    created: Int,
+    model: Str,
+    choices: Vec<StreamChoice>,
+    usage: Usage?
+}
+
+StreamingChatResponse type {
+    status: Int,
+    headers: Map,
+    body: Any // Iterator yielding ChatCompletionChunk SSE events
+}
+
+// ============================================================================
+// Non-Streaming API
+// ============================================================================
+
+complete
+meta {
+    doc: """
+    Create a chat completion (non-streaming).
+
+    Returns a ChatCompletionResponse with `id`, `choices`, `model`, and `usage` fields.
+
+    **Example — simple**
+
+    ```hot
+    response complete(ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}],
+        max_tokens: 50
+    }))
+
+    response.id                                // => "chatcmpl-..."
+    content response.choices[0].message.content
+    response.usage.total_tokens                // => 42
+    ```
+
+    **Example — with a system message**
+
+    ```hot
+    response complete(ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [
+            {role: "system", content: "You are a helpful assistant that responds in JSON."},
+            {role: "user", content: "What is 2+2? Reply with {\"answer\": <number>}"}
+        ],
+        response_format: {type: "json_object"},
+        max_tokens: 100
+    }))
+    ```
+
+    **Example — with thinking mode (Qwen3/Qwen3.5/Qwen3.6 hybrid models)**
+
+    ```hot
+    response complete(ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Is 89 prime? Show your reasoning."}],
+        enable_thinking: true,
+        thinking_budget: 2048,
+        stream: true
+    }))
+    ```
+    """
+}
+fn (request: ChatCompletionRequest): ChatCompletionResponse | HttpError {
+    response api-request("POST", `${::qwen/BASE_URL}/chat/completions`, {}, request)
+    if(is-ok-response(response), ChatCompletionResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Streaming API
+// ============================================================================
+
+complete-stream
+meta {
+    doc: """
+    Create a streaming chat completion. Returns a StreamingChatResponse with status,
+    headers, and a body iterator that yields SSE events.
+
+    Each event has `{event, data}` where `data` is a ChatCompletionChunk with
+    `choices[0].delta.content` (and, when thinking mode is enabled,
+    `choices[0].delta.reasoning_content`).
+
+    **Example**
+
+    ```hot
+    response complete-stream(ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Count from 1 to 3."}],
+        max_tokens: 50
+    }))
+
+    response.status // => 200
+
+    for-each(response.body, (event) {
+        text extract-chunk-text(event)
+        cond {
+            gt(length(text), 0) => { print(text) }
+        }
+    })
+    ```
+    """
+}
+fn (request: ChatCompletionRequest): StreamingChatResponse | HttpError {
+    // Force stream: true
+    streaming-request {...untype(request), stream: true}
+    response api-request-stream("POST", `${::qwen/BASE_URL}/chat/completions`, {}, streaming-request, "sse")
+    cond {
+        gte(response.status, 400) => { err(HttpError(response)) }
+        => { StreamingChatResponse(response) }
+    }
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+chat
+meta {
+    doc: """
+    Simple chat — send a message and get the assistant's reply as a string.
+
+    Accepts an optional system prompt and max token limit. This is a convenience
+    wrapper around `complete` that returns the extracted text directly.
+
+    **Example**
+
+    ```hot
+    answer chat("qwen3.6-plus", "What is the capital of France?")
+    // => "The capital of France is Paris."
+
+    // With system instructions
+    answer chat("qwen3-max", "What is 2+2?", "Respond with just the number.")
+    // => "4"
+    ```
+    """
+}
+fn
+(model: Str, message: Str): Str {
+    chat(model, message, null, null)
+},
+(model: Str, message: Str, system: Str): Str {
+    chat(model, message, system, null)
+},
+(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+    messages cond {
+        is-null(system) => {
+            [Message({role: "user", content: message})]
+        }
+        => {
+            [
+                Message({role: "system", content: system}),
+                Message({role: "user", content: message})
+            ]
+        }
+    }
+
+    request {
+        model: model,
+        messages: messages,
+        max_tokens: or(max-tokens, 4096)
+    }
+
+    response complete(ChatCompletionRequest(request))
+
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => { extract-response-text(response) }
+    }
+}
+
+user-message
+meta {
+    doc: """
+    Create a user message for use in a chat completion request.
+
+    **Example**
+
+    ```hot
+    msg user-message("Hello")
+    msg.role    // => "user"
+    msg.content // => "Hello"
+    ```
+    """
+}
+fn (content: Str): Message {
+    Message({role: "user", content: content})
+}
+
+system-message
+meta {
+    doc: """
+    Create a system message for setting model behavior.
+
+    **Example**
+
+    ```hot
+    msg system-message("You are a helpful math tutor.")
+    msg.role // => "system"
+    ```
+    """
+}
+fn (content: Str): Message {
+    Message({role: "system", content: content})
+}
+
+assistant-message
+meta {
+    doc: """
+    Create an assistant message, typically for multi-turn conversation history.
+
+    **Example**
+
+    ```hot
+    messages [
+        user-message("My name is Alice."),
+        assistant-message("Nice to meet you, Alice!"),
+        user-message("What is my name?")
+    ]
+    ```
+    """
+}
+fn (content: Str): Message {
+    Message({role: "assistant", content: content})
+}
+
+extract-response-text
+meta {
+    doc: """
+    Extract the assistant text from a ChatCompletionResponse. Returns the
+    first choice's `message.content`, or empty string if unavailable.
+
+    **Example**
+
+    ```hot
+    response complete(ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Say 'test'"}],
+        max_tokens: 50
+    }))
+
+    text extract-response-text(response)
+    ```
+    """
+}
+fn (response: ChatCompletionResponse): Str {
+    choices response.choices
+    cond {
+        or(is-null(choices), is-zero(length(choices))) => { "" }
+        => {
+            first-choice first(choices)
+            msg first-choice.message
+            cond {
+                is-null(msg) => { "" }
+                => { or(msg.content, "") }
+            }
+        }
+    }
+}
+
+extract-chunk-text
+meta {
+    doc: """
+    Extract the delta text content from a streaming SSE event. Returns empty
+    string if the event has no content (for example, role-only deltas, or
+    reasoning-only deltas when thinking mode is enabled — use
+    `extract-chunk-reasoning` for the latter).
+
+    **Example**
+
+    ```hot
+    for-each(response.body, (event) {
+        text extract-chunk-text(event)
+        cond { gt(length(text), 0) => { print(text) } }
+    })
+    ```
+    """
+}
+fn (event): Str {
+    cond {
+        is-null(event) => { "" }
+        is-null(event.data) => { "" }
+        => {
+            choices event.data.choices
+            cond {
+                or(is-null(choices), is-zero(length(choices))) => { "" }
+                => {
+                    delta first(choices).delta
+                    cond {
+                        is-null(delta) => { "" }
+                        => { or(delta.content, "") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+extract-chunk-reasoning
+meta {
+    doc: """
+    Extract the chain-of-thought (`reasoning_content`) from a streaming SSE event.
+    Qwen models in thinking mode stream their reasoning separately from the final
+    answer. Returns empty string if the event has no reasoning content.
+
+    **Example**
+
+    ```hot
+    response complete-stream(ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Is 89 prime?"}],
+        enable_thinking: true
+    }))
+
+    for-each(response.body, (event) {
+        thought extract-chunk-reasoning(event)
+        answer  extract-chunk-text(event)
+        cond {
+            gt(length(thought), 0) => { print(`[thinking] ${thought}`) }
+            gt(length(answer), 0)  => { print(answer) }
+        }
+    })
+    ```
+    """
+}
+fn (event): Str {
+    cond {
+        is-null(event) => { "" }
+        is-null(event.data) => { "" }
+        => {
+            choices event.data.choices
+            cond {
+                or(is-null(choices), is-zero(length(choices))) => { "" }
+                => {
+                    delta first(choices).delta
+                    cond {
+                        is-null(delta) => { "" }
+                        => { or(delta.reasoning_content, "") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+is-stream-done
+meta {
+    doc: """
+    Check whether a streaming SSE event indicates the stream is complete. Returns
+    true when the event carries the `[DONE]` marker or a non-null `finish_reason`
+    on the first choice.
+
+    **Example**
+
+    ```hot
+    for-each(response.body, (event) {
+        cond { is-stream-done(event) => { println("---done---") } }
+    })
+    ```
+    """
+}
+fn (event): Bool {
+    cond {
+        is-null(event) => { false }
+        is-null(event.data) => { false }
+        eq(event.data, "[DONE]") => { true }
+        => {
+            choices event.data.choices
+            cond {
+                or(is-null(choices), is-zero(length(choices))) => { false }
+                => { not(is-null(first(choices).finish_reason)) }
+            }
+        }
+    }
+}

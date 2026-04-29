@@ -1,0 +1,29 @@
+::anthropic::integration::files ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Anthropic Files API (Beta)
+// =============================================================================
+// These tests require ANTHROPIC_API_KEY to be set in context (via ctx.hot or conf)
+// Note: Files API is in beta and requires the files-api-2025-04-14 header
+
+test-files-list
+meta ["test"]
+fn () {
+    // List files - may be empty if no files uploaded
+    files ::anthropic::files/list()
+
+    // Response should have data array (may be empty)
+    assert(is-vec(files.data), "Response should have data array")
+    // has_more should be a boolean
+    assert(is-bool(files.has_more), "has_more should be boolean")
+}
+
+test-files-list-with-limit
+meta ["test"]
+fn () {
+    files ::anthropic::files/list(5)
+
+    assert(is-vec(files.data), "Response should have data array")
+    assert(lte(length(files.data), 5), "Should respect limit parameter")
+}

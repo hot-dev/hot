@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.slack {
+  name: "hot.dev/slack",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "Slack API bindings for Hot. Includes Chat, Channels, Users, Files, Apps, Calls, Auth, Team, OAuth, Emoji, and Views APIs.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["messaging"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,50 @@
+::telegram::integration::updates ns
+meta ["test"]
+
+test-get-webhook-info
+meta ["test"]
+fn () {
+  response ::telegram::updates/get-webhook-info()
+
+  assert(is-some(response.pending_update_count), "getWebhookInfo should return pending_update_count")
+}
+
+test-set-and-delete-webhook
+meta ["test"]
+fn () {
+  ::telegram::updates/set-webhook(::telegram::updates/SetWebhookRequest({
+    url: "https://hot-integration-test.example.com/webhook",
+    secret_token: "hot-test-secret",
+    allowed_updates: ["message", "callback_query"]
+  }))
+
+  info ::telegram::updates/get-webhook-info()
+  assert-eq("https://hot-integration-test.example.com/webhook", info.url, "webhook url should match")
+
+  ::telegram::updates/delete-webhook(::telegram::updates/DeleteWebhookRequest({
+    drop_pending_updates: false
+  }))
+
+  cleared ::telegram::updates/get-webhook-info()
+  assert-eq("", cleared.url, "webhook url should be empty after delete")
+}
+
+test-get-updates
+meta ["test"]
+fn () {
+  webhook-info ::telegram::updates/get-webhook-info()
+  cond {
+    ne(webhook-info.url, "") => {
+      ::telegram::updates/delete-webhook(::telegram::updates/DeleteWebhookRequest({
+        drop_pending_updates: false
+      }))
+    }
+  }
+
+  updates ::telegram::updates/get-updates(::telegram::updates/GetUpdatesRequest({
+    limit: 1,
+    timeout: 0
+  }))
+
+  assert(is-some(updates), "getUpdates should return a result")
+}

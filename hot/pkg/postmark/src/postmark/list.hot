@@ -1,0 +1,81 @@
+::postmark::list ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+TemplateListingResponse type {
+    TotalCount: Int?,
+    Templates_API: Vec<TemplateRecordResponse>?
+}
+
+TemplateRecordResponse type {
+    Name: Str?,
+    Alias: Str?,
+    TemplateId: Int?,
+    Active: Bool?
+}
+
+ListTemplatesRequest type {
+  count: Str,
+  offset: Str
+}
+
+ListTemplatesResponse type {
+    TotalCount: Int?,
+    Templates_API: Vec<TemplateRecordResponse>?
+}
+
+
+get-templates-associated-with-this-server
+meta {
+    doc: """
+    Retrieve a paginated list of templates associated with the current server.
+
+    **Example**
+
+    ```hot
+    response ::postmark::list/get-templates-associated-with-this-server(::postmark::list/ListTemplatesRequest({
+        count: "10",
+        offset: "0"
+    }))
+    response.TotalCount // => 5
+    ```
+    """
+}
+fn (request: ListTemplatesRequest): ListTemplatesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/templates?Count=${request.count}&Offset=${request.offset}`)
+  if(is-ok-response(response), ListTemplatesResponse(response.body), err(HttpError(response)))
+}
+
+ListInboundRulesRequest type {
+  count: Str,
+  offset: Str
+}
+
+ListInboundRulesResponse type {
+    TotalCount: Int?,
+    InboundRules: Vec<Map>?
+}
+
+
+list-inbound-rule-triggers
+meta {
+    doc: """
+    Retrieve a paginated list of inbound rule triggers configured on the server.
+
+    **Example**
+
+    ```hot
+    response ::postmark::list/list-inbound-rule-triggers(::postmark::list/ListInboundRulesRequest({
+        count: "10",
+        offset: "0"
+    }))
+    response.TotalCount // => 0
+    ```
+    """
+}
+fn (request: ListInboundRulesRequest): ListInboundRulesResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/triggers/inboundrules?count=${request.count}&offset=${request.offset}`)
+  if(is-ok-response(response), ListInboundRulesResponse(response.body), err(HttpError(response)))
+}

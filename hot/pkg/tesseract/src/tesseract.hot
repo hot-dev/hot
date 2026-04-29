@@ -1,0 +1,327 @@
+::tesseract ns
+meta {
+    doc: """
+    Tesseract OCR via Hot Box containers.
+
+    Extract text from images stored at `hot://` URLs with optional language,
+    page segmentation mode (PSM), OCR engine mode (OEM), and output format.
+
+    **Quick Start**
+
+    ```hot
+    result ::tesseract/ocr("hot://uploads/scan.png")
+    tap(result.text)
+    tap(result.url)
+
+    // With explicit output path
+    result ::tesseract/ocr("hot://uploads/scan.png", {
+        output: "hot://ocr/scan-result.txt",
+    })
+
+    ver ::tesseract/version()
+    tap(ver.version)
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+// Alpine base — tesseract-ocr installed at runtime via apk (~15MB, few seconds).
+// For extra languages, use a custom image with additional tesseract-ocr-data-* packages.
+DEFAULT_IMAGE "alpine:3.21"
+INSTALL_CMD "apk add --no-cache tesseract-ocr tesseract-ocr-data-eng"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+OcrOpts
+meta {
+    doc: """
+    Options for OCR.
+
+    **Fields**
+    - `language` — Tesseract language code(s), e.g. `"eng"`, `"fra"`, `"deu+eng"`
+    - `psm` — Page segmentation mode (0–13)
+    - `oem` — OCR engine mode (0–3)
+    - `format` — Output: `"txt"`, `"hocr"`, `"tsv"`, `"pdf"` (default: `"txt"`)
+    - `dpi` — DPI hint for the input image (`--dpi`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with tesseract (default: `alpine:3.21` + runtime install)
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    language: Str?,
+    psm: Int?,
+    oem: Int?,
+    format: Str?,
+    dpi: Int?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+// ============================================================================
+// Command Builders (internal, testable without Docker)
+// ============================================================================
+
+build-ocr-args
+meta {
+    doc: "Build tesseract CLI arguments (after the `tesseract` executable name)."
+}
+fn (input-path: Str, output-base: Str, language: Str?, psm: Int?, oem: Int?, format: Str, dpi: Int?, extra-args: Vec<Str>?): Vec<Str> {
+    lang-args if(is-some(language), ["-l", language], [])
+    psm-args if(is-some(psm), ["--psm", Str(psm)], [])
+    oem-args if(is-some(oem), ["--oem", Str(oem)], [])
+    dpi-args if(is-some(dpi), ["--dpi", Str(dpi)], [])
+    extra or(extra-args, [])
+
+    [
+        input-path, output-base,
+        ...lang-args, ...psm-args, ...oem-args, ...dpi-args, ...extra,
+        format,
+    ]
+}
+
+build-version-args
+meta {
+    doc: "Build tesseract `--version` arguments."
+}
+fn (): Vec<Str> {
+    ["--version"]
+}
+
+// ============================================================================
+// Output Parsers (internal, testable without Docker)
+// ============================================================================
+
+parse-ocr-output
+meta {
+    doc: "Parse OCR stdout into text. For `txt` (and text-like formats), returns trimmed stdout. PDF output is file-only; returns empty text."
+}
+fn (format: Str, stdout: Str): Str {
+    cond {
+        eq(format, "pdf") => { "" }
+        => { trim(stdout) }
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+format-output-suffix fn (format: Str): Str {
+    cond {
+        eq(format, "hocr") => { "hocr" }
+        eq(format, "tsv") => { "tsv" }
+        eq(format, "pdf") => { "pdf" }
+        => { "txt" }
+    }
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+run-tesseract-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD}\n${script}`, script)
+    info ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+    ::task/await(info.id)
+}
+
+start-tesseract-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD}\n${script}`, script)
+    ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+ocr
+meta {
+    doc: """
+    Run Tesseract OCR on an image in Hot storage.
+
+    Returns `{text: Str, url: Str, format: Str}` where `text` is extracted
+    content (for `txt`/`hocr`/`tsv`), `url` is the output file in Hot storage,
+    and `format` is the output format used.
+
+    **Example**
+
+    ```hot
+    r ::tesseract/ocr("hot://uploads/page.png")
+    r.text
+    r.url
+
+    r2 ::tesseract/ocr("hot://uploads/page.png", {
+        language: "eng",
+        psm: 3,
+        oem: 1,
+        format: "txt",
+    })
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    ocr(input, OcrOpts({
+        language: null, psm: null, oem: null,
+        format: null, dpi: null, extra-args: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: OcrOpts): Map {
+    fmt or(opts.format, "txt")
+    uuid Uuid()
+    suffix format-output-suffix(fmt)
+    hot-output resolve-output(opts.output, `hot://tesseract/${uuid}/ocr-output.${suffix}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-base `/data/ocr-out`
+    disk-out `${out-base}.${suffix}`
+
+    tess-args join-args(build-ocr-args(in-path, out-base, opts.language, opts.psm, opts.oem, fmt, opts.dpi, opts.extra-args))
+    text-capture if(eq(fmt, "pdf"), "", ` && cat ${disk-out}`)
+    script `hotbox cp '${input}' ${in-path} && tesseract ${tess-args}${text-capture} && hotbox cp ${disk-out} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-tesseract-box(script, box-size, opts.image, or(opts.timeout, 300))
+    checked check-box-result(result, "tesseract")
+
+    text parse-ocr-output(fmt, or(checked.stdout, ""))
+
+    {text, url: hot-output, format: fmt,}
+}
+
+version
+meta {
+    doc: """
+    Return the `tesseract --version` string.
+
+    **Example**
+
+    ```hot
+    v ::tesseract/version()
+    v.version
+    ```
+    """,
+    box: {min-size: "nano"}
+}
+fn (): Map {
+    version(null)
+},
+(image: Str?): Map {
+    ver-args join-args(build-version-args())
+    script `tesseract ${ver-args}`
+
+    result run-tesseract-box(script, "nano", image, 300)
+    checked check-box-result(result, "tesseract")
+
+    {version: or(checked.stdout, "") |> trim(),}
+}
+
+start-ocr
+meta {
+    doc: """
+    Start Tesseract OCR on an image without awaiting the result.
+
+    Returns the box task info map immediately. Use `::hot::task/await`
+    to retrieve the final result.
+
+    **Example**
+
+    ```hot
+    task ::tesseract/start-ocr("hot://uploads/page.png", {format: "txt"})
+    result ::hot::task/await(task.id)
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-ocr(input, OcrOpts({
+        language: null, psm: null, oem: null,
+        format: null, dpi: null, extra-args: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: OcrOpts): Map {
+    fmt or(opts.format, "txt")
+    uuid Uuid()
+    suffix format-output-suffix(fmt)
+    hot-output resolve-output(opts.output, `hot://tesseract/${uuid}/ocr-output.${suffix}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-base `/data/ocr-out`
+    disk-out `${out-base}.${suffix}`
+
+    tess-args join-args(build-ocr-args(in-path, out-base, opts.language, opts.psm, opts.oem, fmt, opts.dpi, opts.extra-args))
+    text-capture if(eq(fmt, "pdf"), "", ` && cat ${disk-out}`)
+    script `hotbox cp '${input}' ${in-path} && tesseract ${tess-args}${text-capture} && hotbox cp ${disk-out} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-tesseract-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}

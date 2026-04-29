@@ -1,0 +1,15 @@
+::slack::integration::calls ns
+meta ["test"]
+
+test-rtm-connect
+meta ["test"]
+fn () {
+  response ::slack::calls/rtm-connect(::slack::calls/RtmConnectRequest({}))
+
+  // RTM may be disallowed for bot tokens, which is expected behavior
+  assert(
+    or(response.ok, eq(response.error, "not_allowed_token_type")),
+    `rtm.connect should succeed or explicitly reject bot token type. response=${to-json(response)}`
+  )
+  assert(ne(response.error, "invalid_auth"), `rtm.connect should not fail with invalid_auth. response=${to-json(response)}`)
+}

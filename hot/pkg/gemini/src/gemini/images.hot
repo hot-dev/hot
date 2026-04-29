@@ -1,0 +1,419 @@
+::gemini::images ns
+
+// ============================================================================
+// Google Gemini Image Generation (Imagen via Gemini 2.0)
+// https://ai.google.dev/gemini-api/docs/imagen
+// ============================================================================
+
+api-request ::gemini::api/request
+HttpError ::gemini::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+FileMeta ::hot::file/FileMeta
+write-file-bytes ::hot::file/write-file-bytes
+
+// Import media types
+Image ::hot::media/Image
+
+// Import AI media types (wraps pure media with AI generation metadata)
+AIMedia ::ai::media/AIMedia
+AIImage ::ai::media/AIImage
+AIMediaBatch ::ai::media/AIMediaBatch
+AIMediaError ::ai::media/AIMediaError
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// Default model for image generation
+IMAGEN_MODEL "imagen-3.0-generate-002"
+
+// Model that supports inline image generation in chat
+FLASH_IMAGE_MODEL "gemini-2.0-flash-exp"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Literal union for aspect ratios
+AspectRatio type "1:1" | "3:4" | "4:3" | "9:16" | "16:9"
+
+// Literal union for safety filter levels
+SafetyFilterLevel type "BLOCK_LOW_AND_ABOVE" | "BLOCK_MEDIUM_AND_ABOVE" | "BLOCK_ONLY_HIGH" | "BLOCK_NONE"
+
+// Literal union for person generation settings
+PersonGeneration type "DONT_ALLOW" | "ALLOW_ADULT" | "ALLOW_ALL"
+
+// Image generation request for Imagen
+GenerateImageRequest type {
+    prompt: Str,
+    numberOfImages: Int?,
+    aspectRatio: AspectRatio?,
+    negativePrompt: Str?,
+    safetyFilterLevel: SafetyFilterLevel?,
+    personGeneration: PersonGeneration?
+}
+
+// Image generation response from Imagen
+GenerateImageResponse type {
+    predictions: Vec<ImagePrediction>?
+}
+
+ImagePrediction type {
+    bytesBase64Encoded: Str,
+    mimeType: Str
+}
+
+// ============================================================================
+// Core Image Generation (Imagen)
+// ============================================================================
+
+generate
+meta {
+    doc: """
+    Generate images using Imagen model.
+
+    Returns a list of generated images as base64-encoded data.
+
+    **Example**
+    ```hot
+    response generate({
+        prompt: "A serene lake at sunset",
+        numberOfImages: 2,
+        aspectRatio: "16:9"
+    })
+
+    images response.predictions
+    ```
+    """
+}
+fn (request: GenerateImageRequest): GenerateImageResponse | HttpError {
+    // Build the request body for Imagen
+    body {
+        instances: [{prompt: request.prompt}],
+        parameters: merge(
+            {sampleCount: if(is-null(request.numberOfImages), 1, request.numberOfImages)},
+            cond {
+                not(is-null(request.aspectRatio)) => { {aspectRatio: request.aspectRatio} }
+                => { {} }
+            },
+            cond {
+                not(is-null(request.negativePrompt)) => { {negativePrompt: request.negativePrompt} }
+                => { {} }
+            },
+            cond {
+                not(is-null(request.safetyFilterLevel)) => { {safetyFilterLevel: request.safetyFilterLevel} }
+                => { {} }
+            },
+            cond {
+                not(is-null(request.personGeneration)) => { {personGeneration: request.personGeneration} }
+                => { {} }
+            }
+        )
+    }
+
+    url `${::gemini/BASE_URL}/v1/models/${IMAGEN_MODEL}:predict`
+    response api-request("POST", url, {}, body)
+
+    if(is-ok-response(response), GenerateImageResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// File Integration - Returns Media enum
+// ============================================================================
+
+generate-to-file
+meta {
+    doc: """
+    Generate an image and save it to a file.
+
+    Returns an AIMedia.Image with file metadata and AI generation details.
+
+    **Example**
+    ```hot
+    result generate-to-file("uploads/sunset.png", "A serene lake at sunset")
+
+    match result {
+        AIMedia.Image => {
+            println(result.media.file.path)  // "uploads/sunset.png"
+            println(result.prompt)           // "A serene lake at sunset"
+        }
+
+        HttpError => { println("Error!") }
+    }
+    ```
+
+    **With options**
+    ```hot
+    result generate-to-file("output/city.png", {
+        prompt: "A futuristic city at night",
+        aspectRatio: "16:9",
+        negativePrompt: "blurry, low quality"
+    })
+    ```
+    """
+}
+fn
+(path: Str, prompt: Str): AIMedia | HttpError {
+    generate-to-file(path, {prompt: prompt})
+},
+(path: Str, request: GenerateImageRequest): AIMedia | HttpError {
+    response generate(request)
+
+    match response {
+        HttpError => { response }
+        GenerateImageResponse => {
+            // Get the first prediction
+            predictions response.predictions
+            cond {
+                is-null(predictions) => {
+                    HttpError({status: 500, headers: {}, body: "No images generated"})
+                }
+
+                eq(count(predictions), 0) => {
+                    HttpError({status: 500, headers: {}, body: "No images generated"})
+                }
+                => {
+                    first-prediction first(predictions)
+                    base64-data first-prediction.bytesBase64Encoded
+                    mime-type first-prediction.mimeType
+
+                    // Decode and write to file
+                    bytes ::hot::base64/decode(base64-data)
+                    file-result write-file-bytes(path, bytes)
+
+                    match file-result {
+                        FileMeta => {
+                            // Use ::hot::mime to get the format from mime type
+                            format or(::hot::mime/minor-type(mime-type), "png")
+
+                            // Return unified AIMedia.Image
+                            AIMedia.Image(AIImage({
+                                media: Image({
+                                    file: file-result,
+                                    width: null,
+                                    height: null,
+                                    format: format
+                                }),
+                                provider: "gemini",
+                                model: IMAGEN_MODEL,
+                                prompt: request.prompt,
+                                revised_prompt: null,
+                                style: null,
+                                quality: null
+                            }))
+                        }
+                        => {
+                            HttpError({status: 500, headers: {}, body: `Failed to write file: ${file-result}`})
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+generate-batch-to-files
+meta {
+    doc: """
+    Generate multiple images and save them to files.
+
+    Returns an AIMediaBatch with all generated AIMedia.Image items.
+
+    **Example**
+    ```hot
+    result generate-batch-to-files("output", {
+        prompt: "A magical forest",
+        numberOfImages: 3,
+        aspectRatio: "1:1"
+    })
+
+    println(`Generated ${result.succeeded} images`)
+    ```
+    """
+}
+fn (directory: Str, request: GenerateImageRequest): AIMediaBatch | HttpError {
+    response generate(request)
+
+    match response {
+        HttpError => { response }
+        GenerateImageResponse => {
+            predictions response.predictions
+            cond {
+                is-null(predictions) => {
+                    AIMediaBatch({items: [], succeeded: 0, failed: 0, errors: []})
+                }
+                => {
+                    // Process each prediction
+                    results map-indexed(predictions, (i, prediction) {
+                        base64-data prediction.bytesBase64Encoded
+                        mime-type prediction.mimeType
+
+                        // Use ::hot::mime to get the extension from mime type
+                        ext or(::hot::mime/minor-type(mime-type), "png")
+
+                        path `${directory}/image_${i}.${ext}`
+                        bytes ::hot::base64/decode(base64-data)
+                        file-result write-file-bytes(path, bytes)
+
+                        match file-result {
+                            FileMeta => {
+                                media AIMedia.Image(AIImage({
+                                    media: Image({
+                                        file: file-result,
+                                        width: null,
+                                        height: null,
+                                        format: ext
+                                    }),
+                                    provider: "gemini",
+                                    model: IMAGEN_MODEL,
+                                    prompt: request.prompt,
+                                    revised_prompt: null,
+                                    style: null,
+                                    quality: null
+                                }))
+                                {success: true, media: media}
+                            }
+                            => {
+                                {success: false, error: AIMediaError({index: i, message: Str(file-result)})}
+                            }
+                        }
+                    })
+
+                    // Separate successes and failures
+                    items map(filter(results, %.success), %.media)
+                    errors map(filter(results, not(%.success)), %.error)
+
+                    AIMediaBatch({
+                        items: items,
+                        succeeded: count(items),
+                        failed: count(errors),
+                        errors: errors
+                    })
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Inline Image Generation (Gemini 2.0 Flash)
+// ============================================================================
+
+generate-inline
+meta {
+    doc: """
+    Generate images using Gemini 2.0 Flash's native image generation.
+
+    This uses the generateContent API with responseModalities set to IMAGE,
+    allowing image generation within the chat context.
+
+    **Example**
+    ```hot
+    response generate-inline("Draw a cute robot watering plants")
+
+    // Response contains inline_data parts with base64 images
+    parts response.candidates[0].content.parts
+    images filter(parts, not(is-null(%.inlineData)))
+    ```
+    """
+}
+fn (prompt: Str): Map | HttpError {
+    body {
+        contents: [{role: "user", parts: [{text: prompt}]}],
+        generationConfig: {
+            responseModalities: ["IMAGE", "TEXT"]
+        }
+    }
+
+    url `${::gemini/BASE_URL}/v1beta/models/${FLASH_IMAGE_MODEL}:generateContent`
+    response api-request("POST", url, {}, body)
+
+    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+generate-inline-to-file
+meta {
+    doc: """
+    Generate an image using Gemini 2.0 Flash and save it to a file.
+
+    Uses native image generation in the chat context.
+
+    **Example**
+    ```hot
+    result generate-inline-to-file("output/robot.png", "Draw a cute robot")
+
+    match result {
+        AIMedia.Image => { println(result.media.file.path) }
+        HttpError => { println("Error!") }
+    }
+    ```
+    """
+}
+fn (path: Str, prompt: Str): AIMedia | HttpError {
+    response generate-inline(prompt)
+
+    match response {
+        HttpError => { response }
+        => {
+            // Extract image from response
+            candidates response.candidates
+            cond {
+                is-null(candidates) => {
+                    HttpError({status: 500, headers: {}, body: "No candidates in response"})
+                }
+
+                eq(count(candidates), 0) => {
+                    HttpError({status: 500, headers: {}, body: "No candidates in response"})
+                }
+                => {
+                    first-candidate first(candidates)
+                    parts first-candidate.content.parts
+
+                    // Find inline data parts (images)
+                    image-parts filter(parts, not(is-null(%.inlineData)))
+
+                    cond {
+                        eq(count(image-parts), 0) => {
+                            HttpError({status: 500, headers: {}, body: "No images in response"})
+                        }
+                        => {
+                            first-image first(image-parts)
+                            inline-data first-image.inlineData
+                            base64-data inline-data.data
+                            mime-type inline-data.mimeType
+
+                            // Decode and write to file
+                            bytes ::hot::base64/decode(base64-data)
+                            file-result write-file-bytes(path, bytes)
+
+                            match file-result {
+                                FileMeta => {
+                                    // Use ::hot::mime to get the format from mime type
+                                    format or(::hot::mime/minor-type(mime-type), "png")
+
+                                    AIMedia.Image(AIImage({
+                                        media: Image({
+                                            file: file-result,
+                                            width: null,
+                                            height: null,
+                                            format: format
+                                        }),
+                                        provider: "gemini",
+                                        model: FLASH_IMAGE_MODEL,
+                                        prompt: prompt,
+                                        revised_prompt: null,
+                                        style: null,
+                                        quality: null
+                                    }))
+                                }
+                                => {
+                                    HttpError({status: 500, headers: {}, body: `Failed to write file: ${file-result}`})
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

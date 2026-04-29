@@ -1,0 +1,100 @@
+::hot::test::regex ns
+meta ["test"]
+
+// Note: assert, assert-eq, length are core functions - no aliasing needed
+test-regex-basic
+meta ["test"] fn () {
+    // Test is-match function (boolean test)
+    assert(::hot::regex/is-match("123", "\\d+"), "is-match(\"123\", \"\\\\d+\") returns true")
+    assert-eq(false, ::hot::regex/is-match("abc", "\\d+"), "is-match(\"abc\", \"\\\\d+\") returns false")
+
+    // Test first-match function (first match)
+    assert-eq("123", ::hot::regex/first-match("abc123def", "\\d+"), "first-match(\"abc123def\", \"\\\\d+\") returns \"123\"")
+    assert-eq(null, ::hot::regex/first-match("abcdef", "\\d+"), "first-match(\"abcdef\", \"\\\\d+\") returns null")
+}
+
+test-regex-find
+meta ["test"] fn () {
+    // Test find function (returns match info)
+    expected-match {match: "123", start: 3, end: 6}
+    assert-eq(expected-match, ::hot::regex/find("abc123def", "\\d+"), "find returns match with position info")
+
+    // Test find-all function (all matches)
+    expected-matches [{match: "123", start: 3, end: 6}, {match: "456", start: 9, end: 12}]
+    assert-eq(expected-matches, ::hot::regex/find-all("abc123def456", "\\d+"), "find-all returns all matches")
+}
+
+test-regex-replace
+meta ["test"] fn () {
+    // Test replace function (replace first match)
+    assert-eq("abc[NUM]def", ::hot::regex/replace("abc123def", "\\d+", "[NUM]"), "replace replaces first match")
+
+    // Test replace-all function (replace all matches)
+    assert-eq("abc[NUM]def[NUM]", ::hot::regex/replace-all("abc123def456", "\\d+", "[NUM]"), "replace-all replaces all matches")
+}
+
+test-regex-split
+meta ["test"] fn () {
+    // Test split function
+    assert-eq(["apple", "banana", "cherry"], ::hot::regex/split("apple,banana;cherry", "[,;]"), "split splits on pattern")
+    assert-eq(["word1", "word2", "word3"], ::hot::regex/split("word1   word2\t\nword3", "\\s+"), "split handles whitespace")
+}
+
+test-regex-capture
+meta ["test"] fn () {
+    // Test capture function (first match with capture groups)
+    expected-capture {match: "Hello John", groups: ["Hello", "John"]}
+    assert-eq(expected-capture, ::hot::regex/capture("Hello John Doe world", "(\\w+)\\s+(\\w+)"), "capture returns groups")
+
+    // Test capture-all function (all matches with capture groups)
+    expected-captures [
+        {match: "John Doe", groups: ["John", "Doe"]},
+        {match: "Jane Smith", groups: ["Jane", "Smith"]}
+    ]
+    assert-eq(expected-captures, ::hot::regex/capture-all("John Doe. Jane Smith.", "(\\w+)\\s+(\\w+)"), "capture-all returns all groups")
+}
+
+test-regex-escape
+meta ["test"] fn () {
+    // Test escape function
+    assert-eq("hello\\.world\\?", ::hot::regex/escape("hello.world?"), "escape escapes special characters")
+    assert-eq("\\[test\\]", ::hot::regex/escape("[test]"), "escape escapes brackets")
+}
+
+test-regex-email
+meta ["test"] fn () {
+    // Practical email validation test
+    email-pattern "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
+
+    assert(::hot::regex/is-match("user@example.com", email-pattern), "Valid email matches pattern")
+    assert(::hot::regex/is-match("test.user+123@sub.domain.org", email-pattern), "Complex valid email matches")
+    assert-eq(false, ::hot::regex/is-match("invalid.email", email-pattern), "Invalid email doesn't match")
+    assert-eq(false, ::hot::regex/is-match("@example.com", email-pattern), "Email without user doesn't match")
+}
+
+test-regex-phone
+meta ["test"] fn () {
+    // Practical phone number extraction
+    phone-pattern "\\(?\\d{3}\\)?[-.\s]?\\d{3}[-.\s]?\\d{4}"
+
+    phones "Call me at (555) 123-4567 or 555.987.6543"
+    expected-phones [
+        {match: "(555) 123-4567", start: 11, end: 25},
+        {match: "555.987.6543", start: 29, end: 41}
+    ]
+    assert-eq(expected-phones, ::hot::regex/find-all(phones, phone-pattern), "Extract phone numbers")
+}
+
+test-regex-url
+meta ["test"] fn () {
+    // URL extraction and manipulation
+    url-pattern "https?://[\\w.-]+\\.[a-zA-Z]{2,}(?:/[\\w.-]*)*"
+
+    text "Visit https://example.com or http://sub.domain.org/path"
+    urls ::hot::regex/find-all(text, url-pattern)
+    assert-eq(2, length(urls), "Found 2 URLs")
+
+    // Replace URLs with placeholders
+    clean-text ::hot::regex/replace-all(text, url-pattern, "[URL]")
+    assert-eq("Visit [URL] or [URL]", clean-text, "URLs replaced with placeholders")
+}

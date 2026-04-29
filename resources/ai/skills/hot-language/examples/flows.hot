@@ -1,0 +1,261 @@
+// Flow patterns in Hot
+::examples::flows ns
+
+// ============================================
+// IF VS COND
+// ============================================
+
+// if() for simple binary conditions
+check-positive fn (n: Int): Str {
+    if(gt(n, 0), "positive", "non-positive")
+}
+
+// cond for multiple branches
+classify fn cond (n: Int): Str {
+    lt(n, 0) => { "negative" }
+    eq(n, 0) => { "zero" }
+    => { "positive" }
+}
+
+// ============================================
+// PARALLEL FLOW
+// ============================================
+
+// Stub for HTTP calls (in real code, use ::hot::http)
+fetch-user fn (id: Str): Map { {id: id, name: "Alice"} }
+fetch-posts fn (id: Str): Vec { ["post1", "post2"] }
+fetch-settings fn (id: Str): Map { {theme: "dark"} }
+
+// Parallel execution - all branches run concurrently
+// Returns Map keyed by variable names
+fetch-user-data fn parallel (userId: Str): Map {
+    user fetch-user(userId)
+    posts fetch-posts(userId)
+    settings fetch-settings(userId)
+}
+// Returns: {user: {...}, posts: [...], settings: {...}}
+
+// Parallel as standalone expression within a function
+load-dashboard fn (userId: Str): Map {
+    data parallel {
+        profile fetch-user(userId)
+        recent fetch-posts(userId)
+    }
+
+    // Use the parallel results
+    {
+        title: `Welcome, ${data.profile.name}`,
+        post-count: length(data.recent)
+    }
+}
+
+// ============================================
+// COND-ALL FLOW
+// ============================================
+
+// Executes ALL matching branches (not just first)
+// Returns Map keyed by branch names
+apply-discounts fn (order: Map): Map {
+    discounts cond-all {
+        order.is-member => member { {type: "member", percent: 10} }
+        gt(order.total, 100) => bulk { {type: "bulk", percent: 5} }
+        order.has-coupon => coupon { {type: "coupon", percent: 15} }
+        => base { {type: "none", percent: 0} }
+    }
+
+    discounts
+}
+// For member with $150 order and coupon:
+// {member: {type: "member", percent: 10}, bulk: {...}, coupon: {...}, base: {...}}
+
+// ============================================
+// MATCH FLOW
+// ============================================
+
+// Define enum types for matching
+Circle type {
+    radius: Dec
+}
+
+Rectangle type {
+    width: Dec,
+    height: Dec
+}
+
+Shape enum { Circle(Circle), Rectangle(Rectangle), Point }
+
+// match for pattern matching on enums
+// Access matched value through the original variable
+area fn match (shape: Shape): Dec {
+    Shape.Circle => { mul(3.14159, mul(shape.radius, shape.radius)) }
+    Shape.Rectangle => { mul(shape.width, shape.height) }
+    Shape.Point => { 0.0 }
+}
+
+// match as standalone expression
+describe fn (shape: Shape): Str {
+    description match shape {
+        Shape.Circle => { `Circle with radius ${shape.radius}` }
+        Shape.Rectangle => { `${shape.width}x${shape.height} rectangle` }
+        Shape.Point => { "A single point" }
+    }
+
+    description
+}
+
+// ============================================
+// MATCH WITH VALUE LITERALS
+// ============================================
+
+// Match on literal values (Int, Str, Dec, Bool, Null, Vec, Map)
+status-message fn match (code: Int): Str {
+    200 => { "ok" }
+    404 => { "not found" }
+    500 => { "server error" }
+    => { "unknown" }
+}
+
+// Mixed type and value arms — top-to-bottom, first wins
+describe-any fn match (value: Any): Str {
+    null => { "null" }
+    0 => { "zero" }
+    "" => { "empty string" }
+    Int => { "integer" }
+    Str => { "string" }
+    => { "other" }
+}
+
+// Expression subjects — match on computed values
+check-length fn (name: Str): Str {
+    result match length(name) {
+        0 => { "empty" }
+        1 => { "single char" }
+        => { "long" }
+    }
+
+    result
+}
+
+// Vec and Map literal arms — full structural equality
+check-coords fn (coords: Vec): Str {
+    result match coords {
+        [0, 0] => { "origin" }
+        [1, 0] => { "unit x" }
+        [0, 1] => { "unit y" }
+        => { "other" }
+    }
+
+    result
+}
+
+// ============================================
+// MATCH-ALL FLOW
+// ============================================
+
+// Executes ALL matching arms
+// Returns Map keyed by variant pattern name
+Capability enum { Read, Write, Admin }
+
+describe-access fn match-all (cap: Capability): Str {
+    Capability.Read => { "can read" }
+    Capability.Write => { "can write" }
+    Capability.Admin => { "full access" }
+}
+// describe-access(Capability.Admin) returns {"Capability.Admin": "full access"}
+
+// ============================================
+// RESULT MODIFIERS
+// ============================================
+
+// Stubs for modifier examples
+task-a fn (): Str { "result-a" }
+task-b fn (): Str { "result-b" }
+task-c fn (): Str { "result-c" }
+
+// parallel|vec - return as vector instead of map
+parallel-as-vec fn (): Vec {
+    results parallel|vec {
+        task-a()
+        task-b()
+        task-c()
+    }
+
+    results
+}
+// Returns: ["result-a", "result-b", "result-c"]
+
+// parallel|one - return single (last) value
+parallel-as-one fn (): Str {
+    result parallel|one {
+        task-a()
+        task-b()
+        task-c()
+    }
+
+    result
+}
+// Returns: "result-c"
+
+// ============================================
+// NESTED FLOWS
+// ============================================
+
+Request type {
+    user-id: Str,
+    action: Str
+}
+
+Response type {
+    status: Str,
+    data: Any
+}
+
+process-request fn (req: Request): Response {
+    // Parallel: fetch data concurrently
+    data parallel {
+        user fetch-user(req.user-id)
+        settings fetch-settings(req.user-id)
+    }
+
+    // Cond: validate
+    validation cond {
+        is-null(data.user) => { err("User not found") }
+        is-empty(req.action) => { err("Action required") }
+        => { ok(data) }
+    }
+
+    // Match: handle result
+    response match validation {
+        Result.Ok => { Response({status: "success", data: validation}) }
+        Result.Err => { Response({status: "error", data: validation}) }
+    }
+
+    response
+}
+
+// ============================================
+// COMMON PATTERNS
+// ============================================
+
+// Early return validation with cond
+validate-input fn cond (input: Map): Result {
+    is-empty(input.name) => { err("Name required") }
+    lt(length(input.name), 2) => { err("Name too short") }
+    is-empty(input.email) => { err("Email required") }
+    not(contains(input.email, "@")) => { err("Invalid email") }
+    => { ok(input) }
+}
+
+// Direction enum for exhaustive matching
+Direction enum { Up, Down, Left, Right }
+Point type {
+    x: Int,
+    y: Int
+}
+
+move-point fn match (dir: Direction, pos: Point): Point {
+    Direction.Up => { Point({x: pos.x, y: sub(pos.y, 1)}) }
+    Direction.Down => { Point({x: pos.x, y: add(pos.y, 1)}) }
+    Direction.Left => { Point({x: sub(pos.x, 1), y: pos.y}) }
+    Direction.Right => { Point({x: add(pos.x, 1), y: pos.y}) }
+}

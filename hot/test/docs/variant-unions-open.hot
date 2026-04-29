@@ -1,0 +1,162 @@
+// Open Enums and Arrow Enrollment Tests
+//
+// Open enums (`enum open { ... }`) are extensible: any package may enroll
+// new variants via `Source -> Enum.Variant` arrows. This file exercises
+// the parser, type-checker, and runtime support for that feature.
+::hot::test::docs::variant-unions-open ns
+meta ["test"]
+
+// -- Open enum with no initial variants --
+//
+// An empty `enum open { }` is the most common shape for an extension point:
+// downstream code adds variants via arrows. Match expressions on this
+// enum require a `_` default arm because the variant set is unbounded.
+
+Plugin enum open { }
+
+test-open-enum-empty-declaration
+meta ["test"] fn () {
+  // The enum exists as a type even with no variants — used as a parameter
+  // type, return type, or Vec element type for extensibility.
+  describe fn (p: Plugin): Str {
+    match p {
+      _ => { "unknown plugin" }
+    }
+  }
+  assert(true, "open enum declares without errors")
+}
+
+// -- Open enum with initial variants --
+
+Animal enum open {
+  Dog,
+  Cat
+}
+
+test-open-enum-with-initial-variants
+meta ["test"] fn () {
+  dog Animal.Dog
+  cat Animal.Cat
+
+  // Initial variants behave like closed-enum variants: tagged maps
+  // with $type ending in the variant name.
+  assert(ends-with(dog.$type, ".Dog"), "Dog variant should tag as .Dog")
+  assert(ends-with(cat.$type, ".Cat"), "Cat variant should tag as .Cat")
+}
+
+test-open-enum-match-requires-default
+meta ["test"] fn () {
+  dog Animal.Dog
+
+  // Match on an open enum MUST include a `_` default arm — the type
+  // checker rejects matches without one (`open-enum-match-missing-default`).
+  // At runtime, the default
+  // arm catches any new variants enrolled later via arrows.
+  result match dog {
+    Animal.Dog => "dog"
+    Animal.Cat => "cat"
+    _ => "unknown"
+  }
+  assert-eq("dog", result, "Match on open enum dispatches by variant tag")
+}
+
+// -- Arrow enrollment: `Source -> Enum.Variant` --
+
+Bird type {
+  species: Str,
+  wingspan: Dec
+}
+
+// This single-line arrow declaration both registers Bird as a Animal
+// variant (Animal.Bird) AND synthesizes the wrap function so that
+// `Animal.Bird({species: "Eagle", wingspan: 2.1})` works at the call site.
+Bird -> Animal.Bird
+
+test-arrow-enrollment-creates-variant
+meta ["test"] fn () {
+  eagle Animal.Bird({species: "Eagle", wingspan: 2.1})
+
+  assert(ends-with(eagle.$type, ".Bird"), "Bird variant should tag as .Bird")
+  assert-eq("Eagle", eagle.$val.species, "Bird payload retains source type fields")
+}
+
+test-arrow-enrolled-variant-in-match
+meta ["test"] fn () {
+  eagle Animal.Bird({species: "Eagle", wingspan: 2.1})
+
+  result match eagle {
+    Animal.Dog => "dog"
+    Animal.Cat => "cat"
+    Animal.Bird => "bird"
+    _ => "other"
+  }
+  assert-eq("bird", result, "Open enum match handles arrow-enrolled variants")
+}
+
+// -- Bodyless arrow form --
+//
+// `Source -> Enum.Variant` with no body synthesizes a trivial wrap
+// function. The user gets the same call-site experience as if they'd
+// written the wrap function explicitly.
+
+Fish type { species: Str }
+Fish -> Animal.Fish
+
+test-bodyless-arrow-synthesizes-wrap
+meta ["test"] fn () {
+  salmon Animal.Fish({species: "Salmon"})
+
+  assert(ends-with(salmon.$type, ".Fish"), "Bodyless arrow still produces a variant")
+  assert-eq("Salmon", salmon.$val.species, "Synthesized wrap preserves payload")
+}
+
+// -- Role-shaped variants: variant name differs from source type --
+
+Lizard type { length-cm: Dec }
+
+// `Source -> Enum.Variant` lets the variant name differ from the source
+// type name. Useful when you want a domain-specific variant label that
+// doesn't match the data type.
+Lizard -> Animal.Reptile
+
+test-role-shaped-variant
+meta ["test"] fn () {
+  gecko Animal.Reptile({length-cm: 12.5})
+
+  assert(ends-with(gecko.$type, ".Reptile"), "Role-shaped variant uses the target name")
+  assert-eq(12.5, gecko.$val.length-cm, "Role-shaped variant preserves source payload")
+}
+
+// -- Closed enums must be exhaustively matched --
+
+Status enum {
+  Pending,
+  Active,
+  Closed
+}
+
+test-closed-enum-exhaustive-match
+meta ["test"] fn () {
+  st Status.Active
+
+  // Exhaustive match: every variant covered, no `_` arm needed.
+  result match st {
+    Status.Pending => "pending"
+    Status.Active => "active"
+    Status.Closed => "closed"
+  }
+  assert-eq("active", result, "Closed enum exhaustive match dispatches correctly")
+}
+
+test-closed-enum-default-arm-allowed
+meta ["test"] fn () {
+  st Status.Pending
+
+  // A `_` default arm is also accepted on closed enums, in which case
+  // not every variant needs an explicit arm.
+  result match st {
+    Status.Pending => "waiting"
+    _ => "other"
+  }
+  assert-eq("waiting", result, "Default arm satisfies closed-enum exhaustiveness")
+}

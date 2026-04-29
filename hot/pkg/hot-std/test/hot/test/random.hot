@@ -1,0 +1,109 @@
+::hot::test::random ns
+meta ["test"]
+
+// Test random-bytes returns correct length
+test-random-bytes-length
+meta ["test"] fn () {
+    bytes16 ::hot::random/random-bytes(16)
+    // Encode to hex and check length (16 bytes = 32 hex chars)
+    hex16 ::hot::hex/encode(bytes16)
+    assert-eq(32, ::hot::str/length(hex16), "random-bytes(16) should produce 16 bytes (32 hex chars)")
+
+    bytes32 ::hot::random/random-bytes(32)
+    hex32 ::hot::hex/encode(bytes32)
+    assert-eq(64, ::hot::str/length(hex32), "random-bytes(32) should produce 32 bytes (64 hex chars)")
+}
+
+// Test random-bytes produces different values each time
+test-random-bytes-unique
+meta ["test"] fn () {
+    a ::hot::random/random-bytes(32)
+    b ::hot::random/random-bytes(32)
+    // It's theoretically possible for these to be equal, but astronomically unlikely
+    assert(not(eq(a, b)), "random-bytes should produce unique values")
+}
+
+// Test random-bytes with hex encoding
+test-random-bytes-hex
+meta ["test"] fn () {
+    result ::hot::random/random-bytes(16, "hex")
+    // 16 bytes = 32 hex chars
+    assert-eq(32, ::hot::str/length(result), "random-bytes(16, 'hex') should produce 32 hex chars")
+    // Should be valid hex
+    assert(::hot::hex/is-valid(result), "random-bytes hex output should be valid hex")
+}
+
+// Test random-bytes with base64 encoding
+test-random-bytes-base64
+meta ["test"] fn () {
+    result ::hot::random/random-bytes(12, "base64")
+    // 12 bytes = 16 base64 chars
+    assert-eq(16, ::hot::str/length(result), "random-bytes(12, 'base64') should produce 16 base64 chars")
+    // Should be valid base64
+    assert(::hot::base64/is-valid(result), "random-bytes base64 output should be valid base64")
+}
+
+// Test random-string length
+test-random-string-length
+meta ["test"] fn () {
+    s16 ::hot::random/random-string(16)
+    assert-eq(16, ::hot::str/length(s16), "random-string(16) should produce 16 chars")
+
+    s32 ::hot::random/random-string(32)
+    assert-eq(32, ::hot::str/length(s32), "random-string(32) should produce 32 chars")
+}
+
+// Test random-string produces expected length
+test-random-string-format
+meta ["test"] fn () {
+    result ::hot::random/random-string(100)
+    // Check that result is expected length
+    assert-eq(100, ::hot::str/length(result), "random-string(100) should be 100 chars")
+
+    // Check that different lengths work
+    short ::hot::random/random-string(8)
+    assert-eq(8, ::hot::str/length(short), "random-string(8) should be 8 chars")
+}
+
+// Test random-string produces different values each time
+test-random-string-unique
+meta ["test"] fn () {
+    a ::hot::random/random-string(32)
+    b ::hot::random/random-string(32)
+    assert(not(eq(a, b)), "random-string should produce unique values")
+}
+
+// Test secure-compare with equal strings
+test-secure-compare-equal
+meta ["test"] fn () {
+    assert(
+        ::hot::random/secure-compare("secret-token", "secret-token"),
+        "secure-compare should return true for equal strings"
+    )
+}
+
+// Test secure-compare with different strings
+test-secure-compare-different
+meta ["test"] fn () {
+    assert(
+        not(::hot::random/secure-compare("secret-token", "wrong-token")),
+        "secure-compare should return false for different strings"
+    )
+}
+
+// Test secure-compare with different lengths
+test-secure-compare-different-lengths
+meta ["test"] fn () {
+    assert(
+        not(::hot::random/secure-compare("short", "longer-string")),
+        "secure-compare should return false for different length strings"
+    )
+}
+
+// Test secure-compare with bytes
+test-secure-compare-bytes
+meta ["test"] fn () {
+    a Bytes("test-data")
+    b Bytes("test-data")
+    assert(::hot::random/secure-compare(a, b), "secure-compare should work with bytes")
+}

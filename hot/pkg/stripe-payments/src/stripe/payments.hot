@@ -1,0 +1,5225 @@
+::stripe::stripe::payments ns
+
+api-request ::stripe::api/request
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+PaymentMethodKlarna type {
+    dob: Any?
+}
+
+SetupIntent type {
+    application: Any?,
+    attach_to_self: Bool?,
+    automatic_payment_methods: Any?,
+    cancellation_reason: "abandoned" | "duplicate" | "requested_by_customer"?,
+    client_secret: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    flow_directions: Vec<"inbound" | "outbound">?,
+    id: Str,
+    last_setup_error: Any?,
+    latest_attempt: Any?,
+    livemode: Bool,
+    mandate: Any?,
+    metadata: Map?,
+    next_action: Any?,
+    object: "setup_intent",
+    on_behalf_of: Any?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>,
+    single_use_mandate: Any?,
+    status: "canceled" | "processing" | "requires_action" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    usage: Str
+}
+
+PaymentMethodDomainResourcePaymentMethodStatusDetails type {
+    error_message: Str
+}
+
+DisputeEnhancedEvidenceVisaCompellingEvidence3 type {
+    disputed_transaction: Any?,
+    prior_undisputed_transactions: Vec<DisputeVisaCompellingEvidence3PriorUndisputedTransaction>
+}
+
+Error type {
+    error: ApiErrors
+}
+
+PaymentIntent type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+PaymentMethodConfigResourceDisplayPreference type {
+    overridable: Bool?,
+    preference: "none" | "off" | "on",
+    value: "off" | "on"
+}
+
+SourceCodeVerificationFlow type {
+    attempts_remaining: Int,
+    status: Str
+}
+
+PaymentMethodNzBankAccount type {
+    account_holder_name: Str?,
+    bank_code: Str,
+    bank_name: Str,
+    branch_code: Str,
+    last4: Str,
+    suffix: Str?
+}
+
+LineItemsDiscountAmount type {
+    amount: Int,
+    discount: Discount
+}
+
+RefundDestinationDetailsGbBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+Fee type {
+    amount: Int,
+    application: Str?,
+    currency: Str,
+    description: Str?,
+    type: Str
+}
+
+RefundDestinationDetails type {
+    affirm: DestinationDetailsUnimplemented?,
+    afterpay_clearpay: DestinationDetailsUnimplemented?,
+    alipay: DestinationDetailsUnimplemented?,
+    alma: DestinationDetailsUnimplemented?,
+    amazon_pay: DestinationDetailsUnimplemented?,
+    au_bank_transfer: DestinationDetailsUnimplemented?,
+    blik: RefundDestinationDetailsBlik?,
+    br_bank_transfer: RefundDestinationDetailsBrBankTransfer?,
+    card: RefundDestinationDetailsCard?,
+    cashapp: DestinationDetailsUnimplemented?,
+    crypto: RefundDestinationDetailsCrypto?,
+    customer_cash_balance: DestinationDetailsUnimplemented?,
+    eps: DestinationDetailsUnimplemented?,
+    eu_bank_transfer: RefundDestinationDetailsEuBankTransfer?,
+    gb_bank_transfer: RefundDestinationDetailsGbBankTransfer?,
+    giropay: DestinationDetailsUnimplemented?,
+    grabpay: DestinationDetailsUnimplemented?,
+    jp_bank_transfer: RefundDestinationDetailsJpBankTransfer?,
+    klarna: DestinationDetailsUnimplemented?,
+    mb_way: RefundDestinationDetailsMbWay?,
+    multibanco: RefundDestinationDetailsMultibanco?,
+    mx_bank_transfer: RefundDestinationDetailsMxBankTransfer?,
+    nz_bank_transfer: DestinationDetailsUnimplemented?,
+    p24: RefundDestinationDetailsP24?,
+    paynow: DestinationDetailsUnimplemented?,
+    paypal: RefundDestinationDetailsPaypal?,
+    pix: DestinationDetailsUnimplemented?,
+    revolut: DestinationDetailsUnimplemented?,
+    sofort: DestinationDetailsUnimplemented?,
+    swish: RefundDestinationDetailsSwish?,
+    th_bank_transfer: RefundDestinationDetailsThBankTransfer?,
+    twint: DestinationDetailsUnimplemented?,
+    type: Str,
+    us_bank_transfer: RefundDestinationDetailsUsBankTransfer?,
+    wechat_pay: DestinationDetailsUnimplemented?,
+    zip: DestinationDetailsUnimplemented?
+}
+
+PaymentMethodPayByBank type {
+
+}
+
+DestinationDetailsUnimplemented type {
+
+}
+
+RefundDestinationDetailsJpBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+PaymentMethodBoleto type {
+    tax_id: Str
+}
+
+SourceTypeAcssDebit type {
+    bank_address_city: Str?,
+    bank_address_line_1: Str?,
+    bank_address_line_2: Str?,
+    bank_address_postal_code: Str?,
+    bank_name: Str?,
+    category: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    routing_number: Str?
+}
+
+SourceTypeCard type {
+    address_line1_check: Str?,
+    address_zip_check: Str?,
+    brand: Str?,
+    country: Str?,
+    cvc_check: Str?,
+    dynamic_last4: Str?,
+    exp_month: Int?,
+    exp_year: Int?,
+    fingerprint: Str?,
+    funding: Str?,
+    last4: Str?,
+    name: Str?,
+    three_d_secure: Str?,
+    tokenization_method: Str?
+}
+
+RefundDestinationDetailsEuBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+SourceTransactionAchCreditTransferData type {
+    customer_data: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    routing_number: Str?
+}
+
+PaymentAttemptRecord type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_attempt_record",
+    payment_method_details: Any?,
+    payment_record: Str?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+PaymentMethodTwint type {
+
+}
+
+PaymentMethodConfiguration type {
+    acss_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    active: Bool,
+    affirm: PaymentMethodConfigResourcePaymentMethodProperties?,
+    afterpay_clearpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alipay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alma: PaymentMethodConfigResourcePaymentMethodProperties?,
+    amazon_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    apple_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    application: Str?,
+    au_becs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bacs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bancontact: PaymentMethodConfigResourcePaymentMethodProperties?,
+    billie: PaymentMethodConfigResourcePaymentMethodProperties?,
+    blik: PaymentMethodConfigResourcePaymentMethodProperties?,
+    boleto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cartes_bancaires: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cashapp: PaymentMethodConfigResourcePaymentMethodProperties?,
+    crypto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    customer_balance: PaymentMethodConfigResourcePaymentMethodProperties?,
+    eps: PaymentMethodConfigResourcePaymentMethodProperties?,
+    fpx: PaymentMethodConfigResourcePaymentMethodProperties?,
+    giropay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    google_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    grabpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    id: Str,
+    ideal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    is_default: Bool,
+    jcb: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kakao_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    klarna: PaymentMethodConfigResourcePaymentMethodProperties?,
+    konbini: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kr_card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    link: PaymentMethodConfigResourcePaymentMethodProperties?,
+    livemode: Bool,
+    mb_way: PaymentMethodConfigResourcePaymentMethodProperties?,
+    mobilepay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    multibanco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    name: Str,
+    naver_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    nz_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    object: "payment_method_configuration",
+    oxxo: PaymentMethodConfigResourcePaymentMethodProperties?,
+    p24: PaymentMethodConfigResourcePaymentMethodProperties?,
+    parent: Str?,
+    pay_by_bank: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paynow: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paypal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    pix: PaymentMethodConfigResourcePaymentMethodProperties?,
+    promptpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    revolut_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    samsung_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    satispay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sepa_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sofort: PaymentMethodConfigResourcePaymentMethodProperties?,
+    swish: PaymentMethodConfigResourcePaymentMethodProperties?,
+    twint: PaymentMethodConfigResourcePaymentMethodProperties?,
+    us_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    wechat_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    zip: PaymentMethodConfigResourcePaymentMethodProperties?
+}
+
+PaymentFlowsPaymentIntentPresentmentDetails type {
+    presentment_amount: Int,
+    presentment_currency: Str
+}
+
+PaymentMethodMobilepay type {
+
+}
+
+DisputePaymentMethodDetailsAmazonPay type {
+    dispute_type: "chargeback" | "claim"?
+}
+
+SourceTransactionSepaCreditTransferData type {
+    reference: Str?,
+    sender_iban: Str?,
+    sender_name: Str?
+}
+
+RefundDestinationDetailsMultibanco type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+PaymentLinksResourceCustomFieldsDropdown type {
+    default_value: Str?,
+    options: Vec<PaymentLinksResourceCustomFieldsDropdownOption>
+}
+
+DisputePaymentMethodDetailsCard type {
+    brand: Str,
+    case_type: "block" | "chargeback" | "compliance" | "inquiry" | "resolution",
+    network_reason_code: Str?
+}
+
+PaymentMethodBillie type {
+
+}
+
+PaymentMethodIdeal type {
+    bank: "abn_amro" | "asn_bank" | "bunq" | "buut" | "finom" | "handelsbanken" | "ing" | "knab" | "mollie" | "moneyou" | "n26" | "nn" | "rabobank" | "regiobank" | "revolut" | "sns_bank" | "triodos_bank" | "van_lanschot" | "yoursafe"?,
+    bic: "ABNANL2A" | "ASNBNL21" | "BITSNL2A" | "BUNQNL2A" | "BUUTNL2A" | "FNOMNL22" | "FVLBNL22" | "HANDNL2A" | "INGBNL2A" | "KNABNL2H" | "MLLENL2A" | "MOYONL21" | "NNBANL2G" | "NTSBDEB1" | "RABONL2U" | "RBRBNL21" | "REVOIE23" | "REVOLT21" | "SNSBNL2A" | "TRIONL2U"?
+}
+
+PaymentMethodDomain type {
+    amazon_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    apple_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    created: Int,
+    domain_name: Str,
+    enabled: Bool,
+    google_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    id: Str,
+    klarna: PaymentMethodDomainResourcePaymentMethodStatus,
+    link: PaymentMethodDomainResourcePaymentMethodStatus,
+    livemode: Bool,
+    object: "payment_method_domain",
+    paypal: PaymentMethodDomainResourcePaymentMethodStatus
+}
+
+PaymentMethodMultibanco type {
+
+}
+
+RadarRadarOptions type {
+    session: Str?
+}
+
+PaymentMethodCrypto type {
+
+}
+
+ConfirmationToken type {
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    mandate_data: Any?,
+    object: "confirmation_token",
+    payment_intent: Str?,
+    payment_method_options: Any?,
+    payment_method_preview: Any?,
+    return_url: Str?,
+    setup_future_usage: "off_session" | "on_session"?,
+    setup_intent: Str?,
+    shipping: Any?,
+    use_stripe_sdk: Bool
+}
+
+PaymentMethodKrCard type {
+    brand: "bc" | "citi" | "hana" | "hyundai" | "jeju" | "jeonbuk" | "kakaobank" | "kbank" | "kdbbank" | "kookmin" | "kwangju" | "lotte" | "mg" | "nh" | "post" | "samsung" | "savingsbank" | "shinhan" | "shinhyup" | "suhyup" | "tossbank" | "woori"?,
+    last4: Str?
+}
+
+PaymentMethodAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+RefundDestinationDetailsUsBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+PaymentMethodNaverPay type {
+    buyer_id: Str?,
+    funding: "card" | "points"
+}
+
+PaymentMethodEps type {
+    bank: "arzte_und_apotheker_bank" | "austrian_anadi_bank_ag" | "bank_austria" | "bankhaus_carl_spangler" | "bankhaus_schelhammer_und_schattera_ag" | "bawag_psk_ag" | "bks_bank_ag" | "brull_kallmus_bank_ag" | "btv_vier_lander_bank" | "capital_bank_grawe_gruppe_ag" | "deutsche_bank_ag" | "dolomitenbank" | "easybank_ag" | "erste_bank_und_sparkassen" | "hypo_alpeadriabank_international_ag" | "hypo_bank_burgenland_aktiengesellschaft" | "hypo_noe_lb_fur_niederosterreich_u_wien" | "hypo_oberosterreich_salzburg_steiermark" | "hypo_tirol_bank_ag" | "hypo_vorarlberg_bank_ag" | "marchfelder_bank" | "oberbank_ag" | "raiffeisen_bankengruppe_osterreich" | "schoellerbank_ag" | "sparda_bank_wien" | "volksbank_gruppe" | "volkskreditbank_ag" | "vr_bank_braunau"?
+}
+
+BillingDetails type {
+    address: Any?,
+    email: Str?,
+    name: Str?,
+    phone: Str?,
+    tax_id: Str?
+}
+
+ApiErrors type {
+    advice_code: Str?,
+    charge: Str?,
+    code: Str?,
+    decline_code: Str?,
+    doc_url: Str?,
+    message: Str?,
+    network_advice_code: Str?,
+    network_decline_code: Str?,
+    param: Str?,
+    payment_intent: PaymentIntent?,
+    payment_method: PaymentMethod?,
+    payment_method_type: Str?,
+    request_log_url: Str?,
+    setup_intent: SetupIntent?,
+    source: Any?,
+    type: "api_error" | "card_error" | "idempotency_error" | "invalid_request_error"
+}
+
+PaymentLinksResourceCustomFields type {
+    dropdown: PaymentLinksResourceCustomFieldsDropdown?,
+    key: Str,
+    label: PaymentLinksResourceCustomFieldsLabel,
+    numeric: PaymentLinksResourceCustomFieldsNumeric?,
+    optional: Bool,
+    text: PaymentLinksResourceCustomFieldsText?,
+    type: "dropdown" | "numeric" | "text"
+}
+
+PaymentMethodUsBankAccount type {
+    account_holder_type: "company" | "individual"?,
+    account_type: "checking" | "savings"?,
+    bank_name: Str?,
+    financial_connections_account: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    networks: Any?,
+    routing_number: Str?,
+    status_details: Any?
+}
+
+DisputeVisaCompellingEvidence3PriorUndisputedTransaction type {
+    charge: Str,
+    customer_account_id: Str?,
+    customer_device_fingerprint: Str?,
+    customer_device_id: Str?,
+    customer_email_address: Str?,
+    customer_purchase_ip: Str?,
+    product_description: Str?,
+    shipping_address: Any?
+}
+
+PaymentMethodCardPresent type {
+    brand: Str?,
+    brand_product: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    offline: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?,
+    wallet: PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax type {
+    calculation: Str
+}
+
+PaymentMethodDomainResourcePaymentMethodStatus type {
+    status: "active" | "inactive",
+    status_details: PaymentMethodDomainResourcePaymentMethodStatusDetails?
+}
+
+PaymentMethodSofort type {
+    country: Str?
+}
+
+RefundNextAction type {
+    display_details: RefundNextActionDisplayDetails?,
+    type: Str
+}
+
+PaymentMethodZip type {
+
+}
+
+DisputePaymentMethodDetailsKlarna type {
+    chargeback_loss_reason_code: Str?,
+    reason_code: Str?
+}
+
+SourceTypeAlipay type {
+    data_string: Str?,
+    native_url: Str?,
+    statement_descriptor: Str?
+}
+
+PaymentLinksResourceNameCollection type {
+    business: PaymentLinksResourceBusinessName?,
+    individual: PaymentLinksResourceIndividualName?
+}
+
+PaymentLinksResourceCompletionBehaviorRedirect type {
+    url: Str
+}
+
+PaymentMethodCustom type {
+    display_name: Str?,
+    logo: Any?,
+    type: Str
+}
+
+PaymentMethodPaynow type {
+
+}
+
+PaymentLinksResourceTaxIdCollection type {
+    enabled: Bool,
+    required: "if_supported" | "never"
+}
+
+SourceTypeSofort type {
+    bank_code: Str?,
+    bank_name: Str?,
+    bic: Str?,
+    country: Str?,
+    iban_last4: Str?,
+    preferred_language: Str?,
+    statement_descriptor: Str?
+}
+
+Address type {
+    city: Str?,
+    country: Str?,
+    line1: Str?,
+    line2: Str?,
+    postal_code: Str?,
+    state: Str?
+}
+
+SourceRedirectFlow type {
+    failure_reason: Str?,
+    return_url: Str,
+    status: Str,
+    url: Str
+}
+
+SourceTypeAchDebit type {
+    bank_name: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    routing_number: Str?,
+    type: Str?
+}
+
+SourceTypeKlarna type {
+    background_image_url: Str?,
+    client_token: Str?,
+    first_name: Str?,
+    last_name: Str?,
+    locale: Str?,
+    logo_url: Str?,
+    page_title: Str?,
+    pay_later_asset_urls_descriptive: Str?,
+    pay_later_asset_urls_standard: Str?,
+    pay_later_name: Str?,
+    pay_later_redirect_url: Str?,
+    pay_now_asset_urls_descriptive: Str?,
+    pay_now_asset_urls_standard: Str?,
+    pay_now_name: Str?,
+    pay_now_redirect_url: Str?,
+    pay_over_time_asset_urls_descriptive: Str?,
+    pay_over_time_asset_urls_standard: Str?,
+    pay_over_time_name: Str?,
+    pay_over_time_redirect_url: Str?,
+    payment_method_categories: Str?,
+    purchase_country: Str?,
+    purchase_type: Str?,
+    redirect_url: Str?,
+    shipping_delay: Int?,
+    shipping_first_name: Str?,
+    shipping_last_name: Str?
+}
+
+PaymentMethodWechatPay type {
+
+}
+
+SourceTypeAchCreditTransfer type {
+    account_number: Str?,
+    bank_name: Str?,
+    fingerprint: Str?,
+    refund_account_holder_name: Str?,
+    refund_account_holder_type: Str?,
+    refund_routing_number: Str?,
+    routing_number: Str?,
+    swift_code: Str?
+}
+
+PaymentLinksResourceAutomaticTax type {
+    enabled: Bool,
+    liability: Any?
+}
+
+DisputeEvidenceDetails type {
+    due_by: Int?,
+    enhanced_eligibility: DisputeEnhancedEligibility,
+    has_evidence: Bool,
+    past_due: Bool,
+    submission_count: Int
+}
+
+RefundDestinationDetailsCard type {
+    reference: Str?,
+    reference_status: Str?,
+    reference_type: Str?,
+    type: "pending" | "refund" | "reversal"
+}
+
+RefundDestinationDetailsSwish type {
+    network_decline_code: Str?,
+    reference: Str?,
+    reference_status: Str?
+}
+
+EmailSent type {
+    email_sent_at: Int,
+    email_sent_to: Str
+}
+
+DisputeEnhancedEligibilityVisaCompliance type {
+    status: "fee_acknowledged" | "requires_fee_acknowledgement"
+}
+
+PaymentMethodAfterpayClearpay type {
+
+}
+
+Discount type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    end: Int?,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+Shipping type {
+    address: Address?,
+    carrier: Str?,
+    name: Str?,
+    phone: Str?,
+    tracking_number: Str?
+}
+
+PaymentMethodGiropay type {
+
+}
+
+PaymentMethodSwish type {
+
+}
+
+PaymentMethodAcssDebit type {
+    bank_name: Str?,
+    fingerprint: Str?,
+    institution_number: Str?,
+    last4: Str?,
+    transit_number: Str?
+}
+
+PaymentRecord type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+PaymentMethodPayto type {
+    bsb_number: Str?,
+    last4: Str?,
+    pay_id: Str?
+}
+
+PaymentMethodBacsDebit type {
+    fingerprint: Str?,
+    last4: Str?,
+    sort_code: Str?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs type {
+    tax: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflows type {
+    inputs: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs?
+}
+
+PaymentLinksResourceCustomFieldsLabel type {
+    custom: Str?,
+    type: "custom"
+}
+
+PaymentMethodSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    generated_from: Any?,
+    last4: Str?
+}
+
+PaymentsPrimitivesPaymentRecordsResourceProcessorDetails type {
+    custom: PaymentsPrimitivesPaymentRecordsResourceProcessorDetailsResourceCustomDetails?,
+    type: "custom"
+}
+
+PaymentMethodLink type {
+    email: Str?
+}
+
+PaymentLinksResourcePhoneNumberCollection type {
+    enabled: Bool
+}
+
+SourceTransactionPaperCheckData type {
+    available_at: Str?,
+    invoices: Str?
+}
+
+SourceOrder type {
+    amount: Int,
+    currency: Str,
+    email: Str?,
+    items: Vec<SourceOrderItem>?,
+    shipping: Shipping?
+}
+
+DisputePaymentMethodDetailsPaypal type {
+    case_id: Str?,
+    reason_code: Str?
+}
+
+SourceTransactionChfCreditTransferData type {
+    reference: Str?,
+    sender_address_country: Str?,
+    sender_address_line1: Str?,
+    sender_iban: Str?,
+    sender_name: Str?
+}
+
+PaymentMethodCard type {
+    brand: Str,
+    checks: Any?,
+    country: Str?,
+    display_brand: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    generated_from: Any?,
+    last4: Str,
+    networks: Any?,
+    regulated_status: "regulated" | "unregulated"?,
+    three_d_secure_usage: Any?,
+    wallet: Any?
+}
+
+SourceTypeP24 type {
+    reference: Str?
+}
+
+SourceMandateNotificationBacsDebitData type {
+    last4: Str?
+}
+
+SourceTypeIdeal type {
+    bank: Str?,
+    bic: Str?,
+    iban_last4: Str?,
+    statement_descriptor: Str?
+}
+
+RefundDestinationDetailsP24 type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+PaymentMethodConfigResourcePaymentMethodProperties type {
+    available: Bool,
+    display_preference: PaymentMethodConfigResourceDisplayPreference
+}
+
+DisputePaymentMethodDetails type {
+    amazon_pay: DisputePaymentMethodDetailsAmazonPay?,
+    card: DisputePaymentMethodDetailsCard?,
+    klarna: DisputePaymentMethodDetailsKlarna?,
+    paypal: DisputePaymentMethodDetailsPaypal?,
+    type: "amazon_pay" | "card" | "klarna" | "paypal"
+}
+
+DisputeEnhancedEvidenceVisaCompliance type {
+    fee_acknowledged: Bool
+}
+
+SourceTypeSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    mandate_reference: Str?,
+    mandate_url: Str?
+}
+
+PaymentMethodBlik type {
+
+}
+
+SourceTypeAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+SourceTypeThreeDSecure type {
+    address_line1_check: Str?,
+    address_zip_check: Str?,
+    authenticated: Bool?,
+    brand: Str?,
+    card: Str?,
+    country: Str?,
+    customer: Str?,
+    cvc_check: Str?,
+    dynamic_last4: Str?,
+    exp_month: Int?,
+    exp_year: Int?,
+    fingerprint: Str?,
+    funding: Str?,
+    last4: Str?,
+    name: Str?,
+    three_d_secure: Str?,
+    tokenization_method: Str?
+}
+
+SourceTypeMultibanco type {
+    entity: Str?,
+    reference: Str?,
+    refund_account_holder_address_city: Str?,
+    refund_account_holder_address_country: Str?,
+    refund_account_holder_address_line1: Str?,
+    refund_account_holder_address_line2: Str?,
+    refund_account_holder_address_postal_code: Str?,
+    refund_account_holder_address_state: Str?,
+    refund_account_holder_name: Str?,
+    refund_iban: Str?
+}
+
+PaymentIntentAmountDetailsLineItem type {
+    discount_amount: Int?,
+    id: Str,
+    object: "payment_intent_amount_details_line_item",
+    payment_method_options: Any?,
+    product_code: Str?,
+    product_name: Str,
+    quantity: Int,
+    tax: Any?,
+    unit_cost: Int,
+    unit_of_measure: Str?
+}
+
+SourceTypeCardPresent type {
+    application_cryptogram: Str?,
+    application_preferred_name: Str?,
+    authorization_code: Str?,
+    authorization_response_code: Str?,
+    brand: Str?,
+    country: Str?,
+    cvm_type: Str?,
+    data_type: Str?,
+    dedicated_file_name: Str?,
+    emv_auth_data: Str?,
+    evidence_customer_signature: Str?,
+    evidence_transaction_certificate: Str?,
+    exp_month: Int?,
+    exp_year: Int?,
+    fingerprint: Str?,
+    funding: Str?,
+    last4: Str?,
+    pos_device_id: Str?,
+    pos_entry_mode: Str?,
+    read_method: Str?,
+    reader: Str?,
+    terminal_verification_results: Str?,
+    transaction_status_information: Str?
+}
+
+PaymentLink type {
+    active: Bool,
+    after_completion: PaymentLinksResourceAfterCompletion,
+    allow_promotion_codes: Bool,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: PaymentLinksResourceAutomaticTax,
+    billing_address_collection: "auto" | "required",
+    consent_collection: Any?,
+    currency: Str,
+    custom_fields: Vec<PaymentLinksResourceCustomFields>,
+    custom_text: PaymentLinksResourceCustomText,
+    customer_creation: "always" | "if_required",
+    id: Str,
+    inactive_message: Str?,
+    invoice_creation: Any?,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    name_collection: PaymentLinksResourceNameCollection?,
+    object: "payment_link",
+    on_behalf_of: Any?,
+    optional_items: Vec<PaymentLinksResourceOptionalItem>?,
+    payment_intent_data: Any?,
+    payment_method_collection: "always" | "if_required",
+    payment_method_types: Vec<"affirm" | "afterpay_clearpay" | "alipay" | "alma" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "klarna" | "konbini" | "link" | "mb_way" | "mobilepay" | "multibanco" | "oxxo" | "p24" | "pay_by_bank" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    phone_number_collection: PaymentLinksResourcePhoneNumberCollection,
+    restrictions: Any?,
+    shipping_address_collection: Any?,
+    shipping_options: Vec<PaymentLinksResourceShippingOption>,
+    submit_type: "auto" | "book" | "donate" | "pay" | "subscribe",
+    subscription_data: Any?,
+    tax_id_collection: PaymentLinksResourceTaxIdCollection,
+    transfer_data: Any?,
+    url: Str
+}
+
+PaymentLinksResourceShippingOption type {
+    shipping_amount: Int,
+    shipping_rate: Any
+}
+
+PaymentsPrimitivesPaymentRecordsResourceAmount type {
+    currency: Str,
+    value: Int
+}
+
+PaymentMethodP24 type {
+    bank: "alior_bank" | "bank_millennium" | "bank_nowy_bfg_sa" | "bank_pekao_sa" | "banki_spbdzielcze" | "blik" | "bnp_paribas" | "boz" | "citi_handlowy" | "credit_agricole" | "envelobank" | "etransfer_pocztowy24" | "getin_bank" | "ideabank" | "ing" | "inteligo" | "mbank_mtransfer" | "nest_przelew" | "noble_pay" | "pbac_z_ipko" | "plus_bank" | "santander_przelew24" | "tmobile_usbugi_bankowe" | "toyota_bank" | "velobank" | "volkswagen_bank"?
+}
+
+PaymentMethodInteracPresent type {
+    brand: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?
+}
+
+SourceTypeWechat type {
+    prepay_id: Str?,
+    qr_code_url: Str?,
+    statement_descriptor: Str?
+}
+
+SourceMandateNotificationSepaDebitData type {
+    creditor_identifier: Str?,
+    last4: Str?,
+    mandate_reference: Str?
+}
+
+PaymentMethod type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+SourceMandateNotificationAcssDebitData type {
+    statement_descriptor: Str?
+}
+
+RefundDestinationDetailsBrBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+PaymentMethodMbWay type {
+
+}
+
+TaxRate type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+DisputeEnhancedEvidence type {
+    visa_compelling_evidence_3: DisputeEnhancedEvidenceVisaCompellingEvidence3?,
+    visa_compliance: DisputeEnhancedEvidenceVisaCompliance?
+}
+
+RefundDestinationDetailsPaypal type {
+    network_decline_code: Str?
+}
+
+PaymentFlowsPrivatePaymentMethodsAlipay type {
+
+}
+
+SourceTypeGiropay type {
+    bank_code: Str?,
+    bank_name: Str?,
+    bic: Str?,
+    statement_descriptor: Str?
+}
+
+DiscountSource type {
+    coupon: Any?,
+    type: "coupon"
+}
+
+PaymentFlowsPaymentDetails type {
+    customer_reference: Str?,
+    order_reference: Str?
+}
+
+PaymentMethodKakaoPay type {
+
+}
+
+SourceMandateNotification type {
+    acss_debit: SourceMandateNotificationAcssDebitData?,
+    amount: Int?,
+    bacs_debit: SourceMandateNotificationBacsDebitData?,
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    object: "source_mandate_notification",
+    reason: Str,
+    sepa_debit: SourceMandateNotificationSepaDebitData?,
+    source: Source,
+    status: Str,
+    type: Str
+}
+
+PaymentLinksResourceCustomFieldsText type {
+    default_value: Str?,
+    maximum_length: Int?,
+    minimum_length: Int?
+}
+
+PaymentMethodCashapp type {
+    buyer_id: Str?,
+    cashtag: Str?
+}
+
+PaymentMethodGrabpay type {
+
+}
+
+PaymentMethodOxxo type {
+
+}
+
+PaymentLinksResourceCustomFieldsDropdownOption type {
+    label: Str,
+    value: Str
+}
+
+PaymentMethodRevolutPay type {
+
+}
+
+PaymentLinksResourceCustomText type {
+    after_submit: Any?,
+    shipping_address: Any?,
+    submit: Any?,
+    terms_of_service_acceptance: Any?
+}
+
+PaymentMethodFpx type {
+    bank: "affin_bank" | "agrobank" | "alliance_bank" | "ambank" | "bank_islam" | "bank_muamalat" | "bank_of_china" | "bank_rakyat" | "bsn" | "cimb" | "deutsche_bank" | "hong_leong_bank" | "hsbc" | "kfh" | "maybank2e" | "maybank2u" | "ocbc" | "pb_enterprise" | "public_bank" | "rhb" | "standard_chartered" | "uob"
+}
+
+PaymentLinksResourceBusinessName type {
+    enabled: Bool,
+    optional: Bool
+}
+
+PaymentMethodAffirm type {
+
+}
+
+PaymentMethodSatispay type {
+
+}
+
+PaymentMethodBancontact type {
+
+}
+
+PaymentLinksResourceOptionalItem type {
+    adjustable_quantity: Any?,
+    price: Str,
+    quantity: Int
+}
+
+DisputeEvidence type {
+    access_activity_log: Str?,
+    billing_address: Str?,
+    cancellation_policy: Any?,
+    cancellation_policy_disclosure: Str?,
+    cancellation_rebuttal: Str?,
+    customer_communication: Any?,
+    customer_email_address: Str?,
+    customer_name: Str?,
+    customer_purchase_ip: Str?,
+    customer_signature: Any?,
+    duplicate_charge_documentation: Any?,
+    duplicate_charge_explanation: Str?,
+    duplicate_charge_id: Str?,
+    enhanced_evidence: DisputeEnhancedEvidence,
+    product_description: Str?,
+    receipt: Any?,
+    refund_policy: Any?,
+    refund_policy_disclosure: Str?,
+    refund_refusal_explanation: Str?,
+    service_date: Str?,
+    service_documentation: Any?,
+    shipping_address: Str?,
+    shipping_carrier: Str?,
+    shipping_date: Str?,
+    shipping_documentation: Any?,
+    shipping_tracking_number: Str?,
+    uncategorized_file: Any?,
+    uncategorized_text: Str?
+}
+
+DisputeEnhancedEligibility type {
+    visa_compelling_evidence_3: DisputeEnhancedEligibilityVisaCompellingEvidence3?,
+    visa_compliance: DisputeEnhancedEligibilityVisaCompliance?
+}
+
+RefundDestinationDetailsBlik type {
+    network_decline_code: Str?,
+    reference: Str?,
+    reference_status: Str?
+}
+
+Dispute type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+RefundDestinationDetailsCrypto type {
+    reference: Str?
+}
+
+PaymentMethodAmazonPay type {
+
+}
+
+BalanceTransaction type {
+    amount: Int,
+    available_on: Int,
+    balance_type: "issuing" | "payments" | "refund_and_dispute_prefunding"?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    exchange_rate: Dec?,
+    fee: Int,
+    fee_details: Vec<Fee>,
+    id: Str,
+    net: Int,
+    object: "balance_transaction",
+    reporting_category: Str,
+    source: Any?,
+    status: Str,
+    type: "adjustment" | "advance" | "advance_funding" | "anticipation_repayment" | "application_fee" | "application_fee_refund" | "charge" | "climate_order_purchase" | "climate_order_refund" | "connect_collection_transfer" | "contribution" | "issuing_authorization_hold" | "issuing_authorization_release" | "issuing_dispute" | "issuing_transaction" | "obligation_outbound" | "obligation_reversal_inbound" | "payment" | "payment_failure_refund" | "payment_network_reserve_hold" | "payment_network_reserve_release" | "payment_refund" | "payment_reversal" | "payment_unreconciled" | "payout" | "payout_cancel" | "payout_failure" | "payout_minimum_balance_hold" | "payout_minimum_balance_release" | "refund" | "refund_failure" | "reserve_transaction" | "reserved_funds" | "stripe_balance_payment_debit" | "stripe_balance_payment_debit_reversal" | "stripe_fee" | "stripe_fx_fee" | "tax_fee" | "topup" | "topup_reversal" | "transfer" | "transfer_cancel" | "transfer_failure" | "transfer_refund"
+}
+
+RefundDestinationDetailsThBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+SourceTransactionGbpCreditTransferData type {
+    fingerprint: Str?,
+    funding_method: Str?,
+    last4: Str?,
+    reference: Str?,
+    sender_account_number: Str?,
+    sender_name: Str?,
+    sender_sort_code: Str?
+}
+
+SourceOrderItem type {
+    amount: Int?,
+    currency: Str?,
+    description: Str?,
+    parent: Str?,
+    quantity: Int?,
+    type: Str?
+}
+
+PaymentMethodPaypal type {
+    country: Str?,
+    payer_email: Str?,
+    payer_id: Str?
+}
+
+PaymentMethodPix type {
+
+}
+
+PaymentLinksResourceCompletionBehaviorConfirmationPage type {
+    custom_message: Str?
+}
+
+PaymentLinksResourceIndividualName type {
+    enabled: Bool,
+    optional: Bool
+}
+
+PaymentsPrimitivesPaymentRecordsResourceProcessorDetailsResourceCustomDetails type {
+    payment_reference: Str?
+}
+
+RefundNextActionDisplayDetails type {
+    email_sent: EmailSent,
+    expires_at: Int
+}
+
+PaymentLinksResourceAfterCompletion type {
+    hosted_confirmation: PaymentLinksResourceCompletionBehaviorConfirmationPage?,
+    redirect: PaymentLinksResourceCompletionBehaviorRedirect?,
+    type: "hosted_confirmation" | "redirect"
+}
+
+DisputeEnhancedEligibilityVisaCompellingEvidence3 type {
+    required_actions: Vec<"missing_customer_identifiers" | "missing_disputed_transaction_description" | "missing_merchandise_or_services" | "missing_prior_undisputed_transaction_description" | "missing_prior_undisputed_transactions">,
+    status: "not_qualified" | "qualified" | "requires_action"
+}
+
+RefundDestinationDetailsMxBankTransfer type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+PaymentMethodPromptpay type {
+
+}
+
+LineItemsTaxAmount type {
+    amount: Int,
+    rate: TaxRate,
+    taxability_reason: "customer_exempt" | "not_collecting" | "not_subject_to_tax" | "not_supported" | "portion_product_exempt" | "portion_reduced_rated" | "portion_standard_rated" | "product_exempt" | "product_exempt_holiday" | "proportionally_rated" | "reduced_rated" | "reverse_charge" | "standard_rated" | "taxable_basis_reduced" | "zero_rated"?,
+    taxable_amount: Int?
+}
+
+PaymentMethodAlma type {
+
+}
+
+PaymentMethodKonbini type {
+
+}
+
+PaymentMethodPayco type {
+
+}
+
+SourceTypeBancontact type {
+    bank_code: Str?,
+    bank_name: Str?,
+    bic: Str?,
+    iban_last4: Str?,
+    preferred_language: Str?,
+    statement_descriptor: Str?
+}
+
+RefundDestinationDetailsMbWay type {
+    reference: Str?,
+    reference_status: Str?
+}
+
+SourceTransaction type {
+    ach_credit_transfer: SourceTransactionAchCreditTransferData?,
+    amount: Int,
+    chf_credit_transfer: SourceTransactionChfCreditTransferData?,
+    created: Int,
+    currency: Str,
+    gbp_credit_transfer: SourceTransactionGbpCreditTransferData?,
+    id: Str,
+    livemode: Bool,
+    object: "source_transaction",
+    paper_check: SourceTransactionPaperCheckData?,
+    sepa_credit_transfer: SourceTransactionSepaCreditTransferData?,
+    source: Str,
+    status: Str,
+    type: "ach_credit_transfer" | "ach_debit" | "alipay" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat"
+}
+
+PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet type {
+    type: "apple_pay" | "google_pay" | "samsung_pay" | "unknown"
+}
+
+PaymentMethodCustomerBalance type {
+
+}
+
+Item type {
+    amount_discount: Int,
+    amount_subtotal: Int,
+    amount_tax: Int,
+    amount_total: Int,
+    currency: Str,
+    description: Str?,
+    discounts: Vec<LineItemsDiscountAmount>?,
+    id: Str,
+    metadata: Map?,
+    object: "item",
+    price: Any?,
+    quantity: Int?,
+    taxes: Vec<LineItemsTaxAmount>?
+}
+
+SourceTypeEps type {
+    reference: Str?,
+    statement_descriptor: Str?
+}
+
+Source type {
+    ach_credit_transfer: SourceTypeAchCreditTransfer?,
+    ach_debit: SourceTypeAchDebit?,
+    acss_debit: SourceTypeAcssDebit?,
+    alipay: SourceTypeAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    amount: Int?,
+    au_becs_debit: SourceTypeAuBecsDebit?,
+    bancontact: SourceTypeBancontact?,
+    card: SourceTypeCard?,
+    card_present: SourceTypeCardPresent?,
+    client_secret: Str,
+    code_verification: SourceCodeVerificationFlow?,
+    created: Int,
+    currency: Str?,
+    customer: Str?,
+    eps: SourceTypeEps?,
+    flow: Str,
+    giropay: SourceTypeGiropay?,
+    id: Str,
+    ideal: SourceTypeIdeal?,
+    klarna: SourceTypeKlarna?,
+    livemode: Bool,
+    metadata: Map?,
+    multibanco: SourceTypeMultibanco?,
+    object: "source",
+    owner: Any?,
+    p24: SourceTypeP24?,
+    receiver: SourceReceiverFlow?,
+    redirect: SourceRedirectFlow?,
+    sepa_debit: SourceTypeSepaDebit?,
+    sofort: SourceTypeSofort?,
+    source_order: SourceOrder?,
+    statement_descriptor: Str?,
+    status: Str,
+    three_d_secure: SourceTypeThreeDSecure?,
+    type: "ach_credit_transfer" | "ach_debit" | "acss_debit" | "alipay" | "au_becs_debit" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat",
+    usage: Str?,
+    wechat: SourceTypeWechat?
+}
+
+PaymentLinksResourceCustomFieldsNumeric type {
+    default_value: Str?,
+    maximum_length: Int?,
+    minimum_length: Int?
+}
+
+SourceReceiverFlow type {
+    address: Str?,
+    amount_charged: Int,
+    amount_received: Int,
+    amount_returned: Int,
+    refund_attributes_method: Str,
+    refund_attributes_status: Str
+}
+
+PaymentMethodSamsungPay type {
+
+}
+
+Refund type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+Charge type {
+    amount: Int,
+    amount_captured: Int,
+    amount_refunded: Int,
+    application: Any?,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    balance_transaction: Any?,
+    billing_details: BillingDetails,
+    calculated_statement_descriptor: Str?,
+    captured: Bool,
+    created: Int,
+    currency: Str,
+    customer: Any?,
+    description: Str?,
+    disputed: Bool,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    fraud_details: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "charge",
+    on_behalf_of: Any?,
+    outcome: Any?,
+    paid: Bool,
+    payment_intent: Any?,
+    payment_method: Str?,
+    payment_method_details: Any?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    radar_options: RadarRadarOptions?,
+    receipt_email: Str?,
+    receipt_number: Str?,
+    receipt_url: Str?,
+    refunded: Bool,
+    refunds: Map?,
+    review: Any?,
+    shipping: Any?,
+    source_transfer: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "failed" | "pending" | "succeeded",
+    transfer: Any?,
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+PostSourcesRequest type {
+    amount: Int?,
+    currency: Str?,
+    customer: Str?,
+    expand: Vec<Str>?,
+    flow: "code_verification" | "none" | "receiver" | "redirect"?,
+    mandate: Map?,
+    metadata: Map?,
+    original_source: Str?,
+    owner: Map?,
+    receiver: Map?,
+    redirect: Map?,
+    source_order: Map?,
+    statement_descriptor: Str?,
+    token: Str?,
+    type: Str?,
+    usage: "reusable" | "single_use"?
+}
+
+PostSourcesResponse type {
+    ach_credit_transfer: SourceTypeAchCreditTransfer?,
+    ach_debit: SourceTypeAchDebit?,
+    acss_debit: SourceTypeAcssDebit?,
+    alipay: SourceTypeAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    amount: Int?,
+    au_becs_debit: SourceTypeAuBecsDebit?,
+    bancontact: SourceTypeBancontact?,
+    card: SourceTypeCard?,
+    card_present: SourceTypeCardPresent?,
+    client_secret: Str,
+    code_verification: SourceCodeVerificationFlow?,
+    created: Int,
+    currency: Str?,
+    customer: Str?,
+    eps: SourceTypeEps?,
+    flow: Str,
+    giropay: SourceTypeGiropay?,
+    id: Str,
+    ideal: SourceTypeIdeal?,
+    klarna: SourceTypeKlarna?,
+    livemode: Bool,
+    metadata: Map?,
+    multibanco: SourceTypeMultibanco?,
+    object: "source",
+    owner: Any?,
+    p24: SourceTypeP24?,
+    receiver: SourceReceiverFlow?,
+    redirect: SourceRedirectFlow?,
+    sepa_debit: SourceTypeSepaDebit?,
+    sofort: SourceTypeSofort?,
+    source_order: SourceOrder?,
+    statement_descriptor: Str?,
+    status: Str,
+    three_d_secure: SourceTypeThreeDSecure?,
+    type: "ach_credit_transfer" | "ach_debit" | "acss_debit" | "alipay" | "au_becs_debit" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat",
+    usage: Str?,
+    wechat: SourceTypeWechat?
+}
+
+
+shares-source
+meta {doc: """POST /v1/sources - Shares a source"""}
+fn (request: PostSourcesRequest): PostSourcesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/sources`, {}, request)
+  if(is-ok-response(response), PostSourcesResponse(response.body), err(HttpError(response)))
+}
+
+GetSourcesSourceRequest type {
+
+}
+
+GetSourcesSourceResponse type {
+    ach_credit_transfer: SourceTypeAchCreditTransfer?,
+    ach_debit: SourceTypeAchDebit?,
+    acss_debit: SourceTypeAcssDebit?,
+    alipay: SourceTypeAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    amount: Int?,
+    au_becs_debit: SourceTypeAuBecsDebit?,
+    bancontact: SourceTypeBancontact?,
+    card: SourceTypeCard?,
+    card_present: SourceTypeCardPresent?,
+    client_secret: Str,
+    code_verification: SourceCodeVerificationFlow?,
+    created: Int,
+    currency: Str?,
+    customer: Str?,
+    eps: SourceTypeEps?,
+    flow: Str,
+    giropay: SourceTypeGiropay?,
+    id: Str,
+    ideal: SourceTypeIdeal?,
+    klarna: SourceTypeKlarna?,
+    livemode: Bool,
+    metadata: Map?,
+    multibanco: SourceTypeMultibanco?,
+    object: "source",
+    owner: Any?,
+    p24: SourceTypeP24?,
+    receiver: SourceReceiverFlow?,
+    redirect: SourceRedirectFlow?,
+    sepa_debit: SourceTypeSepaDebit?,
+    sofort: SourceTypeSofort?,
+    source_order: SourceOrder?,
+    statement_descriptor: Str?,
+    status: Str,
+    three_d_secure: SourceTypeThreeDSecure?,
+    type: "ach_credit_transfer" | "ach_debit" | "acss_debit" | "alipay" | "au_becs_debit" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat",
+    usage: Str?,
+    wechat: SourceTypeWechat?
+}
+
+
+retrieve-source
+meta {doc: """GET /v1/sources/{source} - Retrieve a source"""}
+fn (source: Str, client-secret: Str, expand: Str, request: GetSourcesSourceRequest): GetSourcesSourceResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/sources/${source}?client_secret=${client-secret}&expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetSourcesSourceResponse(response.body), err(HttpError(response)))
+}
+
+PostSourcesSourceRequest type {
+    amount: Int?,
+    expand: Vec<Str>?,
+    mandate: Map?,
+    metadata: Any?,
+    owner: Map?,
+    source_order: Map?
+}
+
+PostSourcesSourceResponse type {
+    ach_credit_transfer: SourceTypeAchCreditTransfer?,
+    ach_debit: SourceTypeAchDebit?,
+    acss_debit: SourceTypeAcssDebit?,
+    alipay: SourceTypeAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    amount: Int?,
+    au_becs_debit: SourceTypeAuBecsDebit?,
+    bancontact: SourceTypeBancontact?,
+    card: SourceTypeCard?,
+    card_present: SourceTypeCardPresent?,
+    client_secret: Str,
+    code_verification: SourceCodeVerificationFlow?,
+    created: Int,
+    currency: Str?,
+    customer: Str?,
+    eps: SourceTypeEps?,
+    flow: Str,
+    giropay: SourceTypeGiropay?,
+    id: Str,
+    ideal: SourceTypeIdeal?,
+    klarna: SourceTypeKlarna?,
+    livemode: Bool,
+    metadata: Map?,
+    multibanco: SourceTypeMultibanco?,
+    object: "source",
+    owner: Any?,
+    p24: SourceTypeP24?,
+    receiver: SourceReceiverFlow?,
+    redirect: SourceRedirectFlow?,
+    sepa_debit: SourceTypeSepaDebit?,
+    sofort: SourceTypeSofort?,
+    source_order: SourceOrder?,
+    statement_descriptor: Str?,
+    status: Str,
+    three_d_secure: SourceTypeThreeDSecure?,
+    type: "ach_credit_transfer" | "ach_debit" | "acss_debit" | "alipay" | "au_becs_debit" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat",
+    usage: Str?,
+    wechat: SourceTypeWechat?
+}
+
+
+update-source
+meta {doc: """POST /v1/sources/{source} - Update a source"""}
+fn (source: Str, request: PostSourcesSourceRequest): PostSourcesSourceResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/sources/${source}`, {}, request)
+  if(is-ok-response(response), PostSourcesSourceResponse(response.body), err(HttpError(response)))
+}
+
+GetSourcesSourceMandateNotificationsMandateNotificationRequest type {
+
+}
+
+GetSourcesSourceMandateNotificationsMandateNotificationResponse type {
+    acss_debit: SourceMandateNotificationAcssDebitData?,
+    amount: Int?,
+    bacs_debit: SourceMandateNotificationBacsDebitData?,
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    object: "source_mandate_notification",
+    reason: Str,
+    sepa_debit: SourceMandateNotificationSepaDebitData?,
+    source: Source,
+    status: Str,
+    type: Str
+}
+
+
+retrieve-source-mandatenotification
+meta {
+    doc: """GET /v1/sources/{source}/mandate_notifications/{mandate_notification} - Retrieve a Source MandateNotification"""
+}
+fn (mandate-notification: Str, source: Str, expand: Str, request: GetSourcesSourceMandateNotificationsMandateNotificationRequest): GetSourcesSourceMandateNotificationsMandateNotificationResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/sources/${source}/mandate_notifications/${mandate-notification}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetSourcesSourceMandateNotificationsMandateNotificationResponse(response.body), err(HttpError(response)))
+}
+
+GetSourcesSourceSourceTransactionsRequest type {
+
+}
+
+GetSourcesSourceSourceTransactionsResponse type {
+    data: Vec<SourceTransaction>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+get-sources-source-source-transactions
+meta {doc: """GET /v1/sources/{source}/source_transactions"""}
+fn (source: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetSourcesSourceSourceTransactionsRequest): GetSourcesSourceSourceTransactionsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/sources/${source}/source_transactions?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetSourcesSourceSourceTransactionsResponse(response.body), err(HttpError(response)))
+}
+
+GetSourcesSourceSourceTransactionsSourceTransactionRequest type {
+
+}
+
+GetSourcesSourceSourceTransactionsSourceTransactionResponse type {
+    ach_credit_transfer: SourceTransactionAchCreditTransferData?,
+    amount: Int,
+    chf_credit_transfer: SourceTransactionChfCreditTransferData?,
+    created: Int,
+    currency: Str,
+    gbp_credit_transfer: SourceTransactionGbpCreditTransferData?,
+    id: Str,
+    livemode: Bool,
+    object: "source_transaction",
+    paper_check: SourceTransactionPaperCheckData?,
+    sepa_credit_transfer: SourceTransactionSepaCreditTransferData?,
+    source: Str,
+    status: Str,
+    type: "ach_credit_transfer" | "ach_debit" | "alipay" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat"
+}
+
+
+retrieve-source-transaction
+meta {
+    doc: """GET /v1/sources/{source}/source_transactions/{source_transaction} - Retrieve a source transaction"""
+}
+fn (source: Str, source-transaction: Str, expand: Str, request: GetSourcesSourceSourceTransactionsSourceTransactionRequest): GetSourcesSourceSourceTransactionsSourceTransactionResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/sources/${source}/source_transactions/${source-transaction}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetSourcesSourceSourceTransactionsSourceTransactionResponse(response.body), err(HttpError(response)))
+}
+
+PostSourcesSourceVerifyRequest type {
+    expand: Vec<Str>?,
+    values: Vec<Str>
+}
+
+PostSourcesSourceVerifyResponse type {
+    ach_credit_transfer: SourceTypeAchCreditTransfer?,
+    ach_debit: SourceTypeAchDebit?,
+    acss_debit: SourceTypeAcssDebit?,
+    alipay: SourceTypeAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    amount: Int?,
+    au_becs_debit: SourceTypeAuBecsDebit?,
+    bancontact: SourceTypeBancontact?,
+    card: SourceTypeCard?,
+    card_present: SourceTypeCardPresent?,
+    client_secret: Str,
+    code_verification: SourceCodeVerificationFlow?,
+    created: Int,
+    currency: Str?,
+    customer: Str?,
+    eps: SourceTypeEps?,
+    flow: Str,
+    giropay: SourceTypeGiropay?,
+    id: Str,
+    ideal: SourceTypeIdeal?,
+    klarna: SourceTypeKlarna?,
+    livemode: Bool,
+    metadata: Map?,
+    multibanco: SourceTypeMultibanco?,
+    object: "source",
+    owner: Any?,
+    p24: SourceTypeP24?,
+    receiver: SourceReceiverFlow?,
+    redirect: SourceRedirectFlow?,
+    sepa_debit: SourceTypeSepaDebit?,
+    sofort: SourceTypeSofort?,
+    source_order: SourceOrder?,
+    statement_descriptor: Str?,
+    status: Str,
+    three_d_secure: SourceTypeThreeDSecure?,
+    type: "ach_credit_transfer" | "ach_debit" | "acss_debit" | "alipay" | "au_becs_debit" | "bancontact" | "card" | "card_present" | "eps" | "giropay" | "ideal" | "klarna" | "multibanco" | "p24" | "sepa_debit" | "sofort" | "three_d_secure" | "wechat",
+    usage: Str?,
+    wechat: SourceTypeWechat?
+}
+
+
+post-sources-source-verify
+meta {doc: """POST /v1/sources/{source}/verify"""}
+fn (source: Str, request: PostSourcesSourceVerifyRequest): PostSourcesSourceVerifyResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/sources/${source}/verify`, {}, request)
+  if(is-ok-response(response), PostSourcesSourceVerifyResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentMethodsRequest type {
+
+}
+
+GetPaymentMethodsResponse type {
+    data: Vec<PaymentMethod>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-paymentmethods
+meta {doc: """GET /v1/payment_methods - List PaymentMethods"""}
+fn (allow-redisplay: Str, customer: Str, customer-account: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, type-param: Str, request: GetPaymentMethodsRequest): GetPaymentMethodsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_methods?allow_redisplay=${allow-redisplay}&customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&type=${type-param}`, {}, request)
+  if(is-ok-response(response), GetPaymentMethodsResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodsRequest type {
+    acss_debit: Map?,
+    affirm: Map?,
+    afterpay_clearpay: Map?,
+    alipay: Map?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: Map?,
+    amazon_pay: Map?,
+    au_becs_debit: Map?,
+    bacs_debit: Map?,
+    bancontact: Map?,
+    billie: Map?,
+    billing_details: Map?,
+    blik: Map?,
+    boleto: Map?,
+    card: Any?,
+    cashapp: Map?,
+    crypto: Map?,
+    custom: Map?,
+    customer: Str?,
+    customer_balance: Map?,
+    eps: Map?,
+    expand: Vec<Str>?,
+    fpx: Map?,
+    giropay: Map?,
+    grabpay: Map?,
+    ideal: Map?,
+    interac_present: Map?,
+    kakao_pay: Map?,
+    klarna: Map?,
+    konbini: Map?,
+    kr_card: Map?,
+    link: Map?,
+    mb_way: Map?,
+    metadata: Map?,
+    mobilepay: Map?,
+    multibanco: Map?,
+    naver_pay: Map?,
+    nz_bank_account: Map?,
+    oxxo: Map?,
+    p24: Map?,
+    pay_by_bank: Map?,
+    payco: Map?,
+    payment_method: Str?,
+    paynow: Map?,
+    paypal: Map?,
+    payto: Map?,
+    pix: Map?,
+    promptpay: Map?,
+    radar_options: Map?,
+    revolut_pay: Map?,
+    samsung_pay: Map?,
+    satispay: Map?,
+    sepa_debit: Map?,
+    sofort: Map?,
+    swish: Map?,
+    twint: Map?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip"?,
+    us_bank_account: Map?,
+    wechat_pay: Map?,
+    zip: Map?
+}
+
+PostPaymentMethodsResponse type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+
+shares-paymentmethod
+meta {doc: """POST /v1/payment_methods - Shares a PaymentMethod"""}
+fn (request: PostPaymentMethodsRequest): PostPaymentMethodsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodsResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentMethodsPaymentMethodRequest type {
+
+}
+
+GetPaymentMethodsPaymentMethodResponse type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+
+retrieve-paymentmethod
+meta {doc: """GET /v1/payment_methods/{payment_method} - Retrieve a PaymentMethod"""}
+fn (payment-method: Str, expand: Str, request: GetPaymentMethodsPaymentMethodRequest): GetPaymentMethodsPaymentMethodResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentMethodsPaymentMethodResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodsPaymentMethodRequest type {
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    billing_details: Map?,
+    card: Map?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    payto: Map?,
+    us_bank_account: Map?
+}
+
+PostPaymentMethodsPaymentMethodResponse type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+
+update-paymentmethod
+meta {doc: """POST /v1/payment_methods/{payment_method} - Update a PaymentMethod"""}
+fn (payment-method: Str, request: PostPaymentMethodsPaymentMethodRequest): PostPaymentMethodsPaymentMethodResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodsPaymentMethodResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodsPaymentMethodAttachRequest type {
+    customer: Str?,
+    customer_account: Str?,
+    expand: Vec<Str>?
+}
+
+PostPaymentMethodsPaymentMethodAttachResponse type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+
+attach-paymentmethod-customer
+meta {
+    doc: """POST /v1/payment_methods/{payment_method}/attach - Attach a PaymentMethod to a Customer"""
+}
+fn (payment-method: Str, request: PostPaymentMethodsPaymentMethodAttachRequest): PostPaymentMethodsPaymentMethodAttachResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}/attach`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodsPaymentMethodAttachResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodsPaymentMethodDetachRequest type {
+    expand: Vec<Str>?
+}
+
+PostPaymentMethodsPaymentMethodDetachResponse type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+
+detach-paymentmethod-from-customer
+meta {
+    doc: """POST /v1/payment_methods/{payment_method}/detach - Detach a PaymentMethod from a Customer"""
+}
+fn (payment-method: Str, request: PostPaymentMethodsPaymentMethodDetachRequest): PostPaymentMethodsPaymentMethodDetachResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}/detach`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodsPaymentMethodDetachResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentMethodDomainsRequest type {
+
+}
+
+GetPaymentMethodDomainsResponse type {
+    data: Vec<PaymentMethodDomain>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-payment-method-domains
+meta {doc: """GET /v1/payment_method_domains - List payment method domains"""}
+fn (domain-name: Str, enabled: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetPaymentMethodDomainsRequest): GetPaymentMethodDomainsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_method_domains?domain_name=${domain-name}&enabled=${enabled}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentMethodDomainsResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodDomainsRequest type {
+    domain_name: Str,
+    enabled: Bool?,
+    expand: Vec<Str>?
+}
+
+PostPaymentMethodDomainsResponse type {
+    amazon_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    apple_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    created: Int,
+    domain_name: Str,
+    enabled: Bool,
+    google_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    id: Str,
+    klarna: PaymentMethodDomainResourcePaymentMethodStatus,
+    link: PaymentMethodDomainResourcePaymentMethodStatus,
+    livemode: Bool,
+    object: "payment_method_domain",
+    paypal: PaymentMethodDomainResourcePaymentMethodStatus
+}
+
+
+create-payment-method-domain
+meta {doc: """POST /v1/payment_method_domains - Create a payment method domain"""}
+fn (request: PostPaymentMethodDomainsRequest): PostPaymentMethodDomainsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_method_domains`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodDomainsResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentMethodDomainsPaymentMethodDomainRequest type {
+
+}
+
+GetPaymentMethodDomainsPaymentMethodDomainResponse type {
+    amazon_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    apple_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    created: Int,
+    domain_name: Str,
+    enabled: Bool,
+    google_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    id: Str,
+    klarna: PaymentMethodDomainResourcePaymentMethodStatus,
+    link: PaymentMethodDomainResourcePaymentMethodStatus,
+    livemode: Bool,
+    object: "payment_method_domain",
+    paypal: PaymentMethodDomainResourcePaymentMethodStatus
+}
+
+
+retrieve-payment-method-domain
+meta {
+    doc: """GET /v1/payment_method_domains/{payment_method_domain} - Retrieve a payment method domain"""
+}
+fn (payment-method-domain: Str, expand: Str, request: GetPaymentMethodDomainsPaymentMethodDomainRequest): GetPaymentMethodDomainsPaymentMethodDomainResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_method_domains/${payment-method-domain}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentMethodDomainsPaymentMethodDomainResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodDomainsPaymentMethodDomainRequest type {
+    enabled: Bool?,
+    expand: Vec<Str>?
+}
+
+PostPaymentMethodDomainsPaymentMethodDomainResponse type {
+    amazon_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    apple_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    created: Int,
+    domain_name: Str,
+    enabled: Bool,
+    google_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    id: Str,
+    klarna: PaymentMethodDomainResourcePaymentMethodStatus,
+    link: PaymentMethodDomainResourcePaymentMethodStatus,
+    livemode: Bool,
+    object: "payment_method_domain",
+    paypal: PaymentMethodDomainResourcePaymentMethodStatus
+}
+
+
+update-payment-method-domain
+meta {
+    doc: """POST /v1/payment_method_domains/{payment_method_domain} - Update a payment method domain"""
+}
+fn (payment-method-domain: Str, request: PostPaymentMethodDomainsPaymentMethodDomainRequest): PostPaymentMethodDomainsPaymentMethodDomainResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_method_domains/${payment-method-domain}`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodDomainsPaymentMethodDomainResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodDomainsPaymentMethodDomainValidateRequest type {
+    expand: Vec<Str>?
+}
+
+PostPaymentMethodDomainsPaymentMethodDomainValidateResponse type {
+    amazon_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    apple_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    created: Int,
+    domain_name: Str,
+    enabled: Bool,
+    google_pay: PaymentMethodDomainResourcePaymentMethodStatus,
+    id: Str,
+    klarna: PaymentMethodDomainResourcePaymentMethodStatus,
+    link: PaymentMethodDomainResourcePaymentMethodStatus,
+    livemode: Bool,
+    object: "payment_method_domain",
+    paypal: PaymentMethodDomainResourcePaymentMethodStatus
+}
+
+
+validate-existing-payment-method-domain
+meta {
+    doc: """POST /v1/payment_method_domains/{payment_method_domain}/validate - Validate an existing payment method domain"""
+}
+fn (payment-method-domain: Str, request: PostPaymentMethodDomainsPaymentMethodDomainValidateRequest): PostPaymentMethodDomainsPaymentMethodDomainValidateResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_method_domains/${payment-method-domain}/validate`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodDomainsPaymentMethodDomainValidateResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentIntentsRequest type {
+
+}
+
+GetPaymentIntentsResponse type {
+    data: Vec<PaymentIntent>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-paymentintents
+meta {doc: """GET /v1/payment_intents - List all PaymentIntents"""}
+fn (created: Str, customer: Str, customer-account: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetPaymentIntentsRequest): GetPaymentIntentsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_intents?created=${created}&customer=${customer}&customer_account=${customer-account}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentIntentsResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsRequest type {
+    amount: Int,
+    amount_details: Map?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Map?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    confirm: Bool?,
+    confirmation_method: "automatic" | "manual"?,
+    confirmation_token: Str?,
+    currency: Str,
+    customer: Str?,
+    customer_account: Str?,
+    description: Str?,
+    error_on_requires_action: Bool?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    expand: Vec<Str>?,
+    hooks: Map?,
+    mandate: Str?,
+    mandate_data: Any?,
+    metadata: Map?,
+    off_session: Any?,
+    on_behalf_of: Str?,
+    payment_details: Map?,
+    payment_method: Str?,
+    payment_method_configuration: Str?,
+    payment_method_data: Map?,
+    payment_method_options: Map?,
+    payment_method_types: Vec<Str>?,
+    radar_options: Map?,
+    receipt_email: Str?,
+    return_url: Str?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Map?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    transfer_data: Map?,
+    transfer_group: Str?,
+    use_stripe_sdk: Bool?
+}
+
+PostPaymentIntentsResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+create-paymentintent
+meta {doc: """POST /v1/payment_intents - Create a PaymentIntent"""}
+fn (request: PostPaymentIntentsRequest): PostPaymentIntentsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentIntentsSearchRequest type {
+
+}
+
+GetPaymentIntentsSearchResponse type {
+    data: Vec<PaymentIntent>,
+    has_more: Bool,
+    next_page: Str?,
+    object: "search_result",
+    total_count: Int?,
+    url: Str
+}
+
+
+search-paymentintents
+meta {doc: """GET /v1/payment_intents/search - Search PaymentIntents"""}
+fn (expand: Str, limit: Str, page: Str, query: Str, request: GetPaymentIntentsSearchRequest): GetPaymentIntentsSearchResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_intents/search?expand=${expand}&limit=${limit}&page=${page}&query=${query}`, {}, request)
+  if(is-ok-response(response), GetPaymentIntentsSearchResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentIntentsIntentRequest type {
+
+}
+
+GetPaymentIntentsIntentResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+retrieve-paymentintent
+meta {doc: """GET /v1/payment_intents/{intent} - Retrieve a PaymentIntent"""}
+fn (intent: Str, client-secret: Str, expand: Str, request: GetPaymentIntentsIntentRequest): GetPaymentIntentsIntentResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_intents/${intent}?client_secret=${client-secret}&expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentIntentsIntentResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentRequest type {
+    amount: Int?,
+    amount_details: Any?,
+    application_fee_amount: Any?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    currency: Str?,
+    customer: Str?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Any?,
+    expand: Vec<Str>?,
+    hooks: Map?,
+    metadata: Any?,
+    payment_details: Any?,
+    payment_method: Str?,
+    payment_method_configuration: Str?,
+    payment_method_data: Map?,
+    payment_method_options: Map?,
+    payment_method_types: Vec<Str>?,
+    receipt_email: Any?,
+    setup_future_usage: "" | "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    transfer_data: Map?,
+    transfer_group: Str?
+}
+
+PostPaymentIntentsIntentResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+update-paymentintent
+meta {doc: """POST /v1/payment_intents/{intent} - Update a PaymentIntent"""}
+fn (intent: Str, request: PostPaymentIntentsIntentRequest): PostPaymentIntentsIntentResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentIntentsIntentAmountDetailsLineItemsRequest type {
+
+}
+
+GetPaymentIntentsIntentAmountDetailsLineItemsResponse type {
+    data: Vec<PaymentIntentAmountDetailsLineItem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-paymentintent-lineitems
+meta {
+    doc: """GET /v1/payment_intents/{intent}/amount_details_line_items - List all PaymentIntent LineItems"""
+}
+fn (intent: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetPaymentIntentsIntentAmountDetailsLineItemsRequest): GetPaymentIntentsIntentAmountDetailsLineItemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/amount_details_line_items?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentIntentsIntentAmountDetailsLineItemsResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentApplyCustomerBalanceRequest type {
+    amount: Int?,
+    currency: Str?,
+    expand: Vec<Str>?
+}
+
+PostPaymentIntentsIntentApplyCustomerBalanceResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+reconcile-customerbalance-paymentintent
+meta {
+    doc: """POST /v1/payment_intents/{intent}/apply_customer_balance - Reconcile a customer_balance PaymentIntent"""
+}
+fn (intent: Str, request: PostPaymentIntentsIntentApplyCustomerBalanceRequest): PostPaymentIntentsIntentApplyCustomerBalanceResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/apply_customer_balance`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentApplyCustomerBalanceResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentCancelRequest type {
+    cancellation_reason: "abandoned" | "duplicate" | "fraudulent" | "requested_by_customer"?,
+    expand: Vec<Str>?
+}
+
+PostPaymentIntentsIntentCancelResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+cancel-paymentintent
+meta {doc: """POST /v1/payment_intents/{intent}/cancel - Cancel a PaymentIntent"""}
+fn (intent: Str, request: PostPaymentIntentsIntentCancelRequest): PostPaymentIntentsIntentCancelResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/cancel`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentCancelResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentCaptureRequest type {
+    amount_details: Map?,
+    amount_to_capture: Int?,
+    application_fee_amount: Int?,
+    expand: Vec<Str>?,
+    final_capture: Bool?,
+    hooks: Map?,
+    metadata: Any?,
+    payment_details: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    transfer_data: Map?
+}
+
+PostPaymentIntentsIntentCaptureResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+capture-paymentintent
+meta {doc: """POST /v1/payment_intents/{intent}/capture - Capture a PaymentIntent"""}
+fn (intent: Str, request: PostPaymentIntentsIntentCaptureRequest): PostPaymentIntentsIntentCaptureResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/capture`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentCaptureResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentConfirmRequest type {
+    amount_details: Any?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_token: Str?,
+    error_on_requires_action: Bool?,
+    excluded_payment_method_types: Any?,
+    expand: Vec<Str>?,
+    hooks: Map?,
+    mandate: Str?,
+    mandate_data: Any?,
+    off_session: Any?,
+    payment_details: Any?,
+    payment_method: Str?,
+    payment_method_data: Map?,
+    payment_method_options: Map?,
+    payment_method_types: Vec<Str>?,
+    radar_options: Map?,
+    receipt_email: Any?,
+    return_url: Str?,
+    setup_future_usage: "" | "off_session" | "on_session"?,
+    shipping: Any?,
+    use_stripe_sdk: Bool?
+}
+
+PostPaymentIntentsIntentConfirmResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+confirm-paymentintent
+meta {doc: """POST /v1/payment_intents/{intent}/confirm - Confirm a PaymentIntent"""}
+fn (intent: Str, request: PostPaymentIntentsIntentConfirmRequest): PostPaymentIntentsIntentConfirmResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/confirm`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentConfirmResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentIncrementAuthorizationRequest type {
+    amount: Int,
+    amount_details: Map?,
+    application_fee_amount: Int?,
+    description: Str?,
+    expand: Vec<Str>?,
+    hooks: Map?,
+    metadata: Map?,
+    payment_details: Map?,
+    statement_descriptor: Str?,
+    transfer_data: Map?
+}
+
+PostPaymentIntentsIntentIncrementAuthorizationResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+increment-authorization
+meta {
+    doc: """POST /v1/payment_intents/{intent}/increment_authorization - Increment an authorization"""
+}
+fn (intent: Str, request: PostPaymentIntentsIntentIncrementAuthorizationRequest): PostPaymentIntentsIntentIncrementAuthorizationResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/increment_authorization`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentIncrementAuthorizationResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentIntentsIntentVerifyMicrodepositsRequest type {
+    amounts: Vec<Int>?,
+    client_secret: Str?,
+    descriptor_code: Str?,
+    expand: Vec<Str>?
+}
+
+PostPaymentIntentsIntentVerifyMicrodepositsResponse type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+verify-microdeposits-on-paymentintent
+meta {
+    doc: """POST /v1/payment_intents/{intent}/verify_microdeposits - Verify microdeposits on a PaymentIntent"""
+}
+fn (intent: Str, request: PostPaymentIntentsIntentVerifyMicrodepositsRequest): PostPaymentIntentsIntentVerifyMicrodepositsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${intent}/verify_microdeposits`, {}, request)
+  if(is-ok-response(response), PostPaymentIntentsIntentVerifyMicrodepositsResponse(response.body), err(HttpError(response)))
+}
+
+GetConfirmationTokensConfirmationTokenRequest type {
+
+}
+
+GetConfirmationTokensConfirmationTokenResponse type {
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    mandate_data: Any?,
+    object: "confirmation_token",
+    payment_intent: Str?,
+    payment_method_options: Any?,
+    payment_method_preview: Any?,
+    return_url: Str?,
+    setup_future_usage: "off_session" | "on_session"?,
+    setup_intent: Str?,
+    shipping: Any?,
+    use_stripe_sdk: Bool
+}
+
+
+retrieve-confirmationtoken
+meta {
+    doc: """GET /v1/confirmation_tokens/{confirmation_token} - Retrieve a ConfirmationToken"""
+}
+fn (confirmation-token: Str, expand: Str, request: GetConfirmationTokensConfirmationTokenRequest): GetConfirmationTokensConfirmationTokenResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/confirmation_tokens/${confirmation-token}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetConfirmationTokensConfirmationTokenResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentLinksRequest type {
+
+}
+
+GetPaymentLinksResponse type {
+    data: Vec<PaymentLink>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-payment-links
+meta {doc: """GET /v1/payment_links - List all payment links"""}
+fn (active: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetPaymentLinksRequest): GetPaymentLinksResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_links?active=${active}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentLinksResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentLinksRequest type {
+    after_completion: Map?,
+    allow_promotion_codes: Bool?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: Map?,
+    billing_address_collection: "auto" | "required"?,
+    consent_collection: Map?,
+    currency: Str?,
+    custom_fields: Vec<Map>?,
+    custom_text: Map?,
+    customer_creation: "always" | "if_required"?,
+    expand: Vec<Str>?,
+    inactive_message: Str?,
+    invoice_creation: Map?,
+    line_items: Vec<Map>,
+    metadata: Map?,
+    name_collection: Map?,
+    on_behalf_of: Str?,
+    optional_items: Vec<Map>?,
+    payment_intent_data: Map?,
+    payment_method_collection: "always" | "if_required"?,
+    payment_method_types: Vec<"affirm" | "afterpay_clearpay" | "alipay" | "alma" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "klarna" | "konbini" | "link" | "mb_way" | "mobilepay" | "multibanco" | "oxxo" | "p24" | "pay_by_bank" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    phone_number_collection: Map?,
+    restrictions: Map?,
+    shipping_address_collection: Map?,
+    shipping_options: Vec<Map>?,
+    submit_type: "auto" | "book" | "donate" | "pay" | "subscribe"?,
+    subscription_data: Map?,
+    tax_id_collection: Map?,
+    transfer_data: Map?
+}
+
+PostPaymentLinksResponse type {
+    active: Bool,
+    after_completion: PaymentLinksResourceAfterCompletion,
+    allow_promotion_codes: Bool,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: PaymentLinksResourceAutomaticTax,
+    billing_address_collection: "auto" | "required",
+    consent_collection: Any?,
+    currency: Str,
+    custom_fields: Vec<PaymentLinksResourceCustomFields>,
+    custom_text: PaymentLinksResourceCustomText,
+    customer_creation: "always" | "if_required",
+    id: Str,
+    inactive_message: Str?,
+    invoice_creation: Any?,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    name_collection: PaymentLinksResourceNameCollection?,
+    object: "payment_link",
+    on_behalf_of: Any?,
+    optional_items: Vec<PaymentLinksResourceOptionalItem>?,
+    payment_intent_data: Any?,
+    payment_method_collection: "always" | "if_required",
+    payment_method_types: Vec<"affirm" | "afterpay_clearpay" | "alipay" | "alma" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "klarna" | "konbini" | "link" | "mb_way" | "mobilepay" | "multibanco" | "oxxo" | "p24" | "pay_by_bank" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    phone_number_collection: PaymentLinksResourcePhoneNumberCollection,
+    restrictions: Any?,
+    shipping_address_collection: Any?,
+    shipping_options: Vec<PaymentLinksResourceShippingOption>,
+    submit_type: "auto" | "book" | "donate" | "pay" | "subscribe",
+    subscription_data: Any?,
+    tax_id_collection: PaymentLinksResourceTaxIdCollection,
+    transfer_data: Any?,
+    url: Str
+}
+
+
+create-payment-link
+meta {doc: """POST /v1/payment_links - Create a payment link"""}
+fn (request: PostPaymentLinksRequest): PostPaymentLinksResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_links`, {}, request)
+  if(is-ok-response(response), PostPaymentLinksResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentLinksPaymentLinkRequest type {
+
+}
+
+GetPaymentLinksPaymentLinkResponse type {
+    active: Bool,
+    after_completion: PaymentLinksResourceAfterCompletion,
+    allow_promotion_codes: Bool,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: PaymentLinksResourceAutomaticTax,
+    billing_address_collection: "auto" | "required",
+    consent_collection: Any?,
+    currency: Str,
+    custom_fields: Vec<PaymentLinksResourceCustomFields>,
+    custom_text: PaymentLinksResourceCustomText,
+    customer_creation: "always" | "if_required",
+    id: Str,
+    inactive_message: Str?,
+    invoice_creation: Any?,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    name_collection: PaymentLinksResourceNameCollection?,
+    object: "payment_link",
+    on_behalf_of: Any?,
+    optional_items: Vec<PaymentLinksResourceOptionalItem>?,
+    payment_intent_data: Any?,
+    payment_method_collection: "always" | "if_required",
+    payment_method_types: Vec<"affirm" | "afterpay_clearpay" | "alipay" | "alma" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "klarna" | "konbini" | "link" | "mb_way" | "mobilepay" | "multibanco" | "oxxo" | "p24" | "pay_by_bank" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    phone_number_collection: PaymentLinksResourcePhoneNumberCollection,
+    restrictions: Any?,
+    shipping_address_collection: Any?,
+    shipping_options: Vec<PaymentLinksResourceShippingOption>,
+    submit_type: "auto" | "book" | "donate" | "pay" | "subscribe",
+    subscription_data: Any?,
+    tax_id_collection: PaymentLinksResourceTaxIdCollection,
+    transfer_data: Any?,
+    url: Str
+}
+
+
+retrieve-payment-link
+meta {doc: """GET /v1/payment_links/{payment_link} - Retrieve payment link"""}
+fn (payment-link: Str, expand: Str, request: GetPaymentLinksPaymentLinkRequest): GetPaymentLinksPaymentLinkResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_links/${payment-link}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentLinksPaymentLinkResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentLinksPaymentLinkRequest type {
+    active: Bool?,
+    after_completion: Map?,
+    allow_promotion_codes: Bool?,
+    automatic_tax: Map?,
+    billing_address_collection: "auto" | "required"?,
+    custom_fields: Any?,
+    custom_text: Map?,
+    customer_creation: "always" | "if_required"?,
+    expand: Vec<Str>?,
+    inactive_message: Any?,
+    invoice_creation: Map?,
+    line_items: Vec<Map>?,
+    metadata: Map?,
+    name_collection: Any?,
+    payment_intent_data: Map?,
+    payment_method_collection: "always" | "if_required"?,
+    payment_method_types: Any?,
+    phone_number_collection: Map?,
+    restrictions: Any?,
+    shipping_address_collection: Any?,
+    submit_type: "auto" | "book" | "donate" | "pay" | "subscribe"?,
+    subscription_data: Map?,
+    tax_id_collection: Map?
+}
+
+PostPaymentLinksPaymentLinkResponse type {
+    active: Bool,
+    after_completion: PaymentLinksResourceAfterCompletion,
+    allow_promotion_codes: Bool,
+    application: Any?,
+    application_fee_amount: Int?,
+    application_fee_percent: Dec?,
+    automatic_tax: PaymentLinksResourceAutomaticTax,
+    billing_address_collection: "auto" | "required",
+    consent_collection: Any?,
+    currency: Str,
+    custom_fields: Vec<PaymentLinksResourceCustomFields>,
+    custom_text: PaymentLinksResourceCustomText,
+    customer_creation: "always" | "if_required",
+    id: Str,
+    inactive_message: Str?,
+    invoice_creation: Any?,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map,
+    name_collection: PaymentLinksResourceNameCollection?,
+    object: "payment_link",
+    on_behalf_of: Any?,
+    optional_items: Vec<PaymentLinksResourceOptionalItem>?,
+    payment_intent_data: Any?,
+    payment_method_collection: "always" | "if_required",
+    payment_method_types: Vec<"affirm" | "afterpay_clearpay" | "alipay" | "alma" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "klarna" | "konbini" | "link" | "mb_way" | "mobilepay" | "multibanco" | "oxxo" | "p24" | "pay_by_bank" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    phone_number_collection: PaymentLinksResourcePhoneNumberCollection,
+    restrictions: Any?,
+    shipping_address_collection: Any?,
+    shipping_options: Vec<PaymentLinksResourceShippingOption>,
+    submit_type: "auto" | "book" | "donate" | "pay" | "subscribe",
+    subscription_data: Any?,
+    tax_id_collection: PaymentLinksResourceTaxIdCollection,
+    transfer_data: Any?,
+    url: Str
+}
+
+
+update-payment-link
+meta {doc: """POST /v1/payment_links/{payment_link} - Update a payment link"""}
+fn (payment-link: Str, request: PostPaymentLinksPaymentLinkRequest): PostPaymentLinksPaymentLinkResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_links/${payment-link}`, {}, request)
+  if(is-ok-response(response), PostPaymentLinksPaymentLinkResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentLinksPaymentLinkLineItemsRequest type {
+
+}
+
+GetPaymentLinksPaymentLinkLineItemsResponse type {
+    data: Vec<Item>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-payment-links-line-items
+meta {
+    doc: """GET /v1/payment_links/{payment_link}/line_items - Retrieve a payment link's line items"""
+}
+fn (payment-link: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetPaymentLinksPaymentLinkLineItemsRequest): GetPaymentLinksPaymentLinkLineItemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_links/${payment-link}/line_items?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentLinksPaymentLinkLineItemsResponse(response.body), err(HttpError(response)))
+}
+
+GetDisputesRequest type {
+
+}
+
+GetDisputesResponse type {
+    data: Vec<Dispute>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-disputes
+meta {doc: """GET /v1/disputes - List all disputes"""}
+fn (charge: Str, created: Str, ending-before: Str, expand: Str, limit: Str, payment-intent: Str, starting-after: Str, request: GetDisputesRequest): GetDisputesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/disputes?charge=${charge}&created=${created}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&payment_intent=${payment-intent}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetDisputesResponse(response.body), err(HttpError(response)))
+}
+
+GetDisputesDisputeRequest type {
+
+}
+
+GetDisputesDisputeResponse type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+
+retrieve-dispute
+meta {doc: """GET /v1/disputes/{dispute} - Retrieve a dispute"""}
+fn (dispute: Str, expand: Str, request: GetDisputesDisputeRequest): GetDisputesDisputeResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/disputes/${dispute}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetDisputesDisputeResponse(response.body), err(HttpError(response)))
+}
+
+PostDisputesDisputeRequest type {
+    evidence: Map?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    submit: Bool?
+}
+
+PostDisputesDisputeResponse type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+
+update-dispute
+meta {doc: """POST /v1/disputes/{dispute} - Update a dispute"""}
+fn (dispute: Str, request: PostDisputesDisputeRequest): PostDisputesDisputeResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/disputes/${dispute}`, {}, request)
+  if(is-ok-response(response), PostDisputesDisputeResponse(response.body), err(HttpError(response)))
+}
+
+PostDisputesDisputeCloseRequest type {
+    expand: Vec<Str>?
+}
+
+PostDisputesDisputeCloseResponse type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+
+close-dispute
+meta {doc: """POST /v1/disputes/{dispute}/close - Close a dispute"""}
+fn (dispute: Str, request: PostDisputesDisputeCloseRequest): PostDisputesDisputeCloseResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/disputes/${dispute}/close`, {}, request)
+  if(is-ok-response(response), PostDisputesDisputeCloseResponse(response.body), err(HttpError(response)))
+}
+
+GetRefundsRequest type {
+
+}
+
+GetRefundsResponse type {
+    data: Vec<Refund>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-refunds
+meta {doc: """GET /v1/refunds - List all refunds"""}
+fn (charge: Str, created: Str, ending-before: Str, expand: Str, limit: Str, payment-intent: Str, starting-after: Str, request: GetRefundsRequest): GetRefundsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/refunds?charge=${charge}&created=${created}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&payment_intent=${payment-intent}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetRefundsResponse(response.body), err(HttpError(response)))
+}
+
+PostRefundsRequest type {
+    amount: Int?,
+    charge: Str?,
+    currency: Str?,
+    customer: Str?,
+    expand: Vec<Str>?,
+    instructions_email: Str?,
+    metadata: Any?,
+    origin: "customer_balance"?,
+    payment_intent: Str?,
+    reason: "duplicate" | "fraudulent" | "requested_by_customer"?,
+    refund_application_fee: Bool?,
+    reverse_transfer: Bool?
+}
+
+PostRefundsResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+create-customer-balance-refund
+meta {doc: """POST /v1/refunds - Create customer balance refund"""}
+fn (request: PostRefundsRequest): PostRefundsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/refunds`, {}, request)
+  if(is-ok-response(response), PostRefundsResponse(response.body), err(HttpError(response)))
+}
+
+GetRefundsRefundRequest type {
+
+}
+
+GetRefundsRefundResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+retrieve-refund
+meta {doc: """GET /v1/refunds/{refund} - Retrieve a refund"""}
+fn (refund: Str, expand: Str, request: GetRefundsRefundRequest): GetRefundsRefundResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/refunds/${refund}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetRefundsRefundResponse(response.body), err(HttpError(response)))
+}
+
+PostRefundsRefundRequest type {
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostRefundsRefundResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+update-refund
+meta {doc: """POST /v1/refunds/{refund} - Update a refund"""}
+fn (refund: Str, request: PostRefundsRefundRequest): PostRefundsRefundResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/refunds/${refund}`, {}, request)
+  if(is-ok-response(response), PostRefundsRefundResponse(response.body), err(HttpError(response)))
+}
+
+PostRefundsRefundCancelRequest type {
+    expand: Vec<Str>?
+}
+
+PostRefundsRefundCancelResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+cancel-refund
+meta {doc: """POST /v1/refunds/{refund}/cancel - Cancel a refund"""}
+fn (refund: Str, request: PostRefundsRefundCancelRequest): PostRefundsRefundCancelResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/refunds/${refund}/cancel`, {}, request)
+  if(is-ok-response(response), PostRefundsRefundCancelResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentAttemptRecordsRequest type {
+
+}
+
+GetPaymentAttemptRecordsResponse type {
+    data: Vec<PaymentAttemptRecord>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-payment-attempt-records
+meta {doc: """GET /v1/payment_attempt_records - List Payment Attempt Records"""}
+fn (expand: Str, limit: Str, payment-record: Str, starting-after: Str, request: GetPaymentAttemptRecordsRequest): GetPaymentAttemptRecordsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_attempt_records?expand=${expand}&limit=${limit}&payment_record=${payment-record}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentAttemptRecordsResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentAttemptRecordsIdRequest type {
+
+}
+
+GetPaymentAttemptRecordsIdResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_attempt_record",
+    payment_method_details: Any?,
+    payment_record: Str?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+retrieve-payment-attempt-record
+meta {
+    doc: """GET /v1/payment_attempt_records/{id} - Retrieve a Payment Attempt Record"""
+}
+fn (id: Str, expand: Str, request: GetPaymentAttemptRecordsIdRequest): GetPaymentAttemptRecordsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_attempt_records/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentAttemptRecordsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentMethodConfigurationsRequest type {
+
+}
+
+GetPaymentMethodConfigurationsResponse type {
+    data: Vec<PaymentMethodConfiguration>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-payment-method-configurations
+meta {
+    doc: """GET /v1/payment_method_configurations - List payment method configurations"""
+}
+fn (application: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetPaymentMethodConfigurationsRequest): GetPaymentMethodConfigurationsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_method_configurations?application=${application}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetPaymentMethodConfigurationsResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodConfigurationsRequest type {
+    acss_debit: Map?,
+    affirm: Map?,
+    afterpay_clearpay: Map?,
+    alipay: Map?,
+    alma: Map?,
+    amazon_pay: Map?,
+    apple_pay: Map?,
+    apple_pay_later: Map?,
+    au_becs_debit: Map?,
+    bacs_debit: Map?,
+    bancontact: Map?,
+    billie: Map?,
+    blik: Map?,
+    boleto: Map?,
+    card: Map?,
+    cartes_bancaires: Map?,
+    cashapp: Map?,
+    crypto: Map?,
+    customer_balance: Map?,
+    eps: Map?,
+    expand: Vec<Str>?,
+    fpx: Map?,
+    fr_meal_voucher_conecs: Map?,
+    giropay: Map?,
+    google_pay: Map?,
+    grabpay: Map?,
+    ideal: Map?,
+    jcb: Map?,
+    kakao_pay: Map?,
+    klarna: Map?,
+    konbini: Map?,
+    kr_card: Map?,
+    link: Map?,
+    mb_way: Map?,
+    mobilepay: Map?,
+    multibanco: Map?,
+    name: Str?,
+    naver_pay: Map?,
+    nz_bank_account: Map?,
+    oxxo: Map?,
+    p24: Map?,
+    parent: Str?,
+    pay_by_bank: Map?,
+    payco: Map?,
+    paynow: Map?,
+    paypal: Map?,
+    payto: Map?,
+    pix: Map?,
+    promptpay: Map?,
+    revolut_pay: Map?,
+    samsung_pay: Map?,
+    satispay: Map?,
+    sepa_debit: Map?,
+    sofort: Map?,
+    swish: Map?,
+    twint: Map?,
+    us_bank_account: Map?,
+    wechat_pay: Map?,
+    zip: Map?
+}
+
+PostPaymentMethodConfigurationsResponse type {
+    acss_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    active: Bool,
+    affirm: PaymentMethodConfigResourcePaymentMethodProperties?,
+    afterpay_clearpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alipay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alma: PaymentMethodConfigResourcePaymentMethodProperties?,
+    amazon_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    apple_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    application: Str?,
+    au_becs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bacs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bancontact: PaymentMethodConfigResourcePaymentMethodProperties?,
+    billie: PaymentMethodConfigResourcePaymentMethodProperties?,
+    blik: PaymentMethodConfigResourcePaymentMethodProperties?,
+    boleto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cartes_bancaires: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cashapp: PaymentMethodConfigResourcePaymentMethodProperties?,
+    crypto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    customer_balance: PaymentMethodConfigResourcePaymentMethodProperties?,
+    eps: PaymentMethodConfigResourcePaymentMethodProperties?,
+    fpx: PaymentMethodConfigResourcePaymentMethodProperties?,
+    giropay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    google_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    grabpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    id: Str,
+    ideal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    is_default: Bool,
+    jcb: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kakao_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    klarna: PaymentMethodConfigResourcePaymentMethodProperties?,
+    konbini: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kr_card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    link: PaymentMethodConfigResourcePaymentMethodProperties?,
+    livemode: Bool,
+    mb_way: PaymentMethodConfigResourcePaymentMethodProperties?,
+    mobilepay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    multibanco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    name: Str,
+    naver_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    nz_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    object: "payment_method_configuration",
+    oxxo: PaymentMethodConfigResourcePaymentMethodProperties?,
+    p24: PaymentMethodConfigResourcePaymentMethodProperties?,
+    parent: Str?,
+    pay_by_bank: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paynow: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paypal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    pix: PaymentMethodConfigResourcePaymentMethodProperties?,
+    promptpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    revolut_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    samsung_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    satispay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sepa_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sofort: PaymentMethodConfigResourcePaymentMethodProperties?,
+    swish: PaymentMethodConfigResourcePaymentMethodProperties?,
+    twint: PaymentMethodConfigResourcePaymentMethodProperties?,
+    us_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    wechat_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    zip: PaymentMethodConfigResourcePaymentMethodProperties?
+}
+
+
+create-payment-method-configuration
+meta {
+    doc: """POST /v1/payment_method_configurations - Create a payment method configuration"""
+}
+fn (request: PostPaymentMethodConfigurationsRequest): PostPaymentMethodConfigurationsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_method_configurations`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodConfigurationsResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentMethodConfigurationsConfigurationRequest type {
+
+}
+
+GetPaymentMethodConfigurationsConfigurationResponse type {
+    acss_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    active: Bool,
+    affirm: PaymentMethodConfigResourcePaymentMethodProperties?,
+    afterpay_clearpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alipay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alma: PaymentMethodConfigResourcePaymentMethodProperties?,
+    amazon_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    apple_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    application: Str?,
+    au_becs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bacs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bancontact: PaymentMethodConfigResourcePaymentMethodProperties?,
+    billie: PaymentMethodConfigResourcePaymentMethodProperties?,
+    blik: PaymentMethodConfigResourcePaymentMethodProperties?,
+    boleto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cartes_bancaires: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cashapp: PaymentMethodConfigResourcePaymentMethodProperties?,
+    crypto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    customer_balance: PaymentMethodConfigResourcePaymentMethodProperties?,
+    eps: PaymentMethodConfigResourcePaymentMethodProperties?,
+    fpx: PaymentMethodConfigResourcePaymentMethodProperties?,
+    giropay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    google_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    grabpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    id: Str,
+    ideal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    is_default: Bool,
+    jcb: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kakao_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    klarna: PaymentMethodConfigResourcePaymentMethodProperties?,
+    konbini: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kr_card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    link: PaymentMethodConfigResourcePaymentMethodProperties?,
+    livemode: Bool,
+    mb_way: PaymentMethodConfigResourcePaymentMethodProperties?,
+    mobilepay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    multibanco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    name: Str,
+    naver_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    nz_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    object: "payment_method_configuration",
+    oxxo: PaymentMethodConfigResourcePaymentMethodProperties?,
+    p24: PaymentMethodConfigResourcePaymentMethodProperties?,
+    parent: Str?,
+    pay_by_bank: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paynow: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paypal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    pix: PaymentMethodConfigResourcePaymentMethodProperties?,
+    promptpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    revolut_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    samsung_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    satispay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sepa_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sofort: PaymentMethodConfigResourcePaymentMethodProperties?,
+    swish: PaymentMethodConfigResourcePaymentMethodProperties?,
+    twint: PaymentMethodConfigResourcePaymentMethodProperties?,
+    us_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    wechat_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    zip: PaymentMethodConfigResourcePaymentMethodProperties?
+}
+
+
+retrieve-payment-method-configuration
+meta {
+    doc: """GET /v1/payment_method_configurations/{configuration} - Retrieve payment method configuration"""
+}
+fn (configuration: Str, expand: Str, request: GetPaymentMethodConfigurationsConfigurationRequest): GetPaymentMethodConfigurationsConfigurationResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_method_configurations/${configuration}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentMethodConfigurationsConfigurationResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentMethodConfigurationsConfigurationRequest type {
+    acss_debit: Map?,
+    active: Bool?,
+    affirm: Map?,
+    afterpay_clearpay: Map?,
+    alipay: Map?,
+    alma: Map?,
+    amazon_pay: Map?,
+    apple_pay: Map?,
+    apple_pay_later: Map?,
+    au_becs_debit: Map?,
+    bacs_debit: Map?,
+    bancontact: Map?,
+    billie: Map?,
+    blik: Map?,
+    boleto: Map?,
+    card: Map?,
+    cartes_bancaires: Map?,
+    cashapp: Map?,
+    crypto: Map?,
+    customer_balance: Map?,
+    eps: Map?,
+    expand: Vec<Str>?,
+    fpx: Map?,
+    fr_meal_voucher_conecs: Map?,
+    giropay: Map?,
+    google_pay: Map?,
+    grabpay: Map?,
+    ideal: Map?,
+    jcb: Map?,
+    kakao_pay: Map?,
+    klarna: Map?,
+    konbini: Map?,
+    kr_card: Map?,
+    link: Map?,
+    mb_way: Map?,
+    mobilepay: Map?,
+    multibanco: Map?,
+    name: Str?,
+    naver_pay: Map?,
+    nz_bank_account: Map?,
+    oxxo: Map?,
+    p24: Map?,
+    pay_by_bank: Map?,
+    payco: Map?,
+    paynow: Map?,
+    paypal: Map?,
+    payto: Map?,
+    pix: Map?,
+    promptpay: Map?,
+    revolut_pay: Map?,
+    samsung_pay: Map?,
+    satispay: Map?,
+    sepa_debit: Map?,
+    sofort: Map?,
+    swish: Map?,
+    twint: Map?,
+    us_bank_account: Map?,
+    wechat_pay: Map?,
+    zip: Map?
+}
+
+PostPaymentMethodConfigurationsConfigurationResponse type {
+    acss_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    active: Bool,
+    affirm: PaymentMethodConfigResourcePaymentMethodProperties?,
+    afterpay_clearpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alipay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    alma: PaymentMethodConfigResourcePaymentMethodProperties?,
+    amazon_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    apple_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    application: Str?,
+    au_becs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bacs_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    bancontact: PaymentMethodConfigResourcePaymentMethodProperties?,
+    billie: PaymentMethodConfigResourcePaymentMethodProperties?,
+    blik: PaymentMethodConfigResourcePaymentMethodProperties?,
+    boleto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cartes_bancaires: PaymentMethodConfigResourcePaymentMethodProperties?,
+    cashapp: PaymentMethodConfigResourcePaymentMethodProperties?,
+    crypto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    customer_balance: PaymentMethodConfigResourcePaymentMethodProperties?,
+    eps: PaymentMethodConfigResourcePaymentMethodProperties?,
+    fpx: PaymentMethodConfigResourcePaymentMethodProperties?,
+    giropay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    google_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    grabpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    id: Str,
+    ideal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    is_default: Bool,
+    jcb: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kakao_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    klarna: PaymentMethodConfigResourcePaymentMethodProperties?,
+    konbini: PaymentMethodConfigResourcePaymentMethodProperties?,
+    kr_card: PaymentMethodConfigResourcePaymentMethodProperties?,
+    link: PaymentMethodConfigResourcePaymentMethodProperties?,
+    livemode: Bool,
+    mb_way: PaymentMethodConfigResourcePaymentMethodProperties?,
+    mobilepay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    multibanco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    name: Str,
+    naver_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    nz_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    object: "payment_method_configuration",
+    oxxo: PaymentMethodConfigResourcePaymentMethodProperties?,
+    p24: PaymentMethodConfigResourcePaymentMethodProperties?,
+    parent: Str?,
+    pay_by_bank: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payco: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paynow: PaymentMethodConfigResourcePaymentMethodProperties?,
+    paypal: PaymentMethodConfigResourcePaymentMethodProperties?,
+    payto: PaymentMethodConfigResourcePaymentMethodProperties?,
+    pix: PaymentMethodConfigResourcePaymentMethodProperties?,
+    promptpay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    revolut_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    samsung_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    satispay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sepa_debit: PaymentMethodConfigResourcePaymentMethodProperties?,
+    sofort: PaymentMethodConfigResourcePaymentMethodProperties?,
+    swish: PaymentMethodConfigResourcePaymentMethodProperties?,
+    twint: PaymentMethodConfigResourcePaymentMethodProperties?,
+    us_bank_account: PaymentMethodConfigResourcePaymentMethodProperties?,
+    wechat_pay: PaymentMethodConfigResourcePaymentMethodProperties?,
+    zip: PaymentMethodConfigResourcePaymentMethodProperties?
+}
+
+
+update-payment-method-configuration
+meta {
+    doc: """POST /v1/payment_method_configurations/{configuration} - Update payment method configuration"""
+}
+fn (configuration: Str, request: PostPaymentMethodConfigurationsConfigurationRequest): PostPaymentMethodConfigurationsConfigurationResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_method_configurations/${configuration}`, {}, request)
+  if(is-ok-response(response), PostPaymentMethodConfigurationsConfigurationResponse(response.body), err(HttpError(response)))
+}
+
+GetChargesRequest type {
+
+}
+
+GetChargesResponse type {
+    data: Vec<Charge>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-charges
+meta {doc: """GET /v1/charges - List all charges"""}
+fn (created: Str, customer: Str, ending-before: Str, expand: Str, limit: Str, payment-intent: Str, starting-after: Str, transfer-group: Str, request: GetChargesRequest): GetChargesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/charges?created=${created}&customer=${customer}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&payment_intent=${payment-intent}&starting_after=${starting-after}&transfer_group=${transfer-group}`, {}, request)
+  if(is-ok-response(response), GetChargesResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesRequest type {
+    amount: Int?,
+    application_fee: Int?,
+    application_fee_amount: Int?,
+    capture: Bool?,
+    card: Any?,
+    currency: Str?,
+    customer: Str?,
+    description: Str?,
+    destination: Any?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    on_behalf_of: Str?,
+    radar_options: Map?,
+    receipt_email: Str?,
+    shipping: Map?,
+    source: Str?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    transfer_data: Map?,
+    transfer_group: Str?
+}
+
+PostChargesResponse type {
+    amount: Int,
+    amount_captured: Int,
+    amount_refunded: Int,
+    application: Any?,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    balance_transaction: Any?,
+    billing_details: BillingDetails,
+    calculated_statement_descriptor: Str?,
+    captured: Bool,
+    created: Int,
+    currency: Str,
+    customer: Any?,
+    description: Str?,
+    disputed: Bool,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    fraud_details: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "charge",
+    on_behalf_of: Any?,
+    outcome: Any?,
+    paid: Bool,
+    payment_intent: Any?,
+    payment_method: Str?,
+    payment_method_details: Any?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    radar_options: RadarRadarOptions?,
+    receipt_email: Str?,
+    receipt_number: Str?,
+    receipt_url: Str?,
+    refunded: Bool,
+    refunds: Map?,
+    review: Any?,
+    shipping: Any?,
+    source_transfer: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "failed" | "pending" | "succeeded",
+    transfer: Any?,
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+post-charges
+meta {doc: """POST /v1/charges"""}
+fn (request: PostChargesRequest): PostChargesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges`, {}, request)
+  if(is-ok-response(response), PostChargesResponse(response.body), err(HttpError(response)))
+}
+
+GetChargesSearchRequest type {
+
+}
+
+GetChargesSearchResponse type {
+    data: Vec<Charge>,
+    has_more: Bool,
+    next_page: Str?,
+    object: "search_result",
+    total_count: Int?,
+    url: Str
+}
+
+
+search-charges
+meta {doc: """GET /v1/charges/search - Search charges"""}
+fn (expand: Str, limit: Str, page: Str, query: Str, request: GetChargesSearchRequest): GetChargesSearchResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/charges/search?expand=${expand}&limit=${limit}&page=${page}&query=${query}`, {}, request)
+  if(is-ok-response(response), GetChargesSearchResponse(response.body), err(HttpError(response)))
+}
+
+GetChargesChargeRequest type {
+
+}
+
+GetChargesChargeResponse type {
+    amount: Int,
+    amount_captured: Int,
+    amount_refunded: Int,
+    application: Any?,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    balance_transaction: Any?,
+    billing_details: BillingDetails,
+    calculated_statement_descriptor: Str?,
+    captured: Bool,
+    created: Int,
+    currency: Str,
+    customer: Any?,
+    description: Str?,
+    disputed: Bool,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    fraud_details: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "charge",
+    on_behalf_of: Any?,
+    outcome: Any?,
+    paid: Bool,
+    payment_intent: Any?,
+    payment_method: Str?,
+    payment_method_details: Any?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    radar_options: RadarRadarOptions?,
+    receipt_email: Str?,
+    receipt_number: Str?,
+    receipt_url: Str?,
+    refunded: Bool,
+    refunds: Map?,
+    review: Any?,
+    shipping: Any?,
+    source_transfer: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "failed" | "pending" | "succeeded",
+    transfer: Any?,
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+retrieve-charge
+meta {doc: """GET /v1/charges/{charge} - Retrieve a charge"""}
+fn (charge: Str, expand: Str, request: GetChargesChargeRequest): GetChargesChargeResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/charges/${charge}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetChargesChargeResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeRequest type {
+    customer: Str?,
+    description: Str?,
+    expand: Vec<Str>?,
+    fraud_details: Map?,
+    metadata: Any?,
+    receipt_email: Str?,
+    shipping: Map?,
+    transfer_group: Str?
+}
+
+PostChargesChargeResponse type {
+    amount: Int,
+    amount_captured: Int,
+    amount_refunded: Int,
+    application: Any?,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    balance_transaction: Any?,
+    billing_details: BillingDetails,
+    calculated_statement_descriptor: Str?,
+    captured: Bool,
+    created: Int,
+    currency: Str,
+    customer: Any?,
+    description: Str?,
+    disputed: Bool,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    fraud_details: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "charge",
+    on_behalf_of: Any?,
+    outcome: Any?,
+    paid: Bool,
+    payment_intent: Any?,
+    payment_method: Str?,
+    payment_method_details: Any?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    radar_options: RadarRadarOptions?,
+    receipt_email: Str?,
+    receipt_number: Str?,
+    receipt_url: Str?,
+    refunded: Bool,
+    refunds: Map?,
+    review: Any?,
+    shipping: Any?,
+    source_transfer: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "failed" | "pending" | "succeeded",
+    transfer: Any?,
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+update-charge
+meta {doc: """POST /v1/charges/{charge} - Update a charge"""}
+fn (charge: Str, request: PostChargesChargeRequest): PostChargesChargeResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}`, {}, request)
+  if(is-ok-response(response), PostChargesChargeResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeCaptureRequest type {
+    amount: Int?,
+    application_fee: Int?,
+    application_fee_amount: Int?,
+    expand: Vec<Str>?,
+    receipt_email: Str?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    transfer_data: Map?,
+    transfer_group: Str?
+}
+
+PostChargesChargeCaptureResponse type {
+    amount: Int,
+    amount_captured: Int,
+    amount_refunded: Int,
+    application: Any?,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    balance_transaction: Any?,
+    billing_details: BillingDetails,
+    calculated_statement_descriptor: Str?,
+    captured: Bool,
+    created: Int,
+    currency: Str,
+    customer: Any?,
+    description: Str?,
+    disputed: Bool,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    fraud_details: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "charge",
+    on_behalf_of: Any?,
+    outcome: Any?,
+    paid: Bool,
+    payment_intent: Any?,
+    payment_method: Str?,
+    payment_method_details: Any?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    radar_options: RadarRadarOptions?,
+    receipt_email: Str?,
+    receipt_number: Str?,
+    receipt_url: Str?,
+    refunded: Bool,
+    refunds: Map?,
+    review: Any?,
+    shipping: Any?,
+    source_transfer: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "failed" | "pending" | "succeeded",
+    transfer: Any?,
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+capture-payment
+meta {doc: """POST /v1/charges/{charge}/capture - Capture a payment"""}
+fn (charge: Str, request: PostChargesChargeCaptureRequest): PostChargesChargeCaptureResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}/capture`, {}, request)
+  if(is-ok-response(response), PostChargesChargeCaptureResponse(response.body), err(HttpError(response)))
+}
+
+GetChargesChargeDisputeRequest type {
+
+}
+
+GetChargesChargeDisputeResponse type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+
+get-charges-charge-dispute
+meta {doc: """GET /v1/charges/{charge}/dispute"""}
+fn (charge: Str, expand: Str, request: GetChargesChargeDisputeRequest): GetChargesChargeDisputeResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/charges/${charge}/dispute?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetChargesChargeDisputeResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeDisputeRequest type {
+    evidence: Map?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    submit: Bool?
+}
+
+PostChargesChargeDisputeResponse type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+
+post-charges-charge-dispute
+meta {doc: """POST /v1/charges/{charge}/dispute"""}
+fn (charge: Str, request: PostChargesChargeDisputeRequest): PostChargesChargeDisputeResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}/dispute`, {}, request)
+  if(is-ok-response(response), PostChargesChargeDisputeResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeDisputeCloseRequest type {
+    expand: Vec<Str>?
+}
+
+PostChargesChargeDisputeCloseResponse type {
+    amount: Int,
+    balance_transactions: Vec<BalanceTransaction>,
+    charge: Any,
+    created: Int,
+    currency: Str,
+    enhanced_eligibility_types: Vec<"visa_compelling_evidence_3" | "visa_compliance">,
+    evidence: DisputeEvidence,
+    evidence_details: DisputeEvidenceDetails,
+    id: Str,
+    is_charge_refundable: Bool,
+    livemode: Bool,
+    metadata: Map,
+    object: "dispute",
+    payment_intent: Any?,
+    payment_method_details: DisputePaymentMethodDetails?,
+    reason: Str,
+    status: "lost" | "needs_response" | "prevented" | "under_review" | "warning_closed" | "warning_needs_response" | "warning_under_review" | "won"
+}
+
+
+post-charges-charge-dispute-close
+meta {doc: """POST /v1/charges/{charge}/dispute/close"""}
+fn (charge: Str, request: PostChargesChargeDisputeCloseRequest): PostChargesChargeDisputeCloseResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}/dispute/close`, {}, request)
+  if(is-ok-response(response), PostChargesChargeDisputeCloseResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeRefundRequest type {
+    amount: Int?,
+    expand: Vec<Str>?,
+    instructions_email: Str?,
+    metadata: Any?,
+    payment_intent: Str?,
+    reason: "duplicate" | "fraudulent" | "requested_by_customer"?,
+    refund_application_fee: Bool?,
+    reverse_transfer: Bool?
+}
+
+PostChargesChargeRefundResponse type {
+    amount: Int,
+    amount_captured: Int,
+    amount_refunded: Int,
+    application: Any?,
+    application_fee: Any?,
+    application_fee_amount: Int?,
+    balance_transaction: Any?,
+    billing_details: BillingDetails,
+    calculated_statement_descriptor: Str?,
+    captured: Bool,
+    created: Int,
+    currency: Str,
+    customer: Any?,
+    description: Str?,
+    disputed: Bool,
+    failure_balance_transaction: Any?,
+    failure_code: Str?,
+    failure_message: Str?,
+    fraud_details: Any?,
+    id: Str,
+    livemode: Bool,
+    metadata: Map,
+    object: "charge",
+    on_behalf_of: Any?,
+    outcome: Any?,
+    paid: Bool,
+    payment_intent: Any?,
+    payment_method: Str?,
+    payment_method_details: Any?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    radar_options: RadarRadarOptions?,
+    receipt_email: Str?,
+    receipt_number: Str?,
+    receipt_url: Str?,
+    refunded: Bool,
+    refunds: Map?,
+    review: Any?,
+    shipping: Any?,
+    source_transfer: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "failed" | "pending" | "succeeded",
+    transfer: Any?,
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+
+create-refund
+meta {doc: """POST /v1/charges/{charge}/refund - Create a refund"""}
+fn (charge: Str, request: PostChargesChargeRefundRequest): PostChargesChargeRefundResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}/refund`, {}, request)
+  if(is-ok-response(response), PostChargesChargeRefundResponse(response.body), err(HttpError(response)))
+}
+
+GetChargesChargeRefundsRequest type {
+
+}
+
+GetChargesChargeRefundsResponse type {
+    data: Vec<Refund>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-refunds
+meta {doc: """GET /v1/charges/{charge}/refunds - List all refunds"""}
+fn (charge: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetChargesChargeRefundsRequest): GetChargesChargeRefundsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/charges/${charge}/refunds?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetChargesChargeRefundsResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeRefundsRequest type {
+    amount: Int?,
+    currency: Str?,
+    customer: Str?,
+    expand: Vec<Str>?,
+    instructions_email: Str?,
+    metadata: Any?,
+    origin: "customer_balance"?,
+    payment_intent: Str?,
+    reason: "duplicate" | "fraudulent" | "requested_by_customer"?,
+    refund_application_fee: Bool?,
+    reverse_transfer: Bool?
+}
+
+PostChargesChargeRefundsResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+create-customer-balance-refund
+meta {doc: """POST /v1/charges/{charge}/refunds - Create customer balance refund"""}
+fn (charge: Str, request: PostChargesChargeRefundsRequest): PostChargesChargeRefundsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}/refunds`, {}, request)
+  if(is-ok-response(response), PostChargesChargeRefundsResponse(response.body), err(HttpError(response)))
+}
+
+GetChargesChargeRefundsRefundRequest type {
+
+}
+
+GetChargesChargeRefundsRefundResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+get-charges-charge-refunds-refund
+meta {doc: """GET /v1/charges/{charge}/refunds/{refund}"""}
+fn (charge: Str, refund: Str, expand: Str, request: GetChargesChargeRefundsRefundRequest): GetChargesChargeRefundsRefundResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/charges/${charge}/refunds/${refund}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetChargesChargeRefundsRefundResponse(response.body), err(HttpError(response)))
+}
+
+PostChargesChargeRefundsRefundRequest type {
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostChargesChargeRefundsRefundResponse type {
+    amount: Int,
+    balance_transaction: Any?,
+    charge: Any?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    destination_details: RefundDestinationDetails?,
+    failure_balance_transaction: Any?,
+    failure_reason: Str?,
+    id: Str,
+    instructions_email: Str?,
+    metadata: Map?,
+    next_action: RefundNextAction?,
+    object: "refund",
+    payment_intent: Any?,
+    pending_reason: "charge_pending" | "insufficient_funds" | "processing"?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    reason: "duplicate" | "expired_uncaptured_charge" | "fraudulent" | "requested_by_customer"?,
+    receipt_number: Str?,
+    source_transfer_reversal: Any?,
+    status: Str?,
+    transfer_reversal: Any?
+}
+
+
+post-charges-charge-refunds-refund
+meta {doc: """POST /v1/charges/{charge}/refunds/{refund}"""}
+fn (charge: Str, refund: Str, request: PostChargesChargeRefundsRefundRequest): PostChargesChargeRefundsRefundResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/charges/${charge}/refunds/${refund}`, {}, request)
+  if(is-ok-response(response), PostChargesChargeRefundsRefundResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsReportPaymentRequest type {
+    amount_requested: Map,
+    customer_details: Map?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    expand: Vec<Str>?,
+    failed: Map?,
+    guaranteed: Map?,
+    initiated_at: Int,
+    metadata: Any?,
+    outcome: "failed" | "guaranteed"?,
+    payment_method_details: Map,
+    processor_details: Map?,
+    shipping_details: Map?
+}
+
+PostPaymentRecordsReportPaymentResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-payment
+meta {doc: """POST /v1/payment_records/report_payment - Report a payment"""}
+fn (request: PostPaymentRecordsReportPaymentRequest): PostPaymentRecordsReportPaymentResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/report_payment`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsReportPaymentResponse(response.body), err(HttpError(response)))
+}
+
+GetPaymentRecordsIdRequest type {
+
+}
+
+GetPaymentRecordsIdResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+retrieve-payment-record
+meta {doc: """GET /v1/payment_records/{id} - Retrieve a Payment Record"""}
+fn (id: Str, expand: Str, request: GetPaymentRecordsIdRequest): GetPaymentRecordsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_records/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetPaymentRecordsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsIdReportPaymentAttemptRequest type {
+    description: Str?,
+    expand: Vec<Str>?,
+    failed: Map?,
+    guaranteed: Map?,
+    initiated_at: Int,
+    metadata: Any?,
+    outcome: "failed" | "guaranteed"?,
+    payment_method_details: Map?,
+    shipping_details: Map?
+}
+
+PostPaymentRecordsIdReportPaymentAttemptResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-payment-attempt
+meta {
+    doc: """POST /v1/payment_records/{id}/report_payment_attempt - Report a payment attempt"""
+}
+fn (id: Str, request: PostPaymentRecordsIdReportPaymentAttemptRequest): PostPaymentRecordsIdReportPaymentAttemptResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/${id}/report_payment_attempt`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsIdReportPaymentAttemptResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsIdReportPaymentAttemptCanceledRequest type {
+    canceled_at: Int,
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostPaymentRecordsIdReportPaymentAttemptCanceledResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-payment-attempt-canceled
+meta {
+    doc: """POST /v1/payment_records/{id}/report_payment_attempt_canceled - Report payment attempt canceled"""
+}
+fn (id: Str, request: PostPaymentRecordsIdReportPaymentAttemptCanceledRequest): PostPaymentRecordsIdReportPaymentAttemptCanceledResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/${id}/report_payment_attempt_canceled`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsIdReportPaymentAttemptCanceledResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsIdReportPaymentAttemptFailedRequest type {
+    expand: Vec<Str>?,
+    failed_at: Int,
+    metadata: Any?
+}
+
+PostPaymentRecordsIdReportPaymentAttemptFailedResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-payment-attempt-failed
+meta {
+    doc: """POST /v1/payment_records/{id}/report_payment_attempt_failed - Report payment attempt failed"""
+}
+fn (id: Str, request: PostPaymentRecordsIdReportPaymentAttemptFailedRequest): PostPaymentRecordsIdReportPaymentAttemptFailedResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/${id}/report_payment_attempt_failed`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsIdReportPaymentAttemptFailedResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsIdReportPaymentAttemptGuaranteedRequest type {
+    expand: Vec<Str>?,
+    guaranteed_at: Int,
+    metadata: Any?
+}
+
+PostPaymentRecordsIdReportPaymentAttemptGuaranteedResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-payment-attempt-guaranteed
+meta {
+    doc: """POST /v1/payment_records/{id}/report_payment_attempt_guaranteed - Report payment attempt guaranteed"""
+}
+fn (id: Str, request: PostPaymentRecordsIdReportPaymentAttemptGuaranteedRequest): PostPaymentRecordsIdReportPaymentAttemptGuaranteedResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/${id}/report_payment_attempt_guaranteed`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsIdReportPaymentAttemptGuaranteedResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsIdReportPaymentAttemptInformationalRequest type {
+    customer_details: Map?,
+    description: Any?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    shipping_details: Any?
+}
+
+PostPaymentRecordsIdReportPaymentAttemptInformationalResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-payment-attempt-informational
+meta {
+    doc: """POST /v1/payment_records/{id}/report_payment_attempt_informational - Report payment attempt informational"""
+}
+fn (id: Str, request: PostPaymentRecordsIdReportPaymentAttemptInformationalRequest): PostPaymentRecordsIdReportPaymentAttemptInformationalResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/${id}/report_payment_attempt_informational`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsIdReportPaymentAttemptInformationalResponse(response.body), err(HttpError(response)))
+}
+
+PostPaymentRecordsIdReportRefundRequest type {
+    amount: Map?,
+    expand: Vec<Str>?,
+    initiated_at: Int?,
+    metadata: Any?,
+    outcome: "refunded",
+    processor_details: Map,
+    refunded: Map
+}
+
+PostPaymentRecordsIdReportRefundResponse type {
+    amount: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_authorized: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_canceled: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_failed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_guaranteed: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_refunded: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    amount_requested: PaymentsPrimitivesPaymentRecordsResourceAmount,
+    application: Str?,
+    created: Int,
+    customer_details: Any?,
+    customer_presence: "off_session" | "on_session"?,
+    description: Str?,
+    id: Str,
+    latest_payment_attempt_record: Str?,
+    livemode: Bool,
+    metadata: Map,
+    object: "payment_record",
+    payment_method_details: Any?,
+    processor_details: PaymentsPrimitivesPaymentRecordsResourceProcessorDetails,
+    reported_by: "self" | "stripe",
+    shipping_details: Any?
+}
+
+
+report-refund
+meta {doc: """POST /v1/payment_records/{id}/report_refund - Report a refund"""}
+fn (id: Str, request: PostPaymentRecordsIdReportRefundRequest): PostPaymentRecordsIdReportRefundResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_records/${id}/report_refund`, {}, request)
+  if(is-ok-response(response), PostPaymentRecordsIdReportRefundResponse(response.body), err(HttpError(response)))
+}

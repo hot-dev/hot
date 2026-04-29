@@ -1,0 +1,209 @@
+::hot::uri ns
+meta {doc: """URI parsing, building, encoding, and validation (RFC 3986)."""}
+
+Uri
+meta {
+    doc: """
+    A parsed URI with structured access to its components.
+
+    **Fields**
+    - `scheme` - URI scheme (e.g. "https", "mailto")
+    - `userinfo` - User info before @ (nullable)
+    - `host` - Hostname (nullable, absent for non-hierarchical URIs)
+    - `port` - Port number (nullable)
+    - `path` - URI path
+    - `query` - Query string without leading ? (nullable)
+    - `fragment` - Fragment without leading # (nullable)
+
+    **Examples**
+
+    ```hot
+    uri Uri("https://example.com:8080/path?q=1#top")
+    uri.scheme    // "https"
+    uri.host      // "example.com"
+    uri.port      // 8080
+    uri.path      // "/path"
+    uri.query     // "q=1"
+
+    // Uri auto-coerces to Str
+    ::http/get(uri)  // works — Uri -> Str coercion
+    Str(uri)         // "https://example.com:8080/path?q=1#top"
+    ```
+    """
+}
+type {
+    scheme: Str,
+    userinfo: Str?,
+    host: Str?,
+    port: Int?,
+    path: Str,
+    query: Str?,
+    fragment: Str?
+}
+fn (s: Str): Uri {
+    call-lib(::hot::uri/parse, [s])
+}
+
+
+// Uri -> Str coercion: reconstruct the URI string from components
+Uri -> Str fn (uri: Uri): Str {
+    call-lib(::hot::uri/to-str, [uri])
+}
+
+
+encode
+meta {
+    doc: """
+    Percent-encode a URI component string (RFC 3986).
+    Encodes everything except unreserved characters: A-Z a-z 0-9 - . _ ~
+
+    **Example**
+
+    ```hot
+    ::uri/encode("hello world")     // "hello%20world"
+    ::uri/encode("a=1&b=2")         // "a%3D1%26b%3D2"
+    ```
+    """
+}
+fn (value: Str): Str {
+    call-lib(::hot::uri/encode, [value])
+}
+
+
+decode
+meta {
+    doc: """
+    Percent-decode a URI string.
+
+    **Example**
+
+    ```hot
+    ::uri/decode("hello%20world")  // "hello world"
+    ```
+    """
+}
+fn (value: Str): Str {
+    call-lib(::hot::uri/decode, [value])
+}
+
+
+encode-query
+meta {
+    doc: """
+    Encode a Map into a query string (application/x-www-form-urlencoded).
+    Spaces are encoded as `+`.
+
+    **Example**
+
+    ```hot
+    ::uri/encode-query({city: "Salt Lake City", days: 3})
+    // "city=Salt+Lake+City&days=3"
+    ```
+    """
+}
+fn (params: Map): Str {
+    call-lib(::hot::uri/encode-query, [params])
+}
+
+
+decode-query
+meta {
+    doc: """
+    Decode a query string into a Map. Strips a leading `?` if present.
+
+    **Example**
+
+    ```hot
+    ::uri/decode-query("city=Salt+Lake+City&days=3")
+    // {city: "Salt Lake City", days: "3"}
+    ```
+    """
+}
+fn (query: Str): Map {
+    call-lib(::hot::uri/decode-query, [query])
+}
+
+
+parse
+meta {
+    doc: """
+    Parse a URI string into a Uri typed map.
+
+    **Example**
+
+    ```hot
+    uri ::uri/parse("https://user:pass@example.com:8080/path?q=1#frag")
+    uri.scheme    // "https"
+    uri.host      // "example.com"
+    uri.port      // 8080
+    ```
+    """
+}
+fn (uri: Str): Uri {
+    call-lib(::hot::uri/parse, [uri])
+}
+
+
+build
+meta {
+    doc: """
+    Build a URI string from a map of components.
+    The `query` field can be a Str or a Map (which gets form-encoded).
+
+    **Example**
+
+    ```hot
+    ::uri/build({scheme: "https", host: "example.com", path: "/users", query: {active: true}})
+    // "https://example.com/users?active=true"
+    ```
+    """
+}
+fn (parts: Map): Str {
+    call-lib(::hot::uri/build, [parts])
+}
+
+
+join
+meta {
+    doc: """
+    Join URI path segments against a base URI.
+    Also supports RFC 3986 relative reference resolution.
+
+    **Example**
+
+    ```hot
+    ::uri/join("https://api.example.com", "users", "123")
+    // "https://api.example.com/users/123"
+
+    ::uri/join("https://example.com/a/b", "../c")
+    // "https://example.com/c"
+    ```
+    """
+}
+fn (base: Str, part1: Str): Str {
+    call-lib(::hot::uri/join, [base, part1])
+},
+(base: Str, part1: Str, part2: Str): Str {
+    call-lib(::hot::uri/join, [base, part1, part2])
+},
+(base: Str, part1: Str, part2: Str, part3: Str): Str {
+    call-lib(::hot::uri/join, [base, part1, part2, part3])
+}
+
+
+is-valid
+meta {
+    doc: """
+    Check if a string is a valid URI.
+
+    **Example**
+
+    ```hot
+    ::uri/is-valid("https://example.com")  // true
+    ::uri/is-valid("://broken")            // false
+    ```
+    """
+}
+fn (uri: Str): Bool {
+    call-lib(::hot::uri/is-valid, [uri])
+}

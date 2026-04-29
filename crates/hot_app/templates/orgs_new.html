@@ -1,0 +1,93 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2 sm:py-4 px-2 sm:px-0">
+    <div class="max-w-2xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 sm:p-6">
+            {% if error_message != "" %}
+            <div class="mb-4 p-3 bg-red-100 border border-red-500 text-xs sm:text-sm text-red-700 rounded-md">
+                {{ error_message }}
+            </div>
+            {% endif %}
+
+            <form action="/orgs/new" method="post">
+                {% include "_org_handle_fields.html" %}
+
+                {% if !is_local_dev && !plans.is_empty() %}
+                <!-- Billing Period -->
+                <div class="mb-4 sm:mb-6">
+                    <label class="block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                        Billing Period
+                    </label>
+                    <div class="flex gap-4">
+                        <label class="flex items-center">
+                            <input type="radio" name="billing_period" value="monthly"
+                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                                   {% if selected_billing != "annual" %}checked{% endif %}>
+                            <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Monthly</span>
+                        </label>
+                        <label class="flex items-center">
+                            <input type="radio" name="billing_period" value="annual"
+                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                                   {% if selected_billing == "annual" %}checked{% endif %}>
+                            <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-600">(Save ~17%)</span></span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Plan Selection (Hot Cloud only) -->
+                <div class="mb-4 sm:mb-6">
+                    <label class="block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                        Select a Plan <span class="text-red-500">*</span>
+                    </label>
+                    <div class="space-y-3">
+                        {% for plan in plans %}
+                        {# Hide Self-Host plans for now - uncomment when ready to launch #}
+                        {% if plan.plan_id.is_some() && !plan.plan_name.contains("Self-Host") %}
+                        {% let pid = plan.plan_id.as_ref().unwrap() %}
+                        <label class="relative flex items-start p-4 border rounded-lg cursor-pointer hover:border-red-500 transition-colors {% if selected_plan == pid.as_str() %}border-red-500 bg-red-50 dark:bg-red-900/20{% else %}border-gray-300 dark:border-gray-700{% endif %}">
+                            <input type="radio" name="plan_id" value="{{ pid }}"
+                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500 mt-0.5"
+                                   {% if selected_plan == pid.as_str() %}checked{% endif %}
+                                   required>
+                            <div class="ml-3 flex-1">
+                                <div class="flex items-center justify-between">
+                                    <span class="font-medium text-gray-900 dark:text-white">{{ plan.plan_name }}</span>
+                                    <span class="font-semibold text-gray-900 dark:text-white">
+                                        {% if plan.base_price_monthly_cents == 0 %}Free{% else %}${{ plan.monthly_price_dollars() }}/mo{% endif %}
+                                    </span>
+                                </div>
+                            </div>
+                        </label>
+                        {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
+                    <p class="text-xs sm:text-sm text-blue-800 dark:text-blue-200">
+                        After creating your organization, you'll continue to activate your selected plan.
+                    </p>
+                </div>
+                {% endif %}
+
+                <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                    <a href="/orgs" class="inline-flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-xs sm:text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-200">
+                        Cancel
+                    </a>
+                    <button type="submit" class="inline-flex items-center justify-center px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                        </svg>
+                        {% if !is_local_dev && !plans.is_empty() %}
+                        Create Organization & Continue
+                        {% else %}
+                        Create Organization
+                        {% endif %}
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

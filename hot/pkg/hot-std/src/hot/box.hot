@@ -1,0 +1,448 @@
+::hot::box ns
+meta {
+    doc: """Run containers from Hot code as async tasks. Supports Docker and Kata/Firecracker backends.""",
+    no-doc: true
+}
+
+// Hot Box - Run containers from Hot code
+//
+// Backend: configurable via hot.box.backend ("docker" or "firecracker")
+// - Docker: uses bollard, works on Mac/Linux/Windows
+// - Firecracker: microVM isolation via Kata + containerd, Linux with KVM only
+//
+// Security features:
+// - Image denylist (dangerous images blocked, everything else allowed)
+// - Internet access by default (configurable with network: "none")
+// - Writable root filesystem by default (configurable with writable: false)
+// - Resource limits via named size presets (nano → 4xlarge)
+// - Per-task file server for hot:// storage access
+
+// ============================================================================
+// Types
+// ============================================================================
+
+BoxSize
+meta {
+    doc: """
+    Named container size presets. Each size maps to a fixed resource profile
+    and a billing multiplier (compute unit seconds).
+
+    | Size | Memory | CPU | Tmp | Disk | CUS/min |
+    |------|--------|-----|-----|------|---------|
+    | `"nano"` | 64 MB | 10% | 32 MB | 256 MB | 15 |
+    | `"micro"` | 128 MB | 25% | 64 MB | 512 MB | 30 |
+    | `"small"` | 256 MB | 25% | 128 MB | 1 GB | 60 |
+    | `"medium"` | 512 MB | 50% | 256 MB | 5 GB | 120 |
+    | `"large"` | 1 GB | 75% | 500 MB | 10 GB | 240 |
+    | `"xlarge"` | 2 GB | 100% | 1 GB | 20 GB | 480 |
+    | `"2xlarge"` | 4 GB | 100% | 2 GB | 50 GB | 960 |
+    | `"4xlarge"` | 8 GB | 100% | 4 GB | 50 GB | 1920 |
+
+    **Example**
+
+    ```hot
+    // Simple curl — use nano
+    ::box/start(BoxConf({"image": "alpine", "cmd": ["curl", "-s", url], "size": "nano"}))
+
+    // ML inference — use large
+    ::box/start(BoxConf({"image": "pytorch:latest", "size": "large"}))
+    ```
+    """
+}
+type "nano" | "micro" | "small" | "medium" | "large" | "xlarge" | "2xlarge" | "4xlarge"
+
+BoxNetwork
+meta {
+    doc: """
+    Network access mode for a container.
+
+    - `"internet"` — outbound internet access via bridge networking (default)
+    - `"none"` — no network access
+    """
+}
+type "none" | "internet"
+
+BoxConf
+meta {
+    doc: """
+    Configuration for starting a container task.
+
+    **Fields**
+
+    - `image` — Docker/OCI image to run (required)
+    - `size` — Container size preset (default: `"small"`). See `BoxSize` for available sizes.
+    - `cmd` — Command and arguments as a Vec (optional, mutually exclusive with `script`)
+    - `script` — Shell script to execute (optional, mutually exclusive with `cmd`).
+      Written to `/tmp/hot-run.sh` and executed with `sh -ex`. Each line runs
+      as a separate command; execution stops on the first failure, and `stderr`
+      shows each command before it runs (via `-x`), so you can tell exactly
+      which step failed.
+    - `env` — Environment variables (optional)
+    - `timeout` — Timeout in seconds (overrides size default, system max: 86400)
+    - `network` — `"internet"` (default) or `"none"`
+    - `tmp-size` — `/tmp` tmpfs size in MB (overrides size default)
+    - `disk-size` — `/data` writable disk in MB (overrides size default)
+    - `memory` — Container memory in MB (overrides size default)
+    - `mounts` — Vec of `BoxMount` records that materialize project resources
+      (declared via `hot.project.<x>.resources.paths`) into the container
+      filesystem. Mounts are read-only; populated from the build manifest
+      (production) or directly from disk (dev mode). The `resource` field is
+      a path relative to a configured resource root; the `dest` field is the
+      absolute destination path inside the container.
+
+    Individual resource fields override the values from the size preset.
+    If no `size` is specified, defaults to `"small"`.
+
+    Only one of `cmd` or `script` may be specified. Both run with `sh -ex`
+    for error tracing (stop on first failure, trace each command to stderr).
+
+    **Examples**
+
+    ```hot
+    // Quick CLI task with cmd
+    ::box/start(BoxConf({
+        image: "alpine:latest",
+        cmd: ["curl", "-s", "https://api.example.com"],
+        size: "nano",
+    }))
+
+    // Multi-step task with script — each line is a command
+    my-script "pip install requests\npython -c \"import requests; print('ok')\""
+    ::box/start(BoxConf({
+        image: "python:3.13-alpine",
+        script: my-script,
+    }))
+    ```
+    """
+}
+type {
+    image: Str,
+    size: BoxSize?,
+    cmd: Vec<Str>?,
+    script: Str?,
+    env: Map<Str, Str>?,
+    timeout: Int?,
+    network: BoxNetwork?,
+    tmp-size: Int?,
+    disk-size: Int?,
+    memory: Int?,
+    mounts: Vec<BoxMount>?
+}
+
+BoxMount
+meta {
+    doc: """
+    A single read-only mount of a project resource into the container.
+
+    **Fields**
+    - `resource` — path relative to a configured resource root, e.g.
+      `"fetcher/index.js"` or `"prompts/system.md"`. The path is resolved
+      against the project's `resources.paths` (classpath order).
+    - `dest` — absolute path inside the container where the file should
+      appear. Parent directories are created as needed.
+
+    **Example**
+
+    ```hot
+    ::box/start(BoxConf({
+        image: "node:20-alpine",
+        cmd: ["node", "/app/index.js"],
+        mounts: [
+            BoxMount({resource: "fetcher/index.js", dest: "/app/index.js"}),
+        ],
+    }))
+    ```
+    """
+}
+type {
+    resource: Str,
+    dest: Str
+}
+
+BoxSizeProfile
+meta {
+    doc: """
+    Resource profile for a single size preset. Returned by `sizes()`.
+
+    **Fields**
+    - `name` — size name (e.g. `"nano"`, `"small"`)
+    - `memory-mb` — memory allocation in MB
+    - `cpu-pct` — CPU percentage (10–100)
+    - `tmp-mb` — `/tmp` tmpfs size in MB
+    - `disk-mb` — `/data` disk size in MB
+    - `timeout-secs` — default timeout in seconds
+    - `cus-multiplier` — CUS billing multiplier (base: small = 1.0)
+    """
+}
+type {
+    name: BoxSize,
+    memory-mb: Int,
+    cpu-pct: Int,
+    tmp-mb: Int,
+    disk-mb: Int,
+    timeout-secs: Int,
+    cus-multiplier: Dec
+}
+
+BoxQuota
+meta {
+    doc: """
+    Quota information for container task usage. Returned by `quota()`.
+
+    **Fields**
+
+    - `tasks-remaining` — tasks left this period (-1 = unlimited, 0 = exhausted)
+    - `minutes-remaining` — wall-clock minutes left this period (-1 = unlimited)
+    - `compute-units-remaining` — CUS left this period (-1 = unlimited)
+    - `compute-units-used` — CUS consumed this period
+    - `concurrent-remaining` — concurrent container slots available (-1 = unlimited)
+    - `overage` — true if usage exceeds included amount (paid plans only)
+    """
+}
+type {
+    tasks-remaining: Int,
+    minutes-remaining: Int,
+    compute-units-remaining: Int,
+    compute-units-used: Int,
+    concurrent-remaining: Int,
+    overage: Bool
+}
+
+BoxImagePolicy
+meta {
+    doc: """
+    Container image policy info. Returned by `image-policy()`.
+
+    Hot uses an open policy with a denylist — all images are allowed except
+    those matching denied names or prefixes.
+
+    **Fields**
+    - `policy` — always `"open"` (denylist model)
+    - `denied` — exact image names that are blocked
+    - `denied-prefixes` — image name prefixes that are blocked
+    """
+}
+type {
+    policy: Str,
+    denied: Vec<Str>,
+    denied-prefixes: Vec<Str>
+}
+
+BoxStats
+meta {
+    doc: """
+    Container execution statistics. Returned by `stats()`.
+
+    **Fields**
+    - `enabled` — whether box is enabled in the current configuration
+    """
+}
+type {
+    enabled: Bool
+}
+
+// ============================================================================
+// Functions
+// ============================================================================
+
+enabled
+meta {
+    doc: """
+    Check whether box (container execution) is enabled.
+
+    Returns `true` if `hot.box.enabled` is set to `true` in configuration,
+    `false` otherwise.
+
+    **Example**
+
+    ```hot
+    if(::hot::box/enabled(), "Box ready", "Box not available")
+    ```
+    """
+}
+fn (): Bool {
+    call-lib(::hot::box/enabled, [])
+}
+
+start
+meta {
+    doc: """
+    Start a container as an async task. Returns immediately with a TaskInfo containing the task ID.
+
+    The container runs asynchronously in the task worker using the configured backend (Docker or Kata/Firecracker). Results are stored in the task record and can be retrieved via the task system.
+
+    **Example**
+
+    ```hot
+    // Start a container task
+    task ::hot::box/start(BoxConf({
+        "image": "python:3.13-alpine",
+        "cmd": ["python", "-c", "print('Hello from container')"]
+    }))
+    // task.id — the task ID
+    // task.stream-id — the stream ID
+
+    // Start with environment variables and custom limits
+    task ::hot::box/start(BoxConf({
+        "image": "node:22-alpine",
+        "cmd": ["node", "-e", "console.log(process.env.NAME)"],
+        "env": {"NAME": "Hot"},
+        "size": "medium",
+    }))
+    ```
+    """
+}
+fn (input: BoxConf): ::hot::task/TaskInfo {
+    call-lib(::hot::box/start, [input])
+}
+
+sizes
+meta {
+    doc: """
+    Get all available container size presets with their resource profiles.
+
+    Returns a `Vec<BoxSizeProfile>` — one entry per size from `nano` to `4xlarge`.
+
+    **Example**
+
+    ```hot
+    all-sizes ::hot::box/sizes()
+    // [{name: "nano", memory-mb: 64, cpu-pct: 10, ...}, ...]
+
+    // Find sizes with at least 1 GB memory
+    big filter(::hot::box/sizes(), gte(%.memory-mb, 1024))
+    ```
+    """
+}
+fn (): Vec<BoxSizeProfile> {
+    call-lib(::hot::box/sizes, [])
+}
+
+image-policy
+meta {
+    doc: """
+    Get the container image policy.
+
+    Hot uses an open policy — all images are allowed except those matching
+    the denylist. Returns a `BoxImagePolicy`.
+
+    **Example**
+
+    ```hot
+    policy ::hot::box/image-policy()
+    policy.policy     // "open"
+    policy.denied     // ["docker", "docker:dind", ...]
+    policy.denied-prefixes // ["docker:", "rancher/", ...]
+    ```
+    """
+}
+fn (): BoxImagePolicy {
+    call-lib(::hot::box/allowed-images, [])
+}
+
+stats
+meta {
+    doc: """
+    Get container execution statistics.
+
+    **Example**
+
+    ```hot
+    s ::hot::box/stats()
+    s.enabled  // true or false
+    ```
+    """
+}
+fn (): BoxStats {
+    call-lib(::hot::box/stats, [])
+}
+
+quota
+meta {
+    doc: """
+    Check remaining container task quota for the current organization.
+
+    Returns a `BoxQuota` with remaining tasks, minutes, compute units,
+    concurrent slots, and overage status.
+
+    **Example**
+
+    ```hot
+    q ::hot::box/quota()
+    q.compute-units-remaining  // 47660
+    q.compute-units-used       // 2340
+    if(eq(q.tasks-remaining, 0), fail("No container tasks remaining"), "OK")
+    ```
+    """
+}
+fn (): BoxQuota {
+    call-lib(::hot::box/quota, [])
+}
+
+BoxLimits
+meta {
+    doc: """
+    Resolved container resource limits for the current org's plan.
+
+    Reflects the maximum resources available after plan and org feature
+    resolution. Use this to make runtime decisions about container sizing
+    (e.g. choosing a Whisper model based on available memory).
+
+    **Fields**
+    - `memory-mb` — Maximum container memory in MB (-1 = unlimited)
+    - `cpu-pct` — Maximum CPU percentage (10–100, -1 = unlimited)
+    - `tmp-mb` — Maximum `/tmp` tmpfs size in MB (-1 = unlimited)
+    - `disk-mb` — Maximum `/data` disk size in MB (-1 = unlimited)
+    - `timeout-secs` — Maximum container timeout in seconds (-1 = unlimited)
+    - `network` — Whether internet access is allowed
+
+    **Example**
+
+    ```hot
+    limits ::hot::box/limits()
+    limits.memory-mb   // 512
+    limits.cpu-pct     // 50
+    limits.network     // false
+    ```
+    """
+}
+type {
+    memory-mb: Int,
+    cpu-pct: Int,
+    tmp-mb: Int,
+    disk-mb: Int,
+    timeout-secs: Int,
+    network: Bool
+}
+
+limits
+meta {
+    doc: """
+    Get the resolved container resource limits for the current org's plan.
+
+    Returns a `BoxLimits` with the maximum resources the org can use per
+    container, based on their subscription plan and any org-level overrides.
+
+    Use this for runtime decisions where static `meta {box: {min-size: ...}}`
+    declarations aren't sufficient (e.g. selecting a model size based on
+    available memory).
+
+    **Example**
+
+    ```hot
+    limits ::hot::box/limits()
+
+    // Choose Whisper model based on available memory
+    model cond {
+        gte(limits.memory-mb, 8192) => { "large" }
+        gte(limits.memory-mb, 4096) => { "medium" }
+        gte(limits.memory-mb, 2048) => { "small" }
+        gte(limits.memory-mb, 1024) => { "base" }
+        => { fail("Whisper requires at least 1 GB memory") }
+    }
+    ```
+    """
+}
+fn (): BoxLimits {
+    call-lib(::hot::box/limits, [])
+}

@@ -1,0 +1,34 @@
+::supabase::admin::integration::organizations ns
+meta ["test"]
+
+::orgs ::supabase::admin::organizations
+
+test-list-organizations
+meta ["test"]
+fn () {
+  orgs ::orgs/list-organizations()
+  assert(is-vec(orgs), "should return a vec of organizations")
+  assert(not(is-empty(orgs)), "should have at least one organization")
+}
+
+test-get-organization
+meta ["test"]
+fn () {
+  orgs ::orgs/list-organizations()
+  slug first(orgs).slug
+
+  org ::orgs/get-organization(slug)
+  assert(org.id, "org should have an id")
+  assert(org.name, "org should have a name")
+}
+
+test-list-members
+meta ["test"]
+fn () {
+  orgs ::orgs/list-organizations()
+  slug first(orgs).slug
+
+  members ::orgs/list-members(slug)
+  assert(is-vec(members), "should return a vec of members")
+  assert(not(is-empty(members)), "should have at least one member")
+}

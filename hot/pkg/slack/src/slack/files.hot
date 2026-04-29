@@ -1,0 +1,328 @@
+::slack::files ns
+
+api-request ::slack::api/request
+HttpError ::slack::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Files
+// ============================================================================
+
+FilesDeleteRequest type {
+  file: Str
+}
+
+FilesDeleteResponse type {
+  ok: Bool?,
+  error: Str?
+}
+
+
+files-delete
+meta {
+    doc: """POST /files.delete - Delete a file. The file is permanently removed and cannot be recovered."""
+}
+fn (request: FilesDeleteRequest): FilesDeleteResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.delete`, {}, request)
+  if(is-ok-response(response), FilesDeleteResponse(response.body), err(HttpError(response)))
+}
+
+FilesInfoRequest type {
+  file: Str,
+  count: Int?,
+  page: Int?,
+  limit: Int?,
+  cursor: Str?
+}
+
+FilesInfoResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?,
+  comments: Vec<Map>?,
+  paging: Map?,
+  response_metadata: Map?
+}
+
+
+files-info
+meta {
+    doc: """GET /files.info - Get information about a file. Returns the file metadata, comments, and paging info."""
+}
+fn (request: FilesInfoRequest): FilesInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/files.info?file=${request.file}&count=${or(request.count, "")}&page=${or(request.page, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`)
+  if(is-ok-response(response), FilesInfoResponse(response.body), err(HttpError(response)))
+}
+
+FilesListRequest type {
+  user: Str?,
+  channel: Str?,
+  ts_from: Str?,
+  ts_to: Str?,
+  types: Str?,
+  count: Int?,
+  page: Int?,
+  show_files_hidden_by_limit: Bool?
+}
+
+FilesListResponse type {
+  ok: Bool?,
+  error: Str?,
+  files: Vec<Map>?,
+  paging: Map?
+}
+
+
+files-list
+meta {
+    doc: """
+POST /files.list - List files within a team. Filter by user, channel, timestamp range, or file type. Results are paginated.
+
+**Example**
+
+```hot
+response ::slack::files/files-list(::slack::files/FilesListRequest({
+  count: 5
+}))
+response.files  // => [{id: "F1234", name: "report.pdf", ...}, ...]
+```
+"""
+}
+fn (request: FilesListRequest): FilesListResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.list`, {}, request)
+  if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+}
+
+FilesRevokePublicURLRequest type {
+  file: Str
+}
+
+FilesRevokePublicURLResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-revoke-public-url
+meta {
+    doc: """POST /files.revokePublicURL - Revoke public sharing of a file. The public URL will no longer be accessible."""
+}
+fn (request: FilesRevokePublicURLRequest): FilesRevokePublicURLResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.revokePublicURL`, {}, request)
+  if(is-ok-response(response), FilesRevokePublicURLResponse(response.body), err(HttpError(response)))
+}
+
+FilesSharedPublicURLRequest type {
+  file: Str
+}
+
+FilesSharedPublicURLResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-shared-public-url
+meta {
+    doc: """POST /files.sharedPublicURL - Enable public sharing of a file. Returns the file object with the public permalink."""
+}
+fn (request: FilesSharedPublicURLRequest): FilesSharedPublicURLResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.sharedPublicURL`, {}, request)
+  if(is-ok-response(response), FilesSharedPublicURLResponse(response.body), err(HttpError(response)))
+}
+
+FilesUploadRequest type {
+  channels: Str?,
+  content: Str?,
+  file: Str?,
+  filename: Str?,
+  filetype: Str?,
+  initial_comment: Str?,
+  thread_ts: Str?,
+  title: Str?
+}
+
+FilesUploadResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-upload
+meta {
+    doc: """POST /files.upload - Upload a file. Provide `content` for text-based uploads or `file` for binary files. Optionally share to channels and add an initial comment."""
+}
+fn (request: FilesUploadRequest): FilesUploadResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.upload`, {}, request)
+  if(is-ok-response(response), FilesUploadResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Files Comments (deprecated but still available)
+// ============================================================================
+
+FilesCommentsDeleteRequest type {
+  file: Str,
+  id: Str
+}
+
+FilesCommentsDeleteResponse type {
+  ok: Bool?,
+  error: Str?
+}
+
+
+files-comments-delete
+meta {
+    doc: """POST /files.comments.delete - Delete a file comment. This API is deprecated but still available."""
+}
+fn (request: FilesCommentsDeleteRequest): FilesCommentsDeleteResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.comments.delete`, {}, request)
+  if(is-ok-response(response), FilesCommentsDeleteResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Remote Files
+// ============================================================================
+
+FilesRemoteAddRequest type {
+  external_id: Str,
+  external_url: Str,
+  title: Str,
+  filetype: Str?,
+  indexable_file_contents: Str?,
+  preview_image: Str?
+}
+
+FilesRemoteAddResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-remote-add
+meta {
+    doc: """POST /files.remote.add - Add a remote file. Register an external file with Slack by providing an `external_id`, `external_url`, and `title`."""
+}
+fn (request: FilesRemoteAddRequest): FilesRemoteAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.remote.add`, {}, request)
+  if(is-ok-response(response), FilesRemoteAddResponse(response.body), err(HttpError(response)))
+}
+
+FilesRemoteInfoRequest type {
+  file: Str?,
+  external_id: Str?
+}
+
+FilesRemoteInfoResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-remote-info
+meta {
+    doc: """GET /files.remote.info - Retrieve information about a remote file. Look up by Slack `file` ID or `external_id`."""
+}
+fn (request: FilesRemoteInfoRequest): FilesRemoteInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/files.remote.info?file=${or(request.file, "")}&external_id=${or(request.external_id, "")}`)
+  if(is-ok-response(response), FilesRemoteInfoResponse(response.body), err(HttpError(response)))
+}
+
+FilesRemoteListRequest type {
+  channel: Str?,
+  ts_from: Str?,
+  ts_to: Str?,
+  limit: Int?,
+  cursor: Str?
+}
+
+FilesRemoteListResponse type {
+  ok: Bool?,
+  error: Str?,
+  files: Vec<Map>?,
+  response_metadata: Map?
+}
+
+
+files-remote-list
+meta {
+    doc: """GET /files.remote.list - List remote files. Filter by channel and timestamp range. Supports cursor-based pagination."""
+}
+fn (request: FilesRemoteListRequest): FilesRemoteListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/files.remote.list?channel=${or(request.channel, "")}&ts_from=${or(request.ts_from, "")}&ts_to=${or(request.ts_to, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`)
+  if(is-ok-response(response), FilesRemoteListResponse(response.body), err(HttpError(response)))
+}
+
+FilesRemoteRemoveRequest type {
+  file: Str?,
+  external_id: Str?
+}
+
+FilesRemoteRemoveResponse type {
+  ok: Bool?,
+  error: Str?
+}
+
+
+files-remote-remove
+meta {
+    doc: """POST /files.remote.remove - Remove a remote file. Identify the file by Slack `file` ID or `external_id`."""
+}
+fn (request: FilesRemoteRemoveRequest): FilesRemoteRemoveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.remote.remove`, {}, request)
+  if(is-ok-response(response), FilesRemoteRemoveResponse(response.body), err(HttpError(response)))
+}
+
+FilesRemoteShareRequest type {
+  file: Str?,
+  external_id: Str?,
+  channels: Str
+}
+
+FilesRemoteShareResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-remote-share
+meta {
+    doc: """GET /files.remote.share - Share a remote file into a channel. Pass a comma-separated list of channel IDs in `channels`."""
+}
+fn (request: FilesRemoteShareRequest): FilesRemoteShareResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/files.remote.share?file=${or(request.file, "")}&external_id=${or(request.external_id, "")}&channels=${request.channels}`)
+  if(is-ok-response(response), FilesRemoteShareResponse(response.body), err(HttpError(response)))
+}
+
+FilesRemoteUpdateRequest type {
+  file: Str?,
+  external_id: Str?,
+  external_url: Str?,
+  title: Str?,
+  filetype: Str?,
+  indexable_file_contents: Str?,
+  preview_image: Str?
+}
+
+FilesRemoteUpdateResponse type {
+  ok: Bool?,
+  error: Str?,
+  file: Map?
+}
+
+
+files-remote-update
+meta {
+    doc: """POST /files.remote.update - Update a remote file. Identify by Slack `file` ID or `external_id`, then update the URL, title, or other fields."""
+}
+fn (request: FilesRemoteUpdateRequest): FilesRemoteUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/files.remote.update`, {}, request)
+  if(is-ok-response(response), FilesRemoteUpdateResponse(response.body), err(HttpError(response)))
+}

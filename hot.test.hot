@@ -1,0 +1,119 @@
+::hot::conf ns
+
+hot.set.profile "local-dev"
+hot.set.project "hot-dev"
+
+hot.profile.local-dev.user.email "local@hot.dev"
+hot.profile.local-dev.org.slug "local"
+hot.profile.local-dev.env.name "development"
+
+hot.project.hot-dev.src.paths ["./hot/src"]
+// Note: ./hot/pkg/hot-ai/test and ./hot/pkg/mcp/test are intentionally NOT
+// included here — running them inside the fully-loaded hot-dev process
+// produces cross-test contamination (skill registries, MCP globals, etc.).
+// They run instead via the isolated pkg-test-hot-ai / pkg-test-mcp projects
+// defined below, mirroring the layout in hot.hot.
+hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/telegram-agent/test"]
+hot.project.hot-dev.test.capture true
+hot.project.hot-dev.resources.paths [
+    "./hot/src/telegram-agent/resources",
+    "./hot/pkg/hot-std/test/fixtures/resources",
+]
+// Keep codegen scoped to Team Brain resources so the hot-std customer-tone
+// fixture stays a resource fixture rather than generated project source.
+hot.project.hot-dev.skills.codegen.enabled true
+hot.project.hot-dev.skills.codegen.paths ["./hot/src/telegram-agent/resources"]
+hot.project.hot-dev.deps {
+
+    // AI types package
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+
+    // MCP packages
+    "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
+    "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
+
+    // AI packages used by checked demos
+    "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" },
+
+    // Communication packages used by checked demos
+    "hot.dev/slack": { "local": "./hot/pkg/slack" },
+    "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
+
+    // Box packages
+    "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
+    "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
+    "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
+    "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
+    "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
+    "hot.dev/sox": { "local": "./hot/pkg/sox" },
+    "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
+    "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
+}
+
+hot.db.uri "sqlite:./.hot/hot.db"
+hot.db.schema "hot"
+
+hot.file.storage.type "local"
+hot.file.storage.path "./.hot/file"
+
+hot.log.level "info"
+hot.log.target "stdout"
+hot.log.dir ".hot/log"
+
+hot.redis.uri ""
+
+hot.api.port 4681
+
+hot.app.port 4680
+
+hot.cache.enabled false
+hot.cache.format "zstdjson"
+
+hot.check.format "pretty"
+hot.check.raw false
+hot.check.include-tests false
+
+hot.emitter.type "none"
+
+hot.engine.threads 4
+
+hot.queue.type "memory"
+
+hot.scheduler.backfill false
+hot.scheduler.sync-interval-seconds 30
+
+hot.serialization.type "json"
+
+hot.lsp.transport "stdio"
+
+hot.watch.debounce 200
+hot.watch.include-tests false
+
+hot.worker.threads 2
+
+hot.daemon false
+
+// =============================================================================
+// Package Unit Test Projects
+// =============================================================================
+// Each package's tests run in their own isolated project so global state
+// (skill registries, MCP handlers, type implementations, etc.) defined by
+// other packages can't bleed into them. Mirrors the layout in hot.hot.
+
+// hot-ai unit tests
+hot.project.pkg-test-hot-ai.src.paths ["./hot/pkg/hot-ai/src"]
+hot.project.pkg-test-hot-ai.test.paths ["./hot/pkg/hot-ai/test"]
+hot.project.pkg-test-hot-ai.test.capture true
+hot.project.pkg-test-hot-ai.deps {
+    "hot.dev/hot-std": { "local": "./hot/pkg/hot-std" }
+}
+
+// mcp unit tests (pure-Hot, no network required)
+hot.project.pkg-test-mcp.src.paths ["./hot/pkg/mcp/src"]
+hot.project.pkg-test-mcp.test.paths ["./hot/pkg/mcp/test"]
+hot.project.pkg-test-mcp.test.capture true
+hot.project.pkg-test-mcp.deps {
+    "hot.dev/hot-ai":   { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" }
+}

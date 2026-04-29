@@ -1,0 +1,204 @@
+::hot::test::mime ns
+meta ["test"]
+
+// ============================================================================
+// from-ext tests
+// ============================================================================
+
+test-from-ext-png
+meta ["test"] fn () {
+    result ::hot::mime/from-ext("png")
+    assert-eq("image/png", result, "from-ext('png') should return 'image/png'")
+}
+
+test-from-ext-with-dot
+meta ["test"] fn () {
+    result ::hot::mime/from-ext(".jpg")
+    assert-eq("image/jpeg", result, "from-ext('.jpg') should handle leading dot")
+}
+
+test-from-ext-video
+meta ["test"] fn () {
+    result ::hot::mime/from-ext("mp4")
+    assert-eq("video/mp4", result, "from-ext('mp4') should return 'video/mp4'")
+}
+
+test-from-ext-audio
+meta ["test"] fn () {
+    result ::hot::mime/from-ext("mp3")
+    assert-eq("audio/mpeg", result, "from-ext('mp3') should return 'audio/mpeg'")
+}
+
+test-from-ext-unknown
+meta ["test"] fn () {
+    result ::hot::mime/from-ext("xyz123unknown")
+    assert-eq(null, result, "from-ext for unknown extension should return null")
+}
+
+// ============================================================================
+// from-path tests
+// ============================================================================
+
+test-from-path-simple
+meta ["test"] fn () {
+    result ::hot::mime/from-path("photo.png")
+    assert-eq("image/png", result, "from-path('photo.png') should return 'image/png'")
+}
+
+test-from-path-with-directory
+meta ["test"] fn () {
+    result ::hot::mime/from-path("/path/to/video.mp4")
+    assert-eq("video/mp4", result, "from-path with directory should work")
+}
+
+test-from-path-json
+meta ["test"] fn () {
+    result ::hot::mime/from-path("config.json")
+    assert-eq("application/json", result, "from-path('config.json') should return 'application/json'")
+}
+
+// ============================================================================
+// to-ext tests
+// ============================================================================
+
+test-to-ext-image
+meta ["test"] fn () {
+    result ::hot::mime/to-ext("image/png")
+    assert-eq("png", result, "to-ext('image/png') should return 'png'")
+}
+
+test-to-ext-video
+meta ["test"] fn () {
+    result ::hot::mime/to-ext("video/mp4")
+    assert-eq("mp4", result, "to-ext('video/mp4') should return 'mp4'")
+}
+
+test-to-ext-unknown
+meta ["test"] fn () {
+    result ::hot::mime/to-ext("application/x-unknown-mime-type")
+    assert-eq(null, result, "to-ext for unknown MIME type should return null")
+}
+
+// ============================================================================
+// to-exts tests
+// ============================================================================
+
+test-to-exts-jpeg
+meta ["test"] fn () {
+    result ::hot::mime/to-exts("image/jpeg")
+    assert(is-vec(result), "to-exts should return a vector")
+    assert(gt(length(result), 0), "to-exts('image/jpeg') should return at least one extension")
+}
+
+test-to-exts-unknown
+meta ["test"] fn () {
+    result ::hot::mime/to-exts("application/x-unknown-mime-type")
+    assert(is-vec(result), "to-exts should return a vector even for unknown")
+    assert-eq(0, length(result), "to-exts for unknown should return empty vector")
+}
+
+// ============================================================================
+// Category check tests
+// ============================================================================
+
+test-is-image-true
+meta ["test"] fn () {
+    assert(::hot::mime/is-image("image/png"), "is-image should return true for 'image/png'")
+    assert(::hot::mime/is-image("image/jpeg"), "is-image should return true for 'image/jpeg'")
+    assert(::hot::mime/is-image("image/gif"), "is-image should return true for 'image/gif'")
+}
+
+test-is-image-false
+meta ["test"] fn () {
+    assert(not(::hot::mime/is-image("video/mp4")), "is-image should return false for 'video/mp4'")
+    assert(not(::hot::mime/is-image("audio/mpeg")), "is-image should return false for 'audio/mpeg'")
+}
+
+test-is-audio-true
+meta ["test"] fn () {
+    assert(::hot::mime/is-audio("audio/mpeg"), "is-audio should return true for 'audio/mpeg'")
+    assert(::hot::mime/is-audio("audio/wav"), "is-audio should return true for 'audio/wav'")
+}
+
+test-is-audio-false
+meta ["test"] fn () {
+    assert(not(::hot::mime/is-audio("image/png")), "is-audio should return false for 'image/png'")
+    assert(not(::hot::mime/is-audio("video/mp4")), "is-audio should return false for 'video/mp4'")
+}
+
+test-is-video-true
+meta ["test"] fn () {
+    assert(::hot::mime/is-video("video/mp4"), "is-video should return true for 'video/mp4'")
+    assert(::hot::mime/is-video("video/webm"), "is-video should return true for 'video/webm'")
+}
+
+test-is-video-false
+meta ["test"] fn () {
+    assert(not(::hot::mime/is-video("image/png")), "is-video should return false for 'image/png'")
+    assert(not(::hot::mime/is-video("audio/mpeg")), "is-video should return false for 'audio/mpeg'")
+}
+
+test-is-text-true
+meta ["test"] fn () {
+    assert(::hot::mime/is-text("text/plain"), "is-text should return true for 'text/plain'")
+    assert(::hot::mime/is-text("text/html"), "is-text should return true for 'text/html'")
+}
+
+test-is-text-false
+meta ["test"] fn () {
+    assert(not(::hot::mime/is-text("image/png")), "is-text should return false for 'image/png'")
+    assert(not(::hot::mime/is-text("application/json")), "is-text should return false for 'application/json'")
+}
+
+test-is-application-true
+meta ["test"] fn () {
+    assert(::hot::mime/is-application("application/json"), "is-application should return true for 'application/json'")
+    assert(::hot::mime/is-application("application/pdf"), "is-application should return true for 'application/pdf'")
+}
+
+test-is-application-false
+meta ["test"] fn () {
+    assert(not(::hot::mime/is-application("text/plain")), "is-application should return false for 'text/plain'")
+    assert(not(::hot::mime/is-application("image/png")), "is-application should return false for 'image/png'")
+}
+
+// ============================================================================
+// major-type / minor-type tests
+// ============================================================================
+
+test-major-type
+meta ["test"] fn () {
+    assert-eq("image", ::hot::mime/major-type("image/png"), "major-type should extract 'image'")
+    assert-eq("video", ::hot::mime/major-type("video/mp4"), "major-type should extract 'video'")
+    assert-eq("application", ::hot::mime/major-type("application/json"), "major-type should extract 'application'")
+}
+
+test-minor-type
+meta ["test"] fn () {
+    assert-eq("png", ::hot::mime/minor-type("image/png"), "minor-type should extract 'png'")
+    assert-eq("mp4", ::hot::mime/minor-type("video/mp4"), "minor-type should extract 'mp4'")
+    assert-eq("json", ::hot::mime/minor-type("application/json"), "minor-type should extract 'json'")
+}
+
+test-minor-type-with-params
+meta ["test"] fn () {
+    result ::hot::mime/minor-type("text/plain; charset=utf-8")
+    assert-eq("plain", result, "minor-type should strip parameters")
+}
+
+// ============================================================================
+// is-media tests
+// ============================================================================
+
+test-is-media-true
+meta ["test"] fn () {
+    assert(::hot::mime/is-media("image/png"), "is-media should return true for images")
+    assert(::hot::mime/is-media("audio/mpeg"), "is-media should return true for audio")
+    assert(::hot::mime/is-media("video/mp4"), "is-media should return true for video")
+}
+
+test-is-media-false
+meta ["test"] fn () {
+    assert(not(::hot::mime/is-media("text/plain")), "is-media should return false for text")
+    assert(not(::hot::mime/is-media("application/json")), "is-media should return false for application")
+}

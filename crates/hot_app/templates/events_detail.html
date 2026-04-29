@@ -1,0 +1,132 @@
+{% extends "private_layout.html" %}
+
+{% block sse_data_attrs %}data-sse-mode="auto" data-sse-filter-event="{{ event.event_id }}"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
+{% block content %}
+    <!-- Event Summary Header -->
+    <div class="rounded-t-lg p-4 sm:p-6 backdrop-blur-sm border border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+            <!-- Event ID -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Event ID</h3>
+                <p class="text-sm text-gray-900 dark:text-white break-all">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ event.event_id }}" title="{{ event.event_id }}">{{ event.event_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ event.event_id }}" title="Copy {{ event.event_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </p>
+            </div>
+
+            <!-- Event Type -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Event Type</h3>
+                <div class="flex items-center">
+                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ event.event_type }}</span>
+                </div>
+            </div>
+
+            <!-- Status -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Status</h3>
+                <div class="flex items-center">
+                    {% if event.handled %}
+                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Handled</span>
+                    {% else %}
+                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">Unhandled</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Event Time -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Event Time</h3>
+                <p class="text-xs font-semibold">{{ event.event_time }}</p>
+            </div>
+
+            <!-- Created At -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Created At</h3>
+                <p class="text-xs font-semibold">{{ event.created_at }}</p>
+            </div>
+        </div>
+
+        <!-- FN Section (if present) -->
+        {% match event.event_fn %}
+        {% when Some with (fn_str) %}
+        <div class="mt-4">
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">FN</h3>
+            <div class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700">
+                <code class="language-hot text-xs">{{ fn_str }}</code>
+            </div>
+        </div>
+        {% when None %}
+        {% endmatch %}
+
+        <!-- Event Data Section -->
+        <div class="mt-4">
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Event Data</h3>
+            <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700" style="max-height: 9rem; overflow-y: auto;">
+                <button onclick="openEventDataWithFormats()" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-gray-100 dark:bg-gray-800" title="View full event data">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </button>
+                <pre><code class="language-hot text-xs whitespace-pre-wrap">{{ event.event_data }}</code></pre>
+            </div>
+            <!-- Store both formats for toggle support -->
+            <script type="application/json" id="event-data-hot">{{ event.event_data|escape }}</script>
+            <script type="application/json" id="event-data-json">{{ event.event_data_json|escape }}</script>
+        </div>
+
+        <!-- Access Attribution -->
+        {% include "components/access_attribution.html" %}
+    </div>
+
+    <!-- Tabbed Content Area -->
+    <div class="w-full rounded-b-lg backdrop-blur-sm border border-t-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white flex flex-col" style="min-height: 500px;">
+        {% include "components/event_detail_tabs.html" %}
+    </div>
+
+<script>
+// SSE refresh callback - used by the SSE status indicator component
+window.sseRefreshCallback = function() {
+    // Reload the page to show updated status
+    window.location.reload();
+};
+
+// Apply syntax highlighting to FN and Event Data
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof Prism !== 'undefined') {
+        document.querySelectorAll('code.language-hot').forEach(el => {
+            Prism.highlightElement(el);
+        });
+    }
+});
+
+// Open event data modal with both Hot and JSON formats for toggle
+function openEventDataWithFormats() {
+    const hotEl = document.getElementById('event-data-hot');
+    const jsonEl = document.getElementById('event-data-json');
+    if (hotEl && jsonEl) {
+        // Decode HTML entities from script content
+        const hotContent = decodeHtmlEntities(hotEl.textContent);
+        const jsonContent = decodeHtmlEntities(jsonEl.textContent);
+        openContentModalWithFormats('Event Data', hotContent, jsonContent);
+    }
+}
+
+function decodeHtmlEntities(text) {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = text;
+    return textarea.value;
+}
+</script>
+{% endblock %}

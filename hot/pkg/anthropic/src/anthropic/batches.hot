@@ -1,0 +1,174 @@
+::anthropic::batches ns
+meta {
+    doc: """Anthropic Message Batches API - Process large volumes of messages asynchronously with 50% cost reduction."""
+}
+
+api-request ::anthropic::api/request
+HttpError ::anthropic::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// =============================================================================
+// Types
+// =============================================================================
+
+BatchIndividualRequest type {
+    custom_id: Str,
+    params: Any
+}
+
+BatchRequestCounts type {
+    processing: Int,
+    succeeded: Int,
+    errored: Int,
+    canceled: Int,
+    expired: Int
+}
+
+MessageBatch type {
+    id: Str,
+    type: Str,
+    processing_status: Str,
+    request_counts: BatchRequestCounts,
+    ended_at: Str?,
+    created_at: Str,
+    expires_at: Str,
+    archived_at: Str?,
+    cancel_initiated_at: Str?,
+    results_url: Str?
+}
+
+BatchesListResponse type {
+    data: Vec<MessageBatch>,
+    has_more: Bool,
+    first_id: Str?,
+    last_id: Str?
+}
+
+CreateBatchRequest type {
+    requests: Vec<BatchIndividualRequest>
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+create
+meta {
+    doc: """
+    POST /v1/messages/batches - Create a message batch.
+
+    Process up to 100,000 message requests asynchronously with 50% cost reduction.
+
+    **Example**
+
+    ```hot
+    batch ::anthropic::batches/create(CreateBatchRequest({
+        requests: [
+            {
+                custom_id: "req-1",
+                params: {
+                    model: "claude-3-haiku-20240307",
+                    max_tokens: 100,
+                    messages: [{role: "user", content: "Hello!"}]
+                }
+            }
+        ]
+    }))
+    batch.id // => "msgbatch_abc123"
+    ```
+    """
+}
+fn (request: CreateBatchRequest): MessageBatch {
+    response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/batches`, {}, request)
+    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+}
+
+list
+meta {
+    doc: """
+    GET /v1/messages/batches - List message batches.
+
+    Returns a paginated list of your message batches. Optionally pass a `limit`
+    to control page size.
+
+    **Example**
+
+    ```hot
+    // List all batches
+    batches ::anthropic::batches/list()
+    assert(is-vec(batches.data))
+    map(batches.data, %.processing_status)
+
+    // List with a limit
+    batches ::anthropic::batches/list(5)
+    assert(lte(length(batches.data), 5))
+    ```
+    """
+}
+fn
+(): BatchesListResponse {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches`)
+    if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
+},
+(limit: Int): BatchesListResponse {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches?limit=${limit}`)
+    if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    GET /v1/messages/batches/{batch_id} - Retrieve a message batch.
+
+    Returns details about a specific batch.
+
+    **Example**
+
+    ```hot
+    batch ::anthropic::batches/get("batch_abc123")
+    batch.processing_status // => "ended"
+    ```
+    """
+}
+fn (batch_id: Str): MessageBatch {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}`)
+    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+}
+
+cancel
+meta {
+    doc: """
+    POST /v1/messages/batches/{batch_id}/cancel - Cancel a message batch.
+
+    Cancels a batch that is still processing.
+
+    **Example**
+
+    ```hot
+    batch ::anthropic::batches/cancel("batch_abc123")
+    ```
+    """
+}
+fn (batch_id: Str): MessageBatch {
+    response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}/cancel`)
+    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+}
+
+results
+meta {
+    doc: """
+    GET /v1/messages/batches/{batch_id}/results - Get batch results.
+
+    Returns the results of a completed batch as JSONL.
+
+    **Example**
+
+    ```hot
+    results ::anthropic::batches/results("batch_abc123")
+    ```
+    """
+}
+fn (batch_id: Str): Any {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}/results`)
+    if(is-ok-response(response), response.body, err(HttpError(response)))
+}

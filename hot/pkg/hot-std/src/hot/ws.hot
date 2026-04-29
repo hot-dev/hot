@@ -1,0 +1,166 @@
+::hot::ws ns
+meta {
+    doc: """
+    WebSocket client for bidirectional, long-lived connections.
+    Works inside tasks for long-running WebSocket sessions.
+    """,
+    no-doc: true
+}
+
+WsOptions
+meta {
+    doc: """
+    Options for establishing a WebSocket connection.
+
+    **Fields**
+    - `headers` - Custom headers to send during the WebSocket handshake (e.g., Authorization)
+    """
+}
+type {
+    headers: Map<Str, Str>?
+}
+
+WsConnection
+meta {
+    doc: """
+    An open WebSocket connection returned by `connect`.
+
+    **Fields**
+    - `id` - Unique connection identifier
+    - `messages` - Iterator that yields incoming messages (auto-parses JSON text frames to Map/Vec)
+
+    Use `send(conn, data)` to send messages and `close(conn)` to shut down.
+
+    All `::hot::ws` functions work inside tasks, making them ideal for
+    long-running WebSocket sessions that outlive a single Run.
+
+    **Example**
+
+    ```hot
+    ::ws ::hot::ws
+
+    conn ::ws/connect("wss://echo.websocket.org", {headers: {}})
+
+    ::ws/send(conn, {type: "hello", text: "world"})
+
+    msg ::ws/receive(conn)
+
+    ::ws/close(conn)
+    ```
+    """
+}
+type {
+    id: Str,
+    messages: Any
+}
+
+connect
+meta {
+    doc: """
+    Open a WebSocket connection to `url`.
+
+    Returns a `WsConnection` with a `messages` iterator for receiving
+    and an internal handle for `send`/`close`.
+
+    **Examples**
+
+    ```hot
+    // Simple connection
+    conn ::ws/connect("wss://echo.websocket.org")
+
+    // With auth headers
+    conn ::ws/connect("wss://api.example.com/ws", {
+        headers: {Authorization: "Bearer my-token"}
+    })
+    ```
+    """
+}
+fn (url: Str): WsConnection {
+    call-lib(::hot::ws/connect, [url])
+},
+(url: Str, options: WsOptions): WsConnection {
+    call-lib(::hot::ws/connect, [url, options])
+}
+
+
+send
+meta {
+    doc: """
+    Send a message over an open WebSocket connection.
+
+    - `Str` values are sent as text frames
+    - `Map`/`Vec` values are JSON-serialized and sent as text frames
+    - `Bytes` values are sent as binary frames
+
+    Returns `true` on success.
+
+    **Example**
+
+    ```hot
+    ::ws/send(conn, {type: "session.update", session: {instructions: "Be nice"}})
+    ::ws/send(conn, "plain text message")
+    ```
+    """
+}
+fn (conn: WsConnection, data: Any): Bool {
+    call-lib(::hot::ws/send, [conn, data])
+}
+
+
+receive
+meta {
+    doc: """
+    Receive a single message from a WebSocket connection.
+
+    Blocks until a message arrives. Returns `null` when the connection closes.
+    JSON text frames are auto-parsed into Map/Vec values.
+
+    For processing a stream of messages, iterate over `conn.messages` instead:
+
+    ```hot
+    for-each(conn.messages, fn (msg) {
+        print(msg)
+    })
+    ```
+    """
+}
+fn (conn: WsConnection): Any {
+    call-lib(::hot::ws/receive, [conn])
+}
+
+
+close
+meta {
+    doc: """
+    Close a WebSocket connection gracefully.
+
+    Sends a WebSocket close frame and shuts down the connection.
+    Returns `true`.
+
+    **Example**
+
+    ```hot
+    ::ws/close(conn)
+    ```
+    """
+}
+fn (conn: WsConnection): Bool {
+    call-lib(::hot::ws/close, [conn])
+}
+
+
+is-open
+meta {
+    doc: """
+    Check whether a WebSocket connection is still open.
+
+    **Example**
+
+    ```hot
+    if(::ws/is-open(conn), ::ws/send(conn, "ping"), print("closed"))
+    ```
+    """
+}
+fn (conn: WsConnection): Bool {
+    call-lib(::hot::ws/is-open, [conn])
+}

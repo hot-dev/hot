@@ -1,0 +1,321 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div x-data="webhookBaseUrl()">
+    <!-- Service Header -->
+    <div class="mb-6 p-5 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div class="flex items-center gap-3">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="-65 -57 1144 1144" fill="currentColor" class="w-6 h-6 text-emerald-500 dark:text-emerald-400 flex-shrink-0">
+                    <path d="M482 226h-1l-10 2q-33 4-64.5 18.5t-55.5 38.5q-41 37-57 91q-9 30-8 63t12 63q17 45 52 78l13 12l-83 135q-26-1-45 7q-30 13-45 40q-7 15-9 31t2 32q8 30 33 48q15 10 33 14.5t36 2t34.5-12.5t27.5-25q12-17 14.5-39t-5.5-41q-1-5-7-14l-3-6l118-192q6-9 8-14l-10-3q-9-2-13-4q-23-10-41.5-27.5t-28.5-39.5q-17-36-9-75q4-23 17-43t31-34q37-27 82-27q27-1 52.5 9.5t44.5 30.5q17 16 26.5 38.5t10.5 45.5q0 17-6 42l70 19l8 1q14-43 7-86q-4-33-19.5-63.5t-39.5-53.5q-42-42-103-56q-6-2-18-4l-14-2h-37zM500 350q-17 0-34 7t-30.5 20.5t-19.5 31.5q-8 20-4 44q3 18 14 34t28 25q24 15 56 13q3 4 5 8l112 191q3 6 6 9q27-26 58.5-35.5t65-3.5t58.5 26q32 25 43.5 61.5t0.5 73.5q-8 28-28.5 50t-48.5 33q-31 13-66.5 8.5t-63.5-24.5q-4-3-13-10l-5-6q-4 3-11 10l-47 46q23 23 52 38.5t61 21.5l22 4h39l28-5q64-13 110-60q22-22 36.5-50.5t19.5-59.5q5-36-2-71.5t-25-64.5t-44-51t-57-35q-34-14-70.5-16t-71.5 7l-17 5l-81-137q13-19 16-37q5-32-13-60q-16-25-44-35q-17-6-35-6zM218 614q-58 13-100 53q-47 44-61 105l-4 24v37l2 11q2 13 4 20q7 31 24.5 59t42.5 49q50 41 115 49q38 4 76-4.5t70-28.5q53-34 78-91q7-17 14-45q6-1 18 0l125 2q14 0 20 1q11 20 25 31t31.5 16t35.5 4q28-3 50-20q27-21 32-54q2-17-1.5-33t-13.5-30q-16-22-41-32q-17-7-35.5-6.5t-35.5 7.5q-28 12-43 37l-3 6q-14 0-42-1l-113-1q-15-1-43-1l-50-1l3 17q8 43-13 81q-14 27-40 45t-57 22q-35 6-70-7.5t-57-42.5q-28-35-27-79q1-37 23-69q13-19 32-32t41-19l9-3z"/>
+                </svg>
+                <code class="bg-emerald-100 dark:bg-emerald-900/50 text-emerald-800 dark:text-emerald-200 px-3 py-1 rounded text-base font-semibold">{{ service }}</code>
+                <span class="text-sm text-gray-500 dark:text-gray-400">{{ total_endpoints }} endpoint{% if total_endpoints != 1 %}s{% endif %}</span>
+            </div>
+        </div>
+
+        <!-- Base URL -->
+        <div class="mt-4 flex items-center gap-2">
+            <span class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider flex-shrink-0">Base</span>
+            {% if !custom_domains.is_empty() %}
+            <div class="relative flex-shrink-0" x-data="{ open: false }">
+                <button @click="open = !open" @click.outside="open = false"
+                    class="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                    <span x-text="selectedLabel"></span>
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </button>
+                <div x-show="open" x-transition class="absolute z-10 mt-1 left-0 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg">
+                    <button @click="selectDomain(''); open = false"
+                        class="block w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        :class="selectedDomain === '' ? 'font-semibold bg-gray-50 dark:bg-gray-700' : ''">
+                        Default
+                    </button>
+                    {% for domain in &custom_domains %}
+                    <button @click="selectDomain('{{ domain }}'); open = false"
+                        class="block w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 truncate"
+                        :class="selectedDomain === '{{ domain }}' ? 'font-semibold bg-gray-50 dark:bg-gray-700' : ''">
+                        {{ domain }}
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            <div class="flex-1 min-w-0 flex items-center gap-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md px-3 py-1.5">
+                <code class="text-sm text-gray-700 dark:text-gray-300 font-mono truncate flex-1"><span x-text="currentBase"></span><span class="text-gray-400">{path}/{token}</span></code>
+            </div>
+        </div>
+    </div>
+
+    <!-- Search -->
+    {% if !endpoints.is_empty() || !search_query.is_empty() %}
+    <div x-data="webhookServiceDetailFilter"
+         data-search="{{ search_query }}"
+         data-service="{{ service }}"
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div class="relative">
+            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
+                    <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 100 13.5 6.75 6.75 0 000-13.5zM2.25 10.5a8.25 8.25 0 1114.59 5.28l4.69 4.69a.75.75 0 11-1.06 1.06l-4.69-4.69A8.25 8.25 0 012.25 10.5z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <input
+                type="text"
+                x-model="searchQuery"
+                placeholder="Search by path, method, function, description, or project..."
+                class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+        </div>
+    </div>
+    {% endif %}
+
+    {% if endpoints.is_empty() && search_query.is_empty() %}
+        <div class="text-center py-12">
+            <svg class="mx-auto h-12 w-12 text-gray-400" viewBox="-65 -57 1144 1144" fill="currentColor">
+                <path d="M482 226h-1l-10 2q-33 4-64.5 18.5t-55.5 38.5q-41 37-57 91q-9 30-8 63t12 63q17 45 52 78l13 12l-83 135q-26-1-45 7q-30 13-45 40q-7 15-9 31t2 32q8 30 33 48q15 10 33 14.5t36 2t34.5-12.5t27.5-25q12-17 14.5-39t-5.5-41q-1-5-7-14l-3-6l118-192q6-9 8-14l-10-3q-9-2-13-4q-23-10-41.5-27.5t-28.5-39.5q-17-36-9-75q4-23 17-43t31-34q37-27 82-27q27-1 52.5 9.5t44.5 30.5q17 16 26.5 38.5t10.5 45.5q0 17-6 42l70 19l8 1q14-43 7-86q-4-33-19.5-63.5t-39.5-53.5q-42-42-103-56q-6-2-18-4l-14-2h-37zM500 350q-17 0-34 7t-30.5 20.5t-19.5 31.5q-8 20-4 44q3 18 14 34t28 25q24 15 56 13q3 4 5 8l112 191q3 6 6 9q27-26 58.5-35.5t65-3.5t58.5 26q32 25 43.5 61.5t0.5 73.5q-8 28-28.5 50t-48.5 33q-31 13-66.5 8.5t-63.5-24.5q-4-3-13-10l-5-6q-4 3-11 10l-47 46q23 23 52 38.5t61 21.5l22 4h39l28-5q64-13 110-60q22-22 36.5-50.5t19.5-59.5q5-36-2-71.5t-25-64.5t-44-51t-57-35q-34-14-70.5-16t-71.5 7l-17 5l-81-137q13-19 16-37q5-32-13-60q-16-25-44-35q-17-6-35-6zM218 614q-58 13-100 53q-47 44-61 105l-4 24v37l2 11q2 13 4 20q7 31 24.5 59t42.5 49q50 41 115 49q38 4 76-4.5t70-28.5q53-34 78-91q7-17 14-45q6-1 18 0l125 2q14 0 20 1q11 20 25 31t31.5 16t35.5 4q28-3 50-20q27-21 32-54q2-17-1.5-33t-13.5-30q-16-22-41-32q-17-7-35.5-6.5t-35.5 7.5q-28 12-43 37l-3 6q-14 0-42-1l-113-1q-15-1-43-1l-50-1l3 17q8 43-13 81q-14 27-40 45t-57 22q-35 6-70-7.5t-57-42.5q-28-35-27-79q1-37 23-69q13-19 32-32t41-19l9-3z"/>
+            </svg>
+            <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No endpoints in this service</h3>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No webhook endpoints found for the "{{ service }}" service.</p>
+        </div>
+    {% elif endpoints.is_empty() %}
+        <div class="text-center py-12">
+            <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No matching endpoints</h3>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No endpoints matched your search query.</p>
+        </div>
+    {% else %}
+        <!-- Desktop Table View -->
+        <div class="hidden md:block">
+            <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+                <div class="responsive-table">
+                    <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead class="bg-gray-100 dark:bg-gray-800">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Project</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Method</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Path</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Function</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Auth</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">URL</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                            {% for ep in endpoints %}
+                            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">
+                                    <a href="/projects/{{ ep.project_name }}" class="text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300">
+                                        {{ ep.project_name }}
+                                    </a>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm">
+                                    <code class="bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-0.5 rounded text-xs font-semibold">{{ ep.method }}</code>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                                    <code class="bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 px-2 py-1 rounded text-xs">{{ ep.path }}</code>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                                    <code class="language-hot text-red-600 dark:text-red-400">{{ ep.ns }}/{{ ep.var }}</code>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm">
+                                    {% if ep.auth_mode == "required" %}
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200">Required</span>
+                                    {% else %}
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">Public</span>
+                                    {% endif %}
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm" x-data="{ copied: false }">
+                                    <div class="flex items-center gap-1.5">
+                                        <code class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-[240px]" :title="currentBase + '{{ ep.path }}/{{ ep.token }}'">...{{ ep.path }}/{{ ep.token }}</code>
+                                        <button
+                                            @click="navigator.clipboard.writeText(currentBase + '{{ ep.path }}/{{ ep.token }}'); copied = true; setTimeout(() => copied = false, 2000)"
+                                            class="flex-shrink-0 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors"
+                                            :title="copied ? 'Copied!' : 'Copy URL'">
+                                            <template x-if="!copied">
+                                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                                </svg>
+                                            </template>
+                                            <template x-if="copied">
+                                                <svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                                                </svg>
+                                            </template>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Pagination (Desktop) -->
+            {% if has_prev_page || has_next_page %}
+            <div class="mt-4 px-6 py-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm text-gray-700 dark:text-gray-300">
+                            Page <span class="font-medium">{{ current_page_num }}</span> of <span class="font-medium">{{ total_pages }}</span>
+                            &middot; <span class="font-medium">{{ total_endpoints }}</span> endpoints total
+                        </p>
+                    </div>
+                    <div>
+                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                            {% if has_prev_page %}
+                            <a href="/webhooks/{{ service }}?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                <span class="sr-only">Previous</span>
+                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
+                                </svg>
+                            </a>
+                            {% endif %}
+
+                            {% for page_num in start_page..=end_page %}
+                            {% if page_num == current_page_num %}
+                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                            {% else %}
+                            <a href="/webhooks/{{ service }}?p={{ page_num }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
+                            {% endif %}
+                            {% endfor %}
+
+                            {% if has_next_page %}
+                            <a href="/webhooks/{{ service }}?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                <span class="sr-only">Next</span>
+                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                                </svg>
+                            </a>
+                            {% endif %}
+                        </nav>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Mobile Card View -->
+        <div class="md:hidden space-y-3">
+            {% for ep in endpoints %}
+            <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+                <div class="flex justify-between items-start mb-3">
+                    <div class="flex items-center gap-2">
+                        <code class="bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-0.5 rounded text-xs font-semibold">{{ ep.method }}</code>
+                        <code class="bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 px-2 py-1 rounded text-xs">{{ ep.path }}</code>
+                    </div>
+                    {% if ep.auth_mode == "required" %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200">Auth Required</span>
+                    {% endif %}
+                </div>
+
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-gray-600 dark:text-gray-400">Project:</span>
+                        <span class="text-gray-700 dark:text-gray-300">{{ ep.project_name }}</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-600 dark:text-gray-400">Function:</span>
+                        <code class="language-hot text-red-600 dark:text-red-400 text-xs">{{ ep.ns }}/{{ ep.var }}</code>
+                    </div>
+                    <div class="flex items-center justify-between" x-data="{ copied: false }">
+                        <span class="text-gray-600 dark:text-gray-400">URL:</span>
+                        <div class="flex items-center gap-1">
+                            <code class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-[180px]">...{{ ep.path }}/{{ ep.token }}</code>
+                            <button
+                                @click="navigator.clipboard.writeText(currentBase + '{{ ep.path }}/{{ ep.token }}'); copied = true; setTimeout(() => copied = false, 2000)"
+                                class="flex-shrink-0 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+                                :title="copied ? 'Copied!' : 'Copy URL'">
+                                <template x-if="!copied">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </template>
+                                <template x-if="copied">
+                                    <svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                </template>
+                            </button>
+                        </div>
+                    </div>
+                    {% match ep.description %}
+                    {% when Some with (desc) %}
+                    <div class="flex justify-between">
+                        <span class="text-gray-600 dark:text-gray-400">Description:</span>
+                        <span class="text-gray-700 dark:text-gray-300 truncate max-w-[180px]">{{ desc }}</span>
+                    </div>
+                    {% when None %}
+                    {% endmatch %}
+                </div>
+            </div>
+            {% endfor %}
+
+            <!-- Pagination (Mobile) -->
+            {% if has_prev_page || has_next_page %}
+            <div class="flex justify-between items-center pt-4">
+                {% if has_prev_page %}
+                <a href="/webhooks/{{ service }}?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
+                {% else %}
+                <div></div>
+                {% endif %}
+                <span class="text-sm text-gray-700 dark:text-gray-300">Page {{ current_page_num }}</span>
+                {% if has_next_page %}
+                <a href="/webhooks/{{ service }}?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
+                {% else %}
+                <div></div>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    {% endif %}
+</div>
+
+<script>
+function webhookBaseUrl() {
+    return {
+        defaultBase: '{{ base_url }}',
+        service: '{{ service }}',
+        selectedDomain: '',
+        get currentBase() {
+            if (this.selectedDomain) {
+                return 'https://' + this.selectedDomain + '/webhook/' + this.service;
+            }
+            return this.defaultBase;
+        },
+        get selectedLabel() {
+            return this.selectedDomain || 'Default';
+        },
+        selectDomain(domain) {
+            this.selectedDomain = domain;
+        }
+    };
+}
+
+function webhookServiceDetailFilter() {
+    return {
+        searchQuery: '',
+        service: '',
+        searchTimeout: null,
+
+        init() {
+            const container = this.$el;
+            this.searchQuery = container.getAttribute('data-search') || '';
+            this.service = container.getAttribute('data-service') || '';
+            this.$watch('searchQuery', () => this.debouncedSearch());
+        },
+
+        debouncedSearch() {
+            clearTimeout(this.searchTimeout);
+            this.searchTimeout = setTimeout(() => this.applyFilters(), 300);
+        },
+
+        applyFilters() {
+            const params = new URLSearchParams();
+            if (this.searchQuery && this.searchQuery.trim() !== '') {
+                params.set('search', this.searchQuery.trim());
+            }
+            const baseUrl = `/webhooks/${this.service}`;
+            const queryString = params.toString();
+            const url = queryString ? `${baseUrl}?${queryString}` : baseUrl;
+            window.location.href = url;
+        }
+    };
+}
+</script>
+{% endblock %}

@@ -1,0 +1,68 @@
+::whatsapp::media ns
+
+::api ::whatsapp::api
+
+// ============================================================================
+// Media Management
+// ============================================================================
+
+get-media
+meta {
+    doc: """
+Get media metadata by ID. Returns the media URL (valid for 5 minutes), MIME type, file size, and SHA256 hash.
+
+The returned URL requires the access token in the Authorization header to download. Use `download-media` for direct download.
+
+**Example**
+
+```hot
+::media ::whatsapp::media
+
+response ::media/get-media("media-id-123")
+response.url       // => "https://lookaside.fbsbx.com/..."
+response.mime_type // => "image/jpeg"
+response.sha256    // => "abc123..."
+response.file_size // => 12345
+```
+"""
+}
+fn (media-id: Str): Map {
+  ::api/request("GET", ::api/url(media-id))
+}
+
+download-media
+meta {
+    doc: """
+Download media content by URL. The URL is obtained from `get-media`. Returns the raw file content as a string.
+
+**Example**
+
+```hot
+::media ::whatsapp::media
+
+info ::media/get-media("media-id-123")
+content ::media/download-media(info.url)
+```
+"""
+}
+fn (media-url: Str): Any {
+  ::api/request("GET", media-url)
+}
+
+delete-media
+meta {
+    doc: """
+Delete uploaded media by ID.
+
+**Example**
+
+```hot
+::media ::whatsapp::media
+
+::media/delete-media("media-id-123")
+```
+"""
+}
+fn (media-id: Str): Map {
+  ::api/request("DELETE", ::api/url(media-id))
+}

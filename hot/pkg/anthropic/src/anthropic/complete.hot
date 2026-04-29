@@ -1,0 +1,82 @@
+::anthropic::complete ns
+
+api-request ::anthropic::api/request
+HttpError ::anthropic::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+CompletionResponse type {
+    type: "completion",
+    id: Str,
+    completion: Str,
+    stop_reason: Any,
+    model: Model
+}
+
+CompletionRequest type {
+    model: Model,
+    prompt: Str,
+    max_tokens_to_sample: Int,
+    stop_sequences: Vec<Str>?,
+    temperature: Dec?,
+    top_p: Dec?,
+    top_k: Int?,
+    metadata: Any?,
+    stream: Bool?
+}
+
+// Model ID string (e.g. "claude-2.1")
+Model type Str
+
+ErrorResponse type {
+    type: "error",
+    error: Any
+}
+
+CompletePostRequest type {
+    model: Model,
+    prompt: Str,
+    max_tokens_to_sample: Int,
+    stop_sequences: Vec<Str>?,
+    temperature: Dec?,
+    top_p: Dec?,
+    top_k: Int?,
+    metadata: Any?,
+    stream: Bool?
+}
+
+CompletePostResponse type {
+    type: "completion",
+    id: Str,
+    completion: Str,
+    stop_reason: Any,
+    model: Model
+}
+
+
+post
+meta {
+    doc: """
+    POST /v1/complete - Create a text completion (legacy).
+
+    > **Note:** This is the legacy completions API. For new projects, use
+    > `::anthropic::messages/post` instead.
+
+    Generates a text completion for the given prompt.
+
+    **Example**
+
+    ```hot
+    request CompletePostRequest({
+        model: "claude-2.1",
+        prompt: "\n\nHuman: What is the capital of France?\n\nAssistant:",
+        max_tokens_to_sample: 256
+    })
+    response ::anthropic::complete/post(request)
+    response.completion // => "The capital of France is Paris."
+    ```
+    """
+}
+fn (request: CompletePostRequest): CompletePostResponse {
+  response api-request("POST", `${::anthropic/BASE_URL}/v1/complete`, {}, request)
+  if(is-ok-response(response), CompletePostResponse(response.body), err(HttpError(response)))
+}

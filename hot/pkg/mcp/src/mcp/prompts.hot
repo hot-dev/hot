@@ -1,0 +1,133 @@
+::mcp::prompts ns
+meta {
+    doc: """MCP prompt discovery and retrieval. Supports listing prompt templates and rendering prompts with arguments."""
+}
+
+::client ::mcp::client
+::types ::mcp::types
+
+// ============================================================================
+// Prompt Listing
+// ============================================================================
+
+// List prompts (first page).
+list
+meta {
+    doc: """
+List prompts available on the MCP server (first page).
+
+Returns a Vec of Prompt, each with `name`, `description`, and `arguments` fields.
+
+**Example**
+
+```hot
+::prompts ::mcp::prompts
+prompts ::prompts/list(session)
+// prompts => [{name: "code-review", description: "...", arguments: [...]}, ...]
+first(prompts).name // => "code-review"
+```
+"""
+}
+fn (session: ::types/Session): Vec<::types/Prompt> {
+  result ::client/session-request(session, "prompts/list", {})
+  map(get(result, "prompts", []), ::types/Prompt(%))
+}
+
+// List prompts with explicit cursor for manual pagination.
+list-page
+meta {
+    doc: """
+List prompts with an explicit cursor for manual pagination.
+
+Returns a Map with `prompts` (Vec of Prompt) and `next-cursor` (Str or null).
+Pass null as the cursor for the first page.
+
+**Example**
+
+```hot
+::prompts ::mcp::prompts
+page ::prompts/list-page(session, null)
+page.prompts // => [{name: "code-review", ...}, ...]
+page.next-cursor // => "cursor-abc" or null
+```
+"""
+}
+fn (session: ::types/Session, cursor: Str?): Map {
+  params {} |> assoc-some("cursor", cursor)
+  result ::client/session-request(session, "prompts/list", params)
+  {
+    prompts: map(get(result, "prompts", []), ::types/Prompt(%)),
+    next-cursor: get(result, "nextCursor", null)
+  }
+}
+
+// List ALL prompts across all pages.
+list-all
+meta {
+    doc: """
+List all prompts across all pages, following pagination automatically.
+
+Follows `nextCursor` links until all pages are exhausted. Returns a
+single Vec containing every prompt.
+
+**Example**
+
+```hot
+::prompts ::mcp::prompts
+all-prompts ::prompts/list-all(session)
+length(all-prompts) // => total number of prompts across all pages
+```
+"""
+}
+fn (session: ::types/Session): Vec<::types/Prompt> {
+  collect-pages(session, null, [])
+}
+
+// Recursive pagination helper (TCO).
+collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
+  => {
+    params {} |> assoc-some("cursor", cursor)
+    result ::client/session-request(session, "prompts/list", params)
+    items map(get(result, "prompts", []), ::types/Prompt(%))
+    combined concat(acc, items)
+    next-cursor get(result, "nextCursor", null)
+    if(is-null(next-cursor),
+      combined,
+      collect-pages(session, next-cursor, combined))
+  }
+}
+
+// ============================================================================
+// Prompt Retrieval
+// ============================================================================
+
+// Get a prompt by name, optionally with arguments.
+get-prompt
+meta {
+    doc: """
+Get a prompt from the MCP server by name, optionally with arguments.
+
+Returns a Vec of PromptMessage (role + content pairs). Each message has
+a `role` ("user" or "assistant") and `content` map.
+
+**Example**
+
+```hot
+::prompts ::mcp::prompts
+messages ::prompts/get-prompt(session, "code-review", {language: "hot", code: "add(1, 2)"})
+message first(messages)
+message.role    // => "user"
+message.content // => {type: "text", text: "Please review..."}
+
+// With no arguments
+messages ::prompts/get-prompt(session, "greeting", {})
+```
+"""
+}
+fn (session: ::types/Session, name: Str, arguments: Map?): Vec<::types/PromptMessage> {
+  result ::client/session-request(session, "prompts/get", {
+    name: name,
+    arguments: or(arguments, {})
+  })
+  map(get(result, "messages", []), ::types/PromptMessage(%))
+}

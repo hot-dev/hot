@@ -1,0 +1,100 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            Organization usage and limits
+        </p>
+
+        {% include "org_tabs.html" %}
+    </div>
+
+    <!-- Plan Badge -->
+    {% match plan %}
+    {% when Some with (p) %}
+    <div class="mb-6">
+        <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200">
+            {{ p.plan_name }}
+        </span>
+    </div>
+    {% when None %}
+    {% endmatch %}
+
+    {% if page_context.is_local_dev %}
+    <!-- Local Development -->
+    <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+        <p class="text-sm text-blue-800 dark:text-blue-200">
+            <strong>Local Development Mode</strong> - Usage limits are not enforced in local development.
+        </p>
+    </div>
+    {% endif %}
+
+    <!-- Usage Stats (loaded via HTMX) -->
+    <div id="usage-stats"
+         hx-get="/@{{ org.slug }}/usage/stats"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <!-- Skeleton Loading State -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <!-- Runs Skeleton -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 animate-pulse">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="h-6 bg-gray-200 dark:bg-gray-700 rounded w-40"></div>
+                </div>
+                <div class="h-10 bg-gray-200 dark:bg-gray-700 rounded w-32 mb-2"></div>
+                <div class="h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full w-full mb-2"></div>
+                <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20"></div>
+            </div>
+
+            <!-- File Storage Skeleton -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 animate-pulse">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="h-6 bg-gray-200 dark:bg-gray-700 rounded w-32"></div>
+                </div>
+                <div class="h-10 bg-gray-200 dark:bg-gray-700 rounded w-32 mb-2"></div>
+                <div class="h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full w-full mb-2"></div>
+                <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20"></div>
+            </div>
+
+            <!-- Team Members Skeleton -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 animate-pulse">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="h-6 bg-gray-200 dark:bg-gray-700 rounded w-36"></div>
+                </div>
+                <div class="h-10 bg-gray-200 dark:bg-gray-700 rounded w-24 mb-2"></div>
+                <div class="h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full w-full mb-2"></div>
+                <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20"></div>
+            </div>
+
+            <!-- Call Data Skeleton -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 animate-pulse">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="h-6 bg-gray-200 dark:bg-gray-700 rounded w-28"></div>
+                </div>
+                <div class="h-10 bg-gray-200 dark:bg-gray-700 rounded w-32 mb-2"></div>
+                <div class="h-2.5 bg-gray-200 dark:bg-gray-700 rounded-full w-full mb-2"></div>
+                <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20"></div>
+                <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-full mb-2"></div>
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-full mb-2"></div>
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-full"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Info Footer Skeleton -->
+        <div class="bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4 animate-pulse">
+            <div class="flex items-start">
+                <div class="h-5 w-5 bg-gray-200 dark:bg-gray-700 rounded"></div>
+                <div class="ml-3 flex-1">
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-32 mb-3"></div>
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-full mb-2"></div>
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-full mb-2"></div>
+                    <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded w-3/4"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

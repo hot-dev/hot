@@ -1,0 +1,130 @@
+::supabase::api ns
+
+::core ::supabase::core
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    ctx: {"supabase.url": {required: true}, "supabase.anon.key": {required: true}},
+    doc: """
+    Make an authenticated request to a Supabase project API. Sends the anon key as both the `apikey` header and the default Bearer token.
+
+    Use `request-as` instead when you need to act as a specific user (with their access token).
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    // GET request
+    response ::api/request("GET", "/rest/v1/users?select=id,name")
+
+    // POST request with body
+    response ::api/request("POST", "/rest/v1/users", {Prefer: "return=representation"}, {name: "Alice"})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  request(method, path, {}, {})
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  anon-key ::core/anon-key()
+  do-request(method, path, additional-headers, body, anon-key, anon-key)
+}
+
+request-as
+meta {
+    doc: """
+    Make a request as a specific authenticated user. The anon key is still sent as the `apikey` header, but the user's access token is used as the Bearer token.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    // Get the current user's profile
+    response ::api/request-as("GET", "/rest/v1/profiles?select=*", {}, {}, user-access-token)
+    ```
+    """
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, access-token: Str): Any {
+  anon-key ::core/anon-key()
+  do-request(method, path, additional-headers, body, anon-key, access-token)
+}
+
+request-service
+meta {
+    ctx: {"supabase.service.key": {required: true}},
+    doc: """Make a request using the service role key (bypasses RLS). Used internally by auth-admin and other admin modules."""
+}
+fn
+(method: Str, path: Str): Any {
+  request-service(method, path, {}, {})
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  service-key ::core/service-key()
+  do-request(method, path, additional-headers, body, service-key, service-key)
+}
+
+do-request fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): Any {
+  base-url ::core/project-url()
+  url `${base-url}${path}`
+
+  default-headers {
+    apikey: apikey,
+    Authorization: `Bearer ${bearer-token}`
+  }
+
+  has-body cond {
+    is-map(body) => { not(is-empty(filter-vals(body, is-some))) }
+    is-vec(body) => { not(is-empty(body)) }
+    is-str(body) => { not(eq(body, "")) }
+    => { is-some(body) }
+  }
+
+  headers if(has-body, merge(default-headers, {Content-Type: "application/json"}), default-headers)
+  final-headers merge(headers, additional-headers)
+
+  encoded-body cond {
+    not(has-body) => { "" }
+    is-str(body) => { body }
+    => { to-json(untype(body)) }
+  }
+
+  response http-request(HttpRequest({
+    method: method,
+    url: url,
+    headers: final-headers,
+    body: encoded-body
+  }))
+
+  cond {
+    not(is-ok-response(response)) => {
+      error-body response.body
+      cond {
+        is-map(error-body) => { err(merge({status: response.status}, error-body)) }
+        => { err(HttpError(response)) }
+      }
+    }
+    => { response.body }
+  }
+}

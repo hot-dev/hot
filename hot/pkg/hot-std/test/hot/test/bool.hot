@@ -1,0 +1,102 @@
+::hot::test::bool ns
+meta ["test"]
+
+// Test functions
+test-is-truthy
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+    assert ::hot::test/assert
+    is-truthy ::hot::bool/is-truthy
+    and ::hot::bool/and
+    or ::hot::bool/or
+    not ::hot::bool/not
+    assert(is-truthy(true), "is-truthy with true")
+    assert(is-truthy(1), "is-truthy with 1")
+    assert(is-truthy("hello"), "is-truthy with string")
+    assert-eq(false, is-truthy(false), "is-truthy with false")
+    assert-eq(false, is-truthy(null), "is-truthy with null")
+}
+
+test-and
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+    assert ::hot::test/assert
+    assert(and(true, true), "and with both true")
+    assert-eq(false, and(true, false), "and with true and false")
+    assert-eq(false, and(false, true), "and with false and true")
+    assert-eq(false, and(false, false), "and with both false")
+}
+
+test-or
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+    assert ::hot::test/assert
+    assert(or(true, true), "or with both true")
+    assert(or(true, false), "or with true and false")
+    assert(or(false, true), "or with false and true")
+    assert-eq(false, or(false, false), "or with both false")
+}
+
+// Test that or() preserves array structure and doesn't unwrap single-element arrays
+// Bug discovered: or([{...}], []) was returning {...} instead of [{...}]
+test-or-preserves-arrays
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+    is-vec ::hot::type/is-vec
+
+    // Single-element array should be returned as-is, not unwrapped
+    single-elem-array [{"key": "value"}]
+    result1 or(single-elem-array, [])
+
+    // This is the core bug test: or() must return a Vec, not unwrap it
+    assert-eq(true, is-vec(result1), "or([{...}], []) should return Vec, not unwrap to Map")
+
+    // Multi-element array should also be preserved
+    multi-elem-array [1, 2, 3]
+    result2 or(multi-elem-array, [])
+    assert-eq(true, is-vec(result2), "or([1,2,3], []) should return Vec")
+
+    // Single-element array with primitive
+    str-array ["hello"]
+    result3 or(str-array, [])
+    assert-eq(true, is-vec(result3), "or([\"hello\"], []) should return Vec, not unwrap to Str")
+}
+
+test-not
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+    assert ::hot::test/assert
+    assert-eq(false, not(true), "not with true")
+    assert(not(false), "not with false")
+    assert(not(null), "not with null")
+    assert-eq(false, not(1), "not with 1")
+}
+
+test-if-with-blocks
+meta ["test"] fn () {
+    assert-eq ::hot::test/assert-eq
+
+    // Test if with inline block expressions (no double-wrapping)
+    result1 if(true, { "yes" }, { "no" })
+    assert-eq("yes", result1, "if with true should return then block result")
+
+    result2 if(false, { "yes" }, { "no" })
+    assert-eq("no", result2, "if with false should return else block result")
+
+    // Test with more complex blocks
+    result3 if(true, {
+        x 10
+        y 20
+        add(x, y)
+    }, {
+        0
+    })
+    assert-eq(30, result3, "if with true should evaluate then block with multiple statements")
+
+    result4 if(false, { 0 }, {
+        x 100
+        y 50
+        sub(x, y)
+    })
+    assert-eq(50, result4, "if with false should evaluate else block with multiple statements")
+}

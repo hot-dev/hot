@@ -1,0 +1,59 @@
+::resend::api ns
+meta {
+    doc: """Internal HTTP request utilities for the Resend API.""",
+    ctx: {"resend.api.key": {required: true}}
+}
+
+// Namespace alias for ctx module
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    doc: """Make an HTTP request with pre-filled service headers. Additional headers can be provided to merge/override defaults."""
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default) — delegates to 5-arity
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("resend.api.key"))
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  default-headers {
+    Authorization: `Bearer ${api-key}`
+  }
+
+  headers if(eq(body, ""), default-headers, merge(default-headers, {Content-Type: "application/json"}))
+  final-headers merge(headers, additional-headers)
+
+  ::hot::http/request(HttpRequest({
+    method: method,
+    url: url,
+    headers: final-headers,
+    body: to-json(untype(body))
+  }))
+}

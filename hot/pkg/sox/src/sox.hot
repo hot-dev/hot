@@ -1,0 +1,577 @@
+::sox ns
+meta {
+    doc: """
+    SoX (Sound eXchange) audio processing via Hot Box containers.
+
+    Provides format conversion, effects chains, normalization, trimming, and
+    file introspection using `sox` / `soxi` in isolated containers.
+
+    Input files use `hot://` storage URLs; outputs are written to
+    `hot://sox/<uuid>/...`.
+
+    **Quick Start**
+
+    ```hot
+    info ::sox/info("hot://uploads/track.wav")
+    tap(info)
+
+    out ::sox/convert("hot://uploads/track.wav", {format: "mp3"})
+    tap(out.url)
+
+    // With explicit output path
+    out ::sox/normalize("hot://uploads/track.wav", {
+        level: "-3",
+        output: "hot://audio/normalized.wav",
+    })
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+DEFAULT_IMAGE "alpine:3.21"
+// SoX plus MP3 read/write (libsox-fmt-mp3 + lame) for convert integration tests.
+INSTALL_CMD "apk add --no-cache sox lame > /dev/null 2>&1"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+ConvertOpts
+meta {
+    doc: """
+    Options for audio format conversion.
+
+    **Fields**
+    - `format` — Output format / extension, e.g. `"wav"`, `"mp3"`, `"flac"`
+    - `sample-rate` — Output sample rate in Hz
+    - `channels` — Channel count (1 mono, 2 stereo)
+    - `bitrate` — Passed to SoX `-C` when set (codec-dependent)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with SoX pre-installed
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    format: Str,
+    sample-rate: Int?,
+    channels: Int?,
+    bitrate: Str?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+EffectOpts
+meta {
+    doc: """
+    Options for SoX effects processing.
+
+    **Fields**
+    - `effects` — Effect tokens, e.g. `["reverb", "50", "50"]`
+    - `format` — Output format / extension (default: `"wav"`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with SoX
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    effects: Vec<Str>,
+    format: Str?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+NormalizeOpts
+meta {
+    doc: """
+    Options for peak normalization via the SoX `gain` effect.
+
+    **Fields**
+    - `level` — Headroom after normalize, e.g. `"-3"` for −3 dB (with `gain -n`)
+    - `format` — Output format / extension (default: `"wav"`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with SoX
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    level: Str?,
+    format: Str?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+TrimOpts
+meta {
+    doc: """
+    Options for trimming audio to a time range (`trim` effect).
+
+    **Fields**
+    - `start` — Start time, e.g. `"0:00"`
+    - `end` — Absolute stop time, e.g. `"0:30"` (passed as `=end` to SoX)
+    - `format` — Output format / extension (default: `"wav"`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with SoX
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    start: Str,
+    end: Str,
+    format: Str?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+// ============================================================================
+// Command builders (internal, testable without Docker)
+// ============================================================================
+
+build-convert-args
+meta {
+    doc: "Build `sox` CLI arguments for format conversion (no effects)."
+}
+fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
+    sr-args if(is-some(opts.sample-rate), ["-r", Str(opts.sample-rate)], [])
+    ch-args if(is-some(opts.channels), ["-c", Str(opts.channels)], [])
+    br-args if(is-some(opts.bitrate), ["-C", opts.bitrate], [])
+    extra or(opts.extra-args, [])
+
+    [input-path, ...sr-args, ...ch-args, ...br-args, ...extra, output-path]
+}
+
+build-effect-args
+meta {
+    doc: "Build `sox` CLI arguments for effects processing."
+}
+fn (input-path: Str, output-path: Str, opts: EffectOpts): Vec<Str> {
+    fx opts.effects
+    extra or(opts.extra-args, [])
+    [input-path, output-path, ...fx, ...extra]
+}
+
+build-normalize-args
+meta {
+    doc: "Build `sox` CLI arguments for normalization using `gain -n`."
+}
+fn (input-path: Str, output-path: Str, level: Str?, extra-args: Vec<Str>?): Vec<Str> {
+    gain-args if(is-some(level), ["gain", "-n", level], ["gain", "-n"])
+    extra or(extra-args, [])
+
+    [input-path, output-path, ...gain-args, ...extra]
+}
+
+build-audio-trim-args
+meta {
+    doc: "Build `sox` CLI arguments for trimming with the `trim` effect."
+}
+fn (input-path: Str, output-path: Str, opts: TrimOpts): Vec<Str> {
+    end-arg `=${opts.end}`
+    extra or(opts.extra-args, [])
+
+    [input-path, output-path, "trim", opts.start, end-arg, ...extra]
+}
+
+build-info-args
+meta {
+    doc: "Build `soxi` CLI arguments for info extraction."
+}
+fn (input-path: Str): Vec<Str> {
+    [input-path]
+}
+
+// ============================================================================
+// Output parsers
+// ============================================================================
+
+strip-soxi-quotes fn (s: Str): Str {
+    t trim(s)
+    cond {
+        and(ends-with(t, "'"), starts-with(t, "'")) => {
+            slice(t, 1, sub(length(t), 1))
+        }
+
+        and(ends-with(t, "\""), starts-with(t, "\"")) => {
+            slice(t, 1, sub(length(t), 1))
+        }
+        => { t }
+    }
+}
+
+parse-info-output
+meta {
+    doc: "Parse `soxi` human-readable output into a Map of field names to values."
+}
+fn (stdout: Str?): Map {
+    lines or(stdout, "") |> split("\n")
+    reduce(lines, (m, line) {
+        parts line |> trim() |> split(":")
+        if(gte(length(parts), 2),
+            assoc(m, first(parts) |> trim(), rest(parts) |> join(":") |> trim() |> strip-soxi-quotes()),
+            m,
+        )
+    }, {})
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+run-sox-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
+    info ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+    ::task/await(info.id)
+}
+
+start-sox-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
+    ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+info
+meta {
+    doc: """
+    Read audio file metadata using `soxi`.
+
+    Returns a Map with string keys matching SoX field names (e.g. `Channels`,
+    `Sample Rate`, `Duration`).
+    """,
+    box: {min-size: "nano"}
+}
+fn (input: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    soxi-args join-args(build-info-args(in-path))
+    script `hotbox cp '${input}' ${in-path} && soxi ${soxi-args}`
+
+    result run-sox-box(script, "nano", null, 300)
+    checked check-box-result(result, "soxi")
+    parse-info-output(checked.stdout)
+}
+
+convert
+meta {
+    doc: """
+    Convert audio to another format (and optional rate / channels).
+
+    Returns `{url: Str, format: Str}` pointing at Hot storage.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    convert(input, ConvertOpts({
+        format: "wav", sample-rate: null, channels: null,
+        bitrate: null, extra-args: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: ConvertOpts): Map {
+    format opts.format
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/output.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-convert-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "sox")
+
+    {url: hot-output, format,}
+}
+
+normalize
+meta {
+    doc: """
+    Normalize audio levels using SoX `gain -n`.
+
+    Optional `level` sets headroom (e.g. `"-3"` for −3 dB relative to full scale).
+
+    Returns `{url: Str, format: Str}`.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    normalize(input, NormalizeOpts({
+        level: null, format: null, extra-args: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: NormalizeOpts): Map {
+    format or(opts.format, "wav")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/normalized.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-normalize-args(in-path, out-path, opts.level, opts.extra-args))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "sox")
+
+    {url: hot-output, format,}
+}
+
+audio-trim
+meta {
+    doc: """
+    Trim audio between `start` and absolute `end` times (SoX `trim` effect).
+
+    Returns `{url: Str, format: Str}`.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: TrimOpts): Map {
+    format or(opts.format, "wav")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/trim.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-audio-trim-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "sox")
+
+    {url: hot-output, format,}
+}
+
+effect
+meta {
+    doc: """
+    Run a SoX effects chain on an audio file.
+
+    `effects` is a flat list of tokens, e.g. `["reverb", "50", "50"]`.
+
+    Returns `{url: Str, format: Str}`.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: EffectOpts): Map {
+    format or(opts.format, "wav")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/effect.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-effect-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "sox")
+
+    {url: hot-output, format,}
+}
+
+// ============================================================================
+// Async (start-*) API — return TaskInfo without awaiting
+// ============================================================================
+
+start-info
+meta {
+    doc: "Start an info task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "nano"}
+}
+fn (input: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    soxi-args join-args(build-info-args(in-path))
+    script `hotbox cp '${input}' ${in-path} && soxi ${soxi-args}`
+
+    start-sox-box(script, "nano", null, 300)
+}
+
+start-convert
+meta {
+    doc: "Start a convert task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-convert(input, ConvertOpts({
+        format: "wav", sample-rate: null, channels: null,
+        bitrate: null, extra-args: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: ConvertOpts): Map {
+    format opts.format
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/output.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-convert-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-normalize
+meta {
+    doc: "Start a normalize task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-normalize(input, NormalizeOpts({
+        level: null, format: null, extra-args: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: NormalizeOpts): Map {
+    format or(opts.format, "wav")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/normalized.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-normalize-args(in-path, out-path, opts.level, opts.extra-args))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-audio-trim
+meta {
+    doc: "Start an audio trim task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: TrimOpts): Map {
+    format or(opts.format, "wav")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/trim.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-audio-trim-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-effect
+meta {
+    doc: "Start an effect task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: EffectOpts): Map {
+    format or(opts.format, "wav")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://sox/${uuid}/effect.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    sox-args join-args(build-effect-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}

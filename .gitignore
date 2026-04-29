@@ -1,0 +1,32 @@
+/target
+/.data
+node_modules/
+.hot/
+.skills/
+hot/ctx.hot
+hot/dev.key
+hot/src-offline/
+**/dev.key
+*.pem
+*.key
+*.p12
+*.pfx
+*.tfvars
+*.kubeconfig
+
+## samply profiling
+profile.json
+profile.json.gz
+
+# macOS specific files
+.DS_Store
+
+# Generated at build time
+resources/git-revision.txt
+resources/pkg-docs/
+crates/hot_cli/resources/
+cdn-output/
+.env
+.env.*
+!.env.example
+.cursor/

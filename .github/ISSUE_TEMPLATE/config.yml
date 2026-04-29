@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://hot.dev/docs
+    about: Most "how do I..." questions are answered in the docs.
+  - name: Security vulnerability
+    url: https://github.com/hot-dev/hot/security/advisories/new
+    about: Report security issues privately. Do not open a public issue.

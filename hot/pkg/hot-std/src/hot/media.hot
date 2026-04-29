@@ -1,0 +1,238 @@
+::hot::media ns
+meta {
+    doc: """
+    Unified types for media files (images, audio, video).
+
+    These are pure media types focused on file metadata and format properties.
+    For AI-generated media with generation metadata, see `::hot::ai::media`.
+    """
+}
+
+FileMeta ::hot::file/FileMeta
+
+// ============================================================================
+// Format Types (literal unions)
+// ============================================================================
+
+ImageFormat
+meta {doc: """
+Common image file formats. Declared `open` so applications can register
+additional formats (e.g., "heic", "avif", "tiff") without forking this
+type. Add members at top level in any namespace, e.g.
+
+    ::hot::media/ImageFormat type open | "heic"
+    ::hot::media/ImageFormat type open "avif" | "tiff"
+"""}
+type open "png" | "jpeg" | "webp" | "gif"
+
+AudioFormat
+meta {doc: """
+Common audio file formats. Declared `open` so applications can register
+additional formats (e.g., "m4a", "alac") without forking this type.
+"""}
+type open "mp3" | "wav" | "ogg" | "flac" | "aac" | "opus"
+
+VideoFormat
+meta {doc: """
+Common video file formats. Declared `open` so applications can register
+additional formats (e.g., "mkv", "flv") without forking this type.
+"""}
+type open "mp4" | "webm" | "mov" | "avi"
+
+// ============================================================================
+// Media Data Types
+// ============================================================================
+
+Image
+meta {
+    doc: """
+    Image file metadata.
+
+    **Fields**
+    - `file` - File metadata from ::hot::file
+    - `width` - Image width in pixels
+    - `height` - Image height in pixels
+    - `format` - Image file format
+    """
+}
+type {
+    file: FileMeta,
+    width: Int?,
+    height: Int?,
+    format: ImageFormat?
+}
+
+Audio
+meta {
+    doc: """
+    Audio file metadata.
+
+    **Fields**
+    - `file` - File metadata from ::hot::file
+    - `duration_seconds` - Audio duration in seconds
+    - `format` - Audio file format
+    - `transcript` - Transcript text (for transcribed audio)
+    """
+}
+type {
+    file: FileMeta,
+    duration_seconds: Dec?,
+    format: AudioFormat?,
+    transcript: Str?
+}
+
+Video
+meta {
+    doc: """
+    Video file metadata.
+
+    **Fields**
+    - `file` - File metadata from ::hot::file
+    - `duration_seconds` - Video duration in seconds
+    - `width` - Video width in pixels
+    - `height` - Video height in pixels
+    - `format` - Video file format
+    - `fps` - Frames per second
+    """
+}
+type {
+    file: FileMeta,
+    duration_seconds: Dec?,
+    width: Int?,
+    height: Int?,
+    format: VideoFormat?,
+    fps: Int?
+}
+
+// ============================================================================
+// Media Enum (tagged union)
+// ============================================================================
+
+Media
+meta {
+    doc: """
+    Unified enum for media files.
+
+    Declared `enum open` so applications can register additional media
+    kinds (e.g., a custom `Document` or `Avatar`) via arrow enrollment
+    without forking this type:
+
+    ```hot
+    Document type { file: FileMeta, page-count: Int? }
+    Document -> Media.Document             // bodyless arrow enrolls the variant
+    ```
+
+    Because the variant set is open-ended, `match` on `Media` MUST
+    include a `_` default arm (`open-enum-match-missing-default` otherwise).
+
+    **Usage**
+    ```hot
+    import ::hot::media
+
+    // Pattern match on media type
+    describe-media fn (media: Media): Str {
+        match media {
+            Media.Image => { `Image: ${media.width}x${media.height}` }
+            Media.Audio => { `Audio: ${media.duration_seconds}s` }
+            Media.Video => { `Video: ${media.width}x${media.height} ${media.duration_seconds}s` }
+            _ => { "unknown media kind" }
+        }
+    }
+
+    // Access common file info
+    path file(media).path
+    size file(media).size
+    ```
+    """
+}
+enum open {
+    Image(Image),
+    Audio(Audio),
+    Video(Video)
+}
+
+// ============================================================================
+// Batch Types
+// ============================================================================
+
+MediaError
+meta {doc: """Error that occurred during batch media processing."""}
+type {
+    index: Int,
+    message: Str
+}
+
+MediaBatch
+meta {
+    doc: """
+    Result of batch media processing.
+
+    **Fields**
+    - `items` - Media files
+    - `succeeded` - Count of successful operations
+    - `failed` - Count of failed operations
+    - `errors` - List of errors (if any)
+    """
+}
+type {
+    items: Vec<Media>,
+    succeeded: Int,
+    failed: Int,
+    errors: Vec<MediaError>?
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+is-image
+meta {doc: """
+Check if media is an Image variant. The bare `=>` default arm is what
+makes this dispatch helper safe on the open `Media` enum — any future
+variant enrolled via an arrow falls through to `false` rather than
+producing a runtime error.
+"""}
+fn (media: Media): Bool {
+    match media { Media.Image => true, _ => false }
+}
+
+is-audio
+meta {doc: """Check if media is an Audio variant."""}
+fn (media: Media): Bool {
+    match media { Media.Audio => true, _ => false }
+}
+
+is-video
+meta {doc: """Check if media is a Video variant."""}
+fn (media: Media): Bool {
+    match media { Media.Video => true, _ => false }
+}
+
+has-duration
+meta {doc: """Check if media has a duration (audio or video)."""}
+fn (media: Media): Bool {
+    match media { Media.Audio => true, Media.Video => true, _ => false }
+}
+
+duration
+meta {
+    doc: """
+    Get duration in seconds for audio/video. Returns null for images.
+
+    **Example**
+    ```hot
+    seconds duration(audio-media)  // 3.5
+    seconds duration(image-media)  // null
+    ```
+    """
+}
+fn (media: Media): Dec? {
+    media.$val.duration_seconds
+}
+
+// Constructor helpers (`image`, `audio`, `video`) were removed in favor
+// of using the synthesized variant constructors directly. Construct media
+// values with `Media.Image(data)`, `Media.Audio(data)`, `Media.Video(data)`
+// — the tagged-variant constructors are equivalent to the old helpers
+// and compose naturally with arrow-enrolled variants like
+// `Document -> Media.Document` from third-party packages.

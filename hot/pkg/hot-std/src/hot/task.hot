@@ -1,0 +1,367 @@
+::hot::task ns
+meta {
+    doc: """
+    Long-running task execution.
+    Start tasks from Runs, send messages to tasks, and receive messages inside tasks.
+    """,
+    no-doc: true
+}
+
+Failure
+meta {
+    doc: """
+    Represents a failed task execution. Created by `fail()` when called inside a task.
+
+    Same structure as `::hot::run/Failure` but indicates the failure occurred in a task context.
+
+    **Example**
+
+    ```hot
+    f fail("Processing failed", {"step": "transform", "input-id": id})
+    f.$msg   // "Processing failed"
+    f.$err   // {"step": "transform", "input-id": "..."}
+    ```
+    """
+}
+type {
+    $msg: Str,
+    $err: Any
+}
+
+Cancellation
+meta {
+    doc: """
+    Represents a cancelled task execution. Created by `cancel()` when called inside a task.
+
+    Same structure as `::hot::run/Cancellation` but indicates the cancellation occurred in a task context.
+
+    **Example**
+
+    ```hot
+    c cancel("Task cancelled", {"reason": "user-request"})
+    c.$msg    // "Task cancelled"
+    c.$data   // {"reason": "user-request"}
+    ```
+    """
+}
+type {
+    $msg: Str,
+    $data: Any
+}
+
+TaskInfo
+meta {
+    doc: """
+    Returned by `start` when a task is successfully queued.
+
+    **Fields**
+    - `id` - Unique task identifier (UUID)
+    - `stream` - Stream this task belongs to (inherited from the triggering Run)
+    - `origin-run` - The Run that spawned this task
+    - `data` - Optional caller-supplied metadata (e.g. output URL for container tasks)
+
+    **Example**
+
+    ```hot
+    ::task ::hot::task
+
+    info ::task/start(::myapp/process-data, {url: "https://example.com"})
+    info.id                  // "019506ab-..."
+    info.stream.id           // same stream as the current Run
+    info.origin-run.id       // the run that started this task
+
+    // Container packages populate data with the output URL
+    info ::sox/start-convert("hot://uploads/track.wav", {format: "mp3"})
+    info.data.output         // "hot://sox/<uuid>/output.mp3"
+    ```
+    """
+}
+type {
+    id: Str,
+    stream: ::hot::stream/Stream,
+    origin-run: ::hot::run/Run,
+    data: Any?
+}
+
+TaskOptions
+meta {
+    doc: """
+    Optional configuration for `start`.
+
+    **Fields**
+    - `timeout` - Maximum task duration in milliseconds (default: 1,800,000 = 30 minutes)
+    - `type` - Task type label, e.g. `"code"`, `"container"` (default: `"code"`)
+    - `retry` - Retry configuration. Simple: `3` (3 attempts, default delay). Full: `{attempts: 5, delay: 5000, backoff: "exponential", max_delay: 300000, jitter: true}`
+
+    **Examples**
+
+    ```hot
+    // Custom timeout
+    ::task/start(::myapp/long-job, args, {timeout: 3600000})
+
+    // Simple retry: 3 attempts with default 1s delay
+    ::task/start(::myapp/flaky-job, args, {retry: 3})
+
+    // Full retry config
+    ::task/start(::myapp/api-sync, args, {
+        timeout: 600000,
+        retry: {attempts: 5, delay: 2000, backoff: "exponential"}
+    })
+    ```
+    """
+}
+type {
+    timeout: Int?,
+    type: Str?,
+    retry: Int | Map?
+}
+
+start
+meta {
+    doc: """
+    Start a long-running task that executes `task-fn` on the task worker.
+
+    The task inherits the current stream and is tracked in the stream timeline.
+    Returns immediately with a `TaskInfo` containing the task ID.
+
+    **Examples**
+
+    ```hot
+    ::task ::hot::task
+
+    // Start a task with no arguments
+    info ::task/start(::myapp/background-sync)
+
+    // Start a task with arguments
+    info ::task/start(::myapp/process-data, {url: "https://example.com"})
+
+    // Start a task with options (timeout + retry)
+    info ::task/start(::myapp/long-job, {input: data}, {
+        timeout: 3600000,
+        retry: {attempts: 3, delay: 5000, backoff: "exponential"}
+    })
+    ```
+    """
+}
+fn (task-fn: Fn): TaskInfo {
+    call-lib(::hot::task/start, [task-fn])
+},
+(task-fn: Fn, args: Any): TaskInfo {
+    call-lib(::hot::task/start, [task-fn, args])
+},
+(task-fn: Fn, args: Any, options: TaskOptions): TaskInfo {
+    call-lib(::hot::task/start, [task-fn, args, options])
+}
+
+cancel
+meta {
+    doc: """
+    Cancel a queued or running task.
+
+    If the task is still queued, it is immediately marked as cancelled and
+    will not execute. If the task is running, a cancellation message is
+    delivered to its `receive` channel (as `{$cancel: true}`) so it can
+    exit cooperatively. The task worker also monitors for the cancel signal
+    and will terminate the task if it does not exit on its own.
+
+    Returns `true` if the task was cancelled, `false` if it was already
+    in a terminal state (completed, failed, timed_out, or cancelled).
+
+    **Example**
+
+    ```hot
+    ::task ::hot::task
+
+    info ::task/start(::myapp/long-job, data)
+
+    // Later, cancel the task
+    cancelled ::task/cancel(info.id)  // true
+    ```
+    """
+}
+fn (task-id: Str): Bool {
+    call-lib(::hot::task/cancel, [task-id])
+}
+
+send
+meta {
+    doc: """
+    Send data to a running task.
+
+    The data is delivered to the task's `receive` call. Accepts any
+    serializable value (Map, Vec, Str, Int, etc.).
+
+    Returns `true` on success.
+
+    **Example**
+
+    ```hot
+    ::task ::hot::task
+
+    info ::task/start(::myapp/worker, null)
+
+    ::task/send(info.id, {command: "process", payload: data})
+    ::task/send(info.id, "shutdown")
+    ```
+    """
+}
+fn (task-id: Str, data: Any): Bool {
+    call-lib(::hot::task/send, [task-id, data])
+}
+
+receive
+meta {
+    doc: """
+    Receive the next message sent to the current task.
+
+    Blocks until a message arrives. Returns `null` when the task's
+    inbox channel closes (shutdown). Only callable from within a task.
+
+    **Example**
+
+    ```hot
+    // Inside a task function
+    my-task fn (initial-args: Any): Any {
+        ::task ::hot::task
+
+        msg ::task/receive()
+
+        cond {
+            eq(msg, "shutdown") => { "done" }
+            => { process(msg) }
+        }
+    }
+    ```
+    """
+}
+fn (): Any {
+    call-lib(::hot::task/receive, [])
+}
+
+TaskResult
+meta {
+    doc: """
+    Full result of a completed task. Returned by `await()`.
+
+    **Fields**
+    - `id` — task ID
+    - `status` — final status: "completed", "failed", "timed_out", "cancelled"
+    - `exit-code` — container exit code (null for code tasks)
+    - `stdout` — container stdout (null for code tasks)
+    - `stderr` — container stderr (null for code tasks)
+    - `duration-ms` — total wall-clock duration in milliseconds
+    - `slot-wait-ms` — time waiting for execution slot
+    - `image-pull-ms` — time pulling container image
+    - `execution-ms` — time running user code
+    - `logs-collect-ms` — time collecting logs
+    - `size` — container size preset used (null for code tasks)
+    - `compute-units` — CUS consumed
+    - `cus-multiplier` — size multiplier applied
+    - `container-id` — backend container ID
+    - `backend` — execution backend ("docker" or "firecracker")
+    - `result` — the task's return value (for code tasks)
+    """
+}
+type {
+    id: Str,
+    status: Str,
+    exit-code: Int?,
+    stdout: Str?,
+    stderr: Str?,
+    duration-ms: Int?,
+    slot-wait-ms: Int?,
+    image-pull-ms: Int?,
+    execution-ms: Int?,
+    logs-collect-ms: Int?,
+    size: Str?,
+    compute-units: Int?,
+    cus-multiplier: Dec?,
+    container-id: Str?,
+    backend: Str?,
+    result: Any?
+}
+
+checkpoint
+meta {
+    doc: """
+    Save application-level state that persists across task restarts.
+
+    Writes arbitrary data to the task's checkpoint storage. If the task is
+    interrupted (worker crash, deploy) and retried, the new instance can
+    call `restore()` to pick up where it left off.
+
+    Only callable from inside a task.
+
+    **Example**
+
+    ```hot
+    ::task ::hot::task
+
+    my-etl fn (config: Map): Any {
+        state or(::task/restore(), {offset: 0, processed: 0})
+
+        // ... process batch starting from state.offset ...
+
+        ::task/checkpoint({offset: add(state.offset, batch-size), processed: add(state.processed, batch-size)})
+    }
+    ```
+    """
+}
+fn (data: Any): Bool {
+    call-lib(::hot::task/checkpoint, [data])
+}
+
+restore
+meta {
+    doc: """
+    Retrieve the last checkpoint saved for the current task (or a given task).
+
+    Returns `null` if no checkpoint has been saved. When called with no
+    arguments, restores the checkpoint for the current task. When called with
+    a task-id, restores the checkpoint for that specific task (useful for
+    inspecting a previous task's state).
+
+    **Example**
+
+    ```hot
+    ::task ::hot::task
+
+    // Restore current task's checkpoint (inside a task)
+    state ::task/restore()   // null if no checkpoint saved
+
+    // Restore a specific task's checkpoint (from any context)
+    state ::task/restore("019506ab-1234-...")
+    ```
+    """
+}
+fn (): Any {
+    call-lib(::hot::task/restore, [])
+},
+(task-id: Str): Any {
+    call-lib(::hot::task/restore, [task-id])
+}
+
+await
+meta {
+    doc: """
+    Wait for a task to complete and return its full result.
+
+    Polls the task until it reaches a terminal status (completed, failed,
+    timed_out, or cancelled), then returns a `TaskResult` with all
+    execution details including timing breakdown and CUS.
+
+    **Examples**
+
+    ```hot
+    task ::box/start(BoxConf({"image": "alpine", "cmd": ["echo", "hello"], "size": "nano"}))
+    result ::hot::task/await(task.id)
+    result.status         // "completed"
+    result.stdout         // "hello\n"
+    result.compute-units  // 15
+    result.execution-ms   // 1234
+    ```
+    """
+}
+fn (task-id: Str): TaskResult {
+    call-lib(::hot::task/await, [task-id])
+}

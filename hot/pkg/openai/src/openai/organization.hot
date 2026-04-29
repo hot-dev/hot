@@ -1,0 +1,1272 @@
+::openai::organization ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ProjectCreateRequest type {
+    name: Str
+}
+
+AdminApiKey type {
+    object: Str,
+    id: Str,
+    name: Str,
+    redacted_value: Str,
+    value: Str?,
+    created_at: Int,
+    last_used_at: Int,
+    owner: Map
+}
+
+ProjectServiceAccountDeleteResponse type {
+    object: "organization.project.service_account.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+AuditLog type {
+    id: Str,
+    type: AuditLogEventType,
+    effective_at: Int,
+    project: Map?,
+    actor: AuditLogActor,
+    api_key_created: Map?,
+    api_key_updated: Map?,
+    api_key_deleted: Map?,
+    checkpoint_permission_created: Map?,
+    checkpoint_permission_deleted: Map?,
+    invite_sent: Map?,
+    invite_accepted: Map?,
+    invite_deleted: Map?,
+    login_failed: Map?,
+    logout_failed: Map?,
+    organization_updated: Map?,
+    project_created: Map?,
+    project_updated: Map?,
+    project_archived: Map?,
+    rate_limit_updated: Map?,
+    rate_limit_deleted: Map?,
+    service_account_created: Map?,
+    service_account_updated: Map?,
+    service_account_deleted: Map?,
+    user_added: Map?,
+    user_updated: Map?,
+    user_deleted: Map?,
+    certificate_created: Map?,
+    certificate_updated: Map?,
+    certificate_deleted: Map?,
+    certificates_activated: Map?,
+    certificates_deactivated: Map?
+}
+
+ProjectApiKeyListResponse type {
+    object: "list",
+    data: Vec<ProjectApiKey>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+ProjectUser type {
+    object: "organization.project.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "member",
+    added_at: Int
+}
+
+UserListResponse type {
+    object: "list",
+    data: Vec<User>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+ProjectListResponse type {
+    object: "list",
+    data: Vec<Project>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+Invite type {
+    object: "organization.invite",
+    id: Str,
+    email: Str,
+    role: "owner" | "reader",
+    status: "accepted" | "expired" | "pending",
+    invited_at: Int,
+    expires_at: Int,
+    accepted_at: Int?,
+    projects: Vec<Map>?
+}
+
+ProjectRateLimit type {
+    object: "project.rate_limit",
+    id: Str,
+    model: Str,
+    max_requests_per_1_minute: Int,
+    max_tokens_per_1_minute: Int,
+    max_images_per_1_minute: Int?,
+    max_audio_megabytes_per_1_minute: Int?,
+    max_requests_per_1_day: Int?,
+    batch_1_day_max_input_tokens: Int?
+}
+
+ProjectUserCreateRequest type {
+    user_id: Str,
+    role: "owner" | "member"
+}
+
+UsageResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+UserRoleUpdateRequest type {
+    role: "owner" | "reader"
+}
+
+ListAuditLogsResponse type {
+    object: "list",
+    data: Vec<AuditLog>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+UsageTimeBucket type {
+    object: "bucket",
+    start_time: Int,
+    end_time: Int,
+    result: Vec
+}
+
+ProjectApiKey type {
+    object: "organization.project.api_key",
+    redacted_value: Str,
+    name: Str,
+    created_at: Int,
+    last_used_at: Int,
+    id: Str,
+    owner: Map
+}
+
+AuditLogActorUser type {
+    id: Str?,
+    email: Str?
+}
+
+ProjectUserListResponse type {
+    object: Str,
+    data: Vec<ProjectUser>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+// Audit log event type identifier (e.g. "api_key.created", "invite.sent", "project.created", etc.)
+AuditLogEventType type Str
+
+InviteDeleteResponse type {
+    object: "organization.invite.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+ProjectApiKeyDeleteResponse type {
+    object: "organization.project.api_key.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+ProjectServiceAccountCreateResponse type {
+    object: "organization.project.service_account",
+    id: Str,
+    name: Str,
+    role: "member",
+    created_at: Int,
+    api_key: ProjectServiceAccountApiKey
+}
+
+AuditLogActor type {
+    type: "session" | "api_key"?,
+    session: AuditLogActorSession?,
+    api_key: AuditLogActorApiKey?
+}
+
+AuditLogActorServiceAccount type {
+    id: Str?
+}
+
+ProjectRateLimitListResponse type {
+    object: "list",
+    data: Vec<ProjectRateLimit>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+ProjectServiceAccount type {
+    object: "organization.project.service_account",
+    id: Str,
+    name: Str,
+    role: "owner" | "member",
+    created_at: Int
+}
+
+Error type {
+    code: Str,
+    message: Str,
+    param: Str,
+    type: Str
+}
+
+InviteListResponse type {
+    object: "list",
+    data: Vec<Invite>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool?
+}
+
+ProjectUserDeleteResponse type {
+    object: "organization.project.user.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+ProjectRateLimitUpdateRequest type {
+    max_requests_per_1_minute: Int?,
+    max_tokens_per_1_minute: Int?,
+    max_images_per_1_minute: Int?,
+    max_audio_megabytes_per_1_minute: Int?,
+    max_requests_per_1_day: Int?,
+    batch_1_day_max_input_tokens: Int?
+}
+
+User type {
+    object: "organization.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "reader",
+    added_at: Int
+}
+
+ProjectServiceAccountListResponse type {
+    object: "list",
+    data: Vec<ProjectServiceAccount>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+ProjectServiceAccountCreateRequest type {
+    name: Str
+}
+
+ProjectUserUpdateRequest type {
+    role: "owner" | "member"
+}
+
+AuditLogActorSession type {
+    user: AuditLogActorUser?,
+    ip_address: Str?
+}
+
+UserDeleteResponse type {
+    object: "organization.user.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+AuditLogActorApiKey type {
+    id: Str?,
+    type: "user" | "service_account"?,
+    user: AuditLogActorUser?,
+    service_account: AuditLogActorServiceAccount?
+}
+
+ProjectServiceAccountApiKey type {
+    object: "organization.project.service_account.api_key",
+    value: Str,
+    name: Str,
+    created_at: Int,
+    id: Str
+}
+
+ProjectUpdateRequest type {
+    name: Str
+}
+
+Project type {
+    id: Str,
+    object: "organization.project",
+    name: Str,
+    created_at: Int,
+    archived_at: Int?,
+    status: "active" | "archived"
+}
+
+ErrorResponse type {
+    error: Error
+}
+
+ApiKeyList type {
+    object: Str?,
+    data: Vec<AdminApiKey>?,
+    has_more: Bool?,
+    first_id: Str?,
+    last_id: Str?
+}
+
+AdminApiKeysListRequest type {
+  after: Str,
+  order: Str,
+  limit: Str
+}
+
+AdminApiKeysListResponse type {
+    object: Str?,
+    data: Vec<AdminApiKey>?,
+    has_more: Bool?,
+    first_id: Str?,
+    last_id: Str?
+}
+
+
+list-all-organization-and-project-api-keys
+meta {
+    doc: """GET /organization/admin_api_keys - List all organization and project API keys."""
+}
+fn (request: AdminApiKeysListRequest): AdminApiKeysListResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/admin_api_keys?after=${request.after}&order=${request.order}&limit=${request.limit}`)
+  if(is-ok-response(response), AdminApiKeysListResponse(response.body), err(HttpError(response)))
+}
+
+AdminApiKeysCreateRequest type {
+    name: Str
+}
+
+AdminApiKeysCreateResponse type {
+    object: Str,
+    id: Str,
+    name: Str,
+    redacted_value: Str,
+    value: Str?,
+    created_at: Int,
+    last_used_at: Int,
+    owner: Map
+}
+
+
+create-admin-api-key
+meta {doc: """POST /organization/admin_api_keys - Create admin API key"""}
+fn (request: AdminApiKeysCreateRequest): AdminApiKeysCreateResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/admin_api_keys`, {}, request)
+  if(is-ok-response(response), AdminApiKeysCreateResponse(response.body), err(HttpError(response)))
+}
+
+AdminApiKeysGetRequest type {
+  key-id: Str
+}
+
+AdminApiKeysGetResponse type {
+    object: Str,
+    id: Str,
+    name: Str,
+    redacted_value: Str,
+    value: Str?,
+    created_at: Int,
+    last_used_at: Int,
+    owner: Map
+}
+
+
+retrieve-admin-api-key
+meta {doc: """GET /organization/admin_api_keys/{key_id} - Retrieve admin API key"""}
+fn (request: AdminApiKeysGetRequest): AdminApiKeysGetResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/admin_api_keys/${request.key-id}`)
+  if(is-ok-response(response), AdminApiKeysGetResponse(response.body), err(HttpError(response)))
+}
+
+AdminApiKeysDeleteRequest type {
+  key-id: Str
+}
+
+AdminApiKeysDeleteResponse type {
+    id: Str?,
+    object: Str?,
+    deleted: Bool?
+}
+
+
+delete-admin-api-key
+meta {doc: """DELETE /organization/admin_api_keys/{key_id} - Delete admin API key"""}
+fn (request: AdminApiKeysDeleteRequest): AdminApiKeysDeleteResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/admin_api_keys/${request.key-id}`)
+  if(is-ok-response(response), AdminApiKeysDeleteResponse(response.body), err(HttpError(response)))
+}
+
+ListAuditLogsRequest type {
+  effective-at: Str,
+  project-ids: Str,
+  event-types: Str,
+  actor-ids: Str,
+  actor-emails: Str,
+  resource-ids: Str,
+  limit: Str,
+  after: Str,
+  before: Str
+}
+
+ListAuditLogsResponse type {
+    object: "list",
+    data: Vec<AuditLog>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-audit-logs
+meta {doc: """GET /organization/audit_logs - List audit logs"""}
+fn (request: ListAuditLogsRequest): ListAuditLogsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/audit_logs?effective_at=${request.effective-at}&project_ids[]=${request.project-ids}&event_types[]=${request.event-types}&actor_ids[]=${request.actor-ids}&actor_emails[]=${request.actor-emails}&resource_ids[]=${request.resource-ids}&limit=${request.limit}&after=${request.after}&before=${request.before}`)
+  if(is-ok-response(response), ListAuditLogsResponse(response.body), err(HttpError(response)))
+}
+
+UsageCostsRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageCostsResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+costs
+meta {doc: """GET /organization/costs - Costs"""}
+fn (request: UsageCostsRequest): UsageCostsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/costs?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageCostsResponse(response.body), err(HttpError(response)))
+}
+
+ListInvitesRequest type {
+  limit: Str,
+  after: Str
+}
+
+ListInvitesResponse type {
+    object: "list",
+    data: Vec<Invite>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool?
+}
+
+
+list-invites
+meta {doc: """GET /organization/invites - List invites"""}
+fn (request: ListInvitesRequest): ListInvitesResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/invites?limit=${request.limit}&after=${request.after}`)
+  if(is-ok-response(response), ListInvitesResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveInviteRequest type {
+  invite-id: Str
+}
+
+RetrieveInviteResponse type {
+    object: "organization.invite",
+    id: Str,
+    email: Str,
+    role: "owner" | "reader",
+    status: "accepted" | "expired" | "pending",
+    invited_at: Int,
+    expires_at: Int,
+    accepted_at: Int?,
+    projects: Vec<Map>?
+}
+
+
+retrieve-invite
+meta {doc: """GET /organization/invites/{invite_id} - Retrieve invite"""}
+fn (request: RetrieveInviteRequest): RetrieveInviteResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/invites/${request.invite-id}`)
+  if(is-ok-response(response), RetrieveInviteResponse(response.body), err(HttpError(response)))
+}
+
+DeleteInviteRequest type {
+  invite-id: Str
+}
+
+DeleteInviteResponse type {
+    object: "organization.invite.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+
+delete-invite
+meta {doc: """DELETE /organization/invites/{invite_id} - Delete invite"""}
+fn (request: DeleteInviteRequest): DeleteInviteResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/invites/${request.invite-id}`)
+  if(is-ok-response(response), DeleteInviteResponse(response.body), err(HttpError(response)))
+}
+
+ListProjectsRequest type {
+  limit: Str,
+  after: Str,
+  include-archived: Str
+}
+
+ListProjectsResponse type {
+    object: "list",
+    data: Vec<Project>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-projects
+meta {doc: """GET /organization/projects - List projects"""}
+fn (request: ListProjectsRequest): ListProjectsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects?limit=${request.limit}&after=${request.after}&include_archived=${request.include-archived}`)
+  if(is-ok-response(response), ListProjectsResponse(response.body), err(HttpError(response)))
+}
+
+CreateProjectRequest type {
+    name: Str
+}
+
+CreateProjectResponse type {
+    id: Str,
+    object: "organization.project",
+    name: Str,
+    created_at: Int,
+    archived_at: Int?,
+    status: "active" | "archived"
+}
+
+
+create-project
+meta {doc: """POST /organization/projects - Create project"""}
+fn (request: CreateProjectRequest): CreateProjectResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects`, {}, request)
+  if(is-ok-response(response), CreateProjectResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveProjectRequest type {
+  project-id: Str
+}
+
+RetrieveProjectResponse type {
+    id: Str,
+    object: "organization.project",
+    name: Str,
+    created_at: Int,
+    archived_at: Int?,
+    status: "active" | "archived"
+}
+
+
+retrieve-project
+meta {doc: """GET /organization/projects/{project_id} - Retrieve project"""}
+fn (request: RetrieveProjectRequest): RetrieveProjectResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}`)
+  if(is-ok-response(response), RetrieveProjectResponse(response.body), err(HttpError(response)))
+}
+
+ModifyProjectRequest type {
+    name: Str
+}
+
+ModifyProjectResponse type {
+    id: Str,
+    object: "organization.project",
+    name: Str,
+    created_at: Int,
+    archived_at: Int?,
+    status: "active" | "archived"
+}
+
+
+modify-project
+meta {doc: """POST /organization/projects/{project_id} - Modify project"""}
+fn (project-id: Str, request: ModifyProjectRequest): ModifyProjectResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}`, {}, request)
+  if(is-ok-response(response), ModifyProjectResponse(response.body), err(HttpError(response)))
+}
+
+ListProjectApiKeysRequest type {
+  project-id: Str,
+  limit: Str,
+  after: Str
+}
+
+ListProjectApiKeysResponse type {
+    object: "list",
+    data: Vec<ProjectApiKey>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-project-api-keys
+meta {
+    doc: """GET /organization/projects/{project_id}/api_keys - List project API keys"""
+}
+fn (request: ListProjectApiKeysRequest): ListProjectApiKeysResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/api_keys?limit=${request.limit}&after=${request.after}`)
+  if(is-ok-response(response), ListProjectApiKeysResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveProjectApiKeyRequest type {
+  project-id: Str,
+  key-id: Str
+}
+
+RetrieveProjectApiKeyResponse type {
+    object: "organization.project.api_key",
+    redacted_value: Str,
+    name: Str,
+    created_at: Int,
+    last_used_at: Int,
+    id: Str,
+    owner: Map
+}
+
+
+retrieve-project-api-key
+meta {
+    doc: """GET /organization/projects/{project_id}/api_keys/{key_id} - Retrieve project API key"""
+}
+fn (request: RetrieveProjectApiKeyRequest): RetrieveProjectApiKeyResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/api_keys/${request.key-id}`)
+  if(is-ok-response(response), RetrieveProjectApiKeyResponse(response.body), err(HttpError(response)))
+}
+
+DeleteProjectApiKeyRequest type {
+  project-id: Str,
+  key-id: Str
+}
+
+DeleteProjectApiKeyResponse type {
+    object: "organization.project.api_key.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+
+delete-project-api-key
+meta {
+    doc: """DELETE /organization/projects/{project_id}/api_keys/{key_id} - Delete project API key"""
+}
+fn (request: DeleteProjectApiKeyRequest): DeleteProjectApiKeyResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/projects/${request.project-id}/api_keys/${request.key-id}`)
+  if(is-ok-response(response), DeleteProjectApiKeyResponse(response.body), err(HttpError(response)))
+}
+
+ArchiveProjectRequest type {
+  project-id: Str
+}
+
+ArchiveProjectResponse type {
+    id: Str,
+    object: "organization.project",
+    name: Str,
+    created_at: Int,
+    archived_at: Int?,
+    status: "active" | "archived"
+}
+
+
+archive-project
+meta {doc: """POST /organization/projects/{project_id}/archive - Archive project"""}
+fn (request: ArchiveProjectRequest): ArchiveProjectResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${request.project-id}/archive`)
+  if(is-ok-response(response), ArchiveProjectResponse(response.body), err(HttpError(response)))
+}
+
+ListProjectRateLimitsRequest type {
+  project-id: Str,
+  limit: Str,
+  after: Str,
+  before: Str
+}
+
+ListProjectRateLimitsResponse type {
+    object: "list",
+    data: Vec<ProjectRateLimit>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-project-rate-limits
+meta {
+    doc: """GET /organization/projects/{project_id}/rate_limits - List project rate limits"""
+}
+fn (request: ListProjectRateLimitsRequest): ListProjectRateLimitsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/rate_limits?limit=${request.limit}&after=${request.after}&before=${request.before}`)
+  if(is-ok-response(response), ListProjectRateLimitsResponse(response.body), err(HttpError(response)))
+}
+
+UpdateProjectRateLimitsRequest type {
+    max_requests_per_1_minute: Int?,
+    max_tokens_per_1_minute: Int?,
+    max_images_per_1_minute: Int?,
+    max_audio_megabytes_per_1_minute: Int?,
+    max_requests_per_1_day: Int?,
+    batch_1_day_max_input_tokens: Int?
+}
+
+UpdateProjectRateLimitsResponse type {
+    object: "project.rate_limit",
+    id: Str,
+    model: Str,
+    max_requests_per_1_minute: Int,
+    max_tokens_per_1_minute: Int,
+    max_images_per_1_minute: Int?,
+    max_audio_megabytes_per_1_minute: Int?,
+    max_requests_per_1_day: Int?,
+    batch_1_day_max_input_tokens: Int?
+}
+
+
+modify-project-rate-limit
+meta {
+    doc: """POST /organization/projects/{project_id}/rate_limits/{rate_limit_id} - Modify project rate limit"""
+}
+fn (project-id: Str, rate-limit-id: Str, request: UpdateProjectRateLimitsRequest): UpdateProjectRateLimitsResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/rate_limits/${rate-limit-id}`, {}, request)
+  if(is-ok-response(response), UpdateProjectRateLimitsResponse(response.body), err(HttpError(response)))
+}
+
+ListProjectServiceAccountsRequest type {
+  project-id: Str,
+  limit: Str,
+  after: Str
+}
+
+ListProjectServiceAccountsResponse type {
+    object: "list",
+    data: Vec<ProjectServiceAccount>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-project-service-accounts
+meta {
+    doc: """GET /organization/projects/{project_id}/service_accounts - List project service accounts"""
+}
+fn (request: ListProjectServiceAccountsRequest): ListProjectServiceAccountsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/service_accounts?limit=${request.limit}&after=${request.after}`)
+  if(is-ok-response(response), ListProjectServiceAccountsResponse(response.body), err(HttpError(response)))
+}
+
+CreateProjectServiceAccountRequest type {
+    name: Str
+}
+
+CreateProjectServiceAccountResponse type {
+    object: "organization.project.service_account",
+    id: Str,
+    name: Str,
+    role: "member",
+    created_at: Int,
+    api_key: ProjectServiceAccountApiKey
+}
+
+
+create-project-service-account
+meta {
+    doc: """POST /organization/projects/{project_id}/service_accounts - Create project service account"""
+}
+fn (project-id: Str, request: CreateProjectServiceAccountRequest): CreateProjectServiceAccountResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/service_accounts`, {}, request)
+  if(is-ok-response(response), CreateProjectServiceAccountResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveProjectServiceAccountRequest type {
+  project-id: Str,
+  service-account-id: Str
+}
+
+RetrieveProjectServiceAccountResponse type {
+    object: "organization.project.service_account",
+    id: Str,
+    name: Str,
+    role: "owner" | "member",
+    created_at: Int
+}
+
+
+retrieve-project-service-account
+meta {
+    doc: """GET /organization/projects/{project_id}/service_accounts/{service_account_id} - Retrieve project service account"""
+}
+fn (request: RetrieveProjectServiceAccountRequest): RetrieveProjectServiceAccountResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/service_accounts/${request.service-account-id}`)
+  if(is-ok-response(response), RetrieveProjectServiceAccountResponse(response.body), err(HttpError(response)))
+}
+
+DeleteProjectServiceAccountRequest type {
+  project-id: Str,
+  service-account-id: Str
+}
+
+DeleteProjectServiceAccountResponse type {
+    object: "organization.project.service_account.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+
+delete-project-service-account
+meta {
+    doc: """DELETE /organization/projects/{project_id}/service_accounts/{service_account_id} - Delete project service account"""
+}
+fn (request: DeleteProjectServiceAccountRequest): DeleteProjectServiceAccountResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/projects/${request.project-id}/service_accounts/${request.service-account-id}`)
+  if(is-ok-response(response), DeleteProjectServiceAccountResponse(response.body), err(HttpError(response)))
+}
+
+ListProjectUsersRequest type {
+  project-id: Str,
+  limit: Str,
+  after: Str
+}
+
+ListProjectUsersResponse type {
+    object: Str,
+    data: Vec<ProjectUser>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-project-users
+meta {doc: """GET /organization/projects/{project_id}/users - List project users"""}
+fn (request: ListProjectUsersRequest): ListProjectUsersResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/users?limit=${request.limit}&after=${request.after}`)
+  if(is-ok-response(response), ListProjectUsersResponse(response.body), err(HttpError(response)))
+}
+
+CreateProjectUserRequest type {
+    user_id: Str,
+    role: "owner" | "member"
+}
+
+CreateProjectUserResponse type {
+    object: "organization.project.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "member",
+    added_at: Int
+}
+
+
+create-project-user
+meta {doc: """POST /organization/projects/{project_id}/users - Create project user"""}
+fn (project-id: Str, request: CreateProjectUserRequest): CreateProjectUserResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/users`, {}, request)
+  if(is-ok-response(response), CreateProjectUserResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveProjectUserRequest type {
+  project-id: Str,
+  user-id: Str
+}
+
+RetrieveProjectUserResponse type {
+    object: "organization.project.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "member",
+    added_at: Int
+}
+
+
+retrieve-project-user
+meta {
+    doc: """GET /organization/projects/{project_id}/users/{user_id} - Retrieve project user"""
+}
+fn (request: RetrieveProjectUserRequest): RetrieveProjectUserResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/projects/${request.project-id}/users/${request.user-id}`)
+  if(is-ok-response(response), RetrieveProjectUserResponse(response.body), err(HttpError(response)))
+}
+
+ModifyProjectUserRequest type {
+    role: "owner" | "member"
+}
+
+ModifyProjectUserResponse type {
+    object: "organization.project.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "member",
+    added_at: Int
+}
+
+
+modify-project-user
+meta {
+    doc: """POST /organization/projects/{project_id}/users/{user_id} - Modify project user"""
+}
+fn (project-id: Str, user-id: Str, request: ModifyProjectUserRequest): ModifyProjectUserResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/users/${user-id}`, {}, request)
+  if(is-ok-response(response), ModifyProjectUserResponse(response.body), err(HttpError(response)))
+}
+
+DeleteProjectUserRequest type {
+  project-id: Str,
+  user-id: Str
+}
+
+DeleteProjectUserResponse type {
+    object: "organization.project.user.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+
+delete-project-user
+meta {
+    doc: """DELETE /organization/projects/{project_id}/users/{user_id} - Delete project user"""
+}
+fn (request: DeleteProjectUserRequest): DeleteProjectUserResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/projects/${request.project-id}/users/${request.user-id}`)
+  if(is-ok-response(response), DeleteProjectUserResponse(response.body), err(HttpError(response)))
+}
+
+UsageAudioSpeechesRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  user-ids: Str,
+  api-key-ids: Str,
+  models: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageAudioSpeechesResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+audio-speeches
+meta {doc: """GET /organization/usage/audio_speeches - Audio speeches"""}
+fn (request: UsageAudioSpeechesRequest): UsageAudioSpeechesResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/audio_speeches?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageAudioSpeechesResponse(response.body), err(HttpError(response)))
+}
+
+UsageAudioTranscriptionsRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  user-ids: Str,
+  api-key-ids: Str,
+  models: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageAudioTranscriptionsResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+audio-transcriptions
+meta {doc: """GET /organization/usage/audio_transcriptions - Audio transcriptions"""}
+fn (request: UsageAudioTranscriptionsRequest): UsageAudioTranscriptionsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/audio_transcriptions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageAudioTranscriptionsResponse(response.body), err(HttpError(response)))
+}
+
+UsageCodeInterpreterSessionsRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageCodeInterpreterSessionsResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+code-interpreter-sessions
+meta {
+    doc: """GET /organization/usage/code_interpreter_sessions - Code interpreter sessions"""
+}
+fn (request: UsageCodeInterpreterSessionsRequest): UsageCodeInterpreterSessionsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/code_interpreter_sessions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageCodeInterpreterSessionsResponse(response.body), err(HttpError(response)))
+}
+
+UsageCompletionsRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  user-ids: Str,
+  api-key-ids: Str,
+  models: Str,
+  batch: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageCompletionsResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+completions
+meta {doc: """GET /organization/usage/completions - Completions"""}
+fn (request: UsageCompletionsRequest): UsageCompletionsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/completions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&batch=${request.batch}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageCompletionsResponse(response.body), err(HttpError(response)))
+}
+
+UsageEmbeddingsRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  user-ids: Str,
+  api-key-ids: Str,
+  models: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageEmbeddingsResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+embeddings
+meta {doc: """GET /organization/usage/embeddings - Embeddings"""}
+fn (request: UsageEmbeddingsRequest): UsageEmbeddingsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/embeddings?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageEmbeddingsResponse(response.body), err(HttpError(response)))
+}
+
+UsageImagesRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  sources: Str,
+  sizes: Str,
+  project-ids: Str,
+  user-ids: Str,
+  api-key-ids: Str,
+  models: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageImagesResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+images
+meta {doc: """GET /organization/usage/images - Images"""}
+fn (request: UsageImagesRequest): UsageImagesResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/images?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&sources=${request.sources}&sizes=${request.sizes}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageImagesResponse(response.body), err(HttpError(response)))
+}
+
+UsageModerationsRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  user-ids: Str,
+  api-key-ids: Str,
+  models: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageModerationsResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+moderations
+meta {doc: """GET /organization/usage/moderations - Moderations"""}
+fn (request: UsageModerationsRequest): UsageModerationsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/moderations?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageModerationsResponse(response.body), err(HttpError(response)))
+}
+
+UsageVectorStoresRequest type {
+  start-time: Str,
+  end-time: Str,
+  bucket-width: Str,
+  project-ids: Str,
+  group-by: Str,
+  limit: Str,
+  page: Str
+}
+
+UsageVectorStoresResponse type {
+    object: "page",
+    data: Vec<UsageTimeBucket>,
+    has_more: Bool,
+    next_page: Str
+}
+
+
+vector-stores
+meta {doc: """GET /organization/usage/vector_stores - Vector stores"""}
+fn (request: UsageVectorStoresRequest): UsageVectorStoresResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/usage/vector_stores?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`)
+  if(is-ok-response(response), UsageVectorStoresResponse(response.body), err(HttpError(response)))
+}
+
+ListUsersRequest type {
+  limit: Str,
+  after: Str,
+  emails: Str
+}
+
+ListUsersResponse type {
+    object: "list",
+    data: Vec<User>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+list-users
+meta {doc: """GET /organization/users - List users"""}
+fn (request: ListUsersRequest): ListUsersResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/users?limit=${request.limit}&after=${request.after}&emails=${request.emails}`)
+  if(is-ok-response(response), ListUsersResponse(response.body), err(HttpError(response)))
+}
+
+RetrieveUserRequest type {
+  user-id: Str
+}
+
+RetrieveUserResponse type {
+    object: "organization.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "reader",
+    added_at: Int
+}
+
+
+retrieve-user
+meta {doc: """GET /organization/users/{user_id} - Retrieve user"""}
+fn (request: RetrieveUserRequest): RetrieveUserResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/users/${request.user-id}`)
+  if(is-ok-response(response), RetrieveUserResponse(response.body), err(HttpError(response)))
+}
+
+ModifyUserRequest type {
+    role: "owner" | "reader"
+}
+
+ModifyUserResponse type {
+    object: "organization.user",
+    id: Str,
+    name: Str,
+    email: Str,
+    role: "owner" | "reader",
+    added_at: Int
+}
+
+
+modify-user
+meta {doc: """POST /organization/users/{user_id} - Modify user"""}
+fn (user-id: Str, request: ModifyUserRequest): ModifyUserResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/users/${user-id}`, {}, request)
+  if(is-ok-response(response), ModifyUserResponse(response.body), err(HttpError(response)))
+}
+
+DeleteUserRequest type {
+  user-id: Str
+}
+
+DeleteUserResponse type {
+    object: "organization.user.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+
+delete-user
+meta {doc: """DELETE /organization/users/{user_id} - Delete user"""}
+fn (request: DeleteUserRequest): DeleteUserResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/users/${request.user-id}`)
+  if(is-ok-response(response), DeleteUserResponse(response.body), err(HttpError(response)))
+}

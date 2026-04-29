@@ -1,0 +1,57 @@
+::postmark::update ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+EditTemplateRequest type {
+    Alias: Str?,
+    Name: Str?,
+    Subject: Str?,
+    HtmlBody: Str?,
+    TextBody: Str?
+}
+
+TemplateRecordResponse type {
+    Name: Str?,
+    Alias: Str?,
+    TemplateId: Int?,
+    Active: Bool?
+}
+
+UpdateTemplateRequest type {
+    Alias: Str?,
+    Name: Str?,
+    Subject: Str?,
+    HtmlBody: Str?,
+    TextBody: Str?
+}
+
+UpdateTemplateResponse type {
+    Name: Str?,
+    Alias: Str?,
+    TemplateId: Int?,
+    Active: Bool?
+}
+
+
+update-template
+meta {
+    doc: """
+    Update an existing template by its numeric ID or string alias. Only provided fields are updated.
+
+    **Example**
+
+    ```hot
+    updated ::postmark::update/update-template("12345", ::postmark::update/UpdateTemplateRequest({
+        Name: "Updated Template Name",
+        Subject: "Updated: Hello {{name}}"
+    }))
+    updated.Name // => "Updated Template Name"
+    ```
+    """
+}
+fn (template-id-or-alias: Str, request: UpdateTemplateRequest): UpdateTemplateResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/templates/${template-id-or-alias}`, {}, request)
+  if(is-ok-response(response), UpdateTemplateResponse(response.body), err(HttpError(response)))
+}

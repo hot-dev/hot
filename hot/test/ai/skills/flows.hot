@@ -1,0 +1,396 @@
+// Test file for: resources/ai/skills/hot-language/references/flows.md
+// All code snippets should be validated with `hot check`
+::hot::test::ai::skills::flows ns
+meta ["test"]
+
+// =============================================================================
+// Stubs for examples (not shown in docs)
+// =============================================================================
+
+// Stub functions for serial flow examples
+validate fn (data: Map): Map { data }
+enrich fn (data: Map): Map { data }
+save fn (data: Map): Map { data }
+
+// Stub for HTTP calls
+::http ::hot::http
+
+// Stub types for match examples
+Circle type {
+    radius: Dec
+}
+
+Rectangle type {
+    width: Dec,
+    height: Dec
+}
+
+Shape enum { Circle(Circle), Rectangle(Rectangle), Point }
+
+// Stub types for event handling examples
+Click type {
+    x: Int,
+    y: Int,
+    target: Str
+}
+
+KeyPress type {
+    key: Str
+}
+
+Event enum { Click(Click), KeyPress(KeyPress) }
+
+Navigate type {
+    target: Str
+}
+
+Input type {
+    value: Str
+}
+
+Action enum { Navigate(Navigate), Input(Input) }
+
+// Stub for log function
+log fn (msg: Str): Null { null }
+
+// Stub for cond-all examples
+add-gift-wrap fn (order: Map): Str { "gift-wrapped" }
+flag-priority fn (order: Map): Str { "priority" }
+send-notification fn (order: Map): Str { "notified" }
+log-order fn (order: Map): Str { "logged" }
+
+// Stub types for nested flows example
+Request type {
+    user-id: Str
+}
+
+Response enum { Success(Map), Error(Str) }
+
+fetch-user fn (id: Str): Map { {id: id, name: "User"} }
+fetch-config fn (): Map { {enabled: true} }
+fetch-permissions fn (id: Str): Map { {admin: false} }
+fetch-preferences fn (id: Str): Map { {theme: "dark"} }
+process-user fn (data: Map): Map { data }
+
+// Stub for fallback example
+Data type {
+    value: Str
+}
+
+fetch-primary fn (id: Str): Data { Data({value: "primary"}) }
+fetch-backup fn (id: Str): Data { Data({value: "backup"}) }
+
+// Stub for parallel error example
+fetch fn (id: Str): Str { id }
+
+// Point type for match exhaustive example
+Point type {
+    x: Int,
+    y: Int
+}
+
+// =============================================================================
+// @doc: serial-flow
+// =============================================================================
+
+// @doc: serial-explicit
+process-serial fn serial (data: Map): Map {
+    validated validate(data)
+    enriched enrich(validated)
+    save(enriched)
+}
+// @end: serial-explicit
+
+// @doc: serial-implicit
+process-implicit fn (data: Map): Map {
+    validated validate(data)
+    enriched enrich(validated)
+    save(enriched)
+}
+// @end: serial-implicit
+
+// =============================================================================
+// @doc: if-vs-cond
+// =============================================================================
+
+// @doc: if-simple
+if-example fn (count: Int): Str {
+    status if(gt(count, 0), "positive", "non-positive")
+    status
+}
+// @end: if-simple
+
+// @doc: cond-multi
+cond-example fn (count: Int): Str {
+    status cond {
+        lt(count, 0) => { "negative" }
+        eq(count, 0) => { "zero" }
+        => { "positive" }
+    }
+
+    status
+}
+// @end: cond-multi
+
+// =============================================================================
+// @doc: cond-flow
+// =============================================================================
+
+// @doc: cond-classify
+classify fn cond (x: Int): Str {
+    lt(x, 0) => { "negative" }
+    eq(x, 0) => { "zero" }
+    => { "positive" }
+}
+// @end: cond-classify
+
+// @doc: cond-standalone
+process-order fn (order: Map): Result {
+    status cond {
+        is-empty(order.items) => { err("No items") }
+        lt(order.total, 0) => { err("Invalid total") }
+        => { ok("valid") }
+    }
+
+    status
+}
+// @end: cond-standalone
+
+// =============================================================================
+// @doc: cond-all-flow
+// =============================================================================
+
+// @doc: cond-all-example
+process-with-effects fn (order: Map): Map {
+    effects cond-all {
+        order.is-gift => gift { add-gift-wrap(order) }
+        order.priority => priority { flag-priority(order) }
+        order.notify => notify { send-notification(order) }
+        => standard { log-order(order) }
+    }
+
+    effects
+}
+// @end: cond-all-example
+
+// =============================================================================
+// @doc: match-flow
+// =============================================================================
+
+// @doc: match-function
+describe-shape fn match (shape: Shape): Str {
+    Shape.Circle => { `Circle with radius ${shape.radius}` }
+    Shape.Rectangle => { `Rectangle ${shape.width}x${shape.height}` }
+    Shape.Point => { "A point" }
+}
+// @end: match-function
+
+// @doc: match-standalone
+process-result fn (result: Result): Str {
+    message match result {
+        Result.Ok => { `Success: ${result}` }
+        Result.Err => { `Error: ${result}` }
+    }
+
+    message
+}
+// @end: match-standalone
+
+// @doc: match-access-values
+handle-event fn (event: Event): Action {
+    action match event {
+        Event.Click => {
+            log(`Clicked at ${event.x}, ${event.y}`)
+            Action.Navigate({target: event.target})
+        }
+
+        Event.KeyPress => {
+            Action.Input({value: event.key})
+        }
+    }
+
+    action
+}
+// @end: match-access-values
+
+// =============================================================================
+// @doc: match-all-flow
+// =============================================================================
+
+// @doc: match-all-trait
+Trait enum { Flying, Swimming, Walking }
+
+describe-trait fn match-all (creature: Trait): Str {
+    Trait.Flying => { "can fly" }
+    Trait.Swimming => { "can swim" }
+    Trait.Walking => { "can walk" }
+}
+// @end: match-all-trait
+
+// =============================================================================
+// @doc: parallel-flow
+// =============================================================================
+
+// @doc: parallel-function
+fetch-user-data fn parallel (id: Str): Map {
+    profile fetch-user(id)
+    perms fetch-permissions(id)
+    prefs fetch-preferences(id)
+}
+// @end: parallel-function
+
+// @doc: parallel-standalone
+process-with-parallel fn (userId: Str): Map {
+    data parallel {
+        user fetch-user(userId)
+        permissions fetch-permissions(userId)
+        preferences fetch-preferences(userId)
+    }
+
+    if(is-err(data.user), data.user, process-user(data))
+}
+// @end: parallel-standalone
+
+// @doc: parallel-error
+fetch-all fn parallel (ids: Vec<Str>): Str {
+    a fetch(ids[0])
+    b fetch(ids[1])
+    c fetch(ids[2])
+}
+// @end: parallel-error
+
+// =============================================================================
+// @doc: result-modifiers
+// =============================================================================
+
+// Stub functions for modifier examples
+fetch-a fn (): Str { "a" }
+fetch-b fn (): Str { "b" }
+fetch-c fn (): Str { "c" }
+
+// @doc: parallel-vec-modifier
+parallel-as-vec fn (): Vec {
+    results parallel|vec {
+        fetch-a()
+        fetch-b()
+        fetch-c()
+    }
+
+    results
+}
+// @end: parallel-vec-modifier
+
+// =============================================================================
+// @doc: nested-flows
+// =============================================================================
+
+// @doc: nested-example
+process-request fn (request: Request): Response {
+    data parallel {
+        user fetch-user(request.user-id)
+        config fetch-config()
+    }
+
+    validated cond {
+        is-null(data.user) => { err("User not found") }
+        not(data.config.enabled) => { err("Service disabled") }
+        => { ok(data) }
+    }
+
+    response match validated {
+        Result.Ok => { Response.Success(validated) }
+        Result.Err => { Response.Error(Str(validated)) }
+    }
+
+    response
+}
+// @end: nested-example
+
+// =============================================================================
+// @doc: common-patterns
+// =============================================================================
+
+// @doc: early-return-cond
+validate-input fn cond (input: Map): Result {
+    is-empty(input.name) => { err("Name required") }
+    lt(length(input.name), 2) => { err("Name too short") }
+    is-empty(input.email) => { err("Email required") }
+    not(contains(input.email, "@")) => { err("Invalid email") }
+    => { ok(input) }
+}
+// @end: early-return-cond
+
+// @doc: parallel-fallback
+fetch-with-fallback fn (id: Str): Data {
+    results parallel {
+        primary fetch-primary(id)
+        backup fetch-backup(id)
+    }
+
+    if(is-ok(results.primary), results.primary, results.backup)
+}
+// @end: parallel-fallback
+
+// @doc: match-exhaustive
+Direction enum { Up, Down, Left, Right }
+
+move-point fn match (dir: Direction, pos: Point): Point {
+    Direction.Up => { Point({x: pos.x, y: sub(pos.y, 1)}) }
+    Direction.Down => { Point({x: pos.x, y: add(pos.y, 1)}) }
+    Direction.Left => { Point({x: sub(pos.x, 1), y: pos.y}) }
+    Direction.Right => { Point({x: add(pos.x, 1), y: pos.y}) }
+}
+// @end: match-exhaustive
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-classify
+meta ["test"] fn () {
+    assert-eq("negative", classify(-5), "negative classification")
+    assert-eq("zero", classify(0), "zero classification")
+    assert-eq("positive", classify(5), "positive classification")
+}
+
+test-if-example
+meta ["test"] fn () {
+    assert-eq("positive", if-example(5), "positive count")
+    assert-eq("non-positive", if-example(0), "zero count")
+    assert-eq("non-positive", if-example(-1), "negative count")
+}
+
+test-cond-example
+meta ["test"] fn () {
+    assert-eq("negative", cond-example(-5), "negative")
+    assert-eq("zero", cond-example(0), "zero")
+    assert-eq("positive", cond-example(5), "positive")
+}
+
+test-describe-shape
+meta ["test"] fn () {
+    circle Shape.Circle({radius: 5.0})
+    assert-eq("Circle with radius 5.0", describe-shape(circle), "circle description")
+
+    rect Shape.Rectangle({width: 10.0, height: 20.0})
+    assert-eq("Rectangle 10.0x20.0", describe-shape(rect), "rectangle description")
+
+    assert-eq("A point", describe-shape(Shape.Point), "point description")
+}
+
+test-describe-trait
+meta ["test"] fn () {
+    result describe-trait(Trait.Flying)
+    assert-eq("can fly", get(result, "Trait.Flying"), "flying trait")
+}
+
+test-move-point
+meta ["test"] fn () {
+    origin Point({x: 0, y: 0})
+
+    up move-point(Direction.Up, origin)
+    assert-eq(-1, up.y, "move up decreases y")
+
+    down move-point(Direction.Down, origin)
+    assert-eq(1, down.y, "move down increases y")
+}

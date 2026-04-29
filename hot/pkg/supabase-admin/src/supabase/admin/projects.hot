@@ -1,0 +1,197 @@
+::supabase::admin::projects ns
+
+::api ::supabase::admin::api
+
+// ============================================================================
+// Project CRUD
+// ============================================================================
+
+list-projects
+meta {
+    doc: """
+List all Supabase projects the authenticated user has access to.
+
+**Example**
+
+```hot
+::projects ::supabase::admin::projects
+
+projects ::projects/list-projects()
+// => [{id: "abc", name: "My App", organization_id: "org-123", region: "us-east-1", ...}, ...]
+```
+"""
+}
+fn (): Vec<Map> {
+  ::api/request("GET", "/projects")
+}
+
+get-project
+meta {
+    doc: """Get details for a specific project by its reference ID."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}`)
+}
+
+CreateProjectRequest type {
+  name: Str,
+  organization_id: Str,
+  region: Str,
+  plan: Str?,
+  db_pass: Str?,
+  kps_enabled: Bool?
+}
+
+create-project
+meta {
+    doc: """
+Create a new Supabase project. `region` must be a valid AWS region (e.g. "us-east-1", "eu-west-1"). `plan` defaults to "free".
+
+**Example**
+
+```hot
+::projects ::supabase::admin::projects
+
+project ::projects/create-project(::projects/CreateProjectRequest({
+  name: "My New App",
+  organization_id: "org-abc-123",
+  region: "us-east-1",
+  db_pass: "secureDbPassword123!"
+}))
+project.id  // => "new-project-ref"
+```
+"""
+}
+fn (request: CreateProjectRequest): Map {
+  body {
+    name: request.name,
+    organization_id: request.organization_id,
+    region: request.region
+  }
+    |> assoc-some("plan", request.plan)
+    |> assoc-some("db_pass", request.db_pass)
+    |> assoc-some("kps_enabled", request.kps_enabled)
+
+  ::api/request("POST", "/projects", {}, body)
+}
+
+delete-project
+meta {
+    doc: """Delete a Supabase project. This is permanent and cannot be undone."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("DELETE", `/projects/${project-ref}`)
+}
+
+// ============================================================================
+// Project Lifecycle
+// ============================================================================
+
+pause-project
+meta {
+    doc: """Pause a project (free tier only). Paused projects stop all services but retain data."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("POST", `/projects/${project-ref}/pause`, {}, {})
+}
+
+restore-project
+meta {
+    doc: """Restore a paused project."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("POST", `/projects/${project-ref}/restore`, {}, {})
+}
+
+// ============================================================================
+// API Keys
+// ============================================================================
+
+get-api-keys
+meta {
+    doc: """
+Get the API keys (anon, service_role) for a project.
+
+**Example**
+
+```hot
+::projects ::supabase::admin::projects
+
+keys ::projects/get-api-keys("my-project-ref")
+// => [{name: "anon", api_key: "eyJ..."}, {name: "service_role", api_key: "eyJ..."}]
+```
+"""
+}
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/api-keys`)
+}
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+get-postgrest-config
+meta {
+    doc: """Get the PostgREST configuration for a project (exposed schemas, max rows, pool size)."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/config/postgrest`)
+}
+
+UpdatePostgrestConfigRequest type {
+  project_ref: Str,
+  db_schema: Str?,
+  max_rows: Int?,
+  db_extra_search_path: Str?,
+  db_pool: Int?
+}
+
+update-postgrest-config
+meta {
+    doc: """Update PostgREST configuration."""
+}
+fn (request: UpdatePostgrestConfigRequest): Map {
+  body {}
+    |> assoc-some("db_schema", request.db_schema)
+    |> assoc-some("max_rows", request.max_rows)
+    |> assoc-some("db_extra_search_path", request.db_extra_search_path)
+    |> assoc-some("db_pool", request.db_pool)
+
+  ::api/request("PATCH", `/projects/${request.project_ref}/config/postgrest`, {}, body)
+}
+
+get-auth-config
+meta {
+    doc: """Get the authentication (GoTrue) configuration for a project."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/config/auth`)
+}
+
+update-auth-config
+meta {
+    doc: """Update authentication configuration. Pass a Map of auth config fields to update."""
+}
+fn (project-ref: Str, config: Map): Map {
+  ::api/request("PATCH", `/projects/${project-ref}/config/auth`, {}, config)
+}
+
+// ============================================================================
+// Health & Usage
+// ============================================================================
+
+get-project-health
+meta {
+    doc: """Get health status of all project services (database, auth, storage, etc.)."""
+}
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/health`)
+}
+
+get-project-usage
+meta {
+    doc: """Get usage metrics for a project (database size, storage, bandwidth, etc.)."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/usage`)
+}

@@ -1,0 +1,53 @@
+::whisper::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::whisper
+// Require Docker + task worker (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-whisper
+//
+// Note: first run may download the Whisper model and is slow.
+// ============================================================================
+
+
+// Short WAV audio sample for speech-to-text testing
+TEST_AUDIO_URL "https://www.kozco.com/tech/LRMonoPhase4.wav"
+
+// Helper: download a test file to hot:// storage for use as input
+setup-test-input fn (url: Str, name: Str): Str {
+    hot-path `hot://whisper-test/${name}`
+    cmd `wget -q -O /tmp/test-audio '${url}' && hotbox cp /tmp/test-audio '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 120,
+        size: "nano",
+        network: "internet",
+    })
+    result ::hot::task/await(info.id)
+    hot-path
+}
+
+test-transcribe-real-audio
+meta ["test"] fn () {
+    input setup-test-input(TEST_AUDIO_URL, "integration-voice.wav")
+    out ::whisper/transcribe(input, {
+        model: "tiny",
+        format: "json",
+    })
+    assert(is-some(out.text), "should return transcript text")
+    assert(gt(length(out.text), 0), "transcript should be non-empty")
+    assert(is-some(out.url), "should return output URL")
+    assert(starts-with(out.url, "hot://whisper/"), "URL should be in whisper namespace")
+}
+
+test-transcribe-json-segments
+meta ["test"] fn () {
+    input setup-test-input(TEST_AUDIO_URL, "integration-segments.wav")
+    out ::whisper/transcribe(input, {
+        model: "tiny",
+        format: "json",
+    })
+    assert(is-some(out.segments), "json output should include segments")
+    assert(gt(length(out.segments), 0), "should have at least one segment")
+}

@@ -1,0 +1,289 @@
+::mcp::ai ns
+meta {
+    doc: """
+    Bridge between an external Model Context Protocol (MCP) server and
+    the Hot agent run-loop. Resolves a server config, performs the MCP
+    initialize handshake, lists the server's tools, and wraps each
+    remote tool as an `::ai::tool/Tool` so it can be merged with
+    locally-defined tools and dispatched by `::ai::chat/run-loop`.
+
+    **Server configs**
+
+    A server is described by a Map with a required `url` field and an
+    optional `headers` map:
+
+    ```hot
+    {url: "https://mcp.weather.example.com/mcp",
+     headers: {Authorization: `Bearer ${::hot::ctx/get(\"WEATHER_TOKEN\")}`}}
+    ```
+
+    Any other keys are ignored.
+
+    **Specs accepted by `for-agent`**
+
+    - a Map literal — used as-is.
+    - a Var or Fn — resolved by calling it (with no args) to produce a
+      Map; lets you compose a config from `::hot::ctx/get` lookups at
+      runtime without bundling secrets into source files.
+    - a single-key Map `{<name>: <config-or-fn>}` — names the server in
+      logs and error messages while still resolving the inner value.
+
+    **Example**
+
+    ```hot
+    ::ai-mcp ::mcp::ai
+
+    weather-config fn (): Map {
+        {url: ::hot::ctx/get("WEATHER_MCP_URL"),
+         headers: {Authorization: `Bearer ${::hot::ctx/get(\"WEATHER_MCP_TOKEN\")}`}}
+    }
+
+    tools ::ai-mcp/for-agent([
+        weather-config,
+        {time: {url: "https://time.example.com/mcp"}}
+    ])
+    // tools is Vec<::ai::tool/Tool> ready to drop into ChatOptions.tools
+    ```
+    """
+}
+
+::client ::mcp::client
+::mcp-tools ::mcp::tools
+::mcp-types ::mcp::types
+::ai-tool ::ai::tool
+::ai-chat ::ai::chat
+
+CLIENT-NAME "hot-ai-agent"
+CLIENT-VERSION "1.0.0"
+
+CLIENT-INFO ::mcp-types/ClientInfo({ name: CLIENT-NAME, version: CLIENT-VERSION })
+
+// ============================================================================
+// Spec resolution
+// ============================================================================
+
+resolve-spec
+meta {
+    doc: """
+    Reduce one entry from `mcp-servers:` to `{name?, config: Map}`.
+
+    Accepted shapes:
+
+    - A Fn (or Var bound to a Fn): called with no args; the returned
+      value is recursively resolved (so a fn may return either a bare
+      Map or a `{name: ...}` named entry).
+    - A bare Map (any keys): returned as `{name: null, config}`.
+    - A single-key Map `{<name>: <Map-or-Fn>}`: the key becomes the
+      label and the inner value is recursively resolved. The single
+      key is recognized as "named" only when its value is a Map or Fn
+      — single-key configs that happen to use a primitive value (e.g.
+      `{url: \"...\"}` is itself a multi-key map in practice; a literal
+      `{onlykey: 1}` is treated as a config).
+
+    Anything else fails with a clear error.
+    """
+}
+fn (spec: Any): Map {
+    cond {
+        is-fn(spec) => { resolve-spec(spec()) }
+        is-map(spec) => {
+            cond {
+                eq(length(spec), 1) => {
+                    only-key first(keys(spec))
+                    inner get(spec, only-key)
+                    cond {
+                        or(is-fn(inner), is-map(inner)) => {
+                            resolved resolve-spec(inner)
+                            { name: Str(only-key), config: resolved.config }
+                        }
+                        => { { name: null, config: spec } }
+                    }
+                }
+                => { { name: null, config: spec } }
+            }
+        }
+        => {
+            fail(`::mcp::ai/resolve-spec: unsupported spec value (must be Map or Fn): ${spec}`)
+        }
+    }
+}
+
+// ============================================================================
+// Validation
+// ============================================================================
+
+validate-config
+meta {
+    doc: """
+    Extract the `{url, headers}` slice the rest of the bridge needs.
+
+    Requires a non-empty Str `url`; `headers` is optional and defaults
+    to `{}`. Other keys on the input config are silently ignored.
+
+    Fails with a single error pointing at the server label when the
+    required shape isn't met.
+    """
+}
+fn (resolved: Map): Map {
+    config resolved.config
+    label or(resolved.name, get(config, "url", "<unknown>"))
+    url get(config, "url")
+    cond {
+        is-null(url) => {
+            fail(`::mcp::ai: server '${label}' is missing a required Str 'url' field`)
+        }
+
+        not(is-str(url)) => {
+            fail(`::mcp::ai: server '${label}' has a non-Str 'url' field: ${url}`)
+        }
+
+        is-empty(url) => {
+            fail(`::mcp::ai: server '${label}' has an empty 'url' field`)
+        }
+        => {
+            { url: url, headers: or(get(config, "headers"), {}) }
+        }
+    }
+}
+
+// ============================================================================
+// Tool wrapping
+// ============================================================================
+
+wrap-remote-tool
+meta {
+    doc: """
+    Wrap a single remote MCP tool as an `::ai::tool/Tool`. The tool's
+    `fn` is a closure that calls `::mcp::tools/call` with the
+    captured session and tool name, and `pass-input` is set so
+    `::ai::tool/dispatch` forwards the raw input map.
+
+    The wrapped tool's `name` is the remote name unchanged; the chat
+    layer is responsible for namespacing if it wants to disambiguate
+    tools coming from multiple servers.
+    """
+}
+fn (session: ::mcp-types/Session, remote: ::mcp-types/Tool): ::ai-tool/Tool {
+    tool-name remote.name
+    ::ai-tool/Tool({
+        name: tool-name,
+        description: or(remote.description, remote.title, null),
+        input-schema: or(remote.input-schema, {type: "object", properties: {}}),
+        output-schema: null,
+        fn: (input: Map) {
+            result ::mcp-tools/call(session, tool-name, input)
+            if(or(result.is-error, false),
+                err(result),
+                or(result.structured-content, result.content))
+        },
+        pass-input: true
+    })
+}
+
+// ============================================================================
+// Top-level entry points
+// ============================================================================
+
+from-server
+meta {
+    doc: """
+    Connect to a single MCP server (lazy: this performs the network
+    handshake) and return its tool list as `Vec<::ai::tool/Tool>`.
+
+    `config` must contain a `url` and may contain `headers`; other
+    keys are ignored (see `validate-config`).
+    """
+}
+fn (config: Map): Vec<::ai-tool/Tool> {
+    validated validate-config({ name: null, config: config })
+    session ::client/initialize(validated.url, CLIENT-INFO, null)
+    remote-tools ::mcp-tools/list-all(session)
+    map(remote-tools, (rt) { wrap-remote-tool(session, rt) })
+}
+
+for-agent
+meta {
+    doc: """
+    Resolve every entry in `specs` to a remote tool list and concatenate
+    the results. Empty `specs` returns `[]`. Errors from individual
+    servers propagate as failures so the agent operator sees the
+    misconfiguration immediately rather than silently dropping tools.
+
+    **Example**
+
+    ```hot
+    ::ai-mcp ::mcp::ai
+    ::ai-tool ::ai::tool
+
+    tools ::ai-mcp/for-agent([
+        () { {url: ::hot::ctx/get(\"WEATHER_MCP_URL\")} },
+        {time: {url: \"https://time.example.com/mcp\"}}
+    ])
+    chat-tools concat(tools, ::ai-tool/for-agent([my-local-fn]))
+    ```
+    """
+}
+fn (specs: Vec<Any>): Vec<::ai-tool/Tool> {
+    if(or(is-null(specs), is-empty(specs)),
+        [],
+        reduce(specs, (acc, spec) {
+            resolved resolve-spec(spec)
+            validated validate-config(resolved)
+            session ::client/initialize(validated.url, CLIENT-INFO, null)
+            remote-tools ::mcp-tools/list-all(session)
+            wrapped map(remote-tools, (rt) { wrap-remote-tool(session, rt) })
+            concat(acc, wrapped)
+        }, []))
+}
+
+// ============================================================================
+// ChatOptions integration
+// ============================================================================
+
+options-with-mcp
+meta {
+    doc: """
+    Return a new `::ai::chat/ChatOptions` with remote MCP tools merged
+    into `tools:` so the rest of the agent run-loop is unchanged.
+
+    Local tools win on name collision: any remote tool whose `name`
+    already appears in `opts.tools` is dropped (with no warning — the
+    agent author is the source of truth for their tool surface).
+
+    The MCP handshake happens here, not inside `::ai::chat/run-loop`, so
+    callers can decide when to pay the network cost (typically once per
+    agent invocation) and surface connection failures in their own
+    error path rather than mid-conversation.
+
+    **Example**
+
+    ```hot
+    ::ai-mcp ::mcp::ai
+    ::ai-chat ::ai::chat
+
+    base ::ai-chat/ChatOptions({
+        chat-fn: ::anthropic::messages/chat-with-tools,
+        model: "claude-sonnet-4-5",
+        tools: [::ai::tool/from-fn(local-add)],
+    })
+
+    opts ::ai-mcp/options-with-mcp(base, [
+        () { {url: ::hot::ctx/get(\"WEATHER_MCP_URL\")} },
+        {time: {url: \"https://time.example.com/mcp\"}}
+    ])
+
+    answer ::ai-chat/run-loop(opts, "What's the weather in Portland?")
+    ```
+    """
+}
+fn (opts: ::ai-chat/ChatOptions, mcp-servers: Vec<Any>?): ::ai-chat/ChatOptions {
+    if(or(is-null(mcp-servers), is-empty(mcp-servers)),
+        opts,
+        {
+            local or(opts.tools, [])
+            local-names map(local, %.name)
+            remote for-agent(mcp-servers)
+            deduped filter(remote, not(in(%.name, local-names)))
+            ::ai-chat/ChatOptions({...untype(opts), tools: concat(local, deduped)})
+        })
+}

@@ -1,0 +1,61 @@
+::supabase::integration::storage ns
+meta ["test"]
+
+::storage ::supabase::storage
+
+SUPABASE_TEST_BUCKET ::hot::env/get("SUPABASE_TEST_BUCKET", "")
+
+test-bucket-lifecycle
+meta ["test"]
+fn () {
+  unique-id random-string(8)
+  bucket-name `hot-test-${unique-id}`
+
+  // Create bucket
+  ::storage/create-bucket(::storage/CreateBucketRequest({
+    name: bucket-name,
+    public: false
+  }))
+
+  // Get bucket
+  bucket ::storage/get-bucket(bucket-name)
+  assert-eq(bucket-name, bucket.name, "bucket name should match")
+
+  // List buckets (should include ours)
+  buckets ::storage/list-buckets()
+  found some(buckets, (b) { eq(b.name, bucket-name) })
+  assert(found, "new bucket should appear in list")
+
+  // Clean up
+  ::storage/empty-bucket(bucket-name)
+  ::storage/delete-bucket(bucket-name)
+}
+
+test-object-upload-download-delete
+meta ["test"]
+fn () {
+  assert(SUPABASE_TEST_BUCKET, "Set SUPABASE_TEST_BUCKET in .env (existing bucket name)")
+
+  unique-id random-string(8)
+  file-path `test/hot-test-${unique-id}.txt`
+  content "Hello from Hot integration test!"
+
+  // Upload
+  result ::storage/upload(SUPABASE_TEST_BUCKET, file-path, content, "text/plain")
+  assert(is-some(result), "upload should return a result")
+
+  // List objects to verify
+  objects ::storage/list-objects(::storage/ListObjectsRequest({
+    bucket: SUPABASE_TEST_BUCKET,
+    prefix: "test/"
+  }))
+  found some(objects, (o) { contains(o.name, unique-id) })
+  assert(found, "uploaded file should appear in listing")
+
+  // Create signed URL
+  signed ::storage/create-signed-url(SUPABASE_TEST_BUCKET, file-path, 60)
+  assert(signed.signedURL, "should return a signed URL")
+
+  // Delete
+  ::storage/delete-object(SUPABASE_TEST_BUCKET, file-path)
+}

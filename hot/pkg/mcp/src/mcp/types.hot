@@ -1,0 +1,365 @@
+::mcp::types ns
+meta {doc: """Type definitions for the Model Context Protocol (MCP)."""}
+
+// ============================================================================
+// Session
+// ============================================================================
+
+ClientInfo
+meta {
+    doc: """
+Client identification sent during the initialize handshake.
+
+**Example**
+
+```hot
+::types ::mcp::types
+info ::types/ClientInfo({name: "my-app", version: "1.0.0"})
+```
+"""
+}
+type {
+  name: Str,
+  version: Str
+}
+
+ServerInfo
+meta {
+    doc: """
+Server identification received during the initialize handshake.
+
+Accessible via `session.server-info` after initialization.
+
+**Example**
+
+```hot
+session.server-info.name    // => "my-mcp-server"
+session.server-info.version // => "2.0.0"
+```
+"""
+}
+type {
+  name: Str,
+  version: Str
+}
+
+ClientCapabilities
+meta {
+    doc: """
+Optional capabilities the client advertises during initialization.
+
+- `roots` - Filesystem root listing support
+- `sampling` - LLM sampling request support
+
+**Example**
+
+```hot
+::types ::mcp::types
+caps ::types/ClientCapabilities({roots: {listChanged: true}, sampling: {}})
+```
+"""
+}
+type {
+  roots: Map?,
+  sampling: Map?
+}
+
+ServerCapabilities
+meta {
+    doc: """
+Capabilities the server advertises during initialization.
+
+- `tools` - Server provides callable tools
+- `resources` - Server provides readable resources
+- `prompts` - Server provides prompt templates
+- `logging` - Server supports structured log messages
+- `completions` - Server supports argument auto-completion
+"""
+}
+type {
+  tools: Map?,
+  resources: Map?,
+  prompts: Map?,
+  logging: Map?,
+  completions: Map?
+}
+
+Session
+meta {
+    doc: """
+An active MCP session. Created by `::mcp::client/initialize` and passed to all subsequent operations.
+
+- `url` - The MCP server endpoint
+- `session-id` - Server-assigned session ID (if any)
+- `protocol-version` - Negotiated protocol version
+- `server-info` - Server name and version
+- `server-capabilities` - What the server supports
+- `headers` - Pre-built headers for subsequent requests
+
+**Example**
+
+```hot
+::mcp ::mcp::client
+::types ::mcp::types
+session ::mcp/initialize(
+  "https://my-server.example.com/mcp",
+  ::types/ClientInfo({name: "my-app", version: "1.0.0"}),
+  null
+)
+session.url              // => "https://my-server.example.com/mcp"
+session.protocol-version // => "2025-11-25"
+session.server-info.name // => "my-server"
+```
+"""
+}
+type {
+  url: Str,
+  session-id: Str?,
+  protocol-version: Str,
+  server-info: ServerInfo,
+  server-capabilities: ServerCapabilities,
+  headers: Map
+}
+
+// ============================================================================
+// Tools
+// ============================================================================
+
+Tool
+meta {
+    doc: """
+A tool available on the MCP server.
+
+- `name` - Unique tool identifier
+- `title` - Human-readable display name
+- `description` - What the tool does
+- `input-schema` - JSON Schema for the tool's arguments
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+tools ::tools/list(session)
+tool first(tools)
+tool.name         // => "get_weather"
+tool.description  // => "Get weather for a location"
+tool.input-schema // => {type: "object", properties: {...}}
+```
+"""
+}
+type {
+  name: Str,
+  title: Str?,
+  description: Str?,
+  input-schema: Map?
+}
+
+ToolContent
+meta {
+    doc: """
+A single content item in a tool call result.
+
+- `type` - Content type: "text", "image", "resource", or "resource_link"
+- `text` - Text content (when type is "text")
+- `data` - Base64-encoded data (when type is "image")
+- `mime-type` - MIME type of the content
+- `resource` - Embedded resource (when type is "resource")
+"""
+}
+type {
+  type: Str,
+  text: Str?,
+  data: Str?,
+  mime-type: Str?,
+  resource: Map?
+}
+
+ToolResult
+meta {
+    doc: """
+Result from calling a tool on the MCP server.
+
+- `content` - Array of content items (text, images, resources)
+- `is-error` - Whether the tool execution resulted in an error
+- `structured-content` - Optional structured output matching the tool's output schema
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+result ::tools/call(session, "get_weather", {location: "Portland"})
+result.is-error          // => false
+first(result.content).text // => "Sunny, 72°F"
+```
+"""
+}
+type {
+  content: Vec<ToolContent>,
+  is-error: Bool?,
+  structured-content: Any?
+}
+
+// ============================================================================
+// Resources
+// ============================================================================
+
+Resource
+meta {
+    doc: """
+A resource available on the MCP server.
+
+- `uri` - Unique resource URI
+- `name` - Human-readable name
+- `description` - What the resource contains
+- `mime-type` - MIME type of the resource content
+
+**Example**
+
+```hot
+::resources ::mcp::resources
+resources ::resources/list(session)
+resource first(resources)
+resource.uri  // => "file:///project/README.md"
+resource.name // => "README"
+```
+"""
+}
+type {
+  uri: Str,
+  name: Str,
+  description: Str?,
+  mime-type: Str?
+}
+
+ResourceTemplate
+meta {
+    doc: """
+A URI template for parameterized resources.
+
+- `uri-template` - RFC 6570 URI template
+- `name` - Human-readable name
+- `description` - What the template produces
+- `mime-type` - MIME type of the resulting resource
+"""
+}
+type {
+  uri-template: Str,
+  name: Str,
+  description: Str?,
+  mime-type: Str?
+}
+
+ResourceContent
+meta {
+    doc: """
+Content returned from reading a resource.
+
+- `uri` - The resource URI
+- `text` - Text content (for text resources)
+- `blob` - Base64-encoded content (for binary resources)
+- `mime-type` - MIME type of the content
+
+**Example**
+
+```hot
+::resources ::mcp::resources
+contents ::resources/read(session, "file:///project/README.md")
+content first(contents)
+content.uri  // => "file:///project/README.md"
+content.text // => "# My Project\n..."
+// Binary resources use content.blob instead of content.text
+```
+"""
+}
+type {
+  uri: Str,
+  text: Str?,
+  blob: Str?,
+  mime-type: Str?
+}
+
+// ============================================================================
+// Prompts
+// ============================================================================
+
+Prompt
+meta {
+    doc: """
+A prompt template available on the MCP server.
+
+- `name` - Unique prompt identifier
+- `title` - Human-readable display name
+- `description` - What the prompt does
+- `arguments` - List of argument definitions (each with name, description, required)
+
+**Example**
+
+```hot
+::prompts ::mcp::prompts
+prompts ::prompts/list(session)
+prompt first(prompts)
+prompt.name // => "code-review"
+prompt.arguments // => [{name: "language", required: true}, ...]
+```
+"""
+}
+type {
+  name: Str,
+  title: Str?,
+  description: Str?,
+  arguments: Vec<Map>?
+}
+
+PromptMessage
+meta {
+    doc: """
+A message in a prompt response.
+
+- `role` - Message role: "user" or "assistant"
+- `content` - Message content (type + text/image/resource)
+
+**Example**
+
+```hot
+::prompts ::mcp::prompts
+messages ::prompts/get-prompt(session, "code-review", {language: "hot"})
+message first(messages)
+message.role    // => "user"
+message.content // => {type: "text", text: "Please review..."}
+```
+"""
+}
+type {
+  role: Str,
+  content: Map
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+StreamEvent
+meta {
+    doc: """
+A parsed SSE event from a streaming MCP response.
+
+- `event` - SSE event type (typically "message")
+- `data` - Parsed JSON-RPC message (notification, response, etc.)
+- `id` - SSE event ID (for resumability)
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+events collect(::tools/call-stream(session, "analyze", {}))
+event first(events)
+event.event // => "message"
+event.data  // => parsed JSON-RPC message (Map)
+```
+"""
+}
+type {
+  event: Str?,
+  data: Any?,
+  id: Str?
+}

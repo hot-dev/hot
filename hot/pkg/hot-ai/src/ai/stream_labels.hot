@@ -1,0 +1,134 @@
+::ai::stream-labels ns
+meta {
+    doc: """
+    Canonical `data-type` labels used across `::ai::*` for
+    `::hot::stream/data` emissions. Centralizing the strings keeps
+    consumers (dashboards, replays, logs) stable as new producers
+    are added.
+
+    # Convention
+
+    Labels follow `<package>:<topic>:<verb>`:
+
+    - `<package>` — top-level namespace identifying the producer
+      (`ai`, `hot`, `mcp`, `agent`, …).
+    - `<topic>` — feature area (`chat`, `tool`, `bundle`, `skill`).
+    - `<verb>` — granularity (`step`, `delta`, `usage`, `start`,
+      `end`, `error`).
+
+    Producers SHOULD prefer the constants exported here over
+    string literals; consumers MAY match by prefix to bucket
+    related events.
+
+    # Currently emitted
+
+    - `ai:chat:step` — `::ai::chat/run-loop` per-turn observability
+      record (when `opts.emit-steps: true`).
+    - `ai:chat:delta` — `::ai::chat/run-loop-stream` per-event
+      mirror of the streaming `ReplyDelta` (when
+      `opts.emit-stream-deltas: true`).
+
+    # Reserved (future producers)
+
+    Reserve namespace prefixes here so adopters know what's safe to
+    use without colliding with built-in producers:
+
+    - `ai:tool:*`     — tool-call lifecycle (start/end/error).
+    - `ai:rag:*`      — RAG pipeline events (retrieve/score/answer).
+    - `ai:skill:*`    — skill activation lifecycle.
+    - `ai:agent:*`    — higher-level agent orchestration events.
+    - `mcp:*`         — MCP server activity.
+    """
+}
+
+CHAT_STEP
+meta {
+    doc: """
+    Stream label for `::ai::chat/run-loop` per-turn step records.
+    Payload shape: `{iteration, model, text, tool-calls, tool-results,
+    stop-reason, usage}`.
+    """
+}
+"ai:chat:step"
+
+CHAT_DELTA
+meta {
+    doc: """
+    Stream label for `::ai::chat/run-loop-stream` per-event mirrors
+    of the streaming `ReplyDelta` enum. Payload is a `ReplyDelta`
+    variant.
+    """
+}
+"ai:chat:delta"
+
+TOOL_START
+meta {
+    doc: """
+    Reserved: stream label for tool-call lifecycle start events.
+    Payload SHOULD include `{id, name, input}`.
+    """
+}
+"ai:tool:start"
+
+TOOL_END
+meta {
+    doc: """
+    Reserved: stream label for tool-call lifecycle end events.
+    Payload SHOULD include `{id, name, output, duration-ms}`.
+    """
+}
+"ai:tool:end"
+
+TOOL_ERROR
+meta {
+    doc: """
+    Reserved: stream label for tool-call lifecycle error events.
+    Payload SHOULD include `{id, name, error}`.
+    """
+}
+"ai:tool:error"
+
+RAG_RETRIEVE
+meta {
+    doc: """
+    Reserved: stream label for RAG retrieval events.
+    Payload SHOULD include `{query, results, scores}`.
+    """
+}
+"ai:rag:retrieve"
+
+RAG_ANSWER
+meta {
+    doc: """
+    Reserved: stream label for RAG final-answer events.
+    Payload SHOULD include `{query, answer, sources}`.
+    """
+}
+"ai:rag:answer"
+
+SKILL_ACTIVATE
+meta {
+    doc: """
+    Reserved: stream label for skill activation events.
+    Payload SHOULD include `{name, when-matched}`.
+    """
+}
+"ai:skill:activate"
+
+AGENT_START
+meta {
+    doc: """
+    Reserved: stream label for agent run start events.
+    Payload SHOULD include `{agent-id, model, opts}`.
+    """
+}
+"ai:agent:start"
+
+AGENT_END
+meta {
+    doc: """
+    Reserved: stream label for agent run end events.
+    Payload SHOULD include `{agent-id, result, usage, duration-ms}`.
+    """
+}
+"ai:agent:end"

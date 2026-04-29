@@ -1,0 +1,17 @@
+::hot::pkg ns
+
+hot.pkg.stripe {
+  name: "hot.dev/stripe",
+  version: "0.10.0",
+  hot-min-version: "1.2.0",
+  description: "stripe API bindings for Hot.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["payments"],
+  deps: {
+    "hot.dev/hot-std": {}
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

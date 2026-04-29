@@ -1,0 +1,983 @@
+::hot::time ns
+meta {doc: """Date, time, and duration types based on the Temporal specification."""}
+
+// Time unit types - wrapper types for numeric time values
+Nanosecond type
+meta {doc: """Nanosecond time unit. Wraps an Int value."""}
+
+Microsecond type
+meta {doc: """Microsecond time unit. Wraps an Int value."""}
+
+Millisecond type
+meta {doc: """Millisecond time unit. Wraps an Int value."""}
+
+Second type
+meta {doc: """Second time unit. Wraps an Int value."""}
+
+Minute type
+meta {doc: """Minute time unit. Wraps an Int value."""}
+
+Hour type
+meta {doc: """Hour time unit. Wraps an Int value."""}
+
+Day type
+meta {doc: """Day time unit. Wraps an Int value."""}
+
+Week type
+meta {doc: """Week time unit. Wraps an Int value."""}
+
+Month type
+meta {doc: """Month time unit. Wraps an Int value."""}
+
+Year type
+meta {doc: """Year time unit. Wraps an Int value."""}
+
+Nanosecond -> Int fn(nanosecond) { Int(nanosecond.$val) }
+
+Microsecond -> Int fn(microsecond) { Int(microsecond.$val) }
+
+Millisecond -> Int fn(millisecond) { Int(millisecond.$val) }
+
+Second -> Int fn(second) { Int(second.$val) }
+
+Minute -> Int fn(minute) { Int(minute.$val) }
+
+Hour -> Int fn(hour) { Int(hour.$val) }
+
+Day -> Int fn(day) { Int(day.$val) }
+
+Week -> Int fn(week) { Int(week.$val) }
+
+Month -> Int fn(month) { Int(month.$val) }
+
+Year -> Int fn(year) { Int(year.$val) }
+
+
+Instant
+meta {
+    doc: """
+    An exact moment in time (UTC). Based on Temporal.Instant.
+
+    **Example**
+
+    ```hot
+    now ::hot::time/now()           // Current instant
+    Str(now)                        // "2024-12-04T15:30:00Z"
+    ::hot::time/epoch-millis(now)   // 1733324400000
+    ```
+    """
+}
+type {
+    epochNanoseconds: Int
+}
+fn
+(epoch-millis: Millisecond): Instant {
+    call-lib(::hot::time/instant-from-millis, [epoch-millis])
+},
+(epoch-micros: Microsecond): Instant {
+    call-lib(::hot::time/instant-from-micros, [epoch-micros])
+},
+(epoch-nanos: Nanosecond): Instant {
+    call-lib(::hot::time/instant-from-nanos, [epoch-nanos])
+},
+(plain-date: PlainDate): Instant {
+    call-lib(::hot::time/instant-from-plain-date, [plain-date])
+},
+(plain-time: PlainTime): Instant {
+    call-lib(::hot::time/instant-from-plain-time, [plain-time])
+},
+(plain-date-time: PlainDateTime): Instant {
+    call-lib(::hot::time/instant-from-plain-date-time, [plain-date-time])
+}
+
+
+Duration
+meta {
+    doc: """
+    A length of time. Can be used to add/subtract from dates and times.
+
+    **Example**
+
+    ```hot
+    d ::hot::time/days(7)              // 7-day duration
+    d Duration({"hours": 2, "minutes": 30})  // 2h 30m duration
+    Str(d)                             // "PT2H30M"
+    ```
+    """
+}
+type {
+    years: Dec,
+    months: Dec,
+    weeks: Dec,
+    days: Dec,
+    hours: Dec,
+    minutes: Dec,
+    seconds: Dec,
+    milliseconds: Dec,
+    microseconds: Dec,
+    nanoseconds: Dec
+}
+fn
+(iso: Str): Duration {
+    call-lib(::hot::time/parse-duration, [iso])
+},
+(components: Map): Duration {
+    call-lib(::hot::time/duration, [components])
+}
+
+
+PlainDate
+meta {
+    doc: """
+    A calendar date without time or timezone. Based on Temporal.PlainDate.
+
+    **Example**
+
+    ```hot
+    today PlainDate()                   // Today's date
+    christmas PlainDate(2024, 12, 25)   // Specific date
+    parsed PlainDate("2024-12-25")      // From ISO string
+    Str(christmas)                      // "2024-12-25"
+    ```
+    """
+}
+type {
+    year: Int,
+    month: Int,
+    day: Int,
+    calendar: Str
+}
+fn
+(): PlainDate { call-lib(::hot::time/now-plain-date, []) },
+(date: Str): PlainDate {
+    call-lib(::hot::time/parse-plain-date, [date])
+},
+(year: Int, month: Int, day: Int): PlainDate {
+    call-lib(::hot::time/plain-date, [year, month, day])
+}
+
+
+PlainTime
+meta {
+    doc: """
+    A wall-clock time without date or timezone. Based on Temporal.PlainTime.
+
+    **Example**
+
+    ```hot
+    now PlainTime()                  // Current time
+    noon PlainTime(12, 0, 0)         // Specific time
+    parsed PlainTime("14:30:00")     // From ISO string
+    Str(noon)                        // "12:00:00"
+    ```
+    """
+}
+type {
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int
+}
+fn
+(): PlainTime { call-lib(::hot::time/now-plain-time, []) },
+(time: Str): PlainTime {
+    call-lib(::hot::time/parse-plain-time, [time])
+},
+(hour: Int, minute: Int, second: Int): PlainTime {
+    call-lib(::hot::time/plain-time, [hour, minute, second])
+}
+
+
+PlainDateTime
+meta {
+    doc: """
+    A date and time without timezone. Based on Temporal.PlainDateTime.
+
+    **Example**
+
+    ```hot
+    now PlainDateTime()                            // Current date/time
+    party PlainDateTime(2024, 12, 31, 23, 59, 0)   // New Year's Eve
+    parsed PlainDateTime("2024-12-31T23:59:00")    // From ISO string
+    Str(party)                                     // "2024-12-31T23:59:00"
+    ```
+    """
+}
+type {
+    year: Int,
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+    calendar: Str
+}
+fn
+(): PlainDateTime { call-lib(::hot::time/now-plain-date-time, []) },
+(datetime: Str): PlainDateTime {
+    call-lib(::hot::time/parse-plain-date-time, [datetime])
+},
+(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int): PlainDateTime {
+    call-lib(::hot::time/plain-date-time, [year, month, day, hour, minute, second])
+}
+
+
+ZonedDateTime
+meta {
+    doc: """
+    A date and time with timezone. Based on Temporal.ZonedDateTime.
+
+    Represents an exact moment in time, projected into a specific timezone.
+    Combines the exactness of Instant with the human-readable fields of
+    PlainDateTime, aware of DST transitions and UTC offset changes.
+
+    **Example**
+
+    ```hot
+    // From IXDTF string
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+
+    // From Instant + timezone
+    zdt ZonedDateTime(::hot::time/now(), "America/Chicago")
+
+    // From PlainDateTime + timezone
+    zdt ZonedDateTime(PlainDateTime(2026, 3, 8, 2, 30, 0), "America/Chicago")
+
+    zdt.year       // 2026
+    zdt.hour       // 10
+    zdt.offset     // "-06:00"
+    zdt.timezone   // "America/Chicago"
+    Str(zdt)       // "2026-02-17T10:30:00-06:00[America/Chicago]"
+    ```
+    """
+}
+type {
+    epochNanoseconds: Int,
+    timezone: Str,
+    offset: Str,
+    year: Int,
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+    calendar: Str
+}
+fn
+(ixdtf: Str): ZonedDateTime {
+    call-lib(::hot::time/zoned-date-time-from-string, [ixdtf])
+},
+(instant: Instant, timezone: Str): ZonedDateTime {
+    call-lib(::hot::time/zoned-date-time-from-instant, [instant, timezone])
+},
+(plain-date-time: PlainDateTime, timezone: Str): ZonedDateTime {
+    call-lib(::hot::time/zoned-date-time-from-plain-date-time, [plain-date-time, timezone])
+}
+
+
+// Current time functions
+now
+meta {
+    doc: """
+    Get the current instant.
+
+    **Example**
+
+    ```hot
+
+    current ::hot::time/now()
+    Str(current)  // "2024-12-04T10:30:00Z"
+    ```
+    """
+}
+fn (): Instant {
+    call-lib(::hot::time/now, [])
+}
+
+// Instant functions (creation via Instant(...) type constructor)
+epoch-millis
+meta {
+    doc: """
+    Get milliseconds since Unix epoch for `instant`.
+
+    **Example**
+
+    ```hot
+
+    ms ::hot::time/epoch-millis(::hot::time/now())
+    // 1733312400000
+    ```
+    """
+}
+fn (instant: Instant): Int {
+    call-lib(::hot::time/epoch-millis, [instant])
+}
+
+
+epoch-nanos
+meta {
+    doc: """
+    Get nanoseconds since Unix epoch for `instant`.
+
+    **Example**
+
+    ```hot
+
+    ns ::hot::time/epoch-nanos(::hot::time/now())
+    // 1733312400000000000
+    ```
+    """
+}
+fn (instant: Instant): Int {
+    call-lib(::hot::time/epoch-nanos, [instant])
+}
+
+
+// Constructor functions - now replaced by type constructors above
+// Property extraction functions - work with all date/time types
+year
+meta {
+    doc: """
+    Extract the year component.
+
+    **Example**
+
+    ```hot
+
+    date ::hot::time/PlainDate(2024, 12, 25)
+    ::hot::time/year(date)  // 2024
+    ```
+    """
+}
+fn (date: PlainDate | PlainDateTime): Int {
+    call-lib(::hot::time/year, [date])
+}
+
+
+month
+meta {
+    doc: """
+    Extract the month component (1-12).
+
+    **Example**
+
+    ```hot
+
+    date ::hot::time/PlainDate(2024, 12, 25)
+    ::hot::time/month(date)  // 12
+    ```
+    """
+}
+fn (date: PlainDate | PlainDateTime): Int {
+    call-lib(::hot::time/month, [date])
+}
+
+
+day
+meta {
+    doc: """
+    Extract the day of month component (1-31).
+
+    **Example**
+
+    ```hot
+
+    date ::hot::time/PlainDate(2024, 12, 25)
+    ::hot::time/day(date)  // 25
+    ```
+    """
+}
+fn (date: PlainDate | PlainDateTime): Int {
+    call-lib(::hot::time/day, [date])
+}
+
+
+hour
+meta {
+    doc: """
+    Extract the hour component (0-23).
+
+    **Example**
+
+    ```hot
+
+    time ::hot::time/PlainTime(14, 30, 0)
+    ::hot::time/hour(time)  // 14
+    ```
+    """
+}
+fn (time: PlainTime | PlainDateTime): Int {
+    call-lib(::hot::time/hour, [time])
+}
+
+
+minute
+meta {
+    doc: """
+    Extract the minute component (0-59).
+
+    **Example**
+
+    ```hot
+
+    time ::hot::time/PlainTime(14, 30, 45)
+    ::hot::time/minute(time)  // 30
+    ```
+    """
+}
+fn (time: PlainTime | PlainDateTime): Int {
+    call-lib(::hot::time/minute, [time])
+}
+
+
+second
+meta {
+    doc: """
+    Extract the second component (0-59).
+
+    **Example**
+
+    ```hot
+
+    time ::hot::time/PlainTime(14, 30, 45)
+    ::hot::time/second(time)  // 45
+    ```
+    """
+}
+fn (time: PlainTime | PlainDateTime): Int {
+    call-lib(::hot::time/second, [time])
+}
+
+
+millisecond
+meta {
+    doc: """
+    Extract the millisecond component (0-999).
+
+    **Example**
+
+    ```hot
+
+    time ::hot::time/PlainTime("14:30:45.123")
+    ::hot::time/millisecond(time)  // 123
+    ```
+    """
+}
+fn (time: PlainTime | PlainDateTime): Int {
+    call-lib(::hot::time/millisecond, [time])
+}
+
+
+microsecond
+meta {
+    doc: """
+    Extract the microsecond component (0-999).
+
+    **Example**
+
+    ```hot
+
+    time ::hot::time/PlainTime("14:30:45.123456")
+    ::hot::time/microsecond(time)  // 456
+    ```
+    """
+}
+fn (time: PlainTime | PlainDateTime): Int {
+    call-lib(::hot::time/microsecond, [time])
+}
+
+
+nanosecond
+meta {
+    doc: """
+    Extract the nanosecond component (0-999).
+
+    **Example**
+
+    ```hot
+
+    time ::hot::time/PlainTime("14:30:45.123456789")
+    ::hot::time/nanosecond(time)  // 789
+    ```
+    """
+}
+fn (time: PlainTime | PlainDateTime): Int {
+    call-lib(::hot::time/nanosecond, [time])
+}
+
+
+// Duration functions (creation via Duration(...) type constructor)
+// Parsing and formatting
+parse
+meta {
+    doc: """
+    Parse an ISO-like date/time string into PlainDateTime, PlainDate or PlainTime.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/parse("2024-12-25")           // PlainDate
+    ::hot::time/parse("14:30:00")             // PlainTime
+    ::hot::time/parse("2024-12-25T14:30:00")  // PlainDateTime
+    ```
+    """
+}
+fn (date-string: Str): PlainDateTime | PlainDate | PlainTime {
+    call-lib(::hot::time/parse, [date-string])
+}
+
+
+// Enhanced string constructors - use format via Str coercions
+// String coercions via ->
+Instant -> Str fn (instant: Instant): Str {
+    call-lib(::hot::time/to-string, [instant])
+}
+
+
+Duration -> Str fn (duration: Duration): Str {
+    call-lib(::hot::time/to-string, [duration])
+}
+
+
+PlainDate -> Str fn (date: PlainDate): Str {
+    call-lib(::hot::time/to-string, [date])
+}
+
+
+PlainTime -> Str fn (time: PlainTime): Str {
+    call-lib(::hot::time/to-string, [time])
+}
+
+
+PlainDateTime -> Str fn (dt: PlainDateTime): Str {
+    call-lib(::hot::time/to-string, [dt])
+}
+
+
+ZonedDateTime -> Str fn (zdt: ZonedDateTime): Str {
+    call-lib(::hot::time/to-string, [zdt])
+}
+
+
+// Formatting
+format
+meta {
+    doc: """
+    Format a date/time value using a pattern string.
+
+    Works with PlainDate, PlainTime, PlainDateTime, ZonedDateTime, and Instant.
+    Uses English month/day names. For ISO output, use `Str()` coercion instead.
+
+    **Pattern tokens:**
+
+    | Token  | Meaning              | Example   |
+    | ------ | -------------------- | --------- |
+    | YYYY   | 4-digit year         | 2026      |
+    | YY     | 2-digit year         | 26        |
+    | MMMM   | Full month name      | February  |
+    | MMM    | Short month name     | Feb       |
+    | MM     | 2-digit month        | 02        |
+    | M      | Month number         | 2         |
+    | DD     | 2-digit day          | 17        |
+    | D      | Day of month         | 17        |
+    | dddd   | Full weekday name    | Tuesday   |
+    | ddd    | Short weekday name   | Tue       |
+    | HH     | 24-hour hour (2-dig) | 14        |
+    | H      | 24-hour hour         | 14        |
+    | hh     | 12-hour hour (2-dig) | 02        |
+    | h      | 12-hour hour         | 2         |
+    | mm     | Minutes (2-digit)    | 30        |
+    | ss     | Seconds (2-digit)    | 05        |
+    | SSS    | Milliseconds         | 123       |
+    | A      | AM/PM                | PM        |
+    | a      | am/pm                | pm        |
+    | z      | Timezone abbrev      | CST       |
+    | Z      | UTC offset           | -06:00    |
+    | X      | Unix seconds         | 1771362600|
+
+    **Example**
+
+    ```hot
+
+    date ::hot::time/PlainDate(2026, 2, 17)
+    ::hot::time/format(date, "MMMM D, YYYY")          // "February 17, 2026"
+    ::hot::time/format(date, "MM/DD/YYYY")             // "02/17/2026"
+
+    dt ::hot::time/PlainDateTime(2026, 2, 17, 14, 30, 0)
+    ::hot::time/format(dt, "h:mm A")                   // "2:30 PM"
+    ::hot::time/format(dt, "dddd, MMMM D YYYY HH:mm") // "Tuesday, February 17 2026 14:30"
+    ```
+    """
+}
+fn (temporal: Any, pattern: Str): Str {
+    call-lib(::hot::time/format, [temporal, pattern])
+}
+
+
+// Timezone functions
+now-zoned
+meta {
+    doc: """
+    Get the current time as a ZonedDateTime in the given timezone.
+
+    **Example**
+
+    ```hot
+
+    chicago ::hot::time/now-zoned("America/Chicago")
+    tokyo ::hot::time/now-zoned("Asia/Tokyo")
+    chicago.timezone  // "America/Chicago"
+    ```
+    """
+}
+fn (timezone: Str): ZonedDateTime {
+    call-lib(::hot::time/now-zoned, [timezone])
+}
+
+
+with-timezone
+meta {
+    doc: """
+    Convert a ZonedDateTime to a different timezone. The underlying instant
+    remains the same; the wall-clock fields change to reflect the new zone.
+
+    **Example**
+
+    ```hot
+
+    chicago ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    tokyo ::hot::time/with-timezone(chicago, "Asia/Tokyo")
+    tokyo.hour      // 1 (next day)
+    tokyo.timezone  // "Asia/Tokyo"
+    ```
+    """
+}
+fn (zdt: ZonedDateTime, timezone: Str): ZonedDateTime {
+    call-lib(::hot::time/with-timezone, [zdt, timezone])
+}
+
+
+to-plain-date-time
+meta {
+    doc: """
+    Extract the wall-clock date and time from a ZonedDateTime, discarding
+    the timezone. Returns a PlainDateTime.
+
+    **Example**
+
+    ```hot
+
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    dt ::hot::time/to-plain-date-time(zdt)
+    Str(dt)  // "2026-02-17T10:30:00"
+    ```
+    """
+}
+fn (zdt: ZonedDateTime): PlainDateTime {
+    call-lib(::hot::time/to-plain-date-time, [zdt])
+}
+
+
+to-plain-date
+meta {
+    doc: """
+    Extract the date from a ZonedDateTime, discarding time and timezone.
+    Returns a PlainDate.
+
+    **Example**
+
+    ```hot
+
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    d ::hot::time/to-plain-date(zdt)
+    Str(d)  // "2026-02-17"
+    ```
+    """
+}
+fn (zdt: ZonedDateTime): PlainDate {
+    call-lib(::hot::time/to-plain-date, [zdt])
+}
+
+
+to-plain-time
+meta {
+    doc: """
+    Extract the wall-clock time from a ZonedDateTime, discarding date and
+    timezone. Returns a PlainTime.
+
+    **Example**
+
+    ```hot
+
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    t ::hot::time/to-plain-time(zdt)
+    Str(t)  // "10:30:00"
+    ```
+    """
+}
+fn (zdt: ZonedDateTime): PlainTime {
+    call-lib(::hot::time/to-plain-time, [zdt])
+}
+
+
+to-instant
+meta {
+    doc: """
+    Extract the exact moment from a ZonedDateTime as an Instant,
+    discarding the timezone.
+
+    **Example**
+
+    ```hot
+
+    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    inst ::hot::time/to-instant(zdt)
+    ::hot::time/epoch-millis(inst)  // epoch millis for that moment
+    ```
+    """
+}
+fn (zdt: ZonedDateTime): Instant {
+    call-lib(::hot::time/to-instant, [zdt])
+}
+
+
+// Convenience functions for common durations
+years
+meta {
+    doc: """
+    Create a Duration representing `amount` years.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/years(2)  // Duration of 2 years
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({years: amount}) }
+
+
+months
+meta {
+    doc: """
+    Create a Duration representing `amount` months.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/months(6)  // Duration of 6 months
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({months: amount}) }
+
+
+weeks
+meta {
+    doc: """
+    Create a Duration representing `amount` weeks.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/weeks(2)  // Duration of 2 weeks
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({weeks: amount}) }
+
+
+days
+meta {
+    doc: """
+    Create a Duration representing `amount` days.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/days(30)  // Duration of 30 days
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({days: amount}) }
+
+
+hours
+meta {
+    doc: """
+    Create a Duration representing `amount` hours.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/hours(24)  // Duration of 24 hours
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({hours: amount}) }
+
+
+minutes
+meta {
+    doc: """
+    Create a Duration representing `amount` minutes.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/minutes(30)  // Duration of 30 minutes
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({minutes: amount}) }
+
+
+seconds
+meta {
+    doc: """
+    Create a Duration representing `amount` seconds.
+
+    **Example**
+
+    ```hot
+
+    ::hot::time/seconds(60)  // Duration of 60 seconds
+    ```
+    """
+}
+fn (amount: Any): Duration { Duration({seconds: amount}) }
+
+
+// Utility functions for creating common dates
+start-of-day
+meta {
+    doc: """
+    Return a PlainDateTime at 00:00:00 for the given date.
+
+    **Example**
+
+    ```hot
+
+    date ::hot::time/PlainDate(2024, 12, 25)
+    ::hot::time/start-of-day(date)  // 2024-12-25T00:00:00
+    ```
+    """
+}
+fn (date: PlainDate | PlainDateTime): PlainDateTime {
+    PlainDateTime(year(date), month(date), day(date), 0, 0, 0)
+}
+
+
+end-of-day
+meta {
+    doc: """
+    Return a PlainDateTime at 23:59:59 for the given date.
+
+    **Example**
+
+    ```hot
+
+    date ::hot::time/PlainDate(2024, 12, 25)
+    ::hot::time/end-of-day(date)  // 2024-12-25T23:59:59
+    ```
+    """
+}
+fn (date: PlainDate | PlainDateTime): PlainDateTime {
+    PlainDateTime(year(date), month(date), day(date), 23, 59, 59)
+}
+
+
+// Arithmetic and difference
+add
+meta {
+    doc: """
+    Add a Duration to a PlainDateTime.
+
+    **Example**
+
+    ```hot
+
+    dt ::hot::time/PlainDateTime(2024, 12, 25, 10, 0, 0)
+    ::hot::time/add(dt, ::hot::time/days(7))  // 2025-01-01T10:00:00
+    ```
+    """
+}
+fn (temporal: PlainDateTime, duration: Duration): PlainDateTime {
+    call-lib(::hot::time/add, [temporal, duration])
+}
+
+
+subtract
+meta {
+    doc: """
+    Subtract a Duration from a PlainDateTime.
+
+    **Example**
+
+    ```hot
+
+    dt ::hot::time/PlainDateTime(2024, 12, 25, 10, 0, 0)
+    ::hot::time/subtract(dt, ::hot::time/days(25))  // 2024-11-30T10:00:00
+    ```
+    """
+}
+fn (temporal: PlainDateTime, duration: Duration): PlainDateTime {
+    call-lib(::hot::time/subtract, [temporal, duration])
+}
+
+
+until
+meta {
+    doc: """
+    Return the Duration from `start` to `end`.
+
+    **Example**
+
+    ```hot
+
+    start ::hot::time/PlainDateTime(2024, 1, 1, 0, 0, 0)
+    end ::hot::time/PlainDateTime(2024, 12, 31, 23, 59, 59)
+    duration ::hot::time/until(start, end)
+    // duration.days = 365
+    ```
+    """
+}
+fn (start: PlainDateTime, end: PlainDateTime): Duration {
+    call-lib(::hot::time/until, [start, end])
+}
+
+
+since
+meta {
+    doc: """
+    Return the Duration from `end` to `start`.
+
+    **Example**
+
+    ```hot
+
+    start ::hot::time/PlainDateTime(2024, 1, 1, 0, 0, 0)
+    end ::hot::time/PlainDateTime(2024, 12, 31, 23, 59, 59)
+    duration ::hot::time/since(start, end)
+    // duration.days = -365
+    ```
+    """
+}
+fn (start: PlainDateTime, end: PlainDateTime): Duration {
+    call-lib(::hot::time/since, [start, end])
+}

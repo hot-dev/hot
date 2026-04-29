@@ -1,0 +1,48 @@
+#!/bin/sh
+# Pre-commit hook to run formatting, linting, and project checks
+
+echo "Checking version sync..."
+scripts/check-version-sync.sh
+if [ $? -ne 0 ]; then
+    echo "Version sync check failed, aborting commit."
+    exit 1
+fi
+
+echo "Running cargo fmt..."
+cargo fmt --check
+if [ $? -ne 0 ]; then
+    echo "cargo fmt failed, aborting commit."
+    exit 1
+fi
+
+echo "Running cargo clippy..."
+# Use --all-features on Linux (includes kata), exclude it on other platforms
+# Kata feature requires protoc and is Linux-only anyway
+if [ "$(uname)" = "Linux" ]; then
+    cargo clippy --workspace --all-targets --all-features -j 4 -- -D warnings
+else
+    cargo clippy --workspace --all-targets -j 4 -- -D warnings
+fi
+if [ $? -ne 0 ]; then
+    echo "cargo clippy failed, aborting commit."
+    exit 1
+fi
+
+# Cross-check Linux-only kata code on non-Linux platforms
+if [ "$(uname)" != "Linux" ] && rustup target list --installed 2>/dev/null | grep -q x86_64-unknown-linux-gnu; then
+    echo "Cross-checking kata feature for Linux target..."
+    cargo check -p hot_task_worker --features kata --target x86_64-unknown-linux-gnu -j 4 2>&1
+    if [ $? -ne 0 ]; then
+        echo "Kata cross-check failed, aborting commit."
+        exit 1
+    fi
+fi
+
+echo "Running hot check..."
+cargo run -- check
+if [ $? -ne 0 ]; then
+    echo "hot check failed, aborting commit."
+    exit 1
+fi
+
+exit 0

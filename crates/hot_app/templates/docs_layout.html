@@ -1,0 +1,994 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<!-- Search Modal -->
+<div id="search-modal" class="fixed inset-0 z-50 hidden">
+  <div class="fixed inset-0 bg-black/50" onclick="closeSearch()"></div>
+  <div class="fixed top-[10%] left-1/2 -translate-x-1/2 w-full max-w-xl mx-auto px-4">
+    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+      <!-- Search input -->
+      <div class="flex items-center px-4 border-b border-gray-200 dark:border-gray-700">
+        <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>
+        <input id="search-input" type="text" placeholder="Search functions, types, namespaces..."
+               class="w-full px-3 py-4 bg-transparent text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none text-lg"
+               oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)">
+        <kbd class="hidden sm:inline-flex items-center px-2 py-1 text-xs text-gray-400 bg-gray-100 dark:bg-gray-700 rounded">ESC</kbd>
+      </div>
+      <!-- Results -->
+      <div id="search-results" class="max-h-[60vh] overflow-y-auto">
+        <div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
+          Type to search functions, types, and namespaces
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="flex flex-col md:flex-row h-full overflow-hidden">
+  <!-- Docs Sidebar (left) -->
+  <aside class="hidden md:block w-64 flex-shrink-0 border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 overflow-y-auto">
+    <nav class="sticky top-0 p-4">
+      <!-- Back to docs index -->
+      <a href="/docs{% if project_name.is_some() %}?project={{ project_name.as_ref().unwrap() }}{% endif %}" class="flex items-center mb-4 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+        </svg>
+        {% if project_name.is_some() %}{{ project_name.as_ref().unwrap() }}{% else %}Documentation{% endif %}
+      </a>
+
+      <!-- Search button -->
+      <button onclick="openSearch()" class="w-full flex items-center px-3 py-2 mb-4 text-sm text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
+        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>
+        Search
+        <kbd class="ml-auto text-xs text-gray-400 bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded">⌘K</kbd>
+      </button>
+
+      <!-- Navigation -->
+      {% block docs_nav %}{% endblock %}
+    </nav>
+  </aside>
+
+  <!-- Main content area with optional right sidebar -->
+  <div class="flex-1 min-w-0 flex overflow-hidden">
+    <!-- Content column -->
+    <div class="flex-1 min-w-0 overflow-y-auto">
+      <main>
+        <article class="max-w-4xl py-8 px-4 sm:px-8">
+          <div class="docs-content text-gray-700 dark:text-gray-300">
+            {% block docs_content %}{% endblock %}
+          </div>
+
+          <!-- Prev/Next Navigation -->
+          {% block docs_nav_footer %}{% endblock %}
+        </article>
+      </main>
+    </div>
+
+    <!-- Right sidebar TOC (desktop only) -->
+    {% if toc.len() > 0 %}
+    <aside class="hidden lg:block w-56 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
+      <nav class="sticky top-0 p-4">
+        <h4 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">On this page</h4>
+        {% for section in toc %}
+        <div class="mb-4">
+          {% if toc.len() > 1 %}
+          <h5 class="text-xs font-medium text-gray-400 dark:text-gray-500 mb-2">{{ section.title }}</h5>
+          {% endif %}
+          <ul class="space-y-1">
+            {% for item in section.items %}
+            <li>
+              <a href="#{{ item.anchor }}" class="toc-link block text-sm text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 truncate transition-colors">
+                {{ item.name }}{% for badge in item.badges %} <span class="meta-badge {{ badge }}-badge meta-badge-sm">{{ badge }}</span>{% endfor %}
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endfor %}
+      </nav>
+    </aside>
+    {% endif %}
+  </div>
+</div>
+
+<style>
+/* Documentation content styling */
+.docs-content {
+  line-height: 1.75;
+}
+
+.docs-content h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgb(229 231 235);
+  color: rgb(17 24 39);
+}
+
+.dark .docs-content h1 {
+  border-bottom-color: #333;
+  color: rgb(255 255 255);
+}
+
+.docs-content h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+  color: rgb(17 24 39);
+  scroll-margin-top: 6rem;
+}
+
+.dark .docs-content h2 {
+  color: rgb(255 255 255);
+}
+
+.docs-content h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  color: rgb(31 41 55);
+}
+
+.dark .docs-content h3 {
+  color: rgb(243 244 246);
+}
+
+/* Separator between functions/types in pkg docs */
+.docs-content h3[id] {
+  padding-top: 1.25rem;
+  border-top: 1px solid rgb(229 231 235);
+  scroll-margin-top: 6rem;
+}
+
+.dark .docs-content h3[id] {
+  border-top-color: rgb(55 65 81);
+}
+
+/* First item after h2 shouldn't have top border */
+.docs-content h2 + h3[id] {
+  border-top: none;
+  padding-top: 0;
+}
+
+.docs-content h4 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  color: rgb(55 65 81);
+}
+
+.dark .docs-content h4 {
+  color: rgb(229 231 235);
+}
+
+.docs-content p {
+  margin-bottom: 1rem;
+}
+
+.docs-content a {
+  color: #cf2425;
+  text-decoration: none;
+}
+
+.docs-content a:hover {
+  text-decoration: underline;
+}
+
+.docs-content strong {
+  font-weight: 600;
+  color: rgb(17 24 39);
+}
+
+.dark .docs-content strong {
+  color: rgb(255 255 255);
+}
+
+/* Inline code */
+.docs-content code:not(pre code) {
+  background-color: rgb(243 244 246);
+  color: rgb(220 38 38);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  font-family: 'Fira Code', ui-monospace, monospace;
+}
+
+.dark .docs-content code:not(pre code) {
+  background-color: #1a1a1a;
+  color: #ffa4a4;
+}
+
+/* Code blocks - Light mode */
+.docs-content pre {
+  background-color: #f6f8fa;
+  border: 1px solid #d1d5db;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+  position: relative;
+}
+
+.docs-content pre code {
+  background: none;
+  color: #24292f;
+  padding: 0;
+  font-size: 0.875rem;
+  font-family: 'Fira Code', ui-monospace, monospace;
+  line-height: 1.6;
+}
+
+/* Code blocks - Dark mode */
+.dark .docs-content pre {
+  background-color: #0d0d0d;
+  border-color: #333;
+}
+
+.dark .docs-content pre code {
+  color: #e6edf3;
+}
+
+/* Function signature blocks - distinct blue-tinted background */
+.docs-content pre.fn-signature,
+.docs-content pre.fn-signature[class*="language-"] {
+  background: #eef4fc !important;
+  border: 1px solid #bfdbfe !important;
+  border-left: 3px solid #3b82f6 !important;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0 1rem 0;
+  font-size: 0.9rem;
+  border-radius: 0.375rem;
+}
+
+.dark .docs-content pre.fn-signature,
+.dark .docs-content pre.fn-signature[class*="language-"] {
+  background: #172033 !important;
+  border-color: #1e3a5f !important;
+  border-left-color: #3b82f6 !important;
+}
+
+/* Type links in signatures */
+.docs-content .type-link {
+  color: #953800 !important;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.docs-content .type-link:hover {
+  text-decoration: underline;
+}
+
+.dark .docs-content .type-link {
+  color: #ffa657 !important;
+}
+
+/* Anchor link for headings */
+.docs-content h3[id] .anchor-link {
+  opacity: 0;
+  margin-left: 0.5rem;
+  color: rgb(156 163 175);
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: opacity 0.15s;
+}
+
+.docs-content h3[id]:hover .anchor-link {
+  opacity: 1;
+}
+
+.docs-content h3[id] .anchor-link:hover {
+  color: rgb(59 130 246);
+}
+
+.dark .docs-content h3[id] .anchor-link {
+  color: rgb(107 114 128);
+}
+
+.dark .docs-content h3[id] .anchor-link:hover {
+  color: rgb(96 165 250);
+}
+
+.anchor-link.copied {
+  color: rgb(34 197 94) !important;
+  opacity: 1 !important;
+}
+
+.docs-content ul, .docs-content ol {
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+}
+
+.docs-content ul {
+  list-style-type: disc;
+}
+
+.docs-content ol {
+  list-style-type: decimal;
+}
+
+.docs-content li {
+  margin: 0.25rem 0;
+}
+
+.docs-content li > ul, .docs-content li > ol {
+  margin: 0.25rem 0;
+}
+
+.docs-content blockquote {
+  border-left: 4px solid #cf2425;
+  padding-left: 1rem;
+  margin: 1rem 0;
+  font-style: italic;
+  color: rgb(107 114 128);
+}
+
+.dark .docs-content blockquote {
+  color: rgb(156 163 175);
+}
+
+.docs-content hr {
+  border: none;
+  border-top: 1px solid rgb(229 231 235);
+  margin: 2rem 0;
+}
+
+.dark .docs-content hr {
+  border-top-color: #333;
+}
+
+.docs-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.875rem;
+}
+
+.docs-content th {
+  background-color: rgb(243 244 246);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid rgb(229 231 235);
+}
+
+.dark .docs-content th {
+  background-color: #1a1a1a;
+  border-bottom-color: #333;
+}
+
+.docs-content td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgb(229 231 235);
+}
+
+.dark .docs-content td {
+  border-bottom-color: #333;
+}
+
+.docs-content tbody tr:hover {
+  background-color: rgb(249 250 251);
+}
+
+.dark .docs-content tbody tr:hover {
+  background-color: #111;
+}
+
+/* Namespace badge in tables */
+.docs-content code.namespace-badge {
+  background: rgb(243 244 246);
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  display: inline-block;
+}
+.dark .docs-content code.namespace-badge {
+  background: #333;
+}
+.docs-content code.namespace-badge a {
+  color: #cf2425;
+  text-decoration: none;
+}
+.docs-content code.namespace-badge a:hover {
+  text-decoration: underline;
+}
+
+.dark .docs-content code.namespace-badge a {
+  color: #ffa4a4;
+}
+
+/* Package docs styling */
+.docs-content .pkg-description {
+  font-weight: 400;
+  font-size: 0.65em;
+  color: #6b7280;
+}
+.dark .docs-content .pkg-description {
+  color: #9ca3af;
+}
+
+.docs-content .pkg-meta {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: rgb(249 250 251);
+  border-radius: 0.5rem;
+  border: 1px solid rgb(229 231 235);
+}
+
+.dark .docs-content .pkg-meta {
+  background: #1a1a1a;
+  border-color: #333;
+}
+
+.docs-content .pkg-meta p {
+  margin: 0.25rem 0;
+}
+
+.docs-content .breadcrumb {
+  color: #6b7280;
+  margin-bottom: 0.5rem;
+  font-family: 'Fira Code', monospace;
+}
+
+.dark .docs-content .breadcrumb {
+  color: #9ca3af;
+}
+
+.docs-content .breadcrumb a {
+  color: #cf2425;
+}
+
+.dark .docs-content .breadcrumb a {
+  color: #ffa4a4;
+}
+
+.docs-content .breadcrumb .ns-prefix {
+  color: #9ca3af;
+}
+
+.dark .docs-content .breadcrumb .ns-prefix {
+  color: #6b7280;
+}
+
+.docs-content .breadcrumb .ns-current {
+  color: #374151;
+}
+
+.dark .docs-content .breadcrumb .ns-current {
+  color: #e5e7eb;
+}
+
+.docs-content .namespace-header {
+  font-family: 'Fira Code', monospace;
+  color: #6b7280;
+  margin-top: 1.5rem;
+}
+
+.dark .docs-content .namespace-header {
+  color: #9ca3af;
+}
+
+.docs-content .core-badge {
+  background: rgb(229 231 235);
+  color: rgb(75 85 99);
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
+.dark .docs-content .core-badge {
+  background: rgb(55 65 81);
+  color: rgb(156 163 175);
+}
+
+/* Meta indicator badges */
+.docs-content .meta-badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 9999px;
+  font-size: 0.65rem;
+  font-weight: 500;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+.docs-content .meta-badge-sm {
+  font-size: 0.6rem;
+  padding: 0.05rem 0.35rem;
+}
+.docs-content .schedule-badge { background: rgb(224 231 255); color: rgb(67 56 202); }
+.docs-content .event-badge { background: rgb(237 233 254); color: rgb(109 40 217); }
+.docs-content .webhook-badge { background: rgb(255 237 213); color: rgb(194 65 12); }
+.docs-content .mcp-badge { background: rgb(204 251 241); color: rgb(17 94 89); }
+.dark .docs-content .schedule-badge { background: rgb(49 46 129 / 0.4); color: rgb(165 180 252); }
+.dark .docs-content .event-badge { background: rgb(76 29 149 / 0.4); color: rgb(196 181 253); }
+.dark .docs-content .webhook-badge { background: rgb(124 45 18 / 0.4); color: rgb(253 186 116); }
+.dark .docs-content .mcp-badge { background: rgb(19 78 74 / 0.4); color: rgb(94 234 212); }
+.docs-content .ns-meta-pills { margin-left: 0.5rem; }
+.docs-content .ns-meta-pills .meta-badge { margin-left: 0.25rem; }
+.docs-content .meta-details {
+  background: rgb(249 250 251);
+  border: 1px solid rgb(229 231 235);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+}
+.dark .docs-content .meta-details {
+  background: rgb(31 41 55);
+  border-color: rgb(55 65 81);
+}
+.docs-content .meta-detail {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+.docs-content .meta-detail code {
+  font-size: 0.8rem;
+  background: none;
+  padding: 0;
+}
+
+/* Context Variables section styling */
+.docs-content .ctx-requirements {
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-left: 3px solid #22c55e;
+  border-radius: 0.375rem;
+  padding: 1rem;
+  margin: 0.5rem 0 1.5rem 0;
+}
+
+.dark .docs-content .ctx-requirements {
+  background: #052e16;
+  border-color: #166534;
+  border-left-color: #22c55e;
+}
+
+.docs-content .ctx-section {
+  margin-bottom: 0.5rem;
+}
+
+.docs-content .ctx-section:last-child {
+  margin-bottom: 0;
+}
+
+.docs-content .ctx-label {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  margin-bottom: 0.25rem;
+}
+
+.docs-content .ctx-required {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.dark .docs-content .ctx-required {
+  background: #450a0a;
+  color: #fca5a5;
+}
+
+.docs-content .ctx-optional {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.dark .docs-content .ctx-optional {
+  background: #172554;
+  color: #93c5fd;
+}
+
+.docs-content .ctx-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0.25rem 0 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.docs-content .ctx-list li {
+  margin: 0;
+}
+
+.docs-content .ctx-list code {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.dark .docs-content .ctx-list code {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Function-level context vars (inline) */
+.docs-content .ctx-fn-requirements {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin: 0.5rem 0;
+  padding: 0.25rem 0;
+}
+
+.dark .docs-content .ctx-fn-requirements {
+  color: #9ca3af;
+}
+
+.docs-content .ctx-fn-label {
+  font-weight: 600;
+  color: #374151;
+}
+
+.dark .docs-content .ctx-fn-label {
+  color: #d1d5db;
+}
+
+.docs-content .ctx-fn-requirements code.ctx-req {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.dark .docs-content .ctx-fn-requirements code.ctx-req {
+  background: #450a0a;
+  color: #fca5a5;
+}
+
+.docs-content .ctx-fn-requirements code.ctx-opt {
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+}
+
+.dark .docs-content .ctx-fn-requirements code.ctx-opt {
+  background: #172554;
+  color: #93c5fd;
+}
+
+.docs-content .summary-line {
+  color: #6b7280;
+}
+
+.dark .docs-content .summary-line {
+  color: #9ca3af;
+}
+
+/* Copy button styles */
+.copy-button {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #6b7280;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s ease;
+}
+
+.docs-content pre:hover .copy-button {
+  opacity: 1;
+}
+
+.copy-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #374151;
+}
+
+.dark .copy-button {
+  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #9ca3af;
+}
+
+.dark .copy-button:hover {
+  background: rgba(0, 0, 0, 0.5);
+  color: #e5e7eb;
+}
+
+.copy-button.copied {
+  color: #22c55e;
+}
+
+.dark .copy-button.copied {
+  color: #4ade80;
+}
+
+/* TOC sidebar badges */
+.toc-link .meta-badge {
+  display: inline-block;
+  padding: 0.05rem 0.35rem;
+  border-radius: 9999px;
+  font-size: 0.6rem;
+  font-weight: 500;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+.toc-link .schedule-badge { background: rgb(224 231 255); color: rgb(67 56 202); }
+.toc-link .event-badge { background: rgb(237 233 254); color: rgb(109 40 217); }
+.toc-link .webhook-badge { background: rgb(255 237 213); color: rgb(194 65 12); }
+.toc-link .mcp-badge { background: rgb(204 251 241); color: rgb(17 94 89); }
+.dark .toc-link .schedule-badge { background: rgb(49 46 129 / 0.4); color: rgb(165 180 252); }
+.dark .toc-link .event-badge { background: rgb(76 29 149 / 0.4); color: rgb(196 181 253); }
+.dark .toc-link .webhook-badge { background: rgb(124 45 18 / 0.4); color: rgb(253 186 116); }
+.dark .toc-link .mcp-badge { background: rgb(19 78 74 / 0.4); color: rgb(94 234 212); }
+
+/* Active TOC link */
+.toc-link.toc-active {
+  color: #cf2425;
+  font-weight: 500;
+}
+
+.dark .toc-link.toc-active {
+  color: #cf2425;
+}
+</style>
+
+<script>
+// Copy button functionality
+function addCopyButtons() {
+  document.querySelectorAll('.docs-content pre').forEach(function(pre) {
+    if (pre.querySelector('.copy-button')) return;
+
+    var button = document.createElement('button');
+    button.className = 'copy-button';
+    button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    button.title = 'Copy code';
+
+    button.addEventListener('click', function() {
+      var code = pre.querySelector('code');
+      var text = code ? code.textContent : pre.textContent;
+
+      navigator.clipboard.writeText(text).then(function() {
+        button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+        button.classList.add('copied');
+
+        setTimeout(function() {
+          button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+          button.classList.remove('copied');
+        }, 2000);
+      });
+    });
+
+    pre.appendChild(button);
+  });
+}
+
+// Scroll spy for right sidebar TOC
+function initScrollSpy() {
+  var tocLinks = document.querySelectorAll('.toc-link');
+  if (tocLinks.length === 0) return;
+
+  var headings = [];
+  tocLinks.forEach(function(link) {
+    var id = link.getAttribute('href').substring(1);
+    var heading = document.getElementById(id);
+    if (heading) headings.push({ id: id, element: heading });
+  });
+
+  if (headings.length === 0) return;
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      var link = document.querySelector('.toc-link[href="#' + entry.target.id + '"]');
+      if (link) {
+        if (entry.isIntersecting) {
+          tocLinks.forEach(function(l) { l.classList.remove('toc-active'); });
+          link.classList.add('toc-active');
+        }
+      }
+    });
+  }, {
+    rootMargin: '-80px 0px -70% 0px',
+    threshold: 0
+  });
+
+  headings.forEach(function(h) {
+    observer.observe(h.element);
+  });
+}
+
+function addAnchorLinks() {
+  document.querySelectorAll('.docs-content h3[id]').forEach(function(heading) {
+    if (heading.querySelector('.anchor-link')) return;
+
+    var link = document.createElement('span');
+    link.className = 'anchor-link';
+    link.innerHTML = '#';
+    link.title = 'Copy link';
+
+    link.addEventListener('click', function(e) {
+      e.preventDefault();
+      var url = window.location.origin + window.location.pathname + '#' + heading.id;
+      history.replaceState(null, '', '#' + heading.id);
+      navigator.clipboard.writeText(url).then(function() {
+        link.classList.add('copied');
+        link.innerHTML = '✓';
+        setTimeout(function() {
+          link.classList.remove('copied');
+          link.innerHTML = '#';
+        }, 1500);
+      });
+    });
+
+    heading.appendChild(link);
+  });
+}
+
+// --- Search functionality ---
+var searchIndex = null;
+var searchResults = [];
+var selectedIndex = 0;
+var currentQuery = '';
+
+function openSearch() {
+  document.getElementById('search-modal').classList.remove('hidden');
+  document.getElementById('search-input').focus();
+  document.body.style.overflow = 'hidden';
+
+  if (!searchIndex) {
+    loadSearchIndex();
+  }
+}
+
+function closeSearch() {
+  document.getElementById('search-modal').classList.add('hidden');
+  document.getElementById('search-input').value = '';
+  document.getElementById('search-results').innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">Type to search functions, types, and namespaces</div>';
+  document.body.style.overflow = '';
+  searchResults = [];
+  selectedIndex = 0;
+}
+
+function loadSearchIndex() {
+  // Get project name from URL or page data
+  var projectName = '{{ project_name }}';
+  if (!projectName) return;
+
+  fetch('/api/docs/search/' + encodeURIComponent(projectName))
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      searchIndex = data.items || [];
+    })
+    .catch(function(err) {
+      console.error('Failed to load search index:', err);
+      searchIndex = [];
+    });
+}
+
+function onSearchInput(query) {
+  if (!searchIndex || query.length < 2) {
+    document.getElementById('search-results').innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">Type to search functions, types, and namespaces</div>';
+    searchResults = [];
+    currentQuery = '';
+    return;
+  }
+
+  currentQuery = query;
+  var q = query.toLowerCase();
+  searchResults = searchIndex.filter(function(item) {
+    return item.name.toLowerCase().includes(q) ||
+           item.namespace.toLowerCase().includes(q) ||
+           (item.summary && item.summary.toLowerCase().includes(q));
+  }).slice(0, 20);
+
+  selectedIndex = 0;
+  renderSearchResults();
+}
+
+function highlightText(text, query) {
+  if (!query) return escapeHtml(text);
+  var idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return escapeHtml(text);
+
+  var before = escapeHtml(text.substring(0, idx));
+  var match = escapeHtml(text.substring(idx, idx + query.length));
+  var after = escapeHtml(text.substring(idx + query.length));
+
+  return before + '<mark class="bg-yellow-200 dark:bg-yellow-700 text-gray-900 dark:text-white rounded px-0.5">' + match + '</mark>' + after;
+}
+
+function renderSearchResults() {
+  var container = document.getElementById('search-results');
+
+  if (searchResults.length === 0) {
+    container.innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">No results found</div>';
+    return;
+  }
+
+  var html = '<ul class="divide-y divide-gray-100 dark:divide-gray-700">';
+  searchResults.forEach(function(item, i) {
+    var isSelected = i === selectedIndex;
+    var kindBadge = item.kind === 'function' ? 'fn' : item.kind === 'type' ? 'type' : 'ns';
+    var kindClass = item.kind === 'function' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300' :
+                    item.kind === 'type' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300' :
+                    'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
+
+    html += '<li>';
+    html += '<a href="' + item.path + '" class="block px-4 py-3 hover:bg-gray-100 dark:hover:bg-[#222]/50 ' + (isSelected ? 'bg-gray-50 dark:bg-gray-700/50' : '') + '" data-index="' + i + '">';
+    html += '<div class="flex items-center gap-2">';
+    html += '<span class="text-xs font-medium px-1.5 py-0.5 rounded ' + kindClass + '">' + kindBadge + '</span>';
+    html += '<span class="font-medium text-gray-900 dark:text-white">' + highlightText(item.name, currentQuery) + '</span>';
+    if (item.is_core) {
+      html += '<span class="text-xs text-gray-400">core</span>';
+    }
+    html += '</div>';
+    if (item.signature) {
+      html += '<div class="text-sm text-gray-500 dark:text-gray-400 font-mono mt-1">' + escapeHtml(item.signature) + '</div>';
+    }
+    html += '<div class="text-xs text-gray-400 mt-1">' + item.namespace + '</div>';
+    html += '</a></li>';
+  });
+  html += '</ul>';
+
+  container.innerHTML = html;
+}
+
+function onSearchKeydown(e) {
+  if (e.key === 'Escape') {
+    closeSearch();
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (selectedIndex < searchResults.length - 1) {
+      selectedIndex++;
+      renderSearchResults();
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (selectedIndex > 0) {
+      selectedIndex--;
+      renderSearchResults();
+    }
+  } else if (e.key === 'Enter' && searchResults.length > 0) {
+    e.preventDefault();
+    window.location.href = searchResults[selectedIndex].path;
+  }
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Global keyboard shortcut
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    openSearch();
+  }
+  if (e.key === 'Escape') {
+    closeSearch();
+  }
+});
+
+// Initialize on page load
+window.addEventListener('load', function() {
+  if (typeof Prism !== 'undefined') {
+    Prism.highlightAll();
+  }
+  setTimeout(addCopyButtons, 100);
+  addAnchorLinks();
+  initScrollSpy();
+});
+</script>
+{% endblock %}

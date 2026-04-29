@@ -1,0 +1,168 @@
+::slack::apps ns
+
+api-request ::slack::api/request
+HttpError ::slack::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Apps Permissions
+// ============================================================================
+
+AppsPermissionsInfoResponse type {
+  ok: Bool?,
+  error: Str?,
+  info: Map?
+}
+
+
+apps-permissions-info
+meta {
+    doc: """GET /apps.permissions.info - Get the permissions this app has been granted. Returns the current set of scopes and resources available to the app."""
+}
+fn (): AppsPermissionsInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.info`)
+  if(is-ok-response(response), AppsPermissionsInfoResponse(response.body), err(HttpError(response)))
+}
+
+AppsPermissionsRequestRequest type {
+  scopes: Str,
+  trigger_id: Str
+}
+
+AppsPermissionsRequestResponse type {
+  ok: Bool?,
+  error: Str?
+}
+
+
+apps-permissions-request
+meta {
+    doc: """GET /apps.permissions.request - Request additional permissions from a user. Requires a `trigger_id` from an interactive event and a comma-separated list of scopes."""
+}
+fn (request: AppsPermissionsRequestRequest): AppsPermissionsRequestResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.request?scopes=${request.scopes}&trigger_id=${request.trigger_id}`)
+  if(is-ok-response(response), AppsPermissionsRequestResponse(response.body), err(HttpError(response)))
+}
+
+AppsPermissionsResourcesListRequest type {
+  cursor: Str?,
+  limit: Int?
+}
+
+AppsPermissionsResourcesListResponse type {
+  ok: Bool?,
+  error: Str?,
+  resources: Vec<Map>?,
+  response_metadata: Map?
+}
+
+
+apps-permissions-resources-list
+meta {
+    doc: """GET /apps.permissions.resources.list - List resources granted to the app. Supports cursor-based pagination."""
+}
+fn (request: AppsPermissionsResourcesListRequest): AppsPermissionsResourcesListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.resources.list?cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`)
+  if(is-ok-response(response), AppsPermissionsResourcesListResponse(response.body), err(HttpError(response)))
+}
+
+AppsPermissionsScopesListResponse type {
+  ok: Bool?,
+  error: Str?,
+  scopes: Map?
+}
+
+
+apps-permissions-scopes-list
+meta {
+    doc: """GET /apps.permissions.scopes.list - List the scopes this app has been granted. Returns app, user, and channel scopes."""
+}
+fn (): AppsPermissionsScopesListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.scopes.list`)
+  if(is-ok-response(response), AppsPermissionsScopesListResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Apps
+// ============================================================================
+
+AppsUninstallRequest type {
+  client_id: Str,
+  client_secret: Str
+}
+
+AppsUninstallResponse type {
+  ok: Bool?,
+  error: Str?
+}
+
+
+apps-uninstall
+meta {
+    doc: """GET /apps.uninstall - Uninstall your app from a workspace. Requires `client_id` and `client_secret` for verification. This action is irreversible."""
+}
+fn (request: AppsUninstallRequest): AppsUninstallResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/apps.uninstall?client_id=${request.client_id}&client_secret=${request.client_secret}`)
+  if(is-ok-response(response), AppsUninstallResponse(response.body), err(HttpError(response)))
+}
+
+AppsEventAuthorizationsListRequest type {
+  event_context: Str,
+  cursor: Str?,
+  limit: Int?
+}
+
+AppsEventAuthorizationsListResponse type {
+  ok: Bool?,
+  error: Str?,
+  authorizations: Vec<Map>?
+}
+
+
+apps-event-authorizations-list
+meta {
+    doc: """POST /apps.event.authorizations.list - List authorizations for the given event context. Used with org-wide apps to determine which workspaces authorized the event."""
+}
+fn (request: AppsEventAuthorizationsListRequest): AppsEventAuthorizationsListResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/apps.event.authorizations.list`, {}, request)
+  if(is-ok-response(response), AppsEventAuthorizationsListResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Bots
+// ============================================================================
+
+BotsInfoRequest type {
+  bot: Str?
+}
+
+BotsInfoResponse type {
+  ok: Bool?,
+  error: Str?,
+  bot: Map?
+}
+
+
+bots-info
+meta {
+    doc: """
+GET /bots.info - Get information about a bot user. Returns the bot's id, name, icons, and other details.
+
+**Example**
+
+```hot
+// First get bot_id from auth.test
+auth ::slack::misc/auth-test(::slack::misc/AuthTestRequest({}))
+
+response ::slack::apps/bots-info(::slack::apps/BotsInfoRequest({
+  bot: auth.bot_id
+}))
+response.bot.id    // => "B1234567"
+response.bot.name  // => "my-bot"
+```
+"""
+}
+fn (request: BotsInfoRequest): BotsInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/bots.info?bot=${or(request.bot, "")}`)
+  if(is-ok-response(response), BotsInfoResponse(response.body), err(HttpError(response)))
+}

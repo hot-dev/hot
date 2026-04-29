@@ -1,0 +1,395 @@
+::xai::images ns
+
+// ============================================================================
+// xAI Image Generation API (Aurora)
+// https://docs.x.ai/api
+// ============================================================================
+
+api-request ::xai::api/request
+HttpError ::xai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+FileMeta ::hot::file/FileMeta
+write-file-bytes ::hot::file/write-file-bytes
+
+// Import media types
+Image ::hot::media/Image
+
+// Import AI media types (wraps pure media with AI generation metadata)
+AIMedia ::ai::media/AIMedia
+AIImage ::ai::media/AIImage
+AIMediaBatch ::ai::media/AIMediaBatch
+AIMediaError ::ai::media/AIMediaError
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Literal union for response formats
+ResponseFormat type "url" | "b64_json"
+
+// Literal union for image quality
+Quality type "standard" | "hd"
+
+// Literal union for image style
+Style type "vivid" | "natural"
+
+// Image generation request
+CreateImageRequest type {
+    prompt: Str,
+    model: Str?,
+    n: Int?,
+    quality: Quality?,
+    response_format: ResponseFormat?,
+    size: Str?,
+    style: Style?,
+    user: Str?
+}
+
+// Generated image data from API
+ApiImageData type {
+    url: Str?,
+    b64_json: Str?,
+    revised_prompt: Str?
+}
+
+// Image generation response from API
+CreateImageResponse type {
+    created: Int,
+    data: Vec<ApiImageData>
+}
+
+// ============================================================================
+// API Functions
+// ============================================================================
+
+generate
+meta {
+    doc: """
+    Generate images from a text prompt.
+
+    Returns the raw API response with either URLs or base64 data.
+
+    **Example - URL response (default)**
+
+    ```hot
+    response generate(CreateImageRequest({
+        prompt: "A futuristic city at sunset",
+        model: "grok-imagine-image"
+    }))
+
+    image-url response.data[0].url
+    ```
+
+    **Example - Base64 response**
+
+    ```hot
+    response generate(CreateImageRequest({
+        prompt: "A cat wearing a spacesuit",
+        model: "grok-imagine-image",
+        response_format: "b64_json"
+    }))
+
+    base64-data response.data[0].b64_json
+    ```
+    """
+}
+fn (request: CreateImageRequest): CreateImageResponse | HttpError {
+    // Default to grok-imagine-image model if not specified
+    final-request cond {
+        is-null(request.model) => { {...untype(request), model: "grok-imagine-image"} }
+        => { request }
+    }
+
+    response api-request("POST", `${::xai/BASE_URL}/images/generations`, {}, final-request)
+    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// File Integration - Returns Media enum
+// ============================================================================
+
+generate-to-file
+meta {
+    doc: """
+    Generate an image and save it to a file.
+
+    Returns an AIMedia.Image with file metadata and AI generation details.
+    The image is requested in base64 format and decoded to bytes for file writing.
+
+    **Example**
+
+    ```hot
+    result generate-to-file("uploads/city.png", "A futuristic city at sunset")
+
+    match result {
+        AIMedia.Image => {
+            result.media.file.path // => "uploads/city.png"
+            result.media.file.size // => 123456
+            result.prompt // => "A futuristic city at sunset"
+            result.revised_prompt // => "A detailed futuristic city..."
+        }
+
+        HttpError => { fail("Image generation failed") }
+    }
+    ```
+
+    **With options**
+
+    ```hot
+    result generate-to-file("output/cat.png", CreateImageRequest({
+        prompt: "A cat wearing a spacesuit",
+        quality: "hd",
+        style: "vivid"
+    }))
+    ```
+    """
+}
+fn
+(path: Str, prompt: Str): AIMedia | HttpError {
+    generate-to-file(path, CreateImageRequest({prompt: prompt}))
+},
+(path: Str, request: CreateImageRequest): AIMedia | HttpError {
+    // Force base64 response format for file writing
+    final-request {...untype(request), response_format: "b64_json"}
+
+    response generate(CreateImageRequest(final-request))
+
+    match response {
+        HttpError => { response }
+        CreateImageResponse => {
+            data response.data
+            cond {
+                or(is-null(data), is-zero(length(data))) => {
+                    HttpError({status: 500, headers: {}, body: {error: "No image data returned"}})
+                }
+                => {
+                    first-image data[0]
+                    base64-data first-image.b64_json
+
+                    cond {
+                        is-null(base64-data) => {
+                            HttpError({status: 500, headers: {}, body: {error: "No base64 data in response"}})
+                        }
+                        => {
+                            // Decode base64 to bytes and write to file
+                            image-bytes base64-decode(base64-data)
+                            file-meta write-file-bytes(path, image-bytes)
+
+                            // Parse dimensions from size if available
+                            dims parse-size(request.size)
+
+                            // Return unified AIMedia.Image
+                            AIMedia.Image(AIImage({
+                                media: Image({
+                                    file: file-meta,
+                                    width: dims.width,
+                                    height: dims.height,
+                                    format: detect-format(path)
+                                }),
+                                provider: "xai",
+                                model: or(request.model, "grok-imagine-image"),
+                                prompt: request.prompt,
+                                revised_prompt: first-image.revised_prompt,
+                                style: request.style,
+                                quality: request.quality
+                            }))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+generate-batch-to-files
+meta {
+    doc: """
+    Generate multiple images and save them to files.
+
+    Returns an AIMediaBatch with all generated AIMedia.Image items.
+    The path should include a `{n}` placeholder that will be replaced with the image index (0-based).
+
+    **Example**
+
+    ```hot
+    batch generate-batch-to-files("uploads/image-{n}.png", "A beautiful landscape", 3)
+    // Generates: uploads/image-0.png, uploads/image-1.png, uploads/image-2.png
+
+    batch.succeeded // => 3
+    batch.failed // => 0
+
+    paths map(batch.items, %.media.file.path)
+    // => ["uploads/image-0.png", "uploads/image-1.png", "uploads/image-2.png"]
+    ```
+    """
+}
+fn (path-template: Str, prompt: Str, count: Int): AIMediaBatch {
+    // Generate all images in one request
+    response generate(CreateImageRequest({
+        prompt: prompt,
+        n: count,
+        response_format: "b64_json"
+    }))
+
+    match response {
+        HttpError => {
+            AIMediaBatch({
+                items: [],
+                succeeded: 0,
+                failed: count,
+                errors: [AIMediaError({index: 0, message: Str(response.body)})]
+            })
+        }
+
+        CreateImageResponse => {
+            results map-indexed(response.data, (i, image-data) {
+                // Replace {n} placeholder with index
+                file-path ::hot::str/replace(path-template, "{n}", Str(i))
+
+                base64-data image-data.b64_json
+                cond {
+                    is-null(base64-data) => {
+                        {success: false, error: AIMediaError({index: i, message: `No base64 data for image ${i}`})}
+                    }
+                    => {
+                        image-bytes base64-decode(base64-data)
+                        file-meta write-file-bytes(file-path, image-bytes)
+
+                        media AIMedia.Image(AIImage({
+                            media: Image({
+                                file: file-meta,
+                                width: null,
+                                height: null,
+                                format: detect-format(file-path)
+                            }),
+                            provider: "xai",
+                            model: "grok-imagine-image",
+                            prompt: prompt,
+                            revised_prompt: image-data.revised_prompt,
+                            style: null,
+                            quality: null
+                        }))
+
+                        {success: true, media: media}
+                    }
+                }
+            })
+
+            // Separate successes and failures
+            successes filter(results, %.success)
+            failures filter(results, not(%.success))
+
+            AIMediaBatch({
+                items: map(successes, %.media),
+                succeeded: length(successes),
+                failed: length(failures),
+                errors: cond {
+                    is-zero(length(failures)) => { null }
+                    => { map(failures, %.error) }
+                }
+            })
+        }
+    }
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+create-image
+meta {
+    doc: """
+    Simple image generation - returns the URL of the generated image.
+
+    Optionally pass a size string (e.g. "1024x1024") as a second argument.
+
+    **Example**
+
+    ```hot
+    url create-image("A sunset over mountains")
+    // => "https://..."
+
+    // With custom size
+    url create-image("A sunset over mountains", "512x512")
+    ```
+    """
+}
+fn (prompt: Str): Str | HttpError {
+    create-image(prompt, null)
+},
+(prompt: Str, size: Str): Str | HttpError {
+    request {
+        prompt: prompt,
+        response_format: "url"
+    }
+
+    final-request cond {
+        is-null(size) => { request }
+        => { {...request, size: size} }
+    }
+
+    response generate(CreateImageRequest(final-request))
+
+    match response {
+        HttpError => { response }
+        CreateImageResponse => {
+            data response.data
+            cond {
+                or(is-null(data), is-zero(length(data))) => { "" }
+                => { or(data[0].url, "") }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+parse-size
+meta {
+    doc: """Parse size string like "1024x1024" into a Map with width and height keys."""
+}
+fn (size: Str?): Map {
+    cond {
+        is-null(size) => { {width: null, height: null} }
+        => {
+            parts ::hot::str/split(size, "x")
+            cond {
+                lt(length(parts), 2) => { {width: null, height: null} }
+                => {
+                    {
+                        width: Int(parts[0]),
+                        height: Int(parts[1])
+                    }
+                }
+            }
+        }
+    }
+}
+
+detect-format
+meta {
+    doc: """Detect image format from file path extension. Returns the MIME minor type (e.g. "png") or null."""
+}
+fn (path: Str): Str? {
+    // Use ::hot::mime to get the minor type (e.g., "png" from "image/png")
+    mime ::hot::mime/from-path(path)
+    if(is-null(mime), null, ::hot::mime/minor-type(mime))
+}
+
+// ============================================================================
+// Available Models & Sizes
+// ============================================================================
+
+// Image generation models
+GROK_IMAGINE_IMAGE "grok-imagine-image"
+GROK_2_IMAGE "grok-2-image-1212"
+
+// Default model alias
+DEFAULT_MODEL "grok-imagine-image"
+
+// Common image sizes
+SIZE_1024 "1024x1024"
+SIZE_512 "512x512"
+SIZE_256 "256x256"

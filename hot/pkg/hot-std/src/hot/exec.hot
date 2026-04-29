@@ -1,0 +1,128 @@
+::hot::exec ns
+meta {doc: """Execution control for runs and tasks."""}
+
+Failure
+meta {
+    core: true,
+    doc: """
+    Represents a failed execution. Created by `fail()`.
+
+    Context-aware: produces `::hot::run/Failure` when called in a run,
+    `::hot::task/Failure` when called in a task.
+
+    **Example**
+
+    ```hot
+    f fail("Connection failed", {"host": "api.example.com"})
+    f.$msg   // "Connection failed"
+    f.$err   // {"host": "api.example.com"}
+    ```
+    """
+}
+type {
+    $msg: Str,
+    $err: Any
+}
+
+Cancellation
+meta {
+    core: true,
+    doc: """
+    Represents a cancelled execution. Created by `cancel()`.
+
+    Context-aware: produces `::hot::run/Cancellation` when called in a run,
+    `::hot::task/Cancellation` when called in a task.
+
+    **Example**
+
+    ```hot
+    c cancel("User cancelled", {"reason": "timeout"})
+    c.$msg    // "User cancelled"
+    c.$data   // {"reason": "timeout"}
+    ```
+    """
+}
+type {
+    $msg: Str,
+    $data: Any
+}
+
+fail
+meta {
+    core: true,
+    doc: """
+    Fail with `err` or `msg` and `err`. Halts execution immediately.
+
+    Context-aware: produces `::hot::run/Failure` in a run,
+    `::hot::task/Failure` in a task.
+
+    **Example**
+
+    ```hot
+    // Simple failure
+    fail("Something went wrong")
+
+    // Failure with details
+    fail("Validation failed", {"field": "email", "error": "invalid format"})
+
+    // Conditional failure
+    if(is-empty(users), fail("No users found"), first(users))
+    ```
+    """
+}
+fn (lazy err: Any): Failure {
+    call-lib(::hot::exec/fail, [err])
+}, (msg: Str, lazy err: Any): Failure {
+    call-lib(::hot::exec/fail, [msg, err])
+}
+
+cancel
+meta {
+    core: true,
+    doc: """
+    Cancel the current execution. Halts execution gracefully.
+
+    Context-aware: produces `::hot::run/Cancellation` in a run,
+    `::hot::task/Cancellation` in a task.
+
+    **Example**
+
+    ```hot
+    // Simple cancellation
+    cancel("Operation cancelled by user")
+
+    // Cancellation with data
+    cancel("Task timeout", {"elapsed": 30000})
+    ```
+    """
+}
+fn (msg: Str): Cancellation {
+    call-lib(::hot::exec/cancel, [msg])
+}, (msg: Str, lazy data: Any): Cancellation {
+    call-lib(::hot::exec/cancel, [msg, data])
+}
+
+exit
+meta {
+    core: true,
+    doc: """
+    Exit the current execution with status `code`.
+
+    Behavior varies by context:
+    - **CLI**: Exits the process with the given code
+    - **Worker**: `exit(0)` completes successfully; `exit(N)` acts like `fail()`
+
+    **Example**
+
+    ```hot
+    // Exit successfully
+    exit(0)
+
+    // Exit with error code (will fail on worker)
+    exit(1)
+    ```
+    """
+}
+fn (code: Int) {
+    call-lib(::hot::exec/exit, [code])
+}

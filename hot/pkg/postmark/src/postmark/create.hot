@@ -1,0 +1,28 @@
+::postmark::create ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+CreateInboundRuleRequest type {
+    Rule: Str?
+}
+
+CreateInboundRuleRequest type {
+    Rule: Str?
+}
+
+CreateInboundRuleResponse type {
+    ID: Int?,
+    Rule: Str?
+}
+
+
+create-inbound-rule-trigger
+meta {
+    doc: """Create a new inbound rule trigger. The rule specifies an email pattern to match for inbound processing."""
+}
+fn (request: CreateInboundRuleRequest): CreateInboundRuleResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/triggers/inboundrules`, {}, request)
+  if(is-ok-response(response), CreateInboundRuleResponse(response.body), err(HttpError(response)))
+}

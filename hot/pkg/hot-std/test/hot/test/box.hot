@@ -1,0 +1,95 @@
+::hot::test::box ns
+meta ["test"]
+
+// ============================================================================
+// Tests for ::hot::box - Docker Container Execution
+// ============================================================================
+// NOTE: Docker integration tests require HOT_BOX_ENABLED=true and Docker running
+// Run with: HOT_BOX_ENABLED=true hot test
+// Without HOT_BOX_ENABLED set, only the disabled-mode and API tests will run meaningful assertions
+// ============================================================================
+
+// Imports for non-core functions
+box-enabled ::hot::box/enabled
+image-policy ::hot::box/image-policy
+box-stats ::hot::box/stats
+box-start ::hot::box/start
+box-sizes ::hot::box/sizes
+
+// Note: assert, assert-eq, gt, gte, ne, eq, length, get, some, or, not are core - no aliasing needed
+
+// ============================================================================
+// Basic API Tests (no Docker required)
+// ============================================================================
+
+test-box-image-policy
+meta ["test"] fn () {
+    policy image-policy()
+    // Should return a map with policy info
+    assert-eq("open", get(policy, "policy"), "policy should be open (denylist model)")
+    // Should have denied lists
+    denied get(policy, "denied")
+    assert(gt(length(denied), 0), "should have denied images")
+    prefixes get(policy, "denied-prefixes")
+    assert(gt(length(prefixes), 0), "should have denied prefixes")
+}
+
+test-box-stats
+meta ["test"] fn () {
+    stats box-stats()
+    // Should return a map with expected keys
+    assert(ne(get(stats, "enabled"), null), "stats should have enabled")
+}
+
+test-box-enabled
+meta ["test"] fn () {
+    e box-enabled()
+    // Should return a boolean
+    assert(or(eq(e, true), eq(e, false)), "enabled should return a boolean")
+}
+
+// ============================================================================
+// Security Tests
+// ============================================================================
+
+test-box-denylist-blocks-dangerous-images
+meta ["test"] fn () {
+    policy image-policy()
+    denied get(policy, "denied")
+    prefixes get(policy, "denied-prefixes")
+    // docker:dind should be in the denied list
+    assert(some(denied, (img) { eq(img, "docker:dind") }), "docker:dind should be denied")
+    assert(some(denied, (img) { eq(img, "docker:latest") }), "docker:latest should be denied")
+    // docker: prefix should be denied
+    assert(some(prefixes, (p) { eq(p, "docker:") }), "docker: prefix should be denied")
+}
+
+// ============================================================================
+// Size Presets
+// ============================================================================
+
+test-box-sizes-returns-all-presets
+meta ["test"] fn () {
+    sizes box-sizes()
+    assert-eq(8, length(sizes), "should return 8 size presets")
+    first-size first(sizes)
+    assert-eq("nano", get(first-size, "name"), "first size should be nano")
+    assert-eq(64, get(first-size, "memory-mb"), "nano should have 64 MB")
+    last-size last(sizes)
+    assert-eq("4xlarge", get(last-size, "name"), "last size should be 4xlarge")
+    assert-eq(8192, get(last-size, "memory-mb"), "4xlarge should have 8192 MB")
+}
+
+test-box-sizes-have-required-fields
+meta ["test"] fn () {
+    sizes box-sizes()
+    map(sizes, (s) {
+        assert(is-some(get(s, "name")), "size should have name")
+        assert(gt(get(s, "memory-mb"), 0), "size should have positive memory")
+        assert(gt(get(s, "cpu-pct"), 0), "size should have positive cpu-pct")
+        assert(gt(get(s, "tmp-mb"), 0), "size should have positive tmp-mb")
+        assert(gt(get(s, "disk-mb"), 0), "size should have positive disk-mb")
+        assert(gt(get(s, "timeout-secs"), 0), "size should have positive timeout")
+        assert(gt(get(s, "cus-multiplier"), 0), "size should have positive cus-multiplier")
+    })
+}

@@ -1,0 +1,19 @@
+::demo::events ns
+
+on-order-placed
+meta {on-event: "order:placed"}
+fn (event) {
+    order event.data
+
+    parallel {
+        inventory send("inventory:reserve", {items: order.items})
+        receipt send("email:send", {
+            to: order.customer.email,
+            subject: `Order #${order.id} confirmed`,
+        })
+        notify send("slack:post", {
+            channel: "#orders",
+            text: `New order #${order.id} from ${order.customer.name}`,
+        })
+    }
+}

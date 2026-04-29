@@ -1,0 +1,1033 @@
+::stripe::stripe::reporting ns
+
+api-request ::stripe::api/request
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+BalanceTransaction type {
+    amount: Int,
+    available_on: Int,
+    balance_type: "issuing" | "payments" | "refund_and_dispute_prefunding"?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    exchange_rate: Dec?,
+    fee: Int,
+    fee_details: Vec<Fee>,
+    id: Str,
+    net: Int,
+    object: "balance_transaction",
+    reporting_category: Str,
+    source: Any?,
+    status: Str,
+    type: "adjustment" | "advance" | "advance_funding" | "anticipation_repayment" | "application_fee" | "application_fee_refund" | "charge" | "climate_order_purchase" | "climate_order_refund" | "connect_collection_transfer" | "contribution" | "issuing_authorization_hold" | "issuing_authorization_release" | "issuing_dispute" | "issuing_transaction" | "obligation_outbound" | "obligation_reversal_inbound" | "payment" | "payment_failure_refund" | "payment_network_reserve_hold" | "payment_network_reserve_release" | "payment_refund" | "payment_reversal" | "payment_unreconciled" | "payout" | "payout_cancel" | "payout_failure" | "payout_minimum_balance_hold" | "payout_minimum_balance_release" | "refund" | "refund_failure" | "reserve_transaction" | "reserved_funds" | "stripe_balance_payment_debit" | "stripe_balance_payment_debit_reversal" | "stripe_fee" | "stripe_fx_fee" | "tax_fee" | "topup" | "topup_reversal" | "transfer" | "transfer_cancel" | "transfer_failure" | "transfer_refund"
+}
+
+Fee type {
+    amount: Int,
+    application: Str?,
+    currency: Str,
+    description: Str?,
+    type: Str
+}
+
+PaymentFlowsPrivatePaymentMethodsAlipay type {
+
+}
+
+PaymentMethodSofort type {
+    country: Str?
+}
+
+PaymentMethodIdeal type {
+    bank: "abn_amro" | "asn_bank" | "bunq" | "buut" | "finom" | "handelsbanken" | "ing" | "knab" | "mollie" | "moneyou" | "n26" | "nn" | "rabobank" | "regiobank" | "revolut" | "sns_bank" | "triodos_bank" | "van_lanschot" | "yoursafe"?,
+    bic: "ABNANL2A" | "ASNBNL21" | "BITSNL2A" | "BUNQNL2A" | "BUUTNL2A" | "FNOMNL22" | "FVLBNL22" | "HANDNL2A" | "INGBNL2A" | "KNABNL2H" | "MLLENL2A" | "MOYONL21" | "NNBANL2G" | "NTSBDEB1" | "RABONL2U" | "RBRBNL21" | "REVOIE23" | "REVOLT21" | "SNSBNL2A" | "TRIONL2U"?
+}
+
+PaymentMethodNzBankAccount type {
+    account_holder_name: Str?,
+    bank_code: Str,
+    bank_name: Str,
+    branch_code: Str,
+    last4: Str,
+    suffix: Str?
+}
+
+PaymentMethodAfterpayClearpay type {
+
+}
+
+BalanceSettings type {
+    object: "balance_settings",
+    payments: BalanceSettingsResourcePayments
+}
+
+FinancialReportingFinanceReportRunRunParameters type {
+    columns: Vec<Str>?,
+    connected_account: Str?,
+    currency: Str?,
+    interval_end: Int?,
+    interval_start: Int?,
+    payout: Str?,
+    reporting_category: Str?,
+    timezone: Str?
+}
+
+PaymentMethodWechatPay type {
+
+}
+
+PaymentMethodPix type {
+
+}
+
+PaymentMethodCard type {
+    brand: Str,
+    checks: Any?,
+    country: Str?,
+    display_brand: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    generated_from: Any?,
+    last4: Str,
+    networks: Any?,
+    regulated_status: "regulated" | "unregulated"?,
+    three_d_secure_usage: Any?,
+    wallet: Any?
+}
+
+PaymentMethodNaverPay type {
+    buyer_id: Str?,
+    funding: "card" | "points"
+}
+
+BalanceAmount type {
+    amount: Int,
+    currency: Str,
+    source_types: BalanceAmountBySourceType?
+}
+
+PaymentMethodCustom type {
+    display_name: Str?,
+    logo: Any?,
+    type: Str
+}
+
+ExchangeRate type {
+    id: Str,
+    object: "exchange_rate",
+    rates: Map
+}
+
+PaymentMethodKonbini type {
+
+}
+
+PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet type {
+    type: "apple_pay" | "google_pay" | "samsung_pay" | "unknown"
+}
+
+PaymentMethodKakaoPay type {
+
+}
+
+PaymentMethodPaypal type {
+    country: Str?,
+    payer_email: Str?,
+    payer_id: Str?
+}
+
+PaymentMethodPayto type {
+    bsb_number: Str?,
+    last4: Str?,
+    pay_id: Str?
+}
+
+RadarRadarOptions type {
+    session: Str?
+}
+
+PaymentMethodEps type {
+    bank: "arzte_und_apotheker_bank" | "austrian_anadi_bank_ag" | "bank_austria" | "bankhaus_carl_spangler" | "bankhaus_schelhammer_und_schattera_ag" | "bawag_psk_ag" | "bks_bank_ag" | "brull_kallmus_bank_ag" | "btv_vier_lander_bank" | "capital_bank_grawe_gruppe_ag" | "deutsche_bank_ag" | "dolomitenbank" | "easybank_ag" | "erste_bank_und_sparkassen" | "hypo_alpeadriabank_international_ag" | "hypo_bank_burgenland_aktiengesellschaft" | "hypo_noe_lb_fur_niederosterreich_u_wien" | "hypo_oberosterreich_salzburg_steiermark" | "hypo_tirol_bank_ag" | "hypo_vorarlberg_bank_ag" | "marchfelder_bank" | "oberbank_ag" | "raiffeisen_bankengruppe_osterreich" | "schoellerbank_ag" | "sparda_bank_wien" | "volksbank_gruppe" | "volkskreditbank_ag" | "vr_bank_braunau"?
+}
+
+PaymentMethod type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+PaymentMethodKlarna type {
+    dob: Any?
+}
+
+PaymentMethodMobilepay type {
+
+}
+
+PaymentMethodP24 type {
+    bank: "alior_bank" | "bank_millennium" | "bank_nowy_bfg_sa" | "bank_pekao_sa" | "banki_spbdzielcze" | "blik" | "bnp_paribas" | "boz" | "citi_handlowy" | "credit_agricole" | "envelobank" | "etransfer_pocztowy24" | "getin_bank" | "ideabank" | "ing" | "inteligo" | "mbank_mtransfer" | "nest_przelew" | "noble_pay" | "pbac_z_ipko" | "plus_bank" | "santander_przelew24" | "tmobile_usbugi_bankowe" | "toyota_bank" | "velobank" | "volkswagen_bank"?
+}
+
+BalanceNetAvailable type {
+    amount: Int,
+    destination: Str,
+    source_types: BalanceAmountBySourceType?
+}
+
+PaymentMethodSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    generated_from: Any?,
+    last4: Str?
+}
+
+PaymentMethodBoleto type {
+    tax_id: Str
+}
+
+PaymentMethodAffirm type {
+
+}
+
+PaymentMethodRevolutPay type {
+
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax type {
+    calculation: Str
+}
+
+PaymentMethodCustomerBalance type {
+
+}
+
+PaymentFlowsPaymentDetails type {
+    customer_reference: Str?,
+    order_reference: Str?
+}
+
+PaymentMethodGiropay type {
+
+}
+
+PaymentMethodBlik type {
+
+}
+
+PaymentMethodPaynow type {
+
+}
+
+PaymentMethodSatispay type {
+
+}
+
+PaymentMethodBancontact type {
+
+}
+
+PaymentFlowsPaymentIntentPresentmentDetails type {
+    presentment_amount: Int,
+    presentment_currency: Str
+}
+
+PaymentMethodBillie type {
+
+}
+
+Balance type {
+    available: Vec<BalanceAmount>,
+    connect_reserved: Vec<BalanceAmount>?,
+    instant_available: Vec<BalanceAmountNet>?,
+    issuing: BalanceDetail?,
+    livemode: Bool,
+    object: "balance",
+    pending: Vec<BalanceAmount>,
+    refund_and_dispute_prefunding: BalanceDetailUngated?
+}
+
+PaymentMethodSamsungPay type {
+
+}
+
+ScheduledQueryRun type {
+    created: Int,
+    data_load_time: Int,
+    error: SigmaScheduledQueryRunError?,
+    file: Any?,
+    id: Str,
+    livemode: Bool,
+    object: "scheduled_query_run",
+    result_available_until: Int,
+    sql: Str,
+    status: Str,
+    title: Str
+}
+
+BalanceAmountNet type {
+    amount: Int,
+    currency: Str,
+    net_available: Vec<BalanceNetAvailable>?,
+    source_types: BalanceAmountBySourceType?
+}
+
+PaymentMethodLink type {
+    email: Str?
+}
+
+PaymentMethodAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+PaymentMethodFpx type {
+    bank: "affin_bank" | "agrobank" | "alliance_bank" | "ambank" | "bank_islam" | "bank_muamalat" | "bank_of_china" | "bank_rakyat" | "bsn" | "cimb" | "deutsche_bank" | "hong_leong_bank" | "hsbc" | "kfh" | "maybank2e" | "maybank2u" | "ocbc" | "pb_enterprise" | "public_bank" | "rhb" | "standard_chartered" | "uob"
+}
+
+PaymentIntent type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+PaymentMethodCashapp type {
+    buyer_id: Str?,
+    cashtag: Str?
+}
+
+PaymentMethodMbWay type {
+
+}
+
+PaymentMethodOxxo type {
+
+}
+
+BalanceSettingsResourceSettlementTiming type {
+    delay_days: Int,
+    delay_days_override: Int?
+}
+
+PaymentMethodCrypto type {
+
+}
+
+PaymentMethodAmazonPay type {
+
+}
+
+PaymentMethodGrabpay type {
+
+}
+
+PaymentMethodPayco type {
+
+}
+
+Error type {
+    error: ApiErrors
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflows type {
+    inputs: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs?
+}
+
+PaymentMethodInteracPresent type {
+    brand: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?
+}
+
+PaymentMethodTwint type {
+
+}
+
+BalanceSettingsResourcePayments type {
+    debit_negative_balances: Bool?,
+    payouts: Any?,
+    settlement_timing: BalanceSettingsResourceSettlementTiming
+}
+
+SigmaSigmaApiQuery type {
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    name: Str,
+    object: "sigma.sigma_api_query",
+    sql: Str
+}
+
+PaymentMethodKrCard type {
+    brand: "bc" | "citi" | "hana" | "hyundai" | "jeju" | "jeonbuk" | "kakaobank" | "kbank" | "kdbbank" | "kookmin" | "kwangju" | "lotte" | "mg" | "nh" | "post" | "samsung" | "savingsbank" | "shinhan" | "shinhyup" | "suhyup" | "tossbank" | "woori"?,
+    last4: Str?
+}
+
+BalanceDetail type {
+    available: Vec<BalanceAmount>
+}
+
+PaymentMethodAlma type {
+
+}
+
+PaymentMethodMultibanco type {
+
+}
+
+PaymentMethodPromptpay type {
+
+}
+
+PaymentMethodZip type {
+
+}
+
+ReportingReportRun type {
+    created: Int,
+    error: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "reporting.report_run",
+    parameters: FinancialReportingFinanceReportRunRunParameters,
+    report_type: Str,
+    result: Any?,
+    status: Str,
+    succeeded_at: Int?
+}
+
+BalanceAmountBySourceType type {
+    bank_account: Int?,
+    card: Int?,
+    fpx: Int?
+}
+
+PaymentMethodSwish type {
+
+}
+
+PaymentMethodCardPresent type {
+    brand: Str?,
+    brand_product: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    offline: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?,
+    wallet: PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet?
+}
+
+SetupIntent type {
+    application: Any?,
+    attach_to_self: Bool?,
+    automatic_payment_methods: Any?,
+    cancellation_reason: "abandoned" | "duplicate" | "requested_by_customer"?,
+    client_secret: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    flow_directions: Vec<"inbound" | "outbound">?,
+    id: Str,
+    last_setup_error: Any?,
+    latest_attempt: Any?,
+    livemode: Bool,
+    mandate: Any?,
+    metadata: Map?,
+    next_action: Any?,
+    object: "setup_intent",
+    on_behalf_of: Any?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>,
+    single_use_mandate: Any?,
+    status: "canceled" | "processing" | "requires_action" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    usage: Str
+}
+
+ApiErrors type {
+    advice_code: Str?,
+    charge: Str?,
+    code: Str?,
+    decline_code: Str?,
+    doc_url: Str?,
+    message: Str?,
+    network_advice_code: Str?,
+    network_decline_code: Str?,
+    param: Str?,
+    payment_intent: PaymentIntent?,
+    payment_method: PaymentMethod?,
+    payment_method_type: Str?,
+    request_log_url: Str?,
+    setup_intent: SetupIntent?,
+    source: Any?,
+    type: "api_error" | "card_error" | "idempotency_error" | "invalid_request_error"
+}
+
+BillingDetails type {
+    address: Any?,
+    email: Str?,
+    name: Str?,
+    phone: Str?,
+    tax_id: Str?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs type {
+    tax: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax?
+}
+
+PaymentMethodAcssDebit type {
+    bank_name: Str?,
+    fingerprint: Str?,
+    institution_number: Str?,
+    last4: Str?,
+    transit_number: Str?
+}
+
+PaymentMethodBacsDebit type {
+    fingerprint: Str?,
+    last4: Str?,
+    sort_code: Str?
+}
+
+ReportingReportType type {
+    data_available_end: Int,
+    data_available_start: Int,
+    default_columns: Vec<Str>?,
+    id: Str,
+    livemode: Bool,
+    name: Str,
+    object: "reporting.report_type",
+    updated: Int,
+    version: Int
+}
+
+BalanceDetailUngated type {
+    available: Vec<BalanceAmount>,
+    pending: Vec<BalanceAmount>
+}
+
+SigmaScheduledQueryRunError type {
+    message: Str
+}
+
+PaymentMethodUsBankAccount type {
+    account_holder_type: "company" | "individual"?,
+    account_type: "checking" | "savings"?,
+    bank_name: Str?,
+    financial_connections_account: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    networks: Any?,
+    routing_number: Str?,
+    status_details: Any?
+}
+
+PaymentMethodPayByBank type {
+
+}
+
+GetBalanceTransactionsRequest type {
+
+}
+
+GetBalanceTransactionsResponse type {
+    data: Vec<BalanceTransaction>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-balance-transactions
+meta {doc: """GET /v1/balance_transactions - List all balance transactions"""}
+fn (created: Str, currency: Str, ending-before: Str, expand: Str, limit: Str, payout: Str, source: Str, starting-after: Str, type-param: Str, request: GetBalanceTransactionsRequest): GetBalanceTransactionsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance_transactions?created=${created}&currency=${currency}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&payout=${payout}&source=${source}&starting_after=${starting-after}&type=${type-param}`, {}, request)
+  if(is-ok-response(response), GetBalanceTransactionsResponse(response.body), err(HttpError(response)))
+}
+
+GetBalanceTransactionsIdRequest type {
+
+}
+
+GetBalanceTransactionsIdResponse type {
+    amount: Int,
+    available_on: Int,
+    balance_type: "issuing" | "payments" | "refund_and_dispute_prefunding"?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    exchange_rate: Dec?,
+    fee: Int,
+    fee_details: Vec<Fee>,
+    id: Str,
+    net: Int,
+    object: "balance_transaction",
+    reporting_category: Str,
+    source: Any?,
+    status: Str,
+    type: "adjustment" | "advance" | "advance_funding" | "anticipation_repayment" | "application_fee" | "application_fee_refund" | "charge" | "climate_order_purchase" | "climate_order_refund" | "connect_collection_transfer" | "contribution" | "issuing_authorization_hold" | "issuing_authorization_release" | "issuing_dispute" | "issuing_transaction" | "obligation_outbound" | "obligation_reversal_inbound" | "payment" | "payment_failure_refund" | "payment_network_reserve_hold" | "payment_network_reserve_release" | "payment_refund" | "payment_reversal" | "payment_unreconciled" | "payout" | "payout_cancel" | "payout_failure" | "payout_minimum_balance_hold" | "payout_minimum_balance_release" | "refund" | "refund_failure" | "reserve_transaction" | "reserved_funds" | "stripe_balance_payment_debit" | "stripe_balance_payment_debit_reversal" | "stripe_fee" | "stripe_fx_fee" | "tax_fee" | "topup" | "topup_reversal" | "transfer" | "transfer_cancel" | "transfer_failure" | "transfer_refund"
+}
+
+
+retrieve-balance-transaction
+meta {doc: """GET /v1/balance_transactions/{id} - Retrieve a balance transaction"""}
+fn (id: Str, expand: Str, request: GetBalanceTransactionsIdRequest): GetBalanceTransactionsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance_transactions/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBalanceTransactionsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetReportingReportRunsRequest type {
+
+}
+
+GetReportingReportRunsResponse type {
+    data: Vec<ReportingReportRun>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-report-runs
+meta {doc: """GET /v1/reporting/report_runs - List all Report Runs"""}
+fn (created: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetReportingReportRunsRequest): GetReportingReportRunsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/reporting/report_runs?created=${created}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetReportingReportRunsResponse(response.body), err(HttpError(response)))
+}
+
+PostReportingReportRunsRequest type {
+    expand: Vec<Str>?,
+    parameters: Map?,
+    report_type: Str
+}
+
+PostReportingReportRunsResponse type {
+    created: Int,
+    error: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "reporting.report_run",
+    parameters: FinancialReportingFinanceReportRunRunParameters,
+    report_type: Str,
+    result: Any?,
+    status: Str,
+    succeeded_at: Int?
+}
+
+
+create-report-run
+meta {doc: """POST /v1/reporting/report_runs - Create a Report Run"""}
+fn (request: PostReportingReportRunsRequest): PostReportingReportRunsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/reporting/report_runs`, {}, request)
+  if(is-ok-response(response), PostReportingReportRunsResponse(response.body), err(HttpError(response)))
+}
+
+GetReportingReportRunsReportRunRequest type {
+
+}
+
+GetReportingReportRunsReportRunResponse type {
+    created: Int,
+    error: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "reporting.report_run",
+    parameters: FinancialReportingFinanceReportRunRunParameters,
+    report_type: Str,
+    result: Any?,
+    status: Str,
+    succeeded_at: Int?
+}
+
+
+retrieve-report-run
+meta {doc: """GET /v1/reporting/report_runs/{report_run} - Retrieve a Report Run"""}
+fn (report-run: Str, expand: Str, request: GetReportingReportRunsReportRunRequest): GetReportingReportRunsReportRunResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/reporting/report_runs/${report-run}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetReportingReportRunsReportRunResponse(response.body), err(HttpError(response)))
+}
+
+GetReportingReportTypesRequest type {
+
+}
+
+GetReportingReportTypesResponse type {
+    data: Vec<ReportingReportType>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-report-types
+meta {doc: """GET /v1/reporting/report_types - List all Report Types"""}
+fn (expand: Str, request: GetReportingReportTypesRequest): GetReportingReportTypesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/reporting/report_types?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetReportingReportTypesResponse(response.body), err(HttpError(response)))
+}
+
+GetReportingReportTypesReportTypeRequest type {
+
+}
+
+GetReportingReportTypesReportTypeResponse type {
+    data_available_end: Int,
+    data_available_start: Int,
+    default_columns: Vec<Str>?,
+    id: Str,
+    livemode: Bool,
+    name: Str,
+    object: "reporting.report_type",
+    updated: Int,
+    version: Int
+}
+
+
+retrieve-report-type
+meta {doc: """GET /v1/reporting/report_types/{report_type} - Retrieve a Report Type"""}
+fn (report-type: Str, expand: Str, request: GetReportingReportTypesReportTypeRequest): GetReportingReportTypesReportTypeResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/reporting/report_types/${report-type}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetReportingReportTypesReportTypeResponse(response.body), err(HttpError(response)))
+}
+
+GetBalanceRequest type {
+
+}
+
+GetBalanceResponse type {
+    available: Vec<BalanceAmount>,
+    connect_reserved: Vec<BalanceAmount>?,
+    instant_available: Vec<BalanceAmountNet>?,
+    issuing: BalanceDetail?,
+    livemode: Bool,
+    object: "balance",
+    pending: Vec<BalanceAmount>,
+    refund_and_dispute_prefunding: BalanceDetailUngated?
+}
+
+
+retrieve-balance
+meta {doc: """GET /v1/balance - Retrieve balance"""}
+fn (expand: Str, request: GetBalanceRequest): GetBalanceResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBalanceResponse(response.body), err(HttpError(response)))
+}
+
+GetBalanceHistoryRequest type {
+
+}
+
+GetBalanceHistoryResponse type {
+    data: Vec<BalanceTransaction>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-balance-transactions
+meta {doc: """GET /v1/balance/history - List all balance transactions"""}
+fn (created: Str, currency: Str, ending-before: Str, expand: Str, limit: Str, payout: Str, source: Str, starting-after: Str, type-param: Str, request: GetBalanceHistoryRequest): GetBalanceHistoryResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance/history?created=${created}&currency=${currency}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&payout=${payout}&source=${source}&starting_after=${starting-after}&type=${type-param}`, {}, request)
+  if(is-ok-response(response), GetBalanceHistoryResponse(response.body), err(HttpError(response)))
+}
+
+GetBalanceHistoryIdRequest type {
+
+}
+
+GetBalanceHistoryIdResponse type {
+    amount: Int,
+    available_on: Int,
+    balance_type: "issuing" | "payments" | "refund_and_dispute_prefunding"?,
+    created: Int,
+    currency: Str,
+    description: Str?,
+    exchange_rate: Dec?,
+    fee: Int,
+    fee_details: Vec<Fee>,
+    id: Str,
+    net: Int,
+    object: "balance_transaction",
+    reporting_category: Str,
+    source: Any?,
+    status: Str,
+    type: "adjustment" | "advance" | "advance_funding" | "anticipation_repayment" | "application_fee" | "application_fee_refund" | "charge" | "climate_order_purchase" | "climate_order_refund" | "connect_collection_transfer" | "contribution" | "issuing_authorization_hold" | "issuing_authorization_release" | "issuing_dispute" | "issuing_transaction" | "obligation_outbound" | "obligation_reversal_inbound" | "payment" | "payment_failure_refund" | "payment_network_reserve_hold" | "payment_network_reserve_release" | "payment_refund" | "payment_reversal" | "payment_unreconciled" | "payout" | "payout_cancel" | "payout_failure" | "payout_minimum_balance_hold" | "payout_minimum_balance_release" | "refund" | "refund_failure" | "reserve_transaction" | "reserved_funds" | "stripe_balance_payment_debit" | "stripe_balance_payment_debit_reversal" | "stripe_fee" | "stripe_fx_fee" | "tax_fee" | "topup" | "topup_reversal" | "transfer" | "transfer_cancel" | "transfer_failure" | "transfer_refund"
+}
+
+
+retrieve-balance-transaction
+meta {doc: """GET /v1/balance/history/{id} - Retrieve a balance transaction"""}
+fn (id: Str, expand: Str, request: GetBalanceHistoryIdRequest): GetBalanceHistoryIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance/history/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBalanceHistoryIdResponse(response.body), err(HttpError(response)))
+}
+
+GetExchangeRatesRequest type {
+
+}
+
+GetExchangeRatesResponse type {
+    data: Vec<ExchangeRate>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-exchange-rates
+meta {doc: """GET /v1/exchange_rates - List all exchange rates"""}
+fn (ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetExchangeRatesRequest): GetExchangeRatesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/exchange_rates?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetExchangeRatesResponse(response.body), err(HttpError(response)))
+}
+
+GetExchangeRatesRateIdRequest type {
+
+}
+
+GetExchangeRatesRateIdResponse type {
+    id: Str,
+    object: "exchange_rate",
+    rates: Map
+}
+
+
+retrieve-exchange-rate
+meta {doc: """GET /v1/exchange_rates/{rate_id} - Retrieve an exchange rate"""}
+fn (rate-id: Str, expand: Str, request: GetExchangeRatesRateIdRequest): GetExchangeRatesRateIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/exchange_rates/${rate-id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetExchangeRatesRateIdResponse(response.body), err(HttpError(response)))
+}
+
+GetBalanceSettingsRequest type {
+
+}
+
+GetBalanceSettingsResponse type {
+    object: "balance_settings",
+    payments: BalanceSettingsResourcePayments
+}
+
+
+retrieve-balance-settings
+meta {doc: """GET /v1/balance_settings - Retrieve balance settings"""}
+fn (expand: Str, request: GetBalanceSettingsRequest): GetBalanceSettingsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance_settings?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetBalanceSettingsResponse(response.body), err(HttpError(response)))
+}
+
+PostBalanceSettingsRequest type {
+    expand: Vec<Str>?,
+    payments: Map?
+}
+
+PostBalanceSettingsResponse type {
+    object: "balance_settings",
+    payments: BalanceSettingsResourcePayments
+}
+
+
+update-balance-settings
+meta {doc: """POST /v1/balance_settings - Update balance settings"""}
+fn (request: PostBalanceSettingsRequest): PostBalanceSettingsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/balance_settings`, {}, request)
+  if(is-ok-response(response), PostBalanceSettingsResponse(response.body), err(HttpError(response)))
+}
+
+PostSigmaSavedQueriesIdRequest type {
+    expand: Vec<Str>?,
+    name: Str?,
+    sql: Str?
+}
+
+PostSigmaSavedQueriesIdResponse type {
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    name: Str,
+    object: "sigma.sigma_api_query",
+    sql: Str
+}
+
+
+update-existing-sigma-query
+meta {doc: """POST /v1/sigma/saved_queries/{id} - Update an existing Sigma Query"""}
+fn (id: Str, request: PostSigmaSavedQueriesIdRequest): PostSigmaSavedQueriesIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/sigma/saved_queries/${id}`, {}, request)
+  if(is-ok-response(response), PostSigmaSavedQueriesIdResponse(response.body), err(HttpError(response)))
+}
+
+GetSigmaScheduledQueryRunsRequest type {
+
+}
+
+GetSigmaScheduledQueryRunsResponse type {
+    data: Vec<ScheduledQueryRun>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-scheduled-query-runs
+meta {doc: """GET /v1/sigma/scheduled_query_runs - List all scheduled query runs"""}
+fn (ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetSigmaScheduledQueryRunsRequest): GetSigmaScheduledQueryRunsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/sigma/scheduled_query_runs?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetSigmaScheduledQueryRunsResponse(response.body), err(HttpError(response)))
+}
+
+GetSigmaScheduledQueryRunsScheduledQueryRunRequest type {
+
+}
+
+GetSigmaScheduledQueryRunsScheduledQueryRunResponse type {
+    created: Int,
+    data_load_time: Int,
+    error: SigmaScheduledQueryRunError?,
+    file: Any?,
+    id: Str,
+    livemode: Bool,
+    object: "scheduled_query_run",
+    result_available_until: Int,
+    sql: Str,
+    status: Str,
+    title: Str
+}
+
+
+retrieve-scheduled-query-run
+meta {
+    doc: """GET /v1/sigma/scheduled_query_runs/{scheduled_query_run} - Retrieve a scheduled query run"""
+}
+fn (scheduled-query-run: Str, expand: Str, request: GetSigmaScheduledQueryRunsScheduledQueryRunRequest): GetSigmaScheduledQueryRunsScheduledQueryRunResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/sigma/scheduled_query_runs/${scheduled-query-run}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetSigmaScheduledQueryRunsScheduledQueryRunResponse(response.body), err(HttpError(response)))
+}

@@ -1,0 +1,25 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <div class="min-h-96 flex items-center justify-center">
+        <div class="text-center">
+            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">Project not found</h3>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                The project "{{ project_name }}" could not be found in the current environment.
+            </p>
+            <div class="mt-6">
+                <a href="/projects" class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    <svg class="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                    </svg>
+                    Back to Projects
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

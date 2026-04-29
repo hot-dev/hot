@@ -1,0 +1,3 @@
+::resend ns
+
+BASE_URL "https://api.resend.com"

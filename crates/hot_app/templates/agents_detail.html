@@ -1,0 +1,495 @@
+{% extends "private_layout.html" %}
+
+{% block title %}{{ agent.display_name }} - Agent{% endblock %}
+
+{% block content %}
+<div>
+    <!-- Header card -->
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-5 mb-6">
+        <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-indigo-500 dark:text-indigo-400 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.5L10.5 19l3 2.5" />
+                        <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
+                    </svg>
+                    <h1 class="text-xl font-bold text-gray-900 dark:text-white">{{ agent.display_name }}</h1>
+                </div>
+                <div class="text-xs text-gray-500 dark:text-gray-400 font-mono mb-2">{{ agent.namespace_qualified_name }}</div>
+                {% if !agent.description.is_empty() %}
+                <p class="text-sm text-gray-600 dark:text-gray-300 max-w-2xl">{{ agent.description }}</p>
+                {% endif %}
+                {% if agent.source_file.is_some() %}
+                <button type="button"
+                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mt-1 text-left"
+                        data-source-build-id="{{ agent.build_id }}"
+                        data-source-file="{{ agent.source_file.as_deref().unwrap_or("") }}"
+                        {% if let Some(line) = agent.source_line %}data-source-line="{{ line }}"{% endif %}
+                        data-source-title="{{ agent.display_name }}"
+                        onclick="openSourceBrowserFromElement(this)">
+                    {{ agent.source_file.as_deref().unwrap_or("") }}{% if let Some(line) = agent.source_line %}:{{ line }}{% endif %}
+                </button>
+                {% endif %}
+            </div>
+            <div class="flex flex-wrap gap-1.5 flex-shrink-0">
+                {% for tag in agent.tags %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300">{{ tag }}</span>
+                {% endfor %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ agent.project_name }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unified container: tabs + content + inspector -->
+    <div x-data="{
+            inspectorOpen: false,
+            inspectorData: null,
+            graphDirection: 'LR',
+            init() {
+                document.addEventListener('agent-graph:inspect', (e) => {
+                    if (e.detail.containerId === 'agent-detail-graph') {
+                        this.inspectorData = e.detail.data;
+                        this.inspectorOpen = true;
+                    }
+                });
+                document.addEventListener('agent-graph:inspect-close', (e) => {
+                    if (e.detail.containerId === 'agent-detail-graph') {
+                        this.closeInspector();
+                    }
+                });
+            },
+            closeInspector() {
+                this.inspectorOpen = false;
+                this.inspectorData = null;
+            },
+            selectNode(nodeId) {
+                AgentGraph.selectNode('agent-detail-graph', nodeId);
+            },
+            setDirection(dir) {
+                this.graphDirection = dir;
+                AgentGraph.setDirection('agent-detail-graph', dir);
+            }
+         }"
+         class="flex flex-col rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden bg-white dark:bg-gray-900">
+
+        <!-- Tab bar header -->
+        <div class="border-b border-gray-200 dark:border-gray-700 px-4 flex items-center justify-between">
+            <nav class="-mb-px flex gap-6" aria-label="Tabs">
+                <a href="?tab=graph"
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                    Graph
+                </a>
+                <a href="?tab=handlers"
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "handlers" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                    Handlers <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ handlers.len() }}</span>
+                </a>
+                <a href="?tab=runs"
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "runs" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                    Runs <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ runs_total }}</span>
+                </a>
+                <a href="?tab=streams"
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "streams" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                    Streams
+                </a>
+            </nav>
+            {% if active_tab == "graph" %}
+            <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+                <span class="flex items-center gap-1.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-blue-600 dark:text-blue-400"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" /></svg>
+                    Function
+                </span>
+                <span class="flex items-center gap-1.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-green-600 dark:text-green-400"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"/></svg>
+                    Trigger
+                </span>
+                <span class="border-l border-gray-300 dark:border-gray-600 h-3 mx-0.5"></span>
+                <span class="inline-flex rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden">
+                    <button @click="setDirection('LR')" :class="graphDirection === 'LR' ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200' : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'" class="px-1.5 py-1 transition-colors" title="Horizontal layout">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 7h10M9 4l3 3-3 3"/></svg>
+                    </button>
+                    <button @click="setDirection('TB')" :class="graphDirection === 'TB' ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200' : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'" class="px-1.5 py-1 border-l border-gray-300 dark:border-gray-600 transition-colors" title="Vertical layout">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 2v10M4 9l3 3 3-3"/></svg>
+                    </button>
+                </span>
+                <button @click="inspectorOpen = !inspectorOpen" :class="inspectorOpen ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200' : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'" class="inline-flex items-center p-1 rounded border border-gray-300 dark:border-gray-600 transition-colors" title="Toggle inspector">
+                    <svg x-show="!inspectorOpen" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" stroke-width="1.5" rx="1"></rect><line x1="10" y1="1" x2="10" y2="15" stroke-width="1.5"></line></svg>
+                    <svg x-show="inspectorOpen" width="14" height="14" fill="currentColor" stroke="currentColor" viewBox="0 0 16 16" x-cloak><rect x="1" y="1" width="14" height="14" fill="none" stroke-width="1.5" rx="1"></rect><rect x="10" y="1" width="5" height="14" fill="currentColor" rx="1"></rect></svg>
+                </button>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Tab content -->
+        {% if active_tab == "graph" %}
+        <div class="flex flex-row flex-1 min-h-0">
+            <!-- Graph section -->
+            <div class="flex-1 min-w-0 overflow-hidden">
+                <div id="agent-detail-graph" data-url="/data/workflow-graph/agents/{{ agent.qualified_name }}" data-max-height="700"></div>
+            </div>
+
+            <!-- Inspector panel -->
+            <div x-show="inspectorOpen" x-cloak
+                 x-transition:enter="transition ease-out duration-200"
+                 x-transition:enter-start="opacity-0"
+                 x-transition:enter-end="opacity-100"
+                 x-transition:leave="transition ease-in duration-150"
+                 x-transition:leave-start="opacity-100"
+                 x-transition:leave-end="opacity-0"
+                 class="w-80 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 overflow-y-auto" style="min-width: 20rem;">
+                <template x-if="!inspectorData">
+                    <div class="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-8 h-8 text-gray-300 dark:text-gray-600 mb-3">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 5.227 7.917-3.286-.672zM12 2.25V4.5m5.834.166l-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243l-1.59-1.59" />
+                        </svg>
+                        <p class="text-sm text-gray-400 dark:text-gray-500">Select a node for details</p>
+                    </div>
+                </template>
+                <template x-if="inspectorData">
+                    <div class="p-4">
+                        <div class="mb-3">
+                            <span class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500"
+                                  x-text="({'handler':'Function','event_type':'Event','schedule':'Schedule','webhook':'Webhook','mcp_tool':'MCP Tool'})[inspectorData.node.node_type] || inspectorData.node.node_type"></span>
+                        </div>
+
+                        <h3 class="text-base font-bold text-gray-900 dark:text-white mb-1" x-text="inspectorData.node.name"></h3>
+
+                        <template x-if="inspectorData.node.node_type === 'handler'">
+                            <div>
+                                <template x-if="inspectorData.node.namespace">
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 font-mono mb-1" x-text="inspectorData.node.namespace"></div>
+                                </template>
+                                <template x-if="inspectorData.node.source_file">
+                                    <button type="button"
+                                            class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                            :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
+                                            @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
+                                            x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
+                                </template>
+                                <template x-if="inspectorData.node.retry">
+                                    <div class="mb-2">
+                                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400"
+                                              x-text="'Retry: ' + inspectorData.node.retry"></span>
+                                    </div>
+                                </template>
+
+                                <template x-if="inspectorData.triggeredBy && inspectorData.triggeredBy.length > 0">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Triggered by</div>
+                                        <template x-for="t in inspectorData.triggeredBy" :key="t.node.id">
+                                            <button @click="selectNode(t.node.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 mb-1 font-mono text-xs transition-colors"
+                                                    x-text="t.node.name"></button>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <template x-if="inspectorData.handles.length > 0">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Handles</div>
+                                        <template x-for="h in inspectorData.handles" :key="h.node.id">
+                                            <button @click="selectNode(h.node.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/40 mb-1 font-mono text-xs transition-colors"
+                                                    x-text="h.node.name"></button>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <template x-if="inspectorData.sends.length > 0">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Sends</div>
+                                        <template x-for="s in inspectorData.sends" :key="s.node.id">
+                                            <div class="mb-1">
+                                                <button @click="selectNode(s.node.id)"
+                                                        class="block w-full text-left px-2 py-1 rounded text-sm text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 font-mono text-xs transition-colors"
+                                                        x-text="s.node.name"></button>
+                                                <template x-if="s.edge.doc">
+                                                    <div class="text-xs text-gray-400 dark:text-gray-500 italic pl-2 mt-0.5" x-text="s.edge.doc"></div>
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <template x-if="inspectorData.node.description">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1">Description</div>
+                                        <p class="text-sm text-gray-600 dark:text-gray-300" x-text="inspectorData.node.description"></p>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+
+                        <template x-if="inspectorData.node.node_type === 'event_type'">
+                            <div>
+                                <template x-if="inspectorData.handledBy.length > 0">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Handled by</div>
+                                        <template x-for="fn in inspectorData.handledBy" :key="fn.id">
+                                            <button @click="selectNode(fn.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                                <span class="font-mono text-xs" x-text="fn.name"></span>
+                                                <template x-if="fn.agent_name">
+                                                    <span class="text-xs text-gray-400 dark:text-gray-500 ml-1" x-text="fn.agent_name"></span>
+                                                </template>
+                                            </button>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <template x-if="inspectorData.sentBy.length > 0">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Sent by</div>
+                                        <template x-for="fn in inspectorData.sentBy" :key="fn.id">
+                                            <button @click="selectNode(fn.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                                <span class="font-mono text-xs" x-text="fn.name"></span>
+                                                <template x-if="fn.agent_name">
+                                                    <span class="text-xs text-gray-400 dark:text-gray-500 ml-1" x-text="fn.agent_name"></span>
+                                                </template>
+                                            </button>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <template x-if="inspectorData.handledBy.length === 0 && inspectorData.sentBy.length === 0">
+                                    <div class="mt-3 text-sm text-gray-400 dark:text-gray-500">No connected handlers.</div>
+                                </template>
+                            </div>
+                        </template>
+
+                        <template x-if="inspectorData.node.node_type === 'schedule' || inspectorData.node.node_type === 'webhook' || inspectorData.node.node_type === 'mcp_tool'">
+                            <div>
+                                <template x-if="inspectorData.node.detail">
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 font-mono mb-1" x-text="inspectorData.node.detail"></div>
+                                </template>
+                                <template x-if="inspectorData.node.source_file">
+                                    <button type="button"
+                                            class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                            :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
+                                            @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
+                                            x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
+                                </template>
+
+                                <div class="flex flex-wrap gap-1.5 mb-2" x-show="inspectorData.node.active !== undefined || inspectorData.node.retry">
+                                    <template x-if="inspectorData.node.active === true">
+                                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400">Active</span>
+                                    </template>
+                                    <template x-if="inspectorData.node.active === false">
+                                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">Inactive</span>
+                                    </template>
+                                    <template x-if="inspectorData.node.retry">
+                                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400"
+                                              x-text="'Retry: ' + inspectorData.node.retry"></span>
+                                    </template>
+                                </div>
+
+                                <template x-if="inspectorData.node.description">
+                                    <p class="text-sm text-gray-600 dark:text-gray-300 mb-3" x-text="inspectorData.node.description"></p>
+                                </template>
+
+                                <template x-if="inspectorData.triggers && inspectorData.triggers.length > 0">
+                                    <div class="mt-3">
+                                        <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Triggers</div>
+                                        <template x-for="fn in inspectorData.triggers" :key="fn.id">
+                                            <button @click="selectNode(fn.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                                <span class="font-mono text-xs" x-text="fn.name"></span>
+                                                <template x-if="fn.agent_name">
+                                                    <span class="text-xs text-gray-400 dark:text-gray-500 ml-1" x-text="fn.agent_name"></span>
+                                                </template>
+                                            </button>
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+        <script>
+          document.addEventListener('DOMContentLoaded', function() {
+            if (typeof AgentGraph !== 'undefined') {
+              AgentGraph.init('agent-detail-graph');
+            }
+          });
+          window.sseRefreshCallback = function() {
+            if (typeof AgentGraph !== 'undefined') {
+              AgentGraph.refresh('agent-detail-graph');
+            }
+          };
+        </script>
+
+    {% else if active_tab == "handlers" %}
+    {% if !config_fields.is_empty() %}
+    <div class="p-5 border-b border-gray-200 dark:border-gray-800">
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-2">Config Fields</h3>
+        <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+            {% for field in config_fields %}
+            <span><span class="font-mono text-gray-900 dark:text-white">{{ field.0 }}</span> <span class="text-gray-400 dark:text-gray-500">{{ field.1 }}</span></span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    <div>
+        {% if handlers.is_empty() %}
+        <div class="text-center py-8 text-gray-500 dark:text-gray-400 text-sm">No handlers linked to this agent.</div>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-200 dark:border-gray-700">
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Type</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Trigger</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Function</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Retry</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Source</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for h in handlers %}
+                    <tr class="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                        <td class="py-2.5 px-4">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                                {% if h.handler_type == "Event" %}bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300
+                                {% else if h.handler_type == "Schedule" %}bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300
+                                {% else %}bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300{% endif %}">
+                                {{ h.handler_type }}
+                            </span>
+                        </td>
+                        <td class="py-2.5 px-4">
+                            <code class="{% if h.handler_type == "Event" %}bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded{% else %}bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 px-2 py-1 rounded{% endif %} text-xs">{{ h.trigger }}</code>
+                        </td>
+                        <td class="py-2.5 px-4">
+                            <code class="language-hot text-red-600 dark:text-red-400">{{ h.function }}</code>
+                        </td>
+                        <td class="py-2.5 px-4 text-xs text-gray-700 dark:text-gray-300">
+                            {% if h.retry == "-" %}
+                            <span class="text-gray-400 dark:text-gray-500">-</span>
+                            {% else %}
+                            <code class="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded text-xs">{{ h.retry }}</code>
+                            {% endif %}
+                        </td>
+                        <td class="py-2.5 px-4 text-gray-500 dark:text-gray-400 text-xs">
+                            {% if let Some(file) = h.source_file %}
+                            <button type="button"
+                                    class="font-mono text-hot-red-600 dark:text-hot-red-400 hover:underline truncate max-w-[220px] text-left"
+                                    title="{{ h.source }}"
+                                    data-source-build-id="{{ h.source_build_id }}"
+                                    data-source-file="{{ file }}"
+                                    {% if let Some(line) = h.source_line %}data-source-line="{{ line }}"{% endif %}
+                                    data-source-title="{{ h.function }}"
+                                    onclick="openSourceBrowserFromElement(this)">
+                                {{ h.source }}
+                            </button>
+                            {% else %}
+                            <span class="font-mono">{{ h.source }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    {% else if active_tab == "runs" %}
+    <div>
+        {% if runs.is_empty() %}
+        <div class="text-center py-8 text-gray-500 dark:text-gray-400 text-sm">No runs found for this agent.</div>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-200 dark:border-gray-700">
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Run ID</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Type</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Function</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Started</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Duration</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in runs %}
+                    <tr class="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
+                        onclick="window.location='/runs/{{ run.run_id }}'">
+                        <td class="py-2.5 px-4 font-mono text-xs text-indigo-600 dark:text-indigo-400">{{ run.run_id.to_string()[..12] }}</td>
+                        <td class="py-2.5 px-4">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                                {% if run.status == "succeeded" %}bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300
+                                {% else if run.status == "failed" %}bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300
+                                {% else if run.status == "running" %}bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300
+                                {% else %}bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300{% endif %}">
+                                {{ run.status }}
+                            </span>
+                        </td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400 text-xs">{{ run.run_type }}</td>
+                        <td class="py-2.5 px-4 font-mono text-gray-700 dark:text-gray-300 text-xs">{{ run.event_fn.as_deref().unwrap_or("-") }}</td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400 text-xs">{{ run.start_time }}</td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400 text-xs">{{ run.exec_time_formatted }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pagination -->
+        {% if runs_total_pages > 1 %}
+        <div class="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+            <div class="text-sm text-gray-500 dark:text-gray-400">
+                Page {{ runs_current_page }} of {{ runs_total_pages }} ({{ runs_total }} total)
+            </div>
+            <div class="flex gap-2">
+                {% if runs_has_prev %}
+                <a href="?tab=runs&rp={{ runs_current_page - 1 }}" class="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">Previous</a>
+                {% endif %}
+                {% if runs_has_next %}
+                <a href="?tab=runs&rp={{ runs_current_page + 1 }}" class="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">Next</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+
+    {% else if active_tab == "streams" %}
+    <div>
+        {% if streams.is_empty() %}
+        <div class="text-center py-8 text-gray-500 dark:text-gray-400 text-sm">No streams found for this agent.</div>
+        {% else %}
+        <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+                <thead>
+                    <tr class="border-b border-gray-200 dark:border-gray-700">
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Stream ID</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Runs</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Events</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Started</th>
+                        <th class="text-left py-3 px-4 font-medium text-gray-500 dark:text-gray-400">Last Activity</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in streams %}
+                    <tr class="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
+                        onclick="window.location='/streams/{{ s.stream_id }}'">
+                        <td class="py-2.5 px-4 font-mono text-xs text-indigo-600 dark:text-indigo-400">{{ s.stream_id }}</td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400">{{ s.total_runs|commafy }}</td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400">{{ s.total_events|commafy }}</td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400 text-xs">{{ s.start_time }}</td>
+                        <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400 text-xs">{{ s.last_activity_at }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    {% endif %}
+</div>
+{% endblock %}

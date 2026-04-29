@@ -1,0 +1,44 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-2xl mx-auto py-8 sm:py-16 px-4">
+  <div class="text-center">
+    <!-- Success Icon -->
+    <div class="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 dark:bg-green-900 mb-6">
+      <svg class="h-10 w-10 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+      </svg>
+    </div>
+
+    <h1 class="text-3xl sm:text-4xl font-bold text-gray-900 dark:text-white mb-4">
+      Subscription Activated!
+    </h1>
+
+    <p class="text-lg text-gray-600 dark:text-gray-300 mb-8">
+      Your subscription is being activated. This may take a few moments.
+    </p>
+
+    <div class="space-y-4">
+      <a href="/" class="inline-block bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-8 py-3 rounded-md transition">
+        Go to Dashboard
+      </a>
+
+      <div class="mt-6">
+        <a href="/settings/billing" class="text-blue-600 dark:text-blue-400 hover:underline text-sm">
+          View Billing Details
+        </a>
+      </div>
+    </div>
+
+    <!-- Processing Info -->
+    <div class="mt-12 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6 text-left">
+      <h3 class="font-semibold text-blue-900 dark:text-blue-200 mb-2">What's Next?</h3>
+      <ul class="space-y-2 text-sm text-blue-800 dark:text-blue-300">
+        <li>✓ Your subscription setup has completed successfully</li>
+        <li>✓ You'll receive a confirmation email shortly</li>
+        <li>✓ Your subscription features are now active</li>
+        <li>✓ You can manage your subscription in Billing settings</li>
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

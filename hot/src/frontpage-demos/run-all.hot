@@ -1,0 +1,96 @@
+::demo::run-all ns
+
+::store ::hot::store
+::box ::hot::box
+
+run-all-demos
+meta {
+    schedule: "every 10 minutes",
+    on-event: "demo:run-all"
+}
+fn (event) {
+    // Seed data
+    seed serial {
+        csv-data """
+            id,customer,amount,status
+            1,Alice,29.99,shipped
+            2,Bob,149.50,pending
+            3,Carol,75.00,shipped
+            4,Dave,12.99,cancelled
+            5,Eve,299.00,shipped
+        """
+        csv write-file("hot://demo/orders.csv", csv-data)
+
+        orders [
+            {
+                id: "ORD-001",
+                status: "shipped",
+                items: [{name: "Widget", qty: 2}],
+                total: 59.97,
+                tracking-url: "https://track.example.com/ABC123",
+            },
+            {
+                id: "ORD-002",
+                status: "processing",
+                items: [{name: "Gadget", qty: 5}],
+                total: 149.95,
+                tracking-url: null,
+            },
+            {
+                id: "ORD-003",
+                status: "pending",
+                items: [{name: "Doohickey", qty: 1}],
+                total: 24.99,
+                tracking-url: null,
+            },
+        ]
+        orders-store ::store/Map({name: "demo:orders"})
+        store map(orders, (o) { ::store/put(orders-store, o.id, o) })
+
+        media cond {
+            not(file-exists("hot://demo/test.mp4")) => {
+                info ::box/start({
+                    image: "alpine:3.21",
+                    script: """
+                        apk add --no-cache ffmpeg > /dev/null 2>&1
+                        ffmpeg -y \
+                          -f lavfi -i testsrc=duration=5:size=320x240:rate=10 \
+                          -f lavfi -i sine=frequency=440:duration=5 \
+                          -c:v libx264 -c:a aac -shortest \
+                          /data/test.mp4
+                        hotbox cp /data/test.mp4 'hot://demo/test.mp4'
+                    """,
+                    timeout: 120,
+                    size: "small",
+                })
+                ::hot::task/await(info.id)
+            }
+            => { "cached" }
+        }
+    }
+
+    // Fire all demo events in parallel
+    parallel {
+        events send("order:placed", {
+            id: "ORD-999",
+            items: [{name: "Widget", qty: 2}],
+            customer: {email: "alice@test.com", name: "Alice"},
+        })
+        schedules send("demo:daily-report", {})
+        files send("report:generate", {
+            orders: [
+                {id: "1", customer: "Alice", amount: "29.99", status: "shipped"},
+                {id: "2", customer: "Bob", amount: "49.99", status: "pending"}
+            ],
+        })
+        retries send("demo:fetch-data", {})
+        tasks send("demo:process-file", {})
+        ffmpeg send("video:uploaded", {path: "hot://demo/test.mp4"})
+        playwright send("page:capture", {url: "https://hot.dev/docs"})
+        containers send("data:analyze", {})
+        webhooks send("demo:webhook", {
+            type: "payment_intent.succeeded",
+            data: {object: {customer: "cus_demo", amount: 4999}},
+        })
+    }
+}

@@ -1,0 +1,105 @@
+// Doc examples for resources/docs/language/errors.md
+::hot::test::docs::errors ns
+meta ["test"]
+
+// Imports
+// Note: All functions used here are core (ok, err, is-ok, is-err, eq, div, if, length, assert, assert-eq)
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: safe-divide
+safe-divide fn (a: Int, b: Int): Int {
+  if(eq(b, 0), err("Division by zero"), div(a, b))  // div result auto-wrapped in Ok
+}
+// @end: safe-divide
+
+// @doc: is-ok-check
+result-check safe-divide(10, 0)
+
+message-check if(is-ok(result-check),
+  `Result: ${result-check}`,
+  "Cannot divide by zero")  // This branch runs
+// @end: is-ok-check
+
+// @doc: short-circuit
+// Short-circuit prevents errors in unevaluated branches
+x-val 0
+short-result if(eq(x-val, 0), "zero", div(10, x-val))  // div never called, no error
+// @end: short-circuit
+
+// @doc: default-value
+// Provide fallbacks for failures
+config-result safe-divide(10, 0)
+config if(is-ok(config-result), config-result, 99)  // Fallback to 99
+// @end: default-value
+
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-create-results
+meta ["test"] fn () {
+  // Test creating results
+  success ok(42)
+  failure err("Not found")
+  assert(is-ok(success), "success is ok")
+  assert(is-err(failure), "failure is err")
+  assert-eq(42, success.$val, "success value is 42")
+  assert-eq("Not found", failure.$val, "failure message")
+}
+
+test-safe-divide
+meta ["test"] fn () {
+  ok-result safe-divide(10, 2)
+  err-result safe-divide(10, 0)
+  assert(is-ok(ok-result), "10/2 is ok")
+  assert-eq(5, ok-result, "10/2 = 5")  // Auto-unwraps to the value
+  assert(is-err(err-result), "10/0 is err")
+}
+
+test-safe-divide-usage
+meta ["test"] fn () {
+  // Test the safe-divide with is-ok check
+  result safe-divide(10, 0)
+  check-result if(is-ok(result),
+    `Result: ${result.$val}`,
+    "Cannot divide by zero")
+  assert-eq("Cannot divide by zero", check-result, "check handles error case")
+}
+
+test-is-ok-check
+meta ["test"] fn () {
+  assert-eq("Cannot divide by zero", message-check, "is-ok check handles error")
+}
+// @result: is-ok-check
+// safe-divide(10, 0) → Result.Err("Division by zero")
+// message-check → "Cannot divide by zero"
+// @end: is-ok-check
+
+test-match-result
+meta ["test"] fn () {
+  result ok(5)
+  message match result {
+    Result.Ok => "ok"
+    Result.Err => "err"
+  }
+
+  assert-eq("ok", message, "match result success")
+}
+// @result: match-result
+// safe-divide(20, 4) → Result.Ok(5)
+// message → "ok"
+// @end: match-result
+
+test-short-circuit
+meta ["test"] fn () {
+  assert-eq("zero", short-result, "short-circuit prevents error")
+}
+
+test-default-value
+meta ["test"] fn () {
+  assert-eq(99, config, "fallback to default on error")
+}

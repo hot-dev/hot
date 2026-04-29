@@ -1,0 +1,17 @@
+::hot::conf ns
+
+hot.set.profile "local-dev"
+hot.set.project "hot-ai-tests"
+
+hot.profile.local-dev.user.email "local@hot.dev"
+hot.profile.local-dev.org.slug "local"
+hot.profile.local-dev.env.name "development"
+
+hot.project.hot-ai-tests.src.paths ["./src"]
+hot.project.hot-ai-tests.test.paths ["./test"]
+hot.project.hot-ai-tests.test.capture true
+
+hot.db.uri "sqlite::memory:"
+hot.db.schema "hot"
+hot.log.level "warn"
+hot.log.target "stdout"

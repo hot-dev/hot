@@ -1,0 +1,80 @@
+::anthropic::integration::beta ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Anthropic Beta APIs
+// =============================================================================
+// These tests require ANTHROPIC_API_KEY to be set in context (via ctx.hot or conf)
+
+// -----------------------------------------------------------------------------
+// Token Counting Tests
+// -----------------------------------------------------------------------------
+
+test-count-tokens-simple
+meta ["test"]
+fn () {
+    request ::anthropic::beta::messages/BetaMessagesCountTokensPostRequest({
+        model: "claude-3-haiku-20240307",
+        messages: [{role: "user", content: "Hello, world!"}]
+    })
+
+    response ::anthropic::beta::messages/count-tokens-post(request)
+
+    assert(response.input_tokens, "Response should have input_tokens")
+    assert(gt(response.input_tokens, 0), "Input tokens should be greater than 0")
+}
+
+test-count-tokens-with-system
+meta ["test"]
+fn () {
+    request ::anthropic::beta::messages/BetaMessagesCountTokensPostRequest({
+        model: "claude-3-haiku-20240307",
+        system: "You are a helpful assistant.",
+        messages: [{role: "user", content: "Hello!"}]
+    })
+
+    response ::anthropic::beta::messages/count-tokens-post(request)
+
+    assert(response.input_tokens, "Response should have input_tokens")
+    // With system prompt, should have more tokens than without
+    assert(gt(response.input_tokens, 0), "Input tokens should be greater than 0")
+}
+
+test-count-tokens-multi-turn
+meta ["test"]
+fn () {
+    request ::anthropic::beta::messages/BetaMessagesCountTokensPostRequest({
+        model: "claude-3-haiku-20240307",
+        messages: [
+            {role: "user", content: "Hello!"},
+            {role: "assistant", content: "Hi there! How can I help you today?"},
+            {role: "user", content: "What's the weather like?"}
+        ]
+    })
+
+    response ::anthropic::beta::messages/count-tokens-post(request)
+
+    assert(response.input_tokens, "Response should have input_tokens")
+    // Multi-turn should have more tokens
+    assert(gt(response.input_tokens, 10), "Multi-turn conversation should have more tokens")
+}
+
+// -----------------------------------------------------------------------------
+// Beta Messages Tests
+// -----------------------------------------------------------------------------
+
+test-beta-messages-post
+meta ["test"]
+fn () {
+    request ::anthropic::beta::messages/BetaMessagesPostRequest({
+        model: "claude-3-haiku-20240307",
+        max_tokens: 50,
+        messages: [{role: "user", content: "Say 'Hello from Beta!'"}]
+    })
+
+    response ::anthropic::beta::messages/post(request)
+
+    assert(response.id, "Response should have an id")
+    assert(response.content, "Response should have content")
+    assert(response.usage, "Response should have usage info")
+}

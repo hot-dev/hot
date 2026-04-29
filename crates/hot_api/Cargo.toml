@@ -1,0 +1,33 @@
+[package]
+name = "hot_api"
+version.workspace = true
+edition.workspace = true
+description = "Local and service API for Hot"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+hot = { workspace = true, features = ["s3-storage"] }
+tower-http = { workspace = true, features = ["trace"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
+once_cell = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+tower = { workspace = true, features = ["limit"] }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+sqlx = { workspace = true }
+async-trait = { workspace = true }
+tempfile = { workspace = true }

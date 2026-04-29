@@ -1,0 +1,533 @@
+::hot::test::type-constructor ns
+meta ["test"]
+
+// Tests for smart type constructors with validation of required fields.
+//
+// Supports:
+// - Required field validation (including nested types)
+// - Optional fields (T?) are not required
+// - Type wrapping with $type/$val structure
+// - Nested type construction with validation
+// - Vec<CustomType> item validation
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+
+// ============================================================================
+// Test 1: Basic Type Construction
+// ============================================================================
+
+test-basic-construction
+meta ["test"] fn () {
+    // Simple type with all required fields
+    Point type {
+        x: Int,
+        y: Int
+    }
+
+    p Point({x: 10, y: 20})
+
+    // Verify it's not an error
+    assert(not(is-err(p)), "Point construction should succeed")
+
+    // Access fields through $val
+    assert-eq(10, p.$val.x, "Point x should be 10")
+    assert-eq(20, p.$val.y, "Point y should be 20")
+    assert-eq("::hot::test::type-constructor/Point", p.$type, "Type should be set correctly")
+}
+
+// ============================================================================
+// Test 2: Missing Required Field Returns Error
+// ============================================================================
+
+test-missing-required-field
+meta ["test"] fn () {
+    // Type with required fields
+    Person type {
+        name: Str,
+        age: Int
+    }
+
+    // Missing 'age' field should return Result.Err
+    result Person({name: "Alice"})
+
+    assert(is-err(result), "Missing required field should return Result.Err")
+
+    error_msg result.$val
+    assert(::hot::str/contains(Str(error_msg), "age"), "Error should mention missing field 'age'")
+}
+
+// ============================================================================
+// Test 3: Multiple Missing Fields
+// ============================================================================
+
+test-multiple-missing-fields
+meta ["test"] fn () {
+    // Type with multiple required fields
+    Address type {
+        street: Str,
+        city: Str,
+        zip: Str
+    }
+
+    // Missing multiple fields
+    result Address({street: "123 Main"})
+
+    assert(is-err(result), "Missing multiple fields should return Result.Err")
+
+    error_msg Str(result.$val)
+    assert(::hot::str/contains(error_msg, "city"), "Error should mention 'city'")
+    assert(::hot::str/contains(error_msg, "zip"), "Error should mention 'zip'")
+}
+
+// ============================================================================
+// Test 4: Optional Fields (with ?) Are Not Required
+// ============================================================================
+
+test-optional-fields
+meta ["test"] fn () {
+    // Type with optional field
+    User type {
+        name: Str,
+        email: Str?
+    }
+
+    // Without optional field - should succeed
+    user1 User({name: "Alice"})
+    assert(not(is-err(user1)), "Optional field can be omitted")
+    assert-eq("Alice", user1.$val.name, "Name should be set")
+
+    // With optional field - should also succeed
+    user2 User({name: "Bob", email: "bob@example.com"})
+    assert(not(is-err(user2)), "Optional field can be provided")
+    assert-eq("bob@example.com", user2.$val.email, "Email should be set")
+}
+
+// ============================================================================
+// Test 5: Nested Type Construction with Validation
+// ============================================================================
+
+test-nested-construction
+meta ["test"] fn () {
+    // Define nested types
+    Inner type {
+        value: Int
+    }
+
+    Outer type {
+        name: Str,
+        inner: Inner
+    }
+
+    // Construct with raw nested map - Inner gets constructed and validated
+    result Outer({
+        name: "Test",
+        inner: {value: 42}
+    })
+
+    assert(not(is-err(result)), "Nested construction should succeed")
+    assert-eq("Test", result.$val.name, "Outer name should be set")
+
+    // The inner field should be a typed Inner object
+    inner_obj result.$val.inner
+    assert-eq("::hot::test::type-constructor/Inner", inner_obj.$type, "Inner should be typed")
+    assert-eq(42, inner_obj.$val.value, "Inner value should be 42")
+}
+
+// ============================================================================
+// Test 6: Nested Type Missing Required Field Returns Error
+// ============================================================================
+
+test-nested-missing-field
+meta ["test"] fn () {
+    // Define types where nested type has required field
+    Config type {
+        host: Str,
+        port: Int
+    }
+
+    App type {
+        name: Str,
+        config: Config
+    }
+
+    // Nested Config is missing required 'port' field
+    result App({
+        name: "MyApp",
+        config: {host: "localhost"}
+    })
+
+    assert(is-err(result), "Nested type missing field should return error")
+
+    error_msg Str(result.$val)
+    assert(::hot::str/contains(error_msg, "port"), "Error should mention missing nested field 'port'")
+}
+
+// ============================================================================
+// Test 7: Vec of Custom Types
+// ============================================================================
+
+test-vec-of-custom-type
+meta ["test"] fn () {
+    // Type with Vec of custom type
+    Tag type {
+        key: Str,
+        value: Str
+    }
+
+    Item type {
+        name: Str,
+        tags: Vec<Tag>
+    }
+
+    result Item({
+        name: "Widget",
+        tags: [
+            {key: "color", value: "red"},
+            {key: "size", value: "large"}
+        ]
+    })
+
+    assert(not(is-err(result)), "Vec of custom type should construct")
+
+    first_tag result.$val.tags[0]
+    assert-eq("::hot::test::type-constructor/Tag", first_tag.$type, "First tag should be typed")
+    assert-eq("color", first_tag.$val.key, "First tag key should be 'color'")
+}
+
+// ============================================================================
+// Test 8: Vec Item Validation
+// ============================================================================
+
+test-vec-item-validation
+meta ["test"] fn () {
+    // Type with Vec of custom type with required field
+    Item type {
+        id: Int,
+        name: Str
+    }
+
+    Container type {
+        items: Vec<Item>
+    }
+
+    // Second item is missing required 'name' field
+    result Container({
+        items: [
+            {id: 1, name: "First"},
+            {id: 2}
+        ]
+    })
+
+    assert(is-err(result), "Vec item missing field should return error")
+
+    error_msg Str(result.$val)
+    assert(::hot::str/contains(error_msg, "item"), "Error should mention item index")
+}
+
+// ============================================================================
+// Test 9: Deeply Nested Construction
+// ============================================================================
+
+test-deeply-nested
+meta ["test"] fn () {
+    // Three levels of nesting
+    Coordinates type {
+        lat: Dec,
+        lng: Dec
+    }
+
+    Location type {
+        name: Str,
+        coords: Coordinates
+    }
+
+    Place type {
+        id: Int,
+        location: Location
+    }
+
+    result Place({
+        id: 1,
+        location: {
+            name: "Office",
+            coords: {lat: 40.7128, lng: -74.0060}
+        }
+    })
+
+    assert(not(is-err(result)), "Deeply nested construction should succeed")
+
+    location result.$val.location
+    assert-eq("::hot::test::type-constructor/Location", location.$type, "Location should be typed")
+
+    coords location.$val.coords
+    assert-eq("::hot::test::type-constructor/Coordinates", coords.$type, "Coordinates should be typed")
+    assert-eq(40.7128, coords.$val.lat, "Latitude should be correct")
+}
+
+// ============================================================================
+// Test 10: Already Typed Input Preserved
+// ============================================================================
+
+test-already-typed-input
+meta ["test"] fn () {
+    // Define types
+    Inner type {
+        value: Int
+    }
+
+    Outer type {
+        inner: Inner
+    }
+
+    // Pre-construct the inner type
+    inner_typed Inner({value: 100})
+
+    // Use already typed object in construction
+    result Outer({inner: inner_typed})
+
+    assert(not(is-err(result)), "Already typed input should work")
+    assert-eq(100, result.$val.inner.$val.value, "Value should be preserved")
+}
+
+// ============================================================================
+// Test 11: Wrong Type Passed (Not a Map)
+// ============================================================================
+
+test-wrong-type-input
+meta ["test"] fn () {
+    // Define type expecting map structure
+    Data type {
+        value: Int
+    }
+
+    // Pass a string instead of map
+    result Data("not a map")
+
+    assert(is-err(result), "Wrong type should return error")
+
+    error_msg Str(result.$val)
+    assert(::hot::str/contains(error_msg, "expected"), "Error should mention expected type")
+}
+
+// ============================================================================
+// Test 12: All Optional Fields Type
+// ============================================================================
+
+test-all-optional-fields
+meta ["test"] fn () {
+    // Type where all fields are optional
+    Options type {
+        debug: Bool?,
+        verbose: Bool?,
+        timeout: Int?
+    }
+
+    // Empty construction should work
+    empty_opts Options({})
+    assert(not(is-err(empty_opts)), "All optional type can be empty")
+
+    // Partial construction should work
+    partial_opts Options({debug: true})
+    assert(not(is-err(partial_opts)), "Partial optional type should work")
+    assert-eq(true, partial_opts.$val.debug, "Debug should be true")
+}
+
+// ============================================================================
+// Test 13: Mixed Required and Optional
+// ============================================================================
+
+test-mixed-required-optional
+meta ["test"] fn () {
+    // Type with mix of required and optional
+    Config type {
+        name: Str,       // required
+        port: Int,       // required
+        ssl: Bool?,      // optional
+        timeout: Int?    // optional
+    }
+
+    // With only required fields
+    config1 Config({name: "api", port: 8080})
+    assert(not(is-err(config1)), "Only required fields should work")
+
+    // With all fields
+    config2 Config({name: "api", port: 8080, ssl: true, timeout: 30})
+    assert(not(is-err(config2)), "All fields should work")
+
+    // Missing required should fail
+    config3 Config({name: "api", ssl: true})
+    assert(is-err(config3), "Missing required 'port' should fail")
+}
+
+// ============================================================================
+// Test 14: Type with Only Builtin Fields Gets Proper Structure
+// ============================================================================
+
+test-builtin-fields-structure
+meta ["test"] fn () {
+    // Type with only builtin type fields
+    Simple type {
+        a: Int,
+        b: Str,
+        c: Bool
+    }
+
+    result Simple({a: 1, b: "hello", c: true})
+
+    assert(not(is-err(result)), "Construction should succeed")
+    assert-eq("::hot::test::type-constructor/Simple", result.$type, "Should have $type")
+    assert-eq(1, result.$val.a, "Field a should be accessible")
+    assert-eq("hello", result.$val.b, "Field b should be accessible")
+    assert-eq(true, result.$val.c, "Field c should be accessible")
+}
+
+// ============================================================================
+// Test 15: Empty Type (No Fields)
+// ============================================================================
+
+test-empty-type
+meta ["test"] fn () {
+    // Type with no fields (like a unit/marker type)
+    Marker type {
+
+    }
+
+    result Marker({})
+
+    assert(not(is-err(result)), "Empty type construction should succeed")
+    assert-eq("::hot::test::type-constructor/Marker", result.$type, "Should have $type")
+}
+
+// ============================================================================
+// Test 16: Field with Null Value
+// ============================================================================
+
+test-null-field-value
+meta ["test"] fn () {
+    // Optional field can have null
+    Record type {
+        id: Int,
+        notes: Str?
+    }
+
+    // null for optional field is OK
+    result Record({id: 1, notes: null})
+    assert(not(is-err(result)), "Null for optional field should work")
+    assert-eq(null, result.$val.notes, "Notes should be null")
+}
+
+// ============================================================================
+// Test 17: Extra Fields Are Preserved
+// ============================================================================
+
+test-extra-fields-preserved
+meta ["test"] fn () {
+    // Type with some fields
+    Basic type {
+        name: Str
+    }
+
+    // Pass extra fields not in type definition
+    result Basic({name: "test", extra: "data", count: 42})
+
+    assert(not(is-err(result)), "Extra fields should be allowed")
+    assert-eq("test", result.$val.name, "Defined field should be set")
+    assert-eq("data", result.$val.extra, "Extra field should be preserved")
+    assert-eq(42, result.$val.count, "Extra field should be preserved")
+}
+
+// ============================================================================
+// Test 18: Enum Variant Inference - Unique Match
+// ============================================================================
+
+// Define types at namespace level for proper scoping
+EnumTestCircle type {
+    radius: Dec
+}
+
+EnumTestRectangle type {
+    width: Dec,
+    height: Dec
+}
+
+EnumTestShape enum { Circle(EnumTestCircle), Rectangle(EnumTestRectangle) }
+EnumTestDrawing type {
+    shape: EnumTestShape
+}
+
+test-enum-variant-inference-unique
+meta ["test"] fn () {
+    // Pass raw map that uniquely matches Circle (has radius, no width/height)
+    circle-drawing EnumTestDrawing({shape: {radius: 5.0}})
+
+    assert(not(is-err(circle-drawing)), "Drawing with circle should succeed")
+    // The shape should be inferred as Circle variant
+    assert-eq("::hot::test::type-constructor/EnumTestShape.Circle", circle-drawing.shape.$type,
+              "Shape should be inferred as Circle variant")
+    // Dot access auto-unwraps typed values, so we can access .radius directly
+    assert-eq(5.0, circle-drawing.shape.radius, "Circle radius should be 5.0")
+
+    // Pass raw map that uniquely matches Rectangle (has width/height, no radius)
+    rect-drawing EnumTestDrawing({shape: {width: 10.0, height: 20.0}})
+
+    assert(not(is-err(rect-drawing)), "Drawing with rectangle should succeed")
+    assert-eq("::hot::test::type-constructor/EnumTestShape.Rectangle", rect-drawing.shape.$type,
+              "Shape should be inferred as Rectangle variant")
+}
+
+// ============================================================================
+// Test 19: Enum Variant Inference - Ambiguous (Tie) Leaves Raw Map
+// ============================================================================
+
+// Two variants with identical field structure
+TieTypeA type {
+    value: Int
+}
+
+TieTypeB type {
+    value: Int
+}
+
+TieAmbiguous enum { A(TieTypeA), B(TieTypeB) }
+TieContainer type {
+    item: TieAmbiguous
+}
+
+test-enum-variant-inference-tie
+meta ["test"] fn () {
+    // Pass raw map that matches BOTH variants equally
+    result TieContainer({item: {value: 42}})
+
+    assert(not(is-err(result)), "Container should succeed")
+    // With a tie, it should be left as a raw map (no $type)
+    assert-eq(null, result.item.$type,
+              "Ambiguous match should leave as raw map (no $type)")
+    assert-eq(42, result.item.value, "Value should be preserved")
+}
+
+// ============================================================================
+// Test 20: Enum Variant Inference - No Match Leaves Raw Map
+// ============================================================================
+
+// Variant requires specific fields
+NoMatchSpecific type {
+    required-field: Str
+}
+
+NoMatchLimited enum { Specific(NoMatchSpecific) }
+NoMatchHolder type {
+    data: NoMatchLimited
+}
+
+test-enum-variant-inference-no-match
+meta ["test"] fn () {
+    // Pass raw map that doesn't match any variant (missing required-field)
+    result NoMatchHolder({data: {other-field: "test"}})
+
+    assert(not(is-err(result)), "Holder should succeed")
+    // No match means raw map preserved
+    assert-eq(null, result.data.$type,
+              "No matching variant should leave as raw map")
+    assert-eq("test", result.data.other-field, "Field should be preserved")
+}

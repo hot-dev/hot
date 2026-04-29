@@ -1,0 +1,175 @@
+::telegram::bot ns
+
+api-request ::telegram::api/request
+
+// ============================================================================
+// Bot Info
+// ============================================================================
+
+get-me
+meta {
+    doc: """
+getMe - Get basic information about the bot. Returns the bot's id, username, first_name, and capabilities.
+
+**Example**
+
+```hot
+::bot ::telegram::bot
+
+response ::bot/get-me()
+response.id          // => 123456789
+response.username    // => "my_hot_bot"
+response.first_name  // => "Hot Bot"
+response.is_bot      // => true
+```
+"""
+}
+fn (): Map {
+  api-request("getMe")
+}
+
+GetMyNameRequest type {
+  language_code: Str?
+}
+
+get-my-name
+meta {
+    doc: """getMyName - Get the bot's name for the given language. Returns `{name: "Bot Name"}`."""
+}
+fn (request: GetMyNameRequest): Map {
+  api-request("getMyName", untype(request))
+}
+
+SetMyNameRequest type {
+  name: Str?,
+  language_code: Str?
+}
+
+set-my-name
+meta {
+    doc: """setMyName - Change the bot's name. Max 64 characters."""
+}
+fn (request: SetMyNameRequest): Bool {
+  api-request("setMyName", untype(request))
+}
+
+GetMyDescriptionRequest type {
+  language_code: Str?
+}
+
+get-my-description
+meta {
+    doc: """getMyDescription - Get the bot's description (shown on the bot's profile and share page)."""
+}
+fn (request: GetMyDescriptionRequest): Map {
+  api-request("getMyDescription", untype(request))
+}
+
+SetMyDescriptionRequest type {
+  description: Str?,
+  language_code: Str?
+}
+
+set-my-description
+meta {
+    doc: """setMyDescription - Change the bot's description. Max 512 characters. Shown on the bot's profile page."""
+}
+fn (request: SetMyDescriptionRequest): Bool {
+  api-request("setMyDescription", untype(request))
+}
+
+GetMyShortDescriptionRequest type {
+  language_code: Str?
+}
+
+get-my-short-description
+meta {
+    doc: """getMyShortDescription - Get the bot's short description (shown on the start screen)."""
+}
+fn (request: GetMyShortDescriptionRequest): Map {
+  api-request("getMyShortDescription", untype(request))
+}
+
+SetMyShortDescriptionRequest type {
+  short_description: Str?,
+  language_code: Str?
+}
+
+set-my-short-description
+meta {
+    doc: """setMyShortDescription - Change the bot's short description. Max 120 characters. Shown when users open a chat with the bot."""
+}
+fn (request: SetMyShortDescriptionRequest): Bool {
+  api-request("setMyShortDescription", untype(request))
+}
+
+// ============================================================================
+// Commands
+// ============================================================================
+
+GetMyCommandsRequest type {
+  scope: Map?,
+  language_code: Str?
+}
+
+get-my-commands
+meta {
+    doc: """
+getMyCommands - Get the bot's command list. `scope` filters by context (e.g. `{type: "all_private_chats"}` or `{type: "chat", chat_id: 123}`).
+
+**Example**
+
+```hot
+::bot ::telegram::bot
+
+commands ::bot/get-my-commands(::bot/GetMyCommandsRequest({}))
+// => [{command: "start", description: "Start the bot"}, {command: "help", description: "Show help"}]
+```
+"""
+}
+fn (request: GetMyCommandsRequest): Vec<Map> {
+  api-request("getMyCommands", untype(request))
+}
+
+SetMyCommandsRequest type {
+  commands: Vec<Map>,
+  scope: Map?,
+  language_code: Str?
+}
+
+set-my-commands
+meta {
+    doc: """
+setMyCommands - Set the bot's command list. Each command is `{command: "name", description: "What it does"}`. Max 100 commands.
+
+**Example**
+
+```hot
+::bot ::telegram::bot
+
+::bot/set-my-commands(::bot/SetMyCommandsRequest({
+  commands: [
+    {command: "start", description: "Start the bot"},
+    {command: "help", description: "Show help"},
+    {command: "status", description: "Check system status"}
+  ]
+}))
+```
+"""
+}
+fn (request: SetMyCommandsRequest): Bool {
+  api-request("setMyCommands", untype(request))
+}
+
+DeleteMyCommandsRequest type {
+  scope: Map?,
+  language_code: Str?
+}
+
+delete-my-commands
+meta {
+    doc: """deleteMyCommands - Delete the bot's command list for the given scope and language."""
+}
+fn (request: DeleteMyCommandsRequest): Bool {
+  api-request("deleteMyCommands", untype(request))
+}

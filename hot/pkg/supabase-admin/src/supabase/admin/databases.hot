@@ -1,0 +1,146 @@
+::supabase::admin::databases ns
+
+::api ::supabase::admin::api
+
+// ============================================================================
+// Database Configuration
+// ============================================================================
+
+get-postgres-config
+meta {
+    doc: """
+Get the Postgres configuration for a project (statement_timeout, max_connections, etc.).
+
+**Example**
+
+```hot
+::databases ::supabase::admin::databases
+
+config ::databases/get-postgres-config("my-project-ref")
+```
+"""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/config/database/postgres`)
+}
+
+update-postgres-config
+meta {
+    doc: """Update Postgres configuration. Pass a Map of config fields (e.g. `{statement_timeout: "30s", max_connections: 200}`)."""
+}
+fn (project-ref: Str, config: Map): Map {
+  ::api/request("PUT", `/projects/${project-ref}/config/database/postgres`, {}, config)
+}
+
+get-pooler-config
+meta {
+    doc: """Get the connection pooler (PgBouncer) configuration."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/config/database/pgbouncer`)
+}
+
+// ============================================================================
+// Backups
+// ============================================================================
+
+list-backups
+meta {
+    doc: """
+List database backups for a project.
+
+**Example**
+
+```hot
+::databases ::supabase::admin::databases
+
+backups ::databases/list-backups("my-project-ref")
+// => [{id: "...", status: "COMPLETED", created_at: "...", ...}, ...]
+```
+"""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/database/backups`)
+}
+
+// ============================================================================
+// Migrations
+// ============================================================================
+
+list-migrations
+meta {
+    doc: """List database migrations that have been run on a project."""
+}
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/database/migrations`)
+}
+
+// ============================================================================
+// Query
+// ============================================================================
+
+RunQueryRequest type {
+  project_ref: Str,
+  query: Str
+}
+
+run-query
+meta {
+    doc: """
+Run a SQL query against a project's database. Requires a Personal Access Token with appropriate permissions.
+
+**Example**
+
+```hot
+::databases ::supabase::admin::databases
+
+result ::databases/run-query(::databases/RunQueryRequest({
+  project_ref: "my-project-ref",
+  query: "SELECT count(*) FROM auth.users"
+}))
+```
+"""
+}
+fn (request: RunQueryRequest): Any {
+  ::api/request("POST", `/projects/${request.project_ref}/database/query`, {}, {query: request.query})
+}
+
+// ============================================================================
+// Read Replicas
+// ============================================================================
+
+list-read-replicas
+meta {
+    doc: """List read replicas for a project."""
+}
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/read-replicas`)
+}
+
+get-readonly-mode
+meta {
+    doc: """Check if the project database is in read-only mode."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/readonly`)
+}
+
+// ============================================================================
+// Upgrades
+// ============================================================================
+
+get-upgrade-status
+meta {
+    doc: """Get the current database upgrade status."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/upgrade/status`)
+}
+
+list-available-versions
+meta {
+    doc: """List available Postgres versions for upgrade."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/upgrade/eligible`)
+}

@@ -1,0 +1,156 @@
+::pandoc::test ns
+meta ["test"]
+
+build-convert-args ::pandoc/build-convert-args
+build-version-args ::pandoc/build-version-args
+parse-version-output ::pandoc/parse-version-output
+file-ext ::pandoc/file-ext
+format-output-ext ::pandoc/format-output-ext
+is-text-output-format ::pandoc/is-text-output-format
+ConvertOpts ::pandoc/ConvertOpts
+
+// ============================================================================
+// file-ext tests
+// ============================================================================
+
+test-file-ext-md
+meta ["test"] fn () {
+    assert-eq("md", file-ext("hot://uploads/readme.md"))
+}
+
+test-file-ext-nested-path
+meta ["test"] fn () {
+    assert-eq("docx", file-ext("hot://users/123/docs/report.docx"))
+}
+
+test-file-ext-multiple-dots
+meta ["test"] fn () {
+    assert-eq("gz", file-ext("archive.tar.gz"))
+}
+
+// ============================================================================
+// format-output-ext tests
+// ============================================================================
+
+test-format-output-ext-markdown
+meta ["test"] fn () {
+    assert-eq("md", format-output-ext("markdown"))
+}
+
+test-format-output-ext-html
+meta ["test"] fn () {
+    assert-eq("html", format-output-ext("html"))
+}
+
+// ============================================================================
+// is-text-output-format tests
+// ============================================================================
+
+test-is-text-output-format-html
+meta ["test"] fn () {
+    assert(is-text-output-format("html"), "html is text output")
+}
+
+test-is-text-output-format-pdf
+meta ["test"] fn () {
+    assert(not(is-text-output-format("pdf")), "pdf is not text output")
+}
+
+// ============================================================================
+// build-convert-args tests
+// ============================================================================
+
+test-convert-args-minimal
+meta ["test"] fn () {
+    opts ConvertOpts({
+        from: null, to: "html", standalone: null, template: null,
+        toc: null, extra-args: null, image: null, size: null,
+    })
+    args build-convert-args("/tmp/input.md", "/tmp/output.html", opts)
+    assert-eq("/tmp/input.md", first(args), "input path first")
+    assert-eq("-t", args[1], "-t after input")
+    assert-eq("html", args[2], "to format")
+    assert-eq("-o", args[3], "-o flag")
+    assert-eq("/tmp/output.html", last(args), "output path last")
+}
+
+test-convert-args-from-and-options
+meta ["test"] fn () {
+    opts ConvertOpts({
+        from: "markdown", to: "html", standalone: true, template: null,
+        toc: true, extra-args: ["--metadata", "title=Demo",],
+        image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.md", "/tmp/out.html", opts)
+    assert(in("-f", args), "should have -f")
+    assert(in("markdown", args), "should have markdown from")
+    assert(in("-t", args), "should have -t")
+    assert(in("html", args), "should have html to")
+    assert(in("--standalone", args), "should have standalone")
+    assert(in("--toc", args), "should have toc")
+    assert(in("--metadata", args), "should have extra metadata flag")
+    assert(in("title=Demo", args), "should have metadata value")
+    assert-eq("/tmp/out.html", last(args), "output last")
+}
+
+test-convert-args-template
+meta ["test"] fn () {
+    opts ConvertOpts({
+        from: "markdown", to: "pdf", standalone: null, template: "/tpl/default.latex",
+        toc: null, extra-args: null, image: null, size: null,
+    })
+    args build-convert-args("/tmp/in.md", "/tmp/out.pdf", opts)
+    assert(in("--template", args), "should have template flag")
+    assert(in("/tpl/default.latex", args), "should have template path")
+}
+
+// ============================================================================
+// build-version-args tests
+// ============================================================================
+
+test-version-args
+meta ["test"] fn () {
+    args build-version-args()
+    assert-eq(["--version",], args)
+}
+
+// ============================================================================
+// parse-version-output tests
+// ============================================================================
+
+test-parse-version-output-basic
+meta ["test"] fn () {
+    out "pandoc 3.1.11\nCompiled with pandoc-types 1.23\n"
+    result parse-version-output(out)
+    assert-eq("3.1.11", result.version)
+    assert(contains(result.raw, "pandoc"), "raw should include pandoc")
+}
+
+test-parse-version-output-with-whitespace
+meta ["test"] fn () {
+    out """
+    pandoc 2.19.2
+    Features: +server +lua
+    """
+    result parse-version-output(out)
+    assert-eq("2.19.2", result.version)
+}
+
+// ============================================================================
+// Type construction tests
+// ============================================================================
+
+test-convert-opts-construction
+meta ["test"] fn () {
+    opts ConvertOpts({
+        from: "markdown", to: "docx", standalone: true,
+        template: null, toc: false, extra-args: ["--wrap=none",],
+        image: null, size: "small",
+    })
+    assert-eq("markdown", opts.from)
+    assert-eq("docx", opts.to)
+    assert-eq(true, opts.standalone)
+    assert-eq(false, opts.toc)
+    assert-eq("small", opts.size)
+    assert-eq(1, length(opts.extra-args))
+}

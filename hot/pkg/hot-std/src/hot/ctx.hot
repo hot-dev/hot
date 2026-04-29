@@ -1,0 +1,73 @@
+::hot::ctx ns
+meta {doc: """Execution context for storing and retrieving values during a run."""}
+
+// Set a value in the engine's execution context
+// Takes a key (string or namespaced VarRef) and a value
+// Returns the value that was set
+set
+meta {
+    doc: """
+
+    Store value in the execution context under key.
+
+    If the key is defined in `ctx` metadata, the `secret` setting
+    of the key determines whether the value is masked in logs.
+
+    """
+}
+fn (ctx-map: Map) {
+    call-lib(::hot::ctx/set, [ctx-map])
+},
+(key: Str | Var, value: Any): Any {
+    call-lib(::hot::ctx/set, [key, value])
+}
+
+// Set a secret value in the engine's execution context
+// The key is marked as secret, so its value will be masked in call logs
+set-secret
+meta {
+    doc: """
+
+    Store value in the execution context under key,
+    explicitly marking it as a secret.
+
+    Prefer this over `::hot::ctx/set` for runtime-created secrets that are
+    not defined in `ctx` metadata, so that the value will be masked in logs.
+
+    """
+}
+fn (ctx-map: Map) {
+    call-lib(::hot::ctx/set-secret, [ctx-map])
+},
+(key: Str | Var, value: Any): Any {
+    call-lib(::hot::ctx/set-secret, [key, value])
+}
+
+
+// Get a value from the engine's execution context
+// 1-arg: returns the value or null if unset
+// 2-arg: returns the value, or `default-value` if unset/null
+get
+meta {
+    doc: """
+    Retrieve a value from the execution context by `key`.
+
+    With one argument, returns the stored value or `null` if `key` is not set.
+    With two arguments, returns `default-value` when the key is unset or stored as `null`.
+
+    **Example**
+
+    ```hot
+
+    api-key ::hot::ctx/get("anthropic.api.key")
+    model   ::hot::ctx/get("brain.model", "claude-sonnet-4-5")
+    ```
+    """
+}
+fn (key: Str | Var): Any {
+    call-lib(::hot::ctx/get, [key])
+},
+(key: Str | Var, default-value: Any): Any {
+    val call-lib(::hot::ctx/get, [key])
+    if(is-null(val), default-value, val)
+}

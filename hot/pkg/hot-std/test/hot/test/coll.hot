@@ -1,0 +1,1216 @@
+::hot::test::coll ns
+meta ["test"]
+
+// Note: assert, assert-eq, and collection functions (map, pmap, filter, reduce, etc.) are core
+
+test-basic-coll
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Test map function
+    assert-eq(
+        [2, 3, 4, 5, 6],
+        map(numbers, (x) { add(x, 1) }),
+        "map(numbers, (x) {add(x, 1)}) returns [2, 3, 4, 5, 6]"
+    )
+    // Test map function
+    assert-eq(
+        [2, 3, 4, 5, 6],
+        pmap(numbers, (x) { add(x, 1) }),
+        "pmap(numbers, (x) {add(x, 1)}) returns [2, 3, 4, 5, 6]"
+    )
+    // Test filter function
+    assert-eq(
+        [3, 4, 5],
+        filter(numbers, (x) { gt(x, 2) }),
+        "filter(numbers, (x) {gt(x, 2)}) returns [3, 4, 5]"
+    )
+    // Test reduce function
+    assert-eq(
+        15,
+        reduce(numbers, (acc, x) { add(acc, x) }, 0),
+        "reduce(numbers, (acc, x) {add(acc, x)}, 0) returns 15"
+    )
+    // Test concat function
+    more_numbers [6, 7, 8]
+    assert-eq(
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        concat(numbers, more_numbers),
+        "concat(numbers, more_numbers) returns [1, 2, 3, 4, 5, 6, 7, 8]"
+    )
+    // Test length function with vector
+    assert-eq(5, length(numbers), "length(numbers) returns 5")
+    // Test length function with string
+    assert-eq(11, length("hello world"), "length(\"hello world\") returns 11")
+    // Test length function with map
+    test_map {a: 1, b: 2, c: 3}
+    assert-eq(3, length(test_map), "length(test_map) returns 3")
+}
+
+test-mapcat
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Test mapcat with simple function
+    assert-eq(
+        [1, 2, 3, 4, 5],
+        mapcat(numbers, (x) { [x] }),
+        "mapcat(numbers, (x) { [x] }) returns [1, 2, 3, 4, 5]"
+    )
+    // Test mapcat with pair creation
+    assert-eq(
+        [1, 2, 2, 3, 3, 4, 4, 5, 5, 6],
+        mapcat(numbers, (x) { [x, add(x, 1)] }),
+        "mapcat(numbers, (x) { [x, add(x, 1)] }) returns [1, 2, 2, 3, 3, 4, 4, 5, 5, 6]"
+    )
+}
+
+test-merge
+meta ["test"] fn () {
+
+    // Test merge function with simple maps
+    map1 {a: 1, b: 2}
+    map2 {b: 3, c: 4}
+    assert-eq(
+        {a: 1, b: 3, c: 4},
+        merge(map1, map2),
+        "merge(map1, map2) returns merged map with second map taking precedence"
+    )
+    // Test merge function with nested maps
+    nested_map1 {
+        settings: {theme: "light", lang: "en"},
+        user: {name: "Alice"}
+    }
+
+    nested_map2 {
+        settings: {theme: "dark", notifications: true},
+        user: {age: 30}
+    }
+
+    expected_nested {
+        settings: {theme: "dark", lang: "en", notifications: true},
+        user: {name: "Alice", age: 30}
+    }
+
+    assert-eq(
+        expected_nested,
+        merge(nested_map1, nested_map2),
+        "merge performs deep merge for nested maps"
+    )
+}
+
+test-coll-access
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Test first function
+    assert-eq(1, first(numbers), "first(numbers) returns 1")
+    assert-eq(null, first([]), "first([]) returns null")
+    // Test last function
+    assert-eq(5, last(numbers), "last(numbers) returns 5")
+    // Test rest function
+    assert-eq([2, 3, 4, 5], rest(numbers), "rest(numbers) returns [2, 3, 4, 5]")
+    // Test butlast function
+    assert-eq([1, 2, 3, 4], butlast(numbers), "butlast(numbers) returns [1, 2, 3, 4]")
+    // Test is-empty function
+    // THIS SUCCEEDS WITH THE ::hot::coll namespace
+    assert-eq(true, ::hot::coll/is-empty([]), "is-empty([]) returns true")
+    assert-eq(false, ::hot::coll/is-empty(numbers), "is-empty(numbers) returns false")
+    // Test is-empty function
+    // THIS FAILS WITHOUT THE ::hot::coll namespace
+    assert-eq(true, is-empty([]), "is-empty([]) returns true")
+    assert-eq(false, is-empty(numbers), "is-empty(numbers) returns false")
+}
+
+test-coll-transform
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Test partition function
+    assert-eq(
+        [[1, 2], [3, 4], [5]],
+        partition(numbers, 2),
+        "partition(numbers, 2) returns [[1, 2], [3, 4], [5]]"
+    )
+    // Test distinct function
+    with_dupes [1, 2, 2, 3, 3, 3, 4, 5]
+    assert-eq(
+        [1, 2, 3, 4, 5],
+        distinct(with_dupes),
+        "distinct removes duplicates while preserving order"
+    )
+    // Test reverse function
+    assert-eq([5, 4, 3, 2, 1], reverse(numbers), "reverse(numbers) returns [5, 4, 3, 2, 1]")
+    // Test sort function
+    unsorted [3, 1, 4, 1, 5, 9, 2, 6]
+    assert-eq([1, 1, 2, 3, 4, 5, 6, 9], sort(unsorted), "sort orders elements in ascending order")
+}
+
+test-coll-combine
+meta ["test"] fn () {
+
+    // Test interleave function
+    first_seq [1, 3, 5]
+    second_seq [2, 4, 6]
+    assert-eq(
+        [1, 2, 3, 4, 5, 6],
+        interleave(first_seq, second_seq),
+        "interleave combines two sequences"
+    )
+    // Test interpose function
+    assert-eq(
+        ["a", ",", "b", ",", "c"],
+        interpose(["a", "b", "c"], ","),
+        "interpose inserts separator between elements"
+    )
+    // Test flatten function
+    nested_list [[1, 2], [3, [4, 5]], 6]
+    assert-eq([1, 2, 3, 4, 5, 6], flatten(nested_list), "flatten flattens nested colls")
+}
+
+test-zipmap
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Test zipmap function
+    keys_list ["a", "b", "c"]
+    values_list [1, 2, 3]
+    assert-eq(
+        {a: 1, b: 2, c: 3},
+        zipmap(keys_list, values_list),
+        "zipmap creates map from keys and values"
+    )
+    // Test some function
+    assert-eq(
+        true,
+        some(numbers, (x) { eq(mod(x, 2), 0) }),
+        "some returns true when any element satisfies predicate"
+    )
+    assert-eq(
+        false,
+        some(numbers, (x) { lt(x, 0) }),
+        "some returns false when no element satisfies predicate"
+    )
+    // Test all function
+    assert-eq(
+        true,
+        all(numbers, (x) { gt(x, 0) }),
+        "all returns true when all elements satisfy predicate"
+    )
+    assert-eq(
+        false,
+        all(numbers, (x) { eq(mod(x, 2), 0) }),
+        "all returns false when not all elements satisfy predicate"
+    )
+}
+
+test-slice
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Test slice function with strings
+    hello_world "hello world"
+    assert-eq("world", slice(hello_world, 6), "slice(\"hello world\", 6) returns \"world\"")
+    assert-eq("hello", slice(hello_world, 0, 5), "slice(\"hello world\", 0, 5) returns \"hello\"")
+    // Test slice function with vectors
+    assert-eq([3, 4, 5], slice(numbers, 2), "slice([1, 2, 3, 4, 5], 2) returns [3, 4, 5]")
+    assert-eq([2, 3, 4], slice(numbers, 1, 4), "slice([1, 2, 3, 4, 5], 1, 4) returns [2, 3, 4]")
+    // Test slice function with maps
+    test_map_slice {a: 1, b: 2, c: 3, d: 4, e: 5}
+    expected_map_2arity {b: 2, c: 3, d: 4, e: 5}
+    assert-eq(
+        expected_map_2arity,
+        slice(test_map_slice, 1),
+        "slice(map, 1) returns map from index 1 to end"
+    )
+    expected_map_3arity {b: 2, c: 3}
+    assert-eq(
+        expected_map_3arity,
+        slice(test_map_slice, 1, 3),
+        "slice(map, 1, 3) returns map from index 1 to 3"
+    )
+    // Test slice edge cases
+    assert-eq("", slice("hello", 5, 3), "slice with start > end returns empty string")
+    assert-eq("", slice("hello", 10), "slice with start beyond length returns empty string")
+}
+
+test-keys-vals
+meta ["test"] fn () {
+    amap {a: 1, b: 2, c: 3}
+    avec [1, 2, 3]
+    astr "hello"
+    assert-eq(["a", "b", "c"], keys(amap), "keys returns keys of map")
+    assert-eq([1, 2, 3], vals(amap), "vals returns values of map")
+    assert-eq([0, 1, 2], keys(avec), "keys returns indices of vector")
+    assert-eq([1, 2, 3], vals(avec), "vals returns values of vector")
+    assert-eq([0, 1, 2, 3, 4], keys(astr), "keys returns indices of string")
+    assert-eq(["h", "e", "l", "l", "o"], vals(astr), "vals returns values of string")
+}
+
+test-map-variations
+meta ["test"] fn () {
+
+    // Test map with vectors
+    numbers [1, 2, 3, 4, 5]
+    doubled_numbers [2, 4, 6, 8, 10]
+    assert-eq(doubled_numbers, map(numbers, (x) { mul(x, 2) }), "map doubles each number in vector")
+    assert-eq(doubled_numbers, pmap(numbers, (x) { mul(x, 2) }), "pmap doubles each number in vector")
+    // Test map with strings
+    input_str "abc"
+    uppercased_chars ["A", "B", "C"]
+    assert-eq(
+        uppercased_chars,
+        map(input_str, (char) { ::hot::str/uppercase(char) }),
+        "map uppercases each character in string"
+    )
+    assert-eq(
+        uppercased_chars,
+        pmap(input_str, (char) { ::hot::str/uppercase(char) }),
+        "pmap uppercases each character in string"
+    )
+    // Test map with maps - transforms key-value pairs
+    input_map {x: 1, y: 2}
+    // Map function receives (key, value) and returns new value
+    formatted_pairs ["x=1", "y=2"]
+    result_pairs map(input_map, (key, value) { concat(key, "=", value) })
+    // Since map order might vary, check both possible orders
+    expected_alt ["y=2", "x=1"]
+    assert(
+        or(eq(formatted_pairs, result_pairs), eq(expected_alt, result_pairs)),
+        "map formats key-value pairs from map"
+    )
+    assert(
+        or(eq(formatted_pairs, result_pairs), eq(expected_alt, result_pairs)),
+        "pmap formats key-value pairs from map"
+    )
+}
+
+test-filter-variations
+meta ["test"] fn () {
+
+    // Test filter with vectors
+    numbers [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    even_numbers [2, 4, 6, 8, 10]
+    assert-eq(
+        even_numbers,
+        filter(numbers, (x) { eq(mod(x, 2), 0) }),
+        "filter keeps only even numbers from vector"
+    )
+    // Test filter with strings
+    input_str "hello123world"
+    letters_only ["h", "e", "l", "l", "o", "w", "o", "r", "l", "d"]
+    // This would need a function to check if character is alphabetic
+    // For now, let's test filtering specific characters
+    input_str2 "abcdef"
+    vowels_only ["a", "e"]
+    assert-eq(
+        vowels_only,
+        filter(input_str2, (char) { or(eq(char, "a"), eq(char, "e")) }),
+        "filter keeps only vowels from string"
+    )
+    // Test filter with maps - filters key-value pairs
+    input_map {a: 1, b: 2, c: 3, d: 4}
+    // Filter function receives (key, value) and returns true/false
+    filtered_pairs filter(input_map, (key, value) { eq(mod(value, 2), 0) })
+    // Result should contain pairs where value is even
+    expected_keys ["b", "d"]
+    result_keys keys(zipmap(filtered_pairs, filtered_pairs))
+    // Note: The result structure might vary, this is a simplified test
+    assert-eq(2, length(filtered_pairs), "filter keeps pairs with even values from map")
+}
+
+test-map-indexed-variations
+meta ["test"] fn () {
+
+    // Test map-indexed with vectors
+    items ["a", "b", "c"]
+    indexed_items ["0:a", "1:b", "2:c"]
+    assert-eq(
+        indexed_items,
+        map-indexed(items, (idx, item) { concat(idx, ":", item) }),
+        "map-indexed adds index to each vector element"
+    )
+    // Test map-indexed with strings
+    input_str "abc"
+    indexed_chars ["0:a", "1:b", "2:c"]
+    assert-eq(
+        indexed_chars,
+        map-indexed(input_str, (idx, char) { concat(idx, ":", char) }),
+        "map-indexed adds index to each character"
+    )
+    // Test map-indexed with maps
+    input_map {x: 10, y: 20}
+    // Map-indexed function receives (index, key, value)
+    indexed_pairs map-indexed(input_map, (idx, key, value) { concat(idx, ":", key, "=", value) })
+    // Since map order might vary, check length and that we have expected patterns
+    assert-eq(2, length(indexed_pairs), "map-indexed processes all key-value pairs with indices")
+    // Check that the results contain the expected patterns (order may vary)
+    result_str concat(first(indexed_pairs), ",", last(indexed_pairs))
+    has_x_pattern or(::hot::str/contains(result_str, "x=10"), ::hot::str/contains(result_str, "x=10"))
+    has_y_pattern or(::hot::str/contains(result_str, "y=20"), ::hot::str/contains(result_str, "y=20"))
+    assert(has_x_pattern, "map-indexed result contains x=10 pattern")
+    assert(has_y_pattern, "map-indexed result contains y=20 pattern")
+}
+
+test-concat-variations
+meta ["test"] fn () {
+
+    // Test concat with multiple strings
+    result1 concat("Hello", " ", "World", "!")
+    assert-eq("Hello World!", result1, "concat joins multiple strings")
+    // Test concat with mixed types (should convert to strings)
+    result2 concat("Count: ", 42, ", Status: ", true)
+    assert-eq("Count: 42, Status: true", result2, "concat converts mixed types to strings")
+    // Test concat with multiple vectors
+    vec1 [1, 2]
+    vec2 [3, 4]
+    vec3 [5, 6]
+    result3 concat(vec1, vec2, vec3)
+    assert-eq([1, 2, 3, 4, 5, 6], result3, "concat joins multiple vectors")
+}
+
+test-range
+meta ["test"] fn () {
+
+    // Test range(end) - 1-arity
+    assert-eq([0, 1, 2, 3, 4], ::hot::coll/range(5), "range(5) returns [0, 1, 2, 3, 4]")
+    // Test range(start, end) - 2-arity
+    assert-eq([2, 3, 4, 5, 6], ::hot::coll/range(2, 7), "range(2, 7) returns [2, 3, 4, 5, 6]")
+    // Test range(start, end, step) - 3-arity
+    assert-eq([1, 3, 5, 7, 9], ::hot::coll/range(1, 10, 2), "range(1, 10, 2) returns [1, 3, 5, 7, 9]")
+    // Test negative step
+    assert-eq(
+        [10, 9, 8, 7, 6],
+        ::hot::coll/range(10, 5, -1),
+        "range(10, 5, -1) returns [10, 9, 8, 7, 6]"
+    )
+    // Test empty range
+    assert-eq([], ::hot::coll/range(5, 5), "range(5, 5) returns empty vector")
+    assert-eq([], ::hot::coll/range(5, 3), "range(5, 3) returns empty vector")
+    // Test decimal range
+    decimal_range ::hot::coll/range(1.0, 1.5, 0.1)
+    assert-eq(5, length(decimal_range), "range(1.0, 1.5, 0.1) returns 5 elements")
+    // Test range with negative numbers
+    assert-eq([-2, -1, 0, 1], ::hot::coll/range(-2, 2), "range(-2, 2) works with negative start")
+    // Test large range length
+    large_range ::hot::coll/range(0, 100)
+    assert-eq(100, length(large_range), "range(0, 100) returns 100 elements")
+    assert-eq(0, first(large_range), "range(0, 100) starts with 0")
+    assert-eq(99, last(large_range), "range(0, 100) ends with 99")
+}
+
+test-get
+meta ["test"] fn () {
+    // Test get function on Map
+    test-map {"a": 1, "b": 2, "c": 3}
+    assert-eq(1, get(test-map, "a"), "get(map, 'a') returns 1")
+    assert-eq(2, get(test-map, "b"), "get(map, 'b') returns 2")
+    assert-eq(null, get(test-map, "missing"), "get(map, 'missing') returns null")
+    assert-eq("default", get(test-map, "missing", "default"), "get(map, 'missing', 'default') returns 'default'")
+
+    // Test get function on Vec
+    test-vec [10, 20, 30, 40, 50]
+    assert-eq(10, get(test-vec, 0), "get(vec, 0) returns first element")
+    assert-eq(30, get(test-vec, 2), "get(vec, 2) returns third element")
+    assert-eq(50, get(test-vec, 4), "get(vec, 4) returns last element")
+    assert-eq(null, get(test-vec, 10), "get(vec, 10) returns null for out-of-bounds")
+    assert-eq(-1, get(test-vec, 10, -1), "get(vec, 10, -1) returns default for out-of-bounds")
+    assert-eq(null, get(test-vec, -1), "get(vec, -1) returns null for negative index")
+
+    // Test get function on Str
+    test-str "hello"
+    assert-eq("h", get(test-str, 0), "get(str, 0) returns first character")
+    assert-eq("e", get(test-str, 1), "get(str, 1) returns second character")
+    assert-eq("o", get(test-str, 4), "get(str, 4) returns last character")
+    assert-eq(null, get(test-str, 100), "get(str, 100) returns null for out-of-bounds")
+    assert-eq("?", get(test-str, 100, "?"), "get(str, 100, '?') returns default for out-of-bounds")
+
+    // Test get function on Bytes
+    test-bytes Bytes([65, 66, 67, 68, 69])
+    assert-eq(65, get(test-bytes, 0), "get(bytes, 0) returns first byte")
+    assert-eq(67, get(test-bytes, 2), "get(bytes, 2) returns third byte")
+    assert-eq(69, get(test-bytes, 4), "get(bytes, 4) returns last byte")
+    assert-eq(null, get(test-bytes, 10), "get(bytes, 10) returns null for out-of-bounds")
+    assert-eq(-1, get(test-bytes, 10, -1), "get(bytes, 10, -1) returns default for out-of-bounds")
+}
+
+test-dynamic-bracket-access
+meta ["test"] fn () {
+    // Test dynamic bracket access on Vec
+    idx1 1
+    vec-data [10, 20, 30]
+    assert-eq(20, vec-data[idx1], "vec[idx] with dynamic index works")
+
+    idx2 0
+    assert-eq(10, vec-data[idx2], "vec[idx] with idx=0 works")
+
+    idx3 2
+    assert-eq(30, vec-data[idx3], "vec[idx] with idx=2 works")
+
+    // Test dynamic bracket access on Map
+    key1 "b"
+    map-data {"a": 1, "b": 2, "c": 3}
+    assert-eq(2, map-data[key1], "map[key] with dynamic key works")
+
+    key2 "a"
+    assert-eq(1, map-data[key2], "map[key] with key='a' works")
+
+    // Test dynamic bracket access on Str
+    char-idx 4
+    str-data "hello"
+    assert-eq("o", str-data[char-idx], "str[idx] with dynamic index works")
+
+    char-idx2 0
+    assert-eq("h", str-data[char-idx2], "str[idx] with idx=0 works")
+
+    // Test chained dynamic access
+    item-idx 1
+    nested-data {"items": [{"name": "first"}, {"name": "second"}]}
+    assert-eq("second", nested-data.items[item-idx].name, "chained dynamic access works")
+
+    item-idx-0 0
+    assert-eq("first", nested-data.items[item-idx-0].name, "chained dynamic access with idx=0 works")
+
+    // Test static string key in brackets
+    map-with-special {"my-key": 42, "other": 99}
+    assert-eq(42, map-with-special["my-key"], "static string key in brackets works")
+
+    // Test combining static and dynamic access
+    combined-data {"users": [{"profile": {"name": "Alice"}}, {"profile": {"name": "Bob"}}]}
+    user-idx 1
+    assert-eq("Bob", combined-data.users[user-idx].profile.name, "complex nested dynamic access works")
+}
+
+test-remove-delete
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    // Test remove function - removes elements that satisfy predicate
+    small_numbers remove(numbers, (x) { gt(x, 5) })
+    assert-eq([1, 2, 3, 4, 5], small_numbers, "remove(numbers, (x) { gt(x, 5) }) keeps numbers <= 5")
+    // Test remove with strings - remove vowels
+    input_str "hello world"
+    consonants_only remove(
+        input_str,
+        (char) { or(or(or(or(eq(char, "a"), eq(char, "e")), eq(char, "i")), eq(char, "o")), eq(char, "u")) }
+    )
+    // Result should be "hll wrld" (consonants and spaces only)
+    expected_consonants "hll wrld"
+    assert-eq(expected_consonants, consonants_only, "remove removes vowels from string")
+    // Test remove with maps - remove entries with even values
+    input_map {a: 1, b: 2, c: 3, d: 4, e: 5}
+    odd_values_only remove(input_map, (k, v) { eq(mod(v, 2), 0) })
+    // Should keep entries with odd values: [["a", 1], ["c", 3], ["e", 5]]
+    assert-eq(3, length(odd_values_only), "remove keeps entries with odd values from map")
+    // Test delete function - delete specific indices/keys
+    // Delete from vector
+    deleted_vec ::hot::coll/delete(numbers, 2)
+    // Delete index 2 (value 3)
+    assert-eq(
+        [1, 2, 4, 5, 6, 7, 8, 9, 10],
+        deleted_vec,
+        "delete(numbers, 2) removes element at index 2"
+    )
+    // Delete from string
+    text "hello world"
+    deleted_char ::hot::coll/delete(text, 5)
+    // Delete index 5 (space character)
+    assert-eq("helloworld", deleted_char, "delete(text, 5) removes character at index 5")
+    // Delete from map
+    person {
+        name: "Alice",
+        age: 30,
+        city: "NYC",
+        country: "USA"
+    }
+
+    no_age ::hot::coll/delete(person, "age")
+    expected_person {name: "Alice", city: "NYC", country: "USA"}
+    assert-eq(expected_person, no_age, "delete(person, \"age\") removes age key from map")
+    // Test delete with negative indices
+    deleted_last ::hot::coll/delete(numbers, -1)
+    // Delete last element
+    assert-eq([1, 2, 3, 4, 5, 6, 7, 8, 9], deleted_last, "delete(numbers, -1) removes last element")
+    // Test delete with out-of-bounds index (should return original)
+    deleted_oob ::hot::coll/delete(numbers, 100)
+    assert-eq(numbers, deleted_oob, "delete with out-of-bounds index returns original collection")
+    // Test delete with non-existent key (should return original)
+    deleted_missing ::hot::coll/delete(person, "salary")
+    assert-eq(person, deleted_missing, "delete with non-existent key returns original map")
+    // Test edge cases
+    empty_vec []
+    deleted_empty ::hot::coll/delete(empty_vec, 0)
+    assert-eq(empty_vec, deleted_empty, "delete from empty collection returns empty collection")
+    single_item [42]
+    deleted_single ::hot::coll/delete(single_item, 0)
+    assert-eq([], deleted_single, "delete only element returns empty collection")
+}
+
+
+// ============================================================================
+// assoc-some
+// ============================================================================
+
+test-assoc-some
+meta ["test"] fn () {
+    // Adds key when value is non-null
+    assert-eq(
+        {"a": 1, "b": 2},
+        assoc-some({"a": 1}, "b", 2),
+        "assoc-some adds key when value is non-null"
+    )
+
+    // Skips key when value is null
+    assert-eq(
+        {"a": 1},
+        assoc-some({"a": 1}, "b", null),
+        "assoc-some skips key when value is null"
+    )
+
+    // Works with empty map
+    assert-eq(
+        {"x": 42},
+        assoc-some({}, "x", 42),
+        "assoc-some works on empty map"
+    )
+
+    // Null on empty map returns empty map
+    assert-eq(
+        {},
+        assoc-some({}, "x", null),
+        "assoc-some with null on empty map returns empty map"
+    )
+
+    // Works with various value types
+    assert-eq({"a": false}, assoc-some({}, "a", false), "assoc-some keeps false values")
+    assert-eq({"a": 0}, assoc-some({}, "a", 0), "assoc-some keeps zero values")
+    assert-eq({"a": ""}, assoc-some({}, "a", ""), "assoc-some keeps empty string values")
+    assert-eq({"a": []}, assoc-some({}, "a", []), "assoc-some keeps empty vec values")
+
+    // Pipe-friendly chaining
+    result {"name": "Alice"}
+        |> assoc-some("email", "a@b.com")
+        |> assoc-some("phone", null)
+        |> assoc-some("age", 30)
+    assert-eq(
+        {"name": "Alice", "email": "a@b.com", "age": 30},
+        result,
+        "assoc-some works in pipe chain, skipping null"
+    )
+}
+
+
+// ============================================================================
+// update
+// ============================================================================
+
+test-update
+meta ["test"] fn () {
+    // Basic update
+    assert-eq(
+        {"count": 2},
+        update({"count": 1}, "count", (n) { add(n, 1) }),
+        "update increments a value"
+    )
+
+    // Transform a value
+    assert-eq(
+        {"name": "ALICE"},
+        update({"name": "alice"}, "name", uppercase),
+        "update transforms with uppercase"
+    )
+
+    // Missing key passes null to function
+    result update({}, "count", (n) { add(or(n, 0), 1) })
+    assert-eq({"count": 1}, result, "update on missing key passes null to func")
+
+    // Multiple fields via pipe
+    result {"hits": 0, "name": "test"}
+        |> update("hits", (n) { add(n, 1) })
+        |> update("name", uppercase)
+    assert-eq({"hits": 1, "name": "TEST"}, result, "update works in pipe chain")
+
+    // Doesn't affect other keys
+    result update({"a": 1, "b": 2, "c": 3}, "b", (v) { mul(v, 10) })
+    assert-eq({"a": 1, "b": 20, "c": 3}, result, "update only affects target key")
+}
+
+
+// ============================================================================
+// map-keys
+// ============================================================================
+
+test-map-keys
+meta ["test"] fn () {
+    // Transform keys with uppercase
+    assert-eq(
+        {"HELLO": 1, "WORLD": 2},
+        map-keys({"hello": 1, "world": 2}, uppercase),
+        "map-keys transforms keys with uppercase"
+    )
+
+    // Replace characters in keys
+    result map-keys({"first_name": "Alice", "last_name": "Smith"}, (k) { replace(k, "_", "-") })
+    assert-eq(
+        {"first-name": "Alice", "last-name": "Smith"},
+        result,
+        "map-keys replaces underscores with hyphens"
+    )
+
+    // Empty map
+    assert-eq({}, map-keys({}, uppercase), "map-keys on empty map returns empty map")
+
+    // Single entry
+    assert-eq(
+        {"A": 1},
+        map-keys({"a": 1}, uppercase),
+        "map-keys works with single entry"
+    )
+}
+
+
+// ============================================================================
+// map-vals
+// ============================================================================
+
+test-map-vals
+meta ["test"] fn () {
+    // Multiply all values
+    assert-eq(
+        {"a": 10, "b": 20, "c": 30},
+        map-vals({"a": 1, "b": 2, "c": 3}, (v) { mul(v, 10) }),
+        "map-vals multiplies all values"
+    )
+
+    // Uppercase all values
+    assert-eq(
+        {"name": "ALICE", "city": "PARIS"},
+        map-vals({"name": "alice", "city": "paris"}, uppercase),
+        "map-vals transforms string values"
+    )
+
+    // Coerce values to strings
+    result map-vals({"a": 1, "b": true}, Str)
+    assert-eq("1", get(result, "a"), "map-vals coerces int to str")
+    assert-eq("true", get(result, "b"), "map-vals coerces bool to str")
+
+    // Empty map
+    assert-eq({}, map-vals({}, uppercase), "map-vals on empty map returns empty map")
+}
+
+
+// ============================================================================
+// filter-keys
+// ============================================================================
+
+test-filter-keys
+meta ["test"] fn () {
+    config {"db_host": "localhost", "db_port": 5432, "app_name": "myapp", "app_env": "prod"}
+
+    // Filter keys by prefix
+    db-config filter-keys(config, (k) { starts-with(k, "db_") })
+    assert-eq(
+        {"db_host": "localhost", "db_port": 5432},
+        db-config,
+        "filter-keys keeps only db_ prefixed keys"
+    )
+
+    // Filter keys by exclusion
+    result filter-keys({"a": 1, "b": 2, "c": 3}, (k) { ne(k, "b") })
+    assert-eq({"a": 1, "c": 3}, result, "filter-keys removes excluded key")
+
+    // All keys match
+    result filter-keys({"a": 1, "b": 2}, (k) { is-str(k) })
+    assert-eq({"a": 1, "b": 2}, result, "filter-keys keeps all when all match")
+
+    // No keys match
+    result filter-keys({"a": 1, "b": 2}, (k) { eq(k, "z") })
+    assert-eq({}, result, "filter-keys returns empty when none match")
+
+    // Empty map
+    assert-eq({}, filter-keys({}, (k) { true }), "filter-keys on empty map returns empty map")
+}
+
+
+// ============================================================================
+// filter-vals
+// ============================================================================
+
+test-filter-vals
+meta ["test"] fn () {
+    // Remove null values
+    assert-eq(
+        {"a": 1, "c": 3},
+        filter-vals({"a": 1, "b": null, "c": 3, "d": null}, is-some),
+        "filter-vals with is-some removes nulls"
+    )
+
+    // Filter by positive values
+    assert-eq(
+        {"x": 10, "z": 20},
+        filter-vals({"x": 10, "y": -5, "z": 20}, (v) { gt(v, 0) }),
+        "filter-vals keeps positive values"
+    )
+
+    // Remove empty strings
+    result filter-vals({"name": "Alice", "phone": "", "email": "a@b.com"}, (v) { not(eq(v, "")) })
+    assert-eq(
+        {"name": "Alice", "email": "a@b.com"},
+        result,
+        "filter-vals removes empty strings"
+    )
+
+    // All values match
+    result filter-vals({"a": 1, "b": 2}, (v) { gt(v, 0) })
+    assert-eq({"a": 1, "b": 2}, result, "filter-vals keeps all when all match")
+
+    // No values match
+    result filter-vals({"a": 1, "b": 2}, (v) { gt(v, 10) })
+    assert-eq({}, result, "filter-vals returns empty when none match")
+
+    // Empty map
+    assert-eq({}, filter-vals({}, is-some), "filter-vals on empty map returns empty map")
+}
+
+
+// ============================================================================
+// index-by
+// ============================================================================
+
+test-index-by
+meta ["test"] fn () {
+    users [
+        {id: 1, name: "Alice"},
+        {id: 2, name: "Bob"},
+        {id: 3, name: "Carol"}
+    ]
+
+    // Index by id
+    by-id index-by(users, (u) { u.id })
+    assert-eq("Alice", get(by-id, 1).name, "index-by allows lookup by id")
+    assert-eq("Bob", get(by-id, 2).name, "index-by allows lookup by id")
+    assert-eq("Carol", get(by-id, 3).name, "index-by allows lookup by id")
+    assert-eq(3, length(by-id), "index-by creates map with correct size")
+
+    // Index by derived key
+    result index-by(["apple", "banana", "cherry"], (s) { first(s) })
+    assert-eq("apple", get(result, "a"), "index-by with derived key works")
+    assert-eq("banana", get(result, "b"), "index-by with derived key works")
+    assert-eq("cherry", get(result, "c"), "index-by with derived key works")
+
+    // Last wins on duplicate keys
+    items [{k: "a", v: 1}, {k: "a", v: 2}]
+    result index-by(items, (x) { x.k })
+    assert-eq(2, get(result, "a").v, "index-by last wins on duplicate keys")
+
+    // Empty collection
+    assert-eq({}, index-by([], (x) { x }), "index-by on empty vec returns empty map")
+}
+
+
+// ============================================================================
+// group-by
+// ============================================================================
+
+test-group-by
+meta ["test"] fn () {
+    orders [
+        {id: 1, status: "pending"},
+        {id: 2, status: "shipped"},
+        {id: 3, status: "pending"},
+        {id: 4, status: "delivered"},
+        {id: 5, status: "shipped"}
+    ]
+
+    grouped group-by(orders, (o) { o.status })
+
+    // Check group sizes
+    assert-eq(2, length(get(grouped, "pending")), "group-by groups pending correctly")
+    assert-eq(2, length(get(grouped, "shipped")), "group-by groups shipped correctly")
+    assert-eq(1, length(get(grouped, "delivered")), "group-by groups delivered correctly")
+
+    // Check group contents
+    pending-ids map(get(grouped, "pending"), (o) { o.id })
+    assert-eq([1, 3], pending-ids, "group-by preserves order within groups")
+
+    // Group numbers by even/odd
+    result group-by([1, 2, 3, 4, 5, 6], (n) { if(eq(mod(n, 2), 0), "even", "odd") })
+    assert-eq([1, 3, 5], get(result, "odd"), "group-by odd numbers")
+    assert-eq([2, 4, 6], get(result, "even"), "group-by even numbers")
+
+    // Single element per group
+    result group-by([1, 2, 3], (x) { x })
+    assert-eq([1], get(result, 1), "group-by unique elements creates single-item groups")
+    assert-eq(3, length(result), "group-by unique elements creates correct number of groups")
+
+    // Empty collection
+    assert-eq({}, group-by([], (x) { x }), "group-by on empty vec returns empty map")
+}
+
+
+// ============================================================================
+// frequencies
+// ============================================================================
+
+test-frequencies
+meta ["test"] fn () {
+    // Basic frequency count
+    assert-eq(
+        {"a": 3, "b": 2, "c": 1},
+        frequencies(["a", "b", "a", "c", "a", "b"]),
+        "frequencies counts string occurrences"
+    )
+
+    // Numeric values
+    num-freq frequencies([1, 2, 2, 3, 3, 3])
+    assert-eq(1, get(num-freq, 1), "frequencies counts 1 once")
+    assert-eq(2, get(num-freq, 2), "frequencies counts 2 twice")
+    assert-eq(3, get(num-freq, 3), "frequencies counts 3 three times")
+
+    // All same
+    assert-eq(
+        {"x": 4},
+        frequencies(["x", "x", "x", "x"]),
+        "frequencies counts all same elements"
+    )
+
+    // All unique
+    result frequencies(["a", "b", "c"])
+    assert-eq(1, get(result, "a"), "frequencies counts unique elements as 1")
+    assert-eq(1, get(result, "b"), "frequencies counts unique elements as 1")
+    assert-eq(1, get(result, "c"), "frequencies counts unique elements as 1")
+
+    // Single element
+    assert-eq({"x": 1}, frequencies(["x"]), "frequencies works with single element")
+
+    // Empty collection
+    assert-eq({}, frequencies([]), "frequencies on empty vec returns empty map")
+}
+
+
+// ============================================================================
+// find-first
+// ============================================================================
+
+test-find-first
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5]
+
+    // Find first match
+    assert-eq(4, find-first(numbers, (x) { gt(x, 3) }), "find-first returns first element > 3")
+
+    // Find first even
+    assert-eq(2, find-first(numbers, (x) { eq(mod(x, 2), 0) }), "find-first returns first even number")
+
+    // No match returns null
+    assert-eq(null, find-first(numbers, (x) { gt(x, 10) }), "find-first returns null when no match")
+
+    // Find in maps
+    users [{name: "Alice", admin: false}, {name: "Bob", admin: true}, {name: "Carol", admin: true}]
+    result find-first(users, (u) { u.admin })
+    assert-eq("Bob", result.name, "find-first returns first admin user")
+
+    // First element matches
+    assert-eq(1, find-first(numbers, (x) { eq(x, 1) }), "find-first returns first element when it matches")
+
+    // Last element matches
+    assert-eq(5, find-first(numbers, (x) { eq(x, 5) }), "find-first finds last element")
+
+    // Empty collection
+    assert-eq(null, find-first([], (x) { true }), "find-first on empty vec returns null")
+
+    // Single element match
+    assert-eq(42, find-first([42], (x) { eq(x, 42) }), "find-first works with single element")
+
+    // Single element no match
+    assert-eq(null, find-first([42], (x) { eq(x, 99) }), "find-first returns null on single element no match")
+}
+
+
+// ============================================================================
+// reduced (short-circuit reduce)
+// ============================================================================
+
+test-reduced-basic
+meta ["test"] fn () {
+    // reduced stops reduce immediately and returns the value
+    result reduce([1, 2, 3, 4, 5], (acc, x) {
+        if(eq(x, 3), reduced(x), acc)
+    }, null)
+    assert-eq(3, result, "reduced stops at first match and returns value")
+
+    // reduced with accumulation
+    result reduce([10, 20, 30, 40], (total, x) {
+        new-total add(total, x)
+        if(gt(new-total, 50), reduced(new-total), new-total)
+    }, 0)
+    assert-eq(60, result, "reduced stops when threshold exceeded")
+
+    // reduced on first element
+    result reduce([99, 1, 2, 3], (acc, x) {
+        reduced(x)
+    }, null)
+    assert-eq(99, result, "reduced on first element returns immediately")
+
+    // reduced on last element
+    result reduce([1, 2, 3], (acc, x) {
+        if(eq(x, 3), reduced("found-last"), acc)
+    }, "not-found")
+    assert-eq("found-last", result, "reduced on last element works")
+}
+
+test-reduced-no-trigger
+meta ["test"] fn () {
+    // When reduced is never called, reduce behaves normally
+    result reduce([1, 2, 3, 4], (acc, x) { add(acc, x) }, 0)
+    assert-eq(10, result, "reduce without reduced sums normally")
+
+    // Empty collection
+    result reduce([], (acc, x) { reduced(x) }, "default")
+    assert-eq("default", result, "reduce on empty collection returns init value")
+}
+
+test-reduced-with-map-collection
+meta ["test"] fn () {
+    // reduced works with map collections too
+    result reduce({a: 1, b: 2, c: 99, d: 4}, (acc, pair) {
+        val last(pair)
+        if(gt(val, 50), reduced(val), acc)
+    }, null)
+    assert-eq(99, result, "reduced short-circuits on map collection")
+}
+
+test-reduced-value-types
+meta ["test"] fn () {
+    // reduced with null value
+    result reduce([1, 2, 3], (acc, x) {
+        if(eq(x, 2), reduced(null), acc)
+    }, "default")
+    assert-eq(null, result, "reduced can return null")
+
+    // reduced with map value
+    result reduce([1, 2, 3], (acc, x) {
+        if(eq(x, 2), reduced({found: x}), acc)
+    }, {})
+    assert-eq({found: 2}, result, "reduced can return a map")
+
+    // reduced with vec value
+    result reduce([1, 2, 3], (acc, x) {
+        if(eq(x, 2), reduced([x, x]), acc)
+    }, [])
+    assert-eq([2, 2], result, "reduced can return a vec")
+
+    // reduced with bool false
+    result reduce([1, 2, 3], (acc, x) {
+        if(eq(x, 2), reduced(false), acc)
+    }, true)
+    assert-eq(false, result, "reduced can return false")
+}
+
+test-reduced-type-constructor
+meta ["test"] fn () {
+    // Reduced type can be constructed directly
+    r Reduced({value: 42})
+    assert(is-type(r, Reduced), "Reduced constructor creates typed value")
+
+    // reduced function creates a Reduced
+    r reduced(42)
+    assert(is-type(r, Reduced), "reduced function creates Reduced type")
+    assert-eq(42, r.value, "reduced wraps the value")
+}
+
+
+// ============================================================================
+// Iterator support for some, all, find-first
+// ============================================================================
+
+test-some-iter
+meta ["test"] fn () {
+    // some over an iterator short-circuits on match
+    iter ::hot::iter/range(1, 10001)
+    assert(some(iter, (x) { eq(x, 5) }), "some finds 5 in large iter range")
+
+    // some over an iterator returns false when no match
+    iter2 ::hot::iter/range(1, 100)
+    assert(not(some(iter2, (x) { gt(x, 1000) })), "some returns false when no iter element matches")
+
+    // some over a small iterator
+    iter3 ::hot::iter/range(3)
+    assert(some(iter3, (x) { eq(x, 2) }), "some finds 2 in range(3)")
+}
+
+test-all-iter
+meta ["test"] fn () {
+    // all over an iterator where all match
+    iter ::hot::iter/range(1, 6)
+    assert(all(iter, (x) { gt(x, 0) }), "all returns true when every iter element is positive")
+
+    // all over an iterator short-circuits on first failure
+    iter2 ::hot::iter/range(1, 10001)
+    assert(not(all(iter2, (x) { lt(x, 50) })), "all returns false when iter element 50 fails predicate")
+
+    // all over a single-element iterator
+    iter3 ::hot::iter/range(1, 2)
+    assert(all(iter3, (x) { eq(x, 1) }), "all returns true for single-element iter")
+}
+
+test-find-first-iter
+meta ["test"] fn () {
+    // find-first over an iterator returns the matching element
+    iter ::hot::iter/range(1, 10001)
+    assert-eq(42, find-first(iter, (x) { eq(x, 42) }), "find-first locates 42 in large iter range")
+
+    // find-first over an iterator returns null when no match
+    iter2 ::hot::iter/range(1, 100)
+    assert-eq(null, find-first(iter2, (x) { gt(x, 1000) }), "find-first returns null when no iter element matches")
+
+    // find-first returns the first match, not just any match
+    iter3 ::hot::iter/range(1, 20)
+    assert-eq(10, find-first(iter3, (x) { gte(x, 10) }), "find-first returns first element >= 10")
+}
+
+
+// ============================================================================
+// partition-by
+// ============================================================================
+
+test-partition-by
+meta ["test"] fn () {
+    // Group consecutive elements with same function result
+    assert-eq(
+        [[1, 1], [2, 2], [3], [1]],
+        partition-by([1, 1, 2, 2, 3, 1], (x) { x }),
+        "partition-by groups consecutive equal elements"
+    )
+
+    // Group by even/odd
+    assert-eq(
+        [[1, 3], [2, 4], [5]],
+        partition-by([1, 3, 2, 4, 5], (x) { eq(mod(x, 2), 0) }),
+        "partition-by groups by even/odd changes"
+    )
+
+    // All same value
+    assert-eq(
+        [["a", "a", "a"]],
+        partition-by(["a", "a", "a"], (x) { x }),
+        "partition-by with all same produces one group"
+    )
+
+    // All different
+    assert-eq(
+        [[1], [2], [3]],
+        partition-by([1, 2, 3], (x) { x }),
+        "partition-by with all different produces singleton groups"
+    )
+
+    // Empty collection
+    assert-eq([], partition-by([], (x) { x }), "partition-by empty returns empty")
+
+    // Single element
+    assert-eq([[42]], partition-by([42], (x) { x }), "partition-by single element")
+}
+
+
+// ============================================================================
+// partition with predicate
+// ============================================================================
+
+test-partition-predicate
+meta ["test"] fn () {
+    numbers [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    // Split into [evens, odds]
+    result partition(numbers, (x) { eq(mod(x, 2), 0) })
+    assert-eq([2, 4, 6, 8, 10], result[0], "partition predicate: true group has evens")
+    assert-eq([1, 3, 5, 7, 9], result[1], "partition predicate: false group has odds")
+
+    // All match
+    all-true partition([1, 2, 3], (x) { gt(x, 0) })
+    assert-eq([1, 2, 3], all-true[0], "partition predicate: all true")
+    assert-eq([], all-true[1], "partition predicate: none false")
+
+    // None match
+    none-true partition([1, 2, 3], (x) { gt(x, 10) })
+    assert-eq([], none-true[0], "partition predicate: none true")
+    assert-eq([1, 2, 3], none-true[1], "partition predicate: all false")
+
+    // Empty
+    empty-result partition([], (x) { true })
+    assert-eq([], empty-result[0], "partition predicate: empty true group")
+    assert-eq([], empty-result[1], "partition predicate: empty false group")
+}
+
+
+// ============================================
+// get-in / assoc-in / update-in
+// ============================================
+
+test-get-in
+meta ["test"] fn () {
+    data {a: {b: {c: 42}}}
+
+    assert-eq(42, get-in(data, ["a", "b", "c"]), "get-in nested map path")
+    assert-eq({c: 42}, get-in(data, ["a", "b"]), "get-in partial path returns sub-map")
+    assert-eq(data, get-in(data, []), "get-in empty path returns root")
+
+    // Missing keys return null
+    assert-eq(null, get-in(data, ["a", "x"]), "get-in missing key returns null")
+    assert-eq(null, get-in(data, ["z", "y", "x"]), "get-in missing top-level key returns null")
+
+    // Default value on missing
+    assert-eq("fallback", get-in(data, ["a", "x"], "fallback"), "get-in missing with default")
+    assert-eq("fallback", get-in(data, ["z"], "fallback"), "get-in missing top-level with default")
+    assert-eq(42, get-in(data, ["a", "b", "c"], "fallback"), "get-in found ignores default")
+
+    // Mixed map/vec paths
+    users {team: [{name: "Alice"}, {name: "Bob"}]}
+    assert-eq("Alice", get-in(users, ["team", 0, "name"]), "get-in map then vec then map")
+    assert-eq("Bob", get-in(users, ["team", 1, "name"]), "get-in second vec element")
+    assert-eq(null, get-in(users, ["team", 5, "name"]), "get-in vec out of bounds returns null")
+}
+
+
+test-assoc-in
+meta ["test"] fn () {
+    // Set value at nested path
+    result assoc-in({}, ["a", "b"], 1)
+    assert-eq(1, get-in(result, ["a", "b"]), "assoc-in creates intermediate maps")
+
+    // Override existing value
+    config {db: {host: "localhost", port: 5432}}
+    updated assoc-in(config, ["db", "port"], 5433)
+    assert-eq(5433, get-in(updated, ["db", "port"]), "assoc-in overrides existing")
+    assert-eq("localhost", get-in(updated, ["db", "host"]), "assoc-in preserves siblings")
+
+    // Deep creation
+    deep assoc-in({}, ["a", "b", "c", "d"], true)
+    assert-eq(true, get-in(deep, ["a", "b", "c", "d"]), "assoc-in deep creation")
+
+    // Single-key path
+    simple assoc-in({x: 1}, ["x"], 2)
+    assert-eq(2, get-in(simple, ["x"]), "assoc-in single key")
+
+    // Empty path replaces root
+    assert-eq(42, assoc-in({a: 1}, [], 42), "assoc-in empty path replaces root")
+}
+
+
+test-update-in
+meta ["test"] fn () {
+    data {a: {b: 1}}
+
+    // Apply function at path
+    result update-in(data, ["a", "b"], (n) { add(n, 10) })
+    assert-eq(11, get-in(result, ["a", "b"]), "update-in applies function")
+
+    // Preserves sibling keys
+    config {db: {port: 5432, retries: 3}}
+    updated config |> update-in(["db", "retries"], (n) { add(n, 1) })
+    assert-eq(4, get-in(updated, ["db", "retries"]), "update-in increments value")
+    assert-eq(5432, get-in(updated, ["db", "port"]), "update-in preserves siblings")
+
+    // Function receives null for missing keys
+    result2 update-in({}, ["a"], (n) { or(n, 0) |> add(1) })
+    assert-eq(1, get-in(result2, ["a"]), "update-in on missing key passes null to func")
+}

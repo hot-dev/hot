@@ -1,0 +1,70 @@
+::twilio::webhooks ns
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::base64 ::hot::base64
+::uri ::hot::uri
+
+// ============================================================================
+// Twilio Webhook Signature Verification
+// ============================================================================
+// Twilio signs every webhook callback with HMAC-SHA1 using your Auth Token.
+// The signature is sent in the X-Twilio-Signature header.
+//
+// For URL-form-encoded requests: signature = HMAC-SHA1(AuthToken, URL + sorted POST params)
+// For JSON bodies (with bodySHA256 query param): signature = HMAC-SHA1(AuthToken, URL)
+//
+// See: https://www.twilio.com/docs/usage/security#validating-requests
+
+verify-request
+meta {
+    ctx: {"twilio.auth.token": {required: false}},
+    doc: """
+  Verify a Twilio webhook request signature using HMAC-SHA1. Returns true if the request is authentic.
+
+  Uses the `twilio.auth.token` context variable by default, or accepts an explicit auth token as a second argument.
+
+  Twilio computes the signature over the full request URL plus all POST body parameters sorted by key. This function handles that automatically.
+
+  **Example**
+
+  ```hot
+  // Using context variable (1-arity)
+  is-valid ::twilio::webhooks/verify-request(request)
+
+  // With explicit auth token (2-arity)
+  is-valid ::twilio::webhooks/verify-request(request, "your-auth-token")
+  ```
+  """
+}
+fn
+(request: Map): Bool {
+  auth-token or(::ctx/get("twilio.auth.token"), "")
+  if(is-empty(auth-token),
+    fail("twilio.auth.token is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, auth-token)
+},
+(request: Map, auth-token: Str): Bool {
+  signature get(request.headers, "x-twilio-signature", "")
+
+  cond {
+    is-empty(auth-token) => { false }
+    is-empty(signature) => { false }
+    => {
+      // Build the validation string: URL + sorted POST param key-value pairs
+      params if(is-some(request.body-raw),
+        ::uri/decode-query(request.body-raw),
+        {}
+      )
+      sorted-keys sort(keys(params))
+      param-string reduce(sorted-keys, (acc, k) { concat(acc, k, get(params, k)) }, "")
+
+      url or(get(request, "url", ""), "")
+      base-string `${url}${param-string}`
+
+      expected ::base64/encode(::hmac/hmac-sha1(auth-token, base-string))
+      secure-compare(expected, signature)
+    }
+  }
+}

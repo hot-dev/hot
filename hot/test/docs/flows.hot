@@ -1,0 +1,409 @@
+// Documentation examples for: resources/docs/language/flows.md
+::hot::test::docs::flows ns
+meta ["test"]
+
+// =============================================================================
+// Imports and setup (not shown in docs)
+// =============================================================================
+// Note: All functions used here are core (add, mul, gt, lt, gte, eq, length, is-null, is-empty, ok, err, assert-eq, etc.)
+
+// Stub for API calls in examples
+api-get fn (path: Str): Map { {path: path, data: "stub"} }
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: serial-basic
+process fn (x: Int): Int {
+  doubled mul(x, 2)     // First
+  tripled mul(x, 3)     // Second
+  add(doubled, tripled) // Third - returned
+}
+// @end: serial-basic
+
+// @doc: parallel-function
+fetch-all fn parallel (user-id: Str): Map {
+  user api-get(`/users/${user-id}`)
+  orders api-get(`/orders/${user-id}`)
+  preferences api-get(`/prefs/${user-id}`)
+}
+// @end: parallel-function
+
+// @doc: cond-classify
+classify fn cond (x: Int): Str {
+  lt(x, 0) => { "negative" }
+  eq(x, 0) => { "zero" }
+  => { "positive" }
+}
+// @end: cond-classify
+
+// @doc: cond-grade
+grade fn cond (score: Int): Str {
+  gte(score, 90) => { "A" }
+  gte(score, 80) => { "B" }
+  gte(score, 70) => { "C" }
+  gte(score, 60) => { "D" }
+  => { "F" }
+}
+// @end: cond-grade
+
+// @doc: cond-all-discounts
+apply-discounts fn cond-all (order: Map): Map {
+  order.is-member => member { "10% member discount" }
+  gt(order.total, 100) => shipping { "Free shipping" }
+  order.has-coupon => coupon { "Coupon applied" }
+  => standard { "Standard pricing" }
+}
+// @end: cond-all-discounts
+
+// @doc: pipe-basic
+pipe-example fn (x: Int): Int {
+  x |> add(2) |> mul(3)
+}
+// @end: pipe-basic
+
+// @doc: pipe-demo
+// Demonstrates the pipe operator (uses fully qualified names for eval)
+5 |> ::hot::math/add(2) |> ::hot::math/mul(3)
+// @end: pipe-demo
+
+// @doc: serial-explicit
+process-explicit fn serial (x: Int): Int {
+  doubled mul(x, 2)
+  tripled mul(x, 3)
+  add(doubled, tripled)
+}
+// @end: serial-explicit
+
+// @doc: flow-as-modifier
+fetch-all-modifier fn parallel (id: Str): Map {
+  user api-get(`/users/${id}`)
+  orders api-get(`/orders/${id}`)
+}
+// @end: flow-as-modifier
+
+// @doc: flow-inline
+process-inline fn (id: Str): Map {
+  // Inline parallel block
+  data parallel {
+    user api-get(`/users/${id}`)
+    orders api-get(`/orders/${id}`)
+  }
+
+  // Inline conditional
+  status cond {
+    is-empty(data.orders) => { "new-customer" }
+    => { "returning-customer" }
+  }
+
+  {data: data, status: status}
+}
+// @end: flow-inline
+
+// @doc: cond-truthy
+get-name fn cond (user: Map): Str {
+  user.nickname => { user.nickname }  // Truthy if nickname exists and isn't null
+  user.name => { user.name }
+  => { "Anonymous" }
+}
+// @end: cond-truthy
+
+// @doc: cond-named-branches
+categorize fn cond (x: Int): Str {
+  lt(x, 0) => negative { "negative" }
+  eq(x, 0) => zero { "zero" }
+  => positive { "positive" }
+}
+// @end: cond-named-branches
+
+// @doc: cond-all-validate
+validate-all fn cond-all (user: Map): Map {
+  is-null(user.name) => name { "Name required" }
+  is-null(user.email) => email { "Email required" }
+  lt(length(user.password), 8) => password { "Password too short" }
+  // Returns ALL validation errors as a map, not just the first
+}
+// @end: cond-all-validate
+
+// Stubs for combining-flows example
+fetch-customer fn (id: Str): Map { {id: id, name: "Customer"} }
+check-inventory fn (items: Vec): Map { {available: true} }
+calculate-shipping fn (order: Map): Map { {cost: 10} }
+
+// @doc: combining-flows
+process-order fn (order: Map): Result {
+  // Validate first (conditional)
+  validation cond {
+    is-null(order.items) => { err("No items") }
+    eq(length(order.items), 0) => { err("Empty order") }
+    => { ok(order) }
+  }
+
+  // Then enrich in parallel (returns a map)
+  enriched parallel {
+    customer fetch-customer(order.customer-id)
+    inventory check-inventory(order.items)
+    shipping calculate-shipping(order)
+  }
+
+  // Return combined result (access via enriched.*)
+  ok({
+    order: order,
+    customer: enriched.customer,
+    inventory: enriched.inventory,
+    shipping: enriched.shipping
+  })
+}
+// @end: combining-flows
+
+// =============================================================================
+// Match flow examples
+// =============================================================================
+
+// @doc: match-direction-enum
+Direction enum {
+  Up,
+  Down,
+  Left,
+  Right
+}
+// @end: match-direction-enum
+
+// @doc: match-describe-direction
+describe-direction fn match (dir, prefix: Str): Str {
+  Direction.Up => concat(prefix, " going up")
+  Direction.Down => concat(prefix, " going down")
+  Direction.Left => concat(prefix, " going left")
+  Direction.Right => concat(prefix, " going right")
+}
+// @end: match-describe-direction
+
+// @doc: match-all-trait-enum
+Trait enum {
+  Flying,
+  Swimming,
+  Walking
+}
+// @end: match-all-trait-enum
+
+// @doc: match-all-describe-traits
+describe-traits fn match-all (trait): Str {
+  Trait.Flying => "Can fly"
+  Trait.Swimming => "Can swim"
+  Trait.Walking => "Can walk"
+}
+// @end: match-all-describe-traits
+
+// =============================================================================
+// Tests - verify the examples actually work
+// =============================================================================
+
+test-match-describe-direction
+meta ["test"] fn () {
+  result describe-direction(Direction.Up, "We are")
+  assert-eq("We are going up", result, "match flow with extra arg")
+}
+// @result: match-describe-direction
+// describe-direction(Direction.Up, "We are")
+// → "We are going up"
+// @end: match-describe-direction
+
+test-match-all-describe-traits
+meta ["test"] fn () {
+  result describe-traits(Trait.Flying)
+  // match-all uses the variant pattern as key
+  assert-eq("Can fly", get(result, "Trait.Flying"), "match-all uses variant pattern as key")
+}
+// @result: match-all-describe-traits
+// describe-traits(Trait.Flying)
+// → {"Trait.Flying": "Can fly"}
+// @end: match-all-describe-traits
+
+// Test fn match syntax (alternative to match fn, consistent with fn cond)
+Color enum { Red, Green, Blue }
+
+// fn match syntax should work like fn cond
+color-name fn match (c: Color): Str {
+  Color.Red => "red"
+  Color.Green => "green"
+  Color.Blue => "blue"
+}
+
+test-fn-match-syntax
+meta ["test"] fn () {
+  result color-name(Color.Red)
+  assert-eq("red", result, "fn match syntax should work like fn cond")
+}
+
+test-serial-basic
+meta ["test"] fn () {
+  // process(5) = mul(5,2) + mul(5,3) = 10 + 15 = 25
+  assert-eq(25, process(5), "serial flow returns last value")
+}
+// @result: serial-basic
+// process(5)
+// → 25
+// @end: serial-basic
+
+test-classify
+meta ["test"] fn () {
+  assert-eq("negative", classify(-5), "negative number")
+  assert-eq("zero", classify(0), "zero")
+  assert-eq("positive", classify(10), "positive number")
+}
+// @result: cond-classify
+// classify(-5)  → "negative"
+// classify(0)   → "zero"
+// classify(10)  → "positive"
+// @end: cond-classify
+
+test-grade
+meta ["test"] fn () {
+  assert-eq("A", grade(95), "95 is A")
+  assert-eq("B", grade(85), "85 is B")
+  assert-eq("C", grade(75), "75 is C")
+  assert-eq("D", grade(65), "65 is D")
+  assert-eq("F", grade(55), "55 is F")
+}
+// @result: cond-grade
+// grade(95) → "A"
+// grade(75) → "C"
+// grade(55) → "F"
+// @end: cond-grade
+
+test-cond-all-discounts
+meta ["test"] fn () {
+  // Member with $150 order and coupon - gets 3 discounts
+  order1 {is-member: true, total: 150, has-coupon: true}
+  result1 apply-discounts(order1)
+  assert-eq("10% member discount", result1.member, "member discount")
+  assert-eq("Free shipping", result1.shipping, "free shipping")
+  assert-eq("Coupon applied", result1.coupon, "coupon applied")
+
+  // Non-member with $50 order - just standard pricing
+  order2 {is-member: false, total: 50, has-coupon: false}
+  result2 apply-discounts(order2)
+  assert-eq("Standard pricing", result2.standard, "standard pricing")
+}
+// @result: cond-all-discounts
+// apply-discounts({is-member: true, total: 150, has-coupon: true})
+// → {member: "10% member discount", shipping: "Free shipping", coupon: "Coupon applied"}
+// @end: cond-all-discounts
+
+test-pipe-basic
+meta ["test"] fn () {
+  // 5 |> add(2) |> mul(3) = (5 + 2) * 3 = 21
+  assert-eq(21, pipe-example(5), "pipe chains correctly")
+}
+// @result: pipe-basic
+// pipe-example(5)
+// → 21  // (5 + 2) * 3
+// @end: pipe-basic
+
+test-parallel-returns-map
+meta ["test"] fn () {
+  result fetch-all("user-123")
+  // Parallel returns a map with all results
+  assert-eq("/users/user-123", result.user.path, "user path")
+  assert-eq("/orders/user-123", result.orders.path, "orders path")
+  assert-eq("/prefs/user-123", result.preferences.path, "prefs path")
+}
+// @result: parallel-function
+// fetch-all("user-123")
+// → {user: {...}, orders: {...}, preferences: {...}}
+// @end: parallel-function
+
+test-cond-truthy
+meta ["test"] fn () {
+  assert-eq("Bob", get-name({nickname: "Bob", name: "Robert"}), "uses nickname")
+  assert-eq("Alice", get-name({name: "Alice"}), "uses name when no nickname")
+  assert-eq("Anonymous", get-name({}), "anonymous when neither")
+}
+// @result: cond-truthy
+// get-name({nickname: "Bob", name: "Robert"}) → "Bob"
+// get-name({name: "Alice"})                   → "Alice"
+// get-name({})                                → "Anonymous"
+// @end: cond-truthy
+
+test-cond-named-branches
+meta ["test"] fn () {
+  assert-eq("negative", categorize(-5), "negative")
+  assert-eq("zero", categorize(0), "zero")
+  assert-eq("positive", categorize(5), "positive")
+}
+// @result: cond-named-branches
+// categorize(-5) → "negative"
+// categorize(0)  → "zero"
+// categorize(5)  → "positive"
+// @end: cond-named-branches
+
+test-validate-all
+meta ["test"] fn () {
+  result validate-all({name: null, email: null, password: "short"})
+  assert-eq("Name required", result.name, "name error")
+  assert-eq("Email required", result.email, "email error")
+  assert-eq("Password too short", result.password, "password error")
+}
+// @result: cond-all-validate
+// validate-all({name: null, email: null, password: "short"})
+// → {name: "Name required", email: "Email required", password: "Password too short"}
+// @end: cond-all-validate
+
+test-flow-inline
+meta ["test"] fn () {
+  result process-inline("user-123")
+  assert-eq("/users/user-123", result.data.user.path, "inline parallel user")
+  // Stub returns non-empty data, so this is "returning-customer"
+  assert-eq("returning-customer", result.status, "inline cond status")
+}
+
+test-match-inline-returns-value
+meta ["test"] fn () {
+  // Test that inline match flow returns the matched arm's value
+  dir Direction.Up
+  result match dir {
+    Direction.Up => { "up" }
+    Direction.Down => { "down" }
+    Direction.Left => { "left" }
+    Direction.Right => { "right" }
+  }
+
+  assert-eq("up", result, "inline match should return matched arm value")
+}
+
+test-match-inline-with-int
+meta ["test"] fn () {
+  // Test match on Int type
+  x 42
+  result match x {
+    Int => { "integer" }
+    Str => { "string" }
+  }
+
+  assert-eq("integer", result, "inline match on Int should return value")
+}
+
+test-match-inline-with-result-ok
+meta ["test"] fn () {
+  // Test match on Result.Ok variant
+  r ok("success")
+  result match r {
+    Result.Err => { "error" }
+    Result.Ok => { "ok" }
+  }
+
+  assert-eq("ok", result, "inline match on Result.Ok should return value")
+}
+
+test-match-inline-with-result-err
+meta ["test"] fn () {
+  // Test match on Result.Err variant
+  r err("failure")
+  result match r {
+    Result.Err => { "error" }
+    Result.Ok => { "ok" }
+  }
+
+  assert-eq("error", result, "inline match on Result.Err should return value")
+}

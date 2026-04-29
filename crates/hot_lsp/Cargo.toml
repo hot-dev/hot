@@ -1,0 +1,18 @@
+[package]
+name = "hot_lsp"
+version.workspace = true
+edition.workspace = true
+description = "Language Server Protocol implementation for Hot"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+hot = { workspace = true }
+tower-lsp = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+url = { workspace = true }

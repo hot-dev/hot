@@ -1,0 +1,288 @@
+::hot::mime ns
+meta {
+    doc: """
+    MIME type utilities for working with file types and content types.
+
+    Provides functions to convert between file extensions and MIME types,
+    and to check MIME type categories.
+
+    **Usage**
+    ```hot
+    ::mime ::hot::mime
+
+    // Get MIME type from file extension
+    ::mime/from-ext("png")        // "image/png"
+    ::mime/from-ext(".jpg")       // "image/jpeg"
+
+    // Get MIME type from file path
+    ::mime/from-path("video.mp4") // "video/mp4"
+
+    // Get file extension from MIME type
+    ::mime/to-ext("image/png")    // "png"
+
+    // Check MIME type category
+    ::mime/is-image("image/png")  // true
+    ::mime/is-video("video/mp4")  // true
+    ```
+    """
+}
+
+// ============================================================================
+// Extension to MIME Type
+// ============================================================================
+
+from-ext
+meta {
+    core: true,
+    doc: """
+    Get MIME type from file extension.
+
+    **Arguments**
+    - `ext` - File extension (with or without leading dot)
+
+    **Returns**
+    MIME type string or null if unknown.
+
+    **Examples**
+    ```hot
+    from-ext("png")   // "image/png"
+    from-ext(".jpg")  // "image/jpeg"
+    from-ext("mp4")   // "video/mp4"
+    from-ext("xyz")   // null
+    ```
+    """
+}
+fn (ext: Str): Str? {
+    call-lib("::hot::mime/from-ext", ext)
+}
+
+from-path
+meta {
+    core: true,
+    doc: """
+    Get MIME type from file path.
+
+    **Arguments**
+    - `path` - File path
+
+    **Returns**
+    MIME type string or null if unknown.
+
+    **Examples**
+    ```hot
+    from-path("photo.png")       // "image/png"
+    from-path("/dir/video.mp4")  // "video/mp4"
+    from-path("document.pdf")    // "application/pdf"
+    ```
+    """
+}
+fn (path: Str): Str? {
+    call-lib("::hot::mime/from-path", path)
+}
+
+// ============================================================================
+// MIME Type to Extension
+// ============================================================================
+
+to-ext
+meta {
+    core: true,
+    doc: """
+    Get file extension from MIME type.
+
+    **Arguments**
+    - `mime` - MIME type string
+
+    **Returns**
+    File extension (without dot) or null if unknown.
+
+    **Examples**
+    ```hot
+    to-ext("image/png")   // "png"
+    to-ext("video/mp4")   // "mp4"
+    to-ext("text/plain")  // "txt"
+    ```
+    """
+}
+fn (mime: Str): Str? {
+    call-lib("::hot::mime/to-ext", mime)
+}
+
+to-exts
+meta {
+    core: true,
+    doc: """
+    Get all file extensions for a MIME type.
+
+    **Arguments**
+    - `mime` - MIME type string
+
+    **Returns**
+    Vector of file extensions (without dots) or empty vector if unknown.
+
+    **Examples**
+    ```hot
+    to-exts("image/jpeg")  // ["jpeg", "jpg", "jpe"]
+    to-exts("text/plain")  // ["txt", "text", "conf", ...]
+    ```
+    """
+}
+fn (mime: Str): Vec<Str> {
+    call-lib("::hot::mime/to-exts", mime)
+}
+
+// ============================================================================
+// Category Checks
+// ============================================================================
+
+is-image
+meta {
+    core: true,
+    doc: """
+    Check if MIME type is an image type.
+
+    **Examples**
+    ```hot
+    is-image("image/png")   // true
+    is-image("image/jpeg")  // true
+    is-image("video/mp4")   // false
+    ```
+    """
+}
+fn (mime: Str): Bool {
+    call-lib("::hot::mime/is-image", mime)
+}
+
+is-audio
+meta {
+    core: true,
+    doc: """
+    Check if MIME type is an audio type.
+
+    **Examples**
+    ```hot
+    is-audio("audio/mpeg")  // true
+    is-audio("audio/wav")   // true
+    is-audio("video/mp4")   // false
+    ```
+    """
+}
+fn (mime: Str): Bool {
+    call-lib("::hot::mime/is-audio", mime)
+}
+
+is-video
+meta {
+    core: true,
+    doc: """
+    Check if MIME type is a video type.
+
+    **Examples**
+    ```hot
+    is-video("video/mp4")   // true
+    is-video("video/webm")  // true
+    is-video("audio/mpeg")  // false
+    ```
+    """
+}
+fn (mime: Str): Bool {
+    call-lib("::hot::mime/is-video", mime)
+}
+
+is-text
+meta {
+    core: true,
+    doc: """
+    Check if MIME type is a text type.
+
+    **Examples**
+    ```hot
+    is-text("text/plain")  // true
+    is-text("text/html")   // true
+    is-text("image/png")   // false
+    ```
+    """
+}
+fn (mime: Str): Bool {
+    call-lib("::hot::mime/is-text", mime)
+}
+
+is-application
+meta {
+    core: true,
+    doc: """
+    Check if MIME type is an application type.
+
+    **Examples**
+    ```hot
+    is-application("application/json")  // true
+    is-application("application/pdf")   // true
+    is-application("text/plain")        // false
+    ```
+    """
+}
+fn (mime: Str): Bool {
+    call-lib("::hot::mime/is-application", mime)
+}
+
+// ============================================================================
+// MIME Type Parts
+// ============================================================================
+
+major-type
+meta {
+    core: true,
+    doc: """
+    Get the major type (first part) of a MIME type.
+
+    **Examples**
+    ```hot
+    major-type("image/png")        // "image"
+    major-type("video/mp4")        // "video"
+    major-type("application/json") // "application"
+    ```
+    """
+}
+fn (mime: Str): Str? {
+    call-lib("::hot::mime/type", mime)
+}
+
+minor-type
+meta {
+    core: true,
+    doc: """
+    Get the minor type (second part) of a MIME type.
+
+    **Examples**
+    ```hot
+    minor-type("image/png")                   // "png"
+    minor-type("video/mp4")                   // "mp4"
+    minor-type("text/plain; charset=utf-8")   // "plain"
+    ```
+    """
+}
+fn (mime: Str): Str? {
+    call-lib("::hot::mime/subtype", mime)
+}
+
+// ============================================================================
+// Media Type Checks (convenience functions)
+// ============================================================================
+
+is-media
+meta {
+    doc: """
+    Check if MIME type is a media type (image, audio, or video).
+
+    **Examples**
+    ```hot
+    is-media("image/png")   // true
+    is-media("audio/mpeg")  // true
+    is-media("video/mp4")   // true
+    is-media("text/plain")  // false
+    ```
+    """
+}
+fn (mime: Str): Bool {
+    or(is-image(mime), is-audio(mime), is-video(mime))
+}

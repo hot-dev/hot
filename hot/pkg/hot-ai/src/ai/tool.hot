@@ -1,0 +1,300 @@
+::ai::tool ns
+meta {
+    doc: """
+    Provider-agnostic Tool primitive shared across `::ai::chat`,
+    `::ai::session`, and any agent code that needs to expose Hot
+    functions (or external MCP-served functions) to an LLM.
+
+    A `Tool` carries enough metadata for the chat layer to advertise it
+    to a model and dispatch incoming `tool_use`/`tool_call` blocks. The
+    underlying schema is computed from a Hot function's typed signature
+    via `::hot::internal::mcp/schema-from-fn`, ensuring there is a
+    single source of truth between MCP-exposed tools (baked into the
+    deploy manifest) and runtime agent dispatch.
+    """
+}
+
+// ============================================================================
+// Types
+// ============================================================================
+
+Tool
+meta {
+    doc: """
+    A callable, model-facing tool. Most fields are derived
+    automatically by `from-fn`; pass overrides to customize what the
+    model sees.
+
+    Fields:
+    - `name` — unique tool identifier presented to the model. Defaults
+      to the qualified Hot function name (e.g. `"::myapp/search"`).
+    - `description` — short natural-language summary the model uses to
+      decide when to call the tool. Falls back to the `meta {doc: ...}`
+      docstring on the underlying Hot function.
+    - `input-schema` — JSON-Schema describing the tool's input. Auto
+      generated from the function's typed parameters.
+    - `output-schema` — optional JSON-Schema for the tool's output.
+    - `fn` — the Hot function the run-loop will dispatch to.
+    - `pass-input` — when `true`, `dispatch` calls `fn(input-map)`
+      directly instead of unpacking the map into positional arguments.
+      Used by external MCP wrappers (`::ai::mcp/from-server`) and other
+      tools whose schema is supplied by an external system. Defaults
+      to `false`.
+
+    **Example**
+
+    ```hot
+    ::ai::tool ::ai::tool
+
+    search-docs
+    meta {doc: "Search project documentation."}
+    fn (query: Str, limit: Int): Vec<Str> {
+        // ... implementation ...
+        []
+    }
+
+    web-search-tool ::ai::tool/from-fn(search-docs)
+    // => Tool({name: "::myapp/search-docs",
+    //          description: "Search project documentation.",
+    //          input-schema: {type: "object", ...},
+    //          fn: search-docs, ...})
+    ```
+    """
+}
+type {
+    name: Str,
+    description: Str?,
+    input-schema: Map,
+    output-schema: Map?,
+    fn: Fn,
+    pass-input: Bool?
+}
+
+ToolCall
+meta {
+    doc: """
+    A single tool invocation request emitted by an LLM in a
+    multi-turn loop. Providers normalize their native tool-use blocks
+    into this shape before passing them to `dispatch`.
+
+    Fields:
+    - `id` — provider-supplied identifier echoed back in the
+      corresponding `ToolResult`.
+    - `name` — the `Tool.name` the model wants to invoke.
+    - `input` — JSON-decoded input map matching the tool's
+      `input-schema`.
+    """
+}
+type {
+    id: Str,
+    name: Str,
+    input: Map
+}
+
+ToolResult
+meta {
+    doc: """
+    The reply for a single `ToolCall`, fed back into the next chat
+    turn. The chat layer is responsible for serializing this into the
+    provider's native shape (e.g. Anthropic `tool_result` blocks or
+    OpenAI tool-message replies).
+
+    Fields:
+    - `id` — must match the originating `ToolCall.id`.
+    - `output` — the result value to return to the model.
+    - `is-error` — true when the tool failed; the message is then
+      surfaced to the model as an error so it can react.
+    """
+}
+type {
+    id: Str,
+    output: Any,
+    is-error: Bool
+}
+
+// ============================================================================
+// Schema introspection
+// ============================================================================
+
+schema-from-fn
+meta {
+    doc: """
+    Return `{name, input-schema, output-schema?, description?}` for a
+    Hot function, derived from its typed signature and `meta {doc: ...}`.
+
+    Schemas are computed once at compile time by the Hot engine and
+    served from a process-global registry, so this call is cheap and
+    safe to use during boot. Useful when you want to advertise a tool
+    to a downstream system without going through `from-fn`.
+
+    **Example**
+
+    ```hot
+    search fn (query: Str, limit: Int): Vec<Str> { [query] }
+    ::ai::tool/schema-from-fn(search)
+    // => {name: "::myapp/search",
+    //     input-schema: {type: "object",
+    //                    properties: {query: {type: "string"},
+    //                                 limit: {type: "integer"}},
+    //                    required: ["query", "limit"]},
+    //     output-schema: {type: "array", items: {type: "string"}}}
+    ```
+    """
+}
+fn (f: Fn): Map {
+    ::hot::internal::mcp/schema-from-fn(f)
+}
+
+// ============================================================================
+// Construction
+// ============================================================================
+
+from-fn
+meta {
+    doc: """
+    Build a `Tool` from any Hot function with typed parameters.
+
+    The function's qualified name becomes `Tool.name`, its
+    `meta {doc: ...}` becomes `description`, and its parameter types
+    are converted to a JSON-Schema input. Pass an `overrides` map to
+    customize any of these fields.
+
+    **Example**
+
+    ```hot
+    add fn (x: Int, y: Int): Int { add(x, y) }
+
+    // Defaults
+    t1 ::ai::tool/from-fn(add)
+    // => Tool({name: "::myapp/add", input-schema: {...}, fn: add})
+
+    // With overrides for the model-facing surface
+    t2 ::ai::tool/from-fn(add, {
+        name: "add-numbers",
+        description: "Add two integers and return the sum."
+    })
+    ```
+    """
+}
+fn
+(f: Fn): Tool {
+    from-fn(f, {})
+},
+(f: Fn, overrides: Map): Tool {
+    schema schema-from-fn(f)
+    Tool({
+        name: or(
+            get(overrides, "name"),
+            get(schema, "display-name"),
+            schema.name
+        ),
+        description: or(
+            get(overrides, "description"),
+            get(schema, "description"),
+            null
+        ),
+        input-schema: or(get(overrides, "input-schema"), schema.input-schema),
+        output-schema: or(
+            get(overrides, "output-schema"),
+            get(schema, "output-schema"),
+            null
+        ),
+        fn: f
+    })
+}
+
+for-agent
+meta {
+    doc: """
+    Normalize an agent's `tools:` list (a mix of Hot function refs and
+    pre-built `Tool` records) into a `Vec<Tool>` ready for the chat
+    run-loop.
+
+    **Example**
+
+    ```hot
+    search fn (query: Str): Vec<Str> { [query] }
+    web-tool Tool({name: "web", input-schema: {...}, fn: search})
+
+    tools ::ai::tool/for-agent([search, web-tool])
+    // => [Tool({name: "::myapp/search", ...}),
+    //     Tool({name: "web", ...})]
+    ```
+    """
+}
+fn (entries: Vec<Any>): Vec<Tool> {
+    map(entries, (entry) {
+        if(is-type(entry, Tool), entry, from-fn(entry))
+    })
+}
+
+// ============================================================================
+// Dispatch
+// ============================================================================
+
+find-by-name
+meta {
+    doc: """
+    Look up a `Tool` in `tools` by `name`, returning `null` when no
+    tool matches. Used by `dispatch` and surfaced for callers that
+    need to inspect or rewrite a tool before invoking it.
+    """
+}
+fn (tools: Vec<Tool>, name: Str): Tool? {
+    find-first(tools, eq(%.name, name))
+}
+
+dispatch
+meta {
+    doc: """
+    Invoke the tool whose `name` matches `call.name`, mapping
+    `call.input` (a Map keyed by parameter name) to the function's
+    positional arguments. Returns a `ToolResult` whose `id` echoes the
+    incoming call and whose `output` is the function's return value.
+
+    Errors from the underlying function are caught and returned with
+    `is-error: true` so the model can react on the next turn.
+
+    **Example**
+
+    ```hot
+    add fn (x: Int, y: Int): Int { add(x, y) }
+    tools ::ai::tool/for-agent([add])
+
+    call ToolCall({id: "call_1", name: "::myapp/add", input: {x: 2, y: 3}})
+    ::ai::tool/dispatch(tools, call)
+    // => ToolResult({id: "call_1", output: 5, is-error: false})
+    ```
+    """
+}
+fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
+    tool find-by-name(tools, call.name)
+    if(
+        is-null(tool),
+        ToolResult({
+            id: call.id,
+            output: `Unknown tool: ${call.name}`,
+            is-error: true
+        }),
+        {
+            result if(
+                or(get(tool, "pass-input"), false),
+                tool.fn(call.input),
+                ::hot::internal::mcp/invoke-with-input(tool.fn, call.input)
+            )
+            match result {
+                Result.Err => {
+                    ToolResult({id: call.id, output: result, is-error: true})
+                }
+
+                Result.Ok => {
+                    ToolResult({id: call.id, output: result, is-error: false})
+                }
+
+                _ => {
+                    ToolResult({id: call.id, output: result, is-error: false})
+                }
+            }
+        }
+    )
+}

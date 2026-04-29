@@ -1,0 +1,72 @@
+<!--
+  Hero Metrics Component - Compact 4-card row.
+
+  All values render as pulsing skeleton bars on first paint and are populated
+  by `updateHeroMetricsUI()` in dashboard.html, which runs as the first task
+  in `refreshDashboardData()`. The dashboard handler does NOT pre-fill these
+  numbers anymore — it returns a bare shell so first byte is fast.
+-->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <!-- Runs -->
+    <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 rounded-lg border border-blue-200 dark:border-blue-700 shadow-sm p-4 relative">
+        <svg class="absolute top-3 right-3 w-5 h-5 text-blue-400/30 dark:text-blue-500/40" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
+        </svg>
+        <h2 id="hero-runs-total" class="text-2xl font-bold text-blue-600 dark:text-blue-400">
+            <span class="inline-block h-6 w-32 bg-blue-200/70 dark:bg-blue-800/50 rounded animate-pulse align-middle"></span>
+        </h2>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">Hot Functions</p>
+        <div class="flex flex-wrap gap-x-2 gap-y-1 text-xs font-semibold">
+            <span id="hero-runs-running" class="text-blue-600 dark:text-blue-400"><span class="inline-block h-3 w-16 bg-blue-200/70 dark:bg-blue-800/50 rounded animate-pulse"></span></span>
+            <span id="hero-runs-succeeded" class="text-green-600 dark:text-green-400"><span class="inline-block h-3 w-20 bg-green-200/70 dark:bg-green-800/50 rounded animate-pulse"></span></span>
+            <span id="hero-runs-failed" class="text-red-600 dark:text-red-500"><span class="inline-block h-3 w-14 bg-red-200/70 dark:bg-red-800/50 rounded animate-pulse"></span></span>
+            <span id="hero-runs-cancelled" class="text-gray-600 dark:text-gray-400"><span class="inline-block h-3 w-20 bg-gray-200 dark:bg-gray-700 rounded animate-pulse"></span></span>
+        </div>
+    </div>
+
+    <!-- Tasks -->
+    <div class="bg-gradient-to-br from-pink-50 to-pink-100 dark:from-pink-900/20 dark:to-pink-800/20 rounded-lg border border-pink-200 dark:border-pink-800 shadow-sm p-4 relative">
+        <svg class="absolute top-3 right-3 w-5 h-5 text-pink-400/30 dark:text-pink-500/40" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <rect x="3" y="3" width="18" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.5 7.5v9l7.5-4.5-7.5-4.5z" />
+        </svg>
+        <h2 id="hero-tasks-total" class="text-2xl font-bold text-pink-600 dark:text-pink-400">
+            <span class="inline-block h-6 w-32 bg-pink-200/70 dark:bg-pink-800/50 rounded animate-pulse align-middle"></span>
+        </h2>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">Compute: Hot Functions &amp; Hot Boxes</p>
+        <div class="flex flex-wrap gap-x-2 gap-y-1 text-xs font-semibold">
+            <span id="hero-tasks-running" class="text-blue-600 dark:text-blue-400"><span class="inline-block h-3 w-16 bg-blue-200/70 dark:bg-blue-800/50 rounded animate-pulse"></span></span>
+            <span id="hero-tasks-completed" class="text-green-600 dark:text-green-400"><span class="inline-block h-3 w-20 bg-green-200/70 dark:bg-green-800/50 rounded animate-pulse"></span></span>
+            <span id="hero-tasks-failed" class="text-red-600 dark:text-red-500"><span class="inline-block h-3 w-14 bg-red-200/70 dark:bg-red-800/50 rounded animate-pulse"></span></span>
+        </div>
+        <div class="mt-2 pt-2 border-t border-pink-200/50 dark:border-pink-700/50">
+            <span id="hero-tasks-cus" class="text-xs font-semibold text-pink-700 dark:text-pink-300"><span class="inline-block h-3 w-40 bg-pink-200/70 dark:bg-pink-800/50 rounded animate-pulse"></span></span>
+        </div>
+    </div>
+
+    <!-- Events -->
+    <div class="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg border border-green-200 dark:border-green-700 shadow-sm p-4 relative">
+        <svg class="absolute top-3 right-3 w-5 h-5 text-green-400/30 dark:text-green-500/40" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+        </svg>
+        <h2 id="hero-events-total" class="text-2xl font-bold text-green-600 dark:text-green-400">
+            <span class="inline-block h-6 w-32 bg-green-200/70 dark:bg-green-800/50 rounded animate-pulse align-middle"></span>
+        </h2>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">Triggers</p>
+        <div class="flex flex-wrap gap-x-2 gap-y-1 text-xs font-semibold">
+            <span id="hero-events-handled" class="text-green-600 dark:text-green-400"><span class="inline-block h-3 w-20 bg-green-200/70 dark:bg-green-800/50 rounded animate-pulse"></span></span>
+            <span id="hero-events-unhandled" class="text-red-600 dark:text-red-500"><span class="inline-block h-3 w-24 bg-red-200/70 dark:bg-red-800/50 rounded animate-pulse"></span></span>
+        </div>
+    </div>
+
+    <!-- Streams -->
+    <div class="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 rounded-lg border border-purple-200 dark:border-purple-700 shadow-sm p-4 relative">
+        <svg class="absolute top-3 right-3 w-5 h-5 text-purple-400/30 dark:text-purple-500/40" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+        </svg>
+        <h2 id="hero-streams-total" class="text-2xl font-bold text-purple-600 dark:text-purple-400">
+            <span class="inline-block h-6 w-32 bg-purple-200/70 dark:bg-purple-800/50 rounded animate-pulse align-middle"></span>
+        </h2>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">Execution chains</p>
+    </div>
+</div>

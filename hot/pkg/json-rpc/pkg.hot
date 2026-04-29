@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.json-rpc {
+  name: "hot.dev/json-rpc",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "JSON-RPC 2.0 client for HTTP transports. Supports standard request/response and SSE streaming.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["protocols"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

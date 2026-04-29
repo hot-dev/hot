@@ -1,0 +1,70 @@
+::openai::activate ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+Certificate type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+ToggleCertificatesRequest type {
+    certificate_ids: Vec<Str>
+}
+
+ListCertificatesResponse type {
+    data: Vec<Certificate>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool,
+    object: "list"
+}
+
+ActivateOrganizationCertificatesRequest type {
+    certificate_ids: Vec<Str>
+}
+
+ActivateOrganizationCertificatesResponse type {
+    data: Vec<Certificate>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool,
+    object: "list"
+}
+
+
+activate-certificates-organization
+meta {
+    doc: """POST /organization/certificates/activate - Activate certificates for organization"""
+}
+fn (request: ActivateOrganizationCertificatesRequest): ActivateOrganizationCertificatesResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/certificates/activate`, {}, request)
+  if(is-ok-response(response), ActivateOrganizationCertificatesResponse(response.body), err(HttpError(response)))
+}
+
+ActivateProjectCertificatesRequest type {
+    certificate_ids: Vec<Str>
+}
+
+ActivateProjectCertificatesResponse type {
+    data: Vec<Certificate>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool,
+    object: "list"
+}
+
+
+activate-certificates-project
+meta {
+    doc: """POST /organization/projects/{project_id}/certificates/activate - Activate certificates for project"""
+}
+fn (project-id: Str, request: ActivateProjectCertificatesRequest): ActivateProjectCertificatesResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/certificates/activate`, {}, request)
+  if(is-ok-response(response), ActivateProjectCertificatesResponse(response.body), err(HttpError(response)))
+}

@@ -1,0 +1,262 @@
+<!-- Usage Warning Banner (hidden in local dev) -->
+{% if !is_local_dev %}
+{% if usage.has_warning(&features) && can_upgrade %}
+<div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-600 rounded-lg p-4 mb-6">
+    <div class="flex">
+        <div class="flex-shrink-0">
+            <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+            </svg>
+        </div>
+        <div class="ml-3">
+            <h3 class="text-sm font-medium text-yellow-800 dark:text-yellow-200">Approaching Usage Limit</h3>
+            <div class="mt-2 text-sm text-yellow-700 dark:text-yellow-300">
+                <p>You're using more than 90% of one or more limits. Consider upgrading your plan for increased capacity.</p>
+            </div>
+            <div class="mt-3">
+                <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-yellow-800 bg-yellow-100 hover:bg-yellow-200 dark:text-yellow-200 dark:bg-yellow-800 dark:hover:bg-yellow-700 transition-colors">
+                    Upgrade Plan
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endif %}
+
+<!-- Usage Cards Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+
+    <!-- Runs This Month -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Runs <span class="text-gray-500 dark:text-gray-400 font-normal">({{ month_start.format("%B %Y") }})</span></h3>
+            {% if usage.runs_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">⚠️</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_runs() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ hot::db::OrgUsageStats::fmt_num(usage.runs_this_period) }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Unlimited</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ hot::db::OrgUsageStats::fmt_num(usage.runs_this_period) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::OrgUsageStats::fmt_num_i32(features.runs_per_month()) }}</span>
+        </p>
+        <!-- Progress Bar -->
+        {% let pct = usage.runs_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ hot::db::OrgUsageStats::fmt_pct(usage.runs_pct(&features)) }}% used</p>
+        {% endif %}
+    </div>
+
+    <!-- File Storage -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">File Storage</h3>
+            {% if usage.file_storage_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">⚠️</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_storage() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ hot::db::Features::format_bytes(usage.file_storage_bytes) }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Unlimited</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ hot::db::Features::format_bytes(usage.file_storage_bytes) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::Features::format_bytes(features.storage_bytes()) }}</span>
+        </p>
+        <!-- Progress Bar -->
+        {% let pct = usage.file_storage_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ hot::db::OrgUsageStats::fmt_pct(usage.file_storage_pct(&features)) }}% used</p>
+        {% endif %}
+    </div>
+
+    <!-- Team Members -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Team Members</h3>
+            {% if usage.team_members_pct(&features) >= 100.0 %}
+            <span class="text-red-500">🚫</span>
+            {% elif usage.team_members_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">⚠️</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_team_members() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ usage.team_members_count|commafy }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Unlimited</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ usage.team_members_count|commafy }} <span class="text-lg font-normal text-gray-500">/ {{ features.team_members() }}</span>
+        </p>
+        <!-- Progress Bar -->
+        {% let pct = usage.team_members_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct >= 100.0 %}bg-red-500{% elif pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">
+            {% if usage.team_members_pct(&features) >= 100.0 %}
+            <span class="text-red-600 dark:text-red-400 font-medium">Limit reached - upgrade to add more members</span>
+            {% else %}
+            {{ hot::db::OrgUsageStats::fmt_pct(usage.team_members_pct(&features)) }}% used
+            {% endif %}
+        </p>
+        {% endif %}
+    </div>
+
+    <!-- Call Data Storage -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Call Data</h3>
+            {% if usage.call_storage_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">⚠️</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_call_storage() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ hot::db::Features::format_bytes(usage.call_storage_bytes) }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">Unlimited storage</p>
+        {% else if features.call_retention_days() == 0 %}
+        <p class="text-3xl font-bold text-gray-500 dark:text-gray-400 mb-2">Not Available</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">Call data not included in this plan</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ hot::db::Features::format_bytes(usage.call_storage_bytes) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::Features::format_bytes(features.call_storage_bytes()) }}</span>
+        </p>
+        <!-- Progress Bar -->
+        {% let pct = usage.call_storage_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ hot::db::OrgUsageStats::fmt_pct(usage.call_storage_pct(&features)) }}% used</p>
+        {% endif %}
+
+        <!-- Retention Info -->
+        {% if features.call_retention_days() > 0 %}
+        <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+            <div class="flex items-center justify-between text-sm">
+                <span class="text-gray-500 dark:text-gray-400">Retention Period</span>
+                <span class="font-medium text-gray-900 dark:text-white">{{ features.format_retention_days() }}</span>
+            </div>
+            <div class="flex items-center justify-between text-sm mt-1">
+                <span class="text-gray-500 dark:text-gray-400">Total Calls</span>
+                <span class="font-medium text-gray-900 dark:text-white">{{ hot::db::OrgUsageStats::fmt_num(usage.call_count) }}</span>
+            </div>
+            {% match usage.oldest_call_time %}
+            {% when Some with (oldest) %}
+            <div class="flex items-center justify-between text-sm mt-1">
+                <span class="text-gray-500 dark:text-gray-400">Oldest Call</span>
+                <span class="font-medium text-gray-900 dark:text-white">{{ oldest.format("%b %d, %Y") }}</span>
+            </div>
+            {% when None %}
+            {% endmatch %}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Store Storage -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Store Data</h3>
+            {% if usage.store_storage_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">⚠️</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_store_storage() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ hot::db::Features::format_bytes(usage.store_storage_bytes) }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Unlimited</p>
+        {% else if features.store_storage_bytes() == 0 %}
+        <p class="text-3xl font-bold text-gray-500 dark:text-gray-400 mb-2">Not Available</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Store not included in this plan</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ hot::db::Features::format_bytes(usage.store_storage_bytes) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::Features::format_bytes(features.store_storage_bytes()) }}</span>
+        </p>
+        {% let pct = usage.store_storage_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ hot::db::OrgUsageStats::fmt_pct(usage.store_storage_pct(&features)) }}% used</p>
+        {% endif %}
+    </div>
+
+    <!-- Compute Unit Seconds (CUS) -->
+    {% if features.compute_units_per_month() != 0 %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Compute Unit Seconds <span class="text-gray-500 dark:text-gray-400 font-normal">({{ month_start.format("%B %Y") }})</span></h3>
+            {% if usage.compute_units_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">⚠️</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_compute_units() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ hot::db::OrgUsageStats::fmt_cus(usage.compute_units) }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Unlimited</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ hot::db::OrgUsageStats::fmt_num(usage.compute_units) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::OrgUsageStats::fmt_num(features.compute_units_per_month()) }} CUS</span>
+        </p>
+        {% let pct = usage.compute_units_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        {% if usage.compute_units_pct(&features) > 100.0 %}
+        <p class="text-sm text-orange-600 dark:text-orange-400 font-medium">
+            {{ hot::db::OrgUsageStats::fmt_num(Box::new(usage.compute_units - features.compute_units_per_month())) }} CUS overage
+        </p>
+        {% else %}
+        <p class="text-sm text-gray-500 dark:text-gray-400">{{ hot::db::OrgUsageStats::fmt_pct(usage.compute_units_pct(&features)) }}% used</p>
+        {% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Info Footer -->
+<div class="bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+    <div class="flex items-start">
+        <div class="flex-shrink-0">
+            <svg class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+            </svg>
+        </div>
+        <div class="ml-3 text-sm text-gray-600 dark:text-gray-400">
+            <p class="mb-2">
+                <strong>About Usage Limits:</strong>
+            </p>
+            <ul class="list-disc list-inside space-y-1">
+                <li><strong>Runs</strong> are counted per billing period and reset at the start of each cycle.</li>
+                <li><strong>File Storage</strong> includes all files uploaded through your Hot applications.</li>
+                <li><strong>Team Members</strong> limit is enforced - you cannot add members beyond your plan limit.</li>
+                <li><strong>Call Data</strong> is automatically archived after the retention period expires.</li>
+                <li><strong>Store Data</strong> includes all data in <code>::hot::store</code> maps, including embeddings.</li>
+                <li><strong>Compute Unit Seconds (CUS)</strong> measure container resource usage. Each box size has a multiplier applied to wall-clock seconds. Usage over the included amount is billed as overage.</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- Upgrade CTA for non-Scale plans (hidden in local dev) -->
+{% if can_upgrade && !is_local_dev %}
+<div class="mt-6 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Need more capacity?</h3>
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+                Upgrade your plan to increase limits and unlock additional features.
+            </p>
+        </div>
+        <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition whitespace-nowrap">
+            Upgrade Plan
+        </a>
+    </div>
+</div>
+{% endif %}

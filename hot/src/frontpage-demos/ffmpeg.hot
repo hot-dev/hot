@@ -1,0 +1,12 @@
+::demo::video ns
+
+on-video-upload
+meta {on-event: "video:uploaded"}
+fn (event) {
+    path or(event.data.path, "hot://demo/test.mp4")
+    parallel {
+        probe ::ffmpeg/probe(path)
+        thumb ::ffmpeg/thumbnail(path, {output: "hot://demo/video-thumb.jpg"})
+        audio ::ffmpeg/extract-audio(path, {output: "hot://demo/video-audio.mp3"})
+    }
+}

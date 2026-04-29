@@ -1,0 +1,85 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-6xl mx-auto py-6">
+  <div class="pb-5 mb-6">
+    <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
+    <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
+      Manage your account settings and preferences
+    </p>
+
+    <!-- Navigation Tabs -->
+    <div class="mt-4 border-b border-gray-200 dark:border-gray-700">
+      <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+        <a href="/account"
+           class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+          Profile
+        </a>
+        {% if !page_context.is_local_dev %}
+        <a href="/account/notifications"
+           class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+          Notifications
+        </a>
+        {% endif %}
+        <a href="/account/billing"
+           class="border-red-500 text-red-600 dark:text-red-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+          Billing
+        </a>
+      </nav>
+    </div>
+  </div>
+
+  <!-- Billing Overview -->
+  <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+    <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-4">Organization Billing</h2>
+    <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+      Billing is managed per organization. Select an organization below to view or manage its subscription.
+    </p>
+
+    {% if user_orgs.len() > 0 %}
+      <div class="space-y-3">
+        {% for org_info in user_orgs %}
+        <a href="/@{{ org_info.org.slug }}/billing"
+           class="block p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-750 transition-colors">
+          <div class="flex items-center justify-between">
+            <div class="flex-1">
+              <h3 class="font-semibold text-gray-900 dark:text-white">{{ org_info.org.name }} <span class="text-sm font-normal text-gray-500 dark:text-gray-400 font-mono">@{{ org_info.org.slug }}</span></h3>
+              <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                {% if let Some(sub) = org_info.subscription %}
+                  {% if let Some(plan) = org_info.plan %}
+                    {{ plan.plan_name }} -
+                    {% if sub.is_active() %}
+                      <span class="text-green-600 dark:text-green-400">Active</span>
+                    {% else %}
+                      <span class="text-gray-500">Inactive</span>
+                    {% endif %}
+                  {% else %}
+                    No active plan
+                  {% endif %}
+                {% else %}
+                  No subscription
+                {% endif %}
+              </p>
+            </div>
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+            </svg>
+          </div>
+        </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="text-sm text-gray-600 dark:text-gray-400">You are not a member of any organizations.</p>
+    {% endif %}
+  </div>
+
+  {% if page_context.is_local_dev %}
+    <!-- Local Dev Info -->
+    <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6">
+      <h3 class="font-semibold text-blue-900 dark:text-blue-200 mb-2">Local Development Mode</h3>
+      <p class="text-sm text-blue-800 dark:text-blue-300">
+        You are running Hot in local development mode. Billing features are not available for local instances.
+      </p>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

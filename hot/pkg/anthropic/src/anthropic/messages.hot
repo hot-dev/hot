@@ -1,0 +1,302 @@
+::anthropic::messages ns
+
+api-request ::anthropic::api/request
+HttpError ::anthropic::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// Literal union for message roles
+Role type "user" | "assistant"
+
+// Literal union for stop reasons
+StopReason type "end_turn" | "max_tokens" | "stop_sequence" | "tool_use"
+
+// Literal union for streaming event types
+StreamEventType type "message_start" | "content_block_start" | "content_block_delta" | "content_block_stop" | "message_delta" | "message_stop" | "ping" | "error"
+
+InputMessage type {
+    role: Role,
+    content: Any
+}
+
+CreateMessageParams type {
+    model: Model,
+    messages: Vec<InputMessage>,
+    max_tokens: Int,
+    metadata: Any?,
+    stop_sequences: Vec<Str>?,
+    stream: Bool?,
+    system: Any?,
+    temperature: Dec?,
+    tool_choice: ToolChoice?,
+    tools: Vec<Tool>?,
+    top_k: Int?,
+    top_p: Dec?
+}
+
+// Model ID string (e.g. "claude-sonnet-4-20250514", "claude-3-haiku-20240307")
+Model type Str
+
+Message type {
+    id: Str,
+    type: Str,
+    role: Role,
+    content: Vec<ContentBlock>,
+    model: Model,
+    stop_reason: StopReason?,
+    stop_sequence: Str?,
+    usage: Any
+}
+
+ErrorResponse type {
+    type: Str,
+    error: Any
+}
+
+Tool type {
+    description: Str?,
+    name: Str,
+    input_schema: Any
+}
+
+// Content block in a message response. Polymorphic -- may be text, tool_use, image, etc.
+// Text block: {type: "text", text: "..."}
+// Tool use block: {type: "tool_use", id: "...", name: "...", input: {...}}
+// Image block: {type: "image", source: {type: "base64", media_type: "...", data: "..."}}
+ContentBlock type {
+    type: Str,
+    text: Str?,
+    id: Str?,
+    name: Str?,
+    input: Any?
+}
+
+// Tool choice configuration for controlling tool use behavior.
+// Auto: {type: "auto"} - Model decides whether to use tools
+// Any: {type: "any"} - Model must use at least one tool
+// Specific: {type: "tool", name: "tool_name"} - Model must use the named tool
+// None: {type: "none"} - Model must not use tools
+ToolChoice type {
+    type: Str,
+    name: Str?,
+    disable_parallel_tool_use: Bool?
+}
+
+MessagesPostRequest type {
+    model: Model,
+    messages: Vec<InputMessage>,
+    max_tokens: Int,
+    metadata: Any?,
+    stop_sequences: Vec<Str>?,
+    stream: Bool?,
+    system: Any?,
+    temperature: Dec?,
+    tool_choice: ToolChoice?,
+    tools: Vec<Tool>?,
+    top_k: Int?,
+    top_p: Dec?
+}
+
+MessagesPostResponse type {
+    id: Str,
+    type: Str,
+    role: Role,
+    content: Vec<ContentBlock>,
+    model: Model,
+    stop_reason: StopReason?,
+    stop_sequence: Str?,
+    usage: Any
+}
+
+
+post
+meta {
+    doc: """
+    POST /v1/messages - Create a message.
+
+    Send a structured list of input messages and receive a model-generated response.
+    Supports system prompts, multi-turn conversations, tool use, temperature control,
+    stop sequences, and token limits.
+
+    **Example**
+
+    ```hot
+    // Simple message
+    request MessagesPostRequest({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [{role: "user", content: "What is the capital of France?"}]
+    })
+    response ::anthropic::messages/post(request)
+    response.content[0].text // => "The capital of France is Paris."
+
+    // With system prompt
+    request MessagesPostRequest({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        system: "You are a helpful assistant that responds in JSON format.",
+        messages: [{role: "user", content: "What is 2+2?"}]
+    })
+    response ::anthropic::messages/post(request)
+
+    // Multi-turn conversation
+    request MessagesPostRequest({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [
+            {role: "user", content: "My name is Alice."},
+            {role: "assistant", content: "Nice to meet you, Alice!"},
+            {role: "user", content: "What is my name?"}
+        ]
+    })
+    response ::anthropic::messages/post(request)
+
+    // With tool use
+    request MessagesPostRequest({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 200,
+        tools: [
+            {
+                name: "get_weather",
+                description: "Get the current weather for a location",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        location: {type: "string", description: "City and state"}
+                    },
+                    required: ["location"]
+                }
+            }
+        ],
+        messages: [{role: "user", content: "What's the weather in San Francisco?"}]
+    })
+    response ::anthropic::messages/post(request)
+    // response.stop_reason => "tool_use" when the model invokes a tool
+    ```
+    """
+}
+fn (request: MessagesPostRequest): MessagesPostResponse {
+  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages`, {}, request)
+  if(is-ok-response(response), MessagesPostResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+chat
+meta {
+    doc: """
+    Simple chat - send a message and get a response string.
+
+    **Example**
+    ```hot
+    response ::anthropic::messages/chat("claude-sonnet-4-20250514", "What is the capital of France?")
+    // Returns: "The capital of France is Paris."
+
+    // With system prompt
+    response ::anthropic::messages/chat("claude-sonnet-4-20250514", "Hello!", "You are a helpful assistant.")
+    ```
+    """
+}
+fn
+(model: Str, message: Str): Str {
+    chat(model, message, null, null)
+},
+(model: Str, message: Str, system: Str): Str {
+    chat(model, message, system, null)
+},
+(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+    messages [InputMessage({role: "user", content: message})]
+
+    request {
+        model: model,
+        messages: messages,
+        max_tokens: or(max-tokens, 1024),
+        system: system
+    }
+
+    result post(MessagesPostRequest(request))
+
+    match result {
+        Result.Err => { err(result) }
+        Result.Ok => {
+            first-block result.content[0]
+            or(first-block.text, "")
+        }
+    }
+}
+
+// ============================================================================
+// Streaming Support
+// ============================================================================
+
+api-request-stream ::anthropic::api/request-stream
+StreamingHttpResponse ::anthropic::api/StreamingHttpResponse
+
+// SSE Event Types for streaming responses
+// See: https://docs.anthropic.com/en/api/messages-streaming
+
+MessageStreamEvent type {
+    type: StreamEventType,
+    message: Message?,
+    index: Int?,
+    content_block: ContentBlock?,
+    delta: Delta?,
+    usage: Any?
+}
+
+// Literal union for delta types
+DeltaType type "text_delta" | "input_json_delta"
+
+Delta type {
+    type: DeltaType?,
+    text: Str?,
+    partial_json: Str?,
+    stop_reason: StopReason?,
+    stop_sequence: Str?
+}
+
+StreamingMessagesResponse type {
+    status: Int,
+    headers: Map<Str, Str>,
+    body: Any  // Iterator yielding MessageStreamEvent
+}
+
+post-stream
+meta {
+    doc: """
+    POST /v1/messages with streaming - yields SSE events as an iterator.
+
+    Use this for real-time streaming of AI responses. The body is an iterator
+    that yields parsed SSE events from Anthropic's streaming API.
+
+    **Event Types**
+    - `message_start` - Initial message metadata
+    - `content_block_start` - Start of a content block
+    - `content_block_delta` - Text chunk (delta.text contains the text)
+    - `content_block_stop` - End of a content block
+    - `message_delta` - Final message metadata (stop_reason, usage)
+    - `message_stop` - End of message
+
+    **Example**
+
+    ```hot
+    request MessagesPostRequest({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [{role: "user", content: "Hello!"}]
+    })
+
+    response post-stream(request)
+    // response.body is an iterator of SSE events
+    events collect(response.body)
+    text-events filter(events, eq(%.event, "content_block_delta"))
+    stop-events filter(events, eq(%.event, "message_stop"))
+    ```
+    """
+}
+fn (request: MessagesPostRequest): StreamingMessagesResponse {
+  // Force stream: true in the request
+  streaming-request {...untype(request), stream: true}
+  api-request-stream("POST", `${::anthropic/BASE_URL}/v1/messages`, {}, streaming-request, "sse")
+}

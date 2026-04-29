@@ -1,0 +1,12 @@
+::twilio::integration::calls ns
+meta ["test"]
+
+test-list-calls
+meta ["test"]
+fn () {
+  response ::twilio::calls/list-calls(::twilio::calls/ListCallsRequest({
+    PageSize: 5
+  }))
+
+  assert(response.calls, "list-calls should return calls array")
+}

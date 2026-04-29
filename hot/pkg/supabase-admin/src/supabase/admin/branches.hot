@@ -1,0 +1,137 @@
+::supabase::admin::branches ns
+
+::api ::supabase::admin::api
+
+// ============================================================================
+// Preview Branches
+// ============================================================================
+
+list-branches
+meta {
+    doc: """
+List all preview branches for a project.
+
+**Example**
+
+```hot
+::branches ::supabase::admin::branches
+
+branches ::branches/list-branches("my-project-ref")
+// => [{id: "...", name: "feat-auth", git_branch: "feat/auth", status: "RUNNING_MIGRATIONS", ...}, ...]
+```
+"""
+}
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/branches`)
+}
+
+CreateBranchRequest type {
+  project_ref: Str,
+  branch_name: Str,
+  git_branch: Str?,
+  region: Str?
+}
+
+create-branch
+meta {
+    doc: """
+Create a new preview branch. Preview branching must be enabled on the project.
+
+**Example**
+
+```hot
+::branches ::supabase::admin::branches
+
+branch ::branches/create-branch(::branches/CreateBranchRequest({
+  project_ref: "my-project-ref",
+  branch_name: "feat-auth",
+  git_branch: "feat/auth"
+}))
+```
+"""
+}
+fn (request: CreateBranchRequest): Map {
+  body {branch_name: request.branch_name}
+    |> assoc-some("git_branch", request.git_branch)
+    |> assoc-some("region", request.region)
+
+  ::api/request("POST", `/projects/${request.project_ref}/branches`, {}, body)
+}
+
+get-branch
+meta {
+    doc: """Get details for a specific branch by its ID."""
+}
+fn (branch-id: Str): Map {
+  ::api/request("GET", `/branches/${branch-id}`)
+}
+
+delete-branch
+meta {
+    doc: """Delete a preview branch."""
+}
+fn (branch-id: Str): Map {
+  ::api/request("DELETE", `/branches/${branch-id}`)
+}
+
+get-branch-config
+meta {
+    doc: """Get the database configuration for a branch."""
+}
+fn (branch-id: Str): Map {
+  ::api/request("GET", `/branches/${branch-id}/config`)
+}
+
+UpdateBranchConfigRequest type {
+  branch_id: Str,
+  git_branch: Str?,
+  reset_on_push: Bool?,
+  persistent: Bool?,
+  status: Str?
+}
+
+update-branch-config
+meta {
+    doc: """Update branch configuration (git branch association, reset behavior, persistence)."""
+}
+fn (request: UpdateBranchConfigRequest): Map {
+  body {}
+    |> assoc-some("git_branch", request.git_branch)
+    |> assoc-some("reset_on_push", request.reset_on_push)
+    |> assoc-some("persistent", request.persistent)
+    |> assoc-some("status", request.status)
+
+  ::api/request("PATCH", `/branches/${request.branch_id}/config`, {}, body)
+}
+
+push-branch
+meta {
+    doc: """Push migrations to a preview branch database."""
+}
+fn (branch-id: Str): Map {
+  ::api/request("POST", `/branches/${branch-id}/push`, {}, {})
+}
+
+reset-branch
+meta {
+    doc: """Reset a preview branch database to match the parent project."""
+}
+fn (branch-id: Str): Map {
+  ::api/request("POST", `/branches/${branch-id}/reset`, {}, {})
+}
+
+merge-branch
+meta {
+    doc: """Merge a preview branch into the parent project."""
+}
+fn (branch-id: Str): Map {
+  ::api/request("POST", `/branches/${branch-id}/merge`, {}, {})
+}
+
+disable-preview-branching
+meta {
+    doc: """Disable preview branching for a project. This deletes all existing preview branches."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/branches`)
+}

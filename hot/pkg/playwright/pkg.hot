@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.playwright {
+  name: "hot.dev/playwright",
+  version: "1.1.0",
+  hot-min-version: "1.2.4",
+  description: "Playwright headless browser via Hot Box containers. Screenshots, PDF generation, and web scraping.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["automation"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

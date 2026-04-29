@@ -1,0 +1,141 @@
+// Test file for literal union types (enum-style types)
+::hot::test::docs::literal-unions ns
+meta ["test"]
+
+// =============================================================================
+// Imports
+// =============================================================================
+// Note: All functions used here are core (assert-eq, assert, if, eq, etc.)
+
+// =============================================================================
+// Literal Union Type Definitions
+// =============================================================================
+
+// String literal union - like an enum of strings
+Fruit type "apple" | "banana" | "orange"
+
+// HTTP methods as literal union
+HttpMethod type "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
+
+// Status values
+Status type "pending" | "active" | "completed" | "failed"
+
+// Number literal union
+Priority type 1 | 2 | 3
+
+// Mixed literal and null
+OptionalFruit type "apple" | "banana" | null
+
+// Single literal types (not a union, just a single value)
+A type "A"
+One type 1
+TrueOnly type true
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-fruit-type
+meta ["test"] fn () {
+  // Valid fruit values
+  apple: Fruit "apple"
+  banana: Fruit "banana"
+  orange: Fruit "orange"
+
+  assert-eq("apple", apple, "apple should be apple")
+  assert-eq("banana", banana, "banana should be banana")
+  assert-eq("orange", orange, "orange should be orange")
+}
+
+test-http-method-type
+meta ["test"] fn () {
+  get-method: HttpMethod "GET"
+  post-method: HttpMethod "POST"
+
+  assert-eq("GET", get-method, "GET method")
+  assert-eq("POST", post-method, "POST method")
+}
+
+test-status-type
+meta ["test"] fn () {
+  pending: Status "pending"
+  active: Status "active"
+  completed: Status "completed"
+
+  assert-eq("pending", pending, "pending status")
+  assert-eq("active", active, "active status")
+  assert-eq("completed", completed, "completed status")
+}
+
+test-priority-type
+meta ["test"] fn () {
+  low: Priority 1
+  medium: Priority 2
+  high: Priority 3
+
+  assert-eq(1, low, "low priority")
+  assert-eq(2, medium, "medium priority")
+  assert-eq(3, high, "high priority")
+}
+
+test-optional-fruit
+meta ["test"] fn () {
+  some-fruit: OptionalFruit "apple"
+  no-fruit: OptionalFruit null
+
+  assert-eq("apple", some-fruit, "some fruit")
+  assert(::hot::type/is-null(no-fruit), "no fruit should be null")
+}
+
+test-function-with-literal-union
+meta ["test"] fn () {
+  // Function that accepts literal union type
+  process-fruit fn (f: Fruit): Str {
+    if(eq(f, "apple"), "It's an apple!",
+      if(eq(f, "banana"), "It's a banana!",
+        "It's an orange!"))
+  }
+
+  result process-fruit("apple")
+  assert-eq("It's an apple!", result, "process apple")
+
+  result2 process-fruit("banana")
+  assert-eq("It's a banana!", result2, "process banana")
+}
+
+test-function-returning-literal-union
+meta ["test"] fn () {
+  // Function that returns literal union type
+  get-default-status fn (): Status {
+    "pending"
+  }
+
+  result get-default-status()
+  assert-eq("pending", result, "default status should be pending")
+}
+
+test-literal-union-in-conditional
+meta ["test"] fn () {
+  check-method fn (method: HttpMethod): Bool {
+    if(eq(method, "GET"), true,
+      if(eq(method, "POST"), true, false))
+  }
+
+  assert(check-method("GET"), "GET should be recognized")
+  assert(check-method("POST"), "POST should be recognized")
+}
+
+test-single-literal-types
+meta ["test"] fn () {
+  // Single string literal type
+  a: A "A"
+  assert-eq("A", a, "A type should hold 'A'")
+
+  // Single number literal type
+  one: One 1
+  assert-eq(1, one, "One type should hold 1")
+
+  // Single boolean literal type
+  t: TrueOnly true
+  assert(t, "TrueOnly type should hold true")
+}

@@ -1,0 +1,114 @@
+::ai::context ns
+meta {
+    doc: "Utilities for fitting content into AI context windows. Pure functions, no dependencies."
+}
+
+// ============================================================================
+// Token estimation
+// ============================================================================
+
+estimate-tokens
+meta {
+    doc: "Rough token estimate (~4 chars per token). Good enough for budget checks."
+}
+fn (text: Str): Int {
+    max(Int(div(length(text), 4)), 1)
+}
+
+// ============================================================================
+// Sampling strategies
+// ============================================================================
+
+sample
+meta {
+    doc: "Sample a Vec down to max-items. Options: max-items (count), strategy (bookend/recent/even). Returns input unchanged if it fits."
+}
+fn (items: Vec, opts: Map): Vec {
+    max-items get(opts, "max-items", length(items))
+    strategy get(opts, "strategy", "bookend")
+
+    cond {
+        lte(length(items), max-items) => { items }
+        eq(strategy, "recent")        => { slice(items, sub(length(items), max-items)) }
+        eq(strategy, "even")          => { sample-even(items, max-items) }
+        =>                               { sample-bookend(items, max-items) }
+    }
+}
+
+sample-bookend fn (items: Vec, max-items: Int): Vec {
+    half Int(div(max-items, 2))
+    tail-half Int(sub(max-items, half))
+    head slice(items, 0, half)
+    tail slice(items, sub(length(items), tail-half))
+    [...head, ...tail]
+}
+
+sample-even fn (items: Vec, max-items: Int): Vec {
+    safe-step max(Int(div(length(items), max-items)), 1)
+    indices range(0, length(items), safe-step)
+    selected slice(indices, 0, max-items)
+    map(selected, (i) {
+        idx Int(i)
+        items[idx]
+    })
+}
+
+// ============================================================================
+// Fitting to token budgets
+// ============================================================================
+
+fit
+meta {
+    doc: "Drop items from the middle of a Vec until total tokens are under budget. Options: max-tokens, field."
+}
+fn (items: Vec, opts: Map): Vec {
+    max-tokens get(opts, "max-tokens", 4096)
+    field get(opts, "field", null)
+
+    item-text fn (item): Str {
+        cond {
+            is-some(field) => { Str(get(item, field, "")) }
+            is-str(item)   => { item }
+            =>             { to-json(item) }
+        }
+    }
+
+    total reduce(items, (acc, item) { add(acc, estimate-tokens(item-text(item))) }, 0)
+
+    cond {
+        lte(total, max-tokens) => { items }
+        => {
+            fit-with-sample(items, max-tokens, item-text, length(items))
+        }
+    }
+}
+
+fit-with-sample fn cond (items: Vec, max-tokens: Int, item-text: Fn, size: Int): Vec {
+    lte(size, 2) => { [first(items), last(items)] }
+    => {
+        candidate sample-bookend(items, size)
+        total reduce(candidate, (acc, item) { add(acc, estimate-tokens(item-text(item))) }, 0)
+        cond {
+            lte(total, max-tokens) => { candidate }
+            => {
+                safe-quarter max(Int(div(size, 4)), 1)
+                next-size Int(sub(size, safe-quarter))
+                fit-with-sample(items, max-tokens, item-text, next-size)
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Text truncation
+// ============================================================================
+
+truncate
+meta { doc: "Truncate text to a character limit. Appends suffix if truncated." }
+fn (text: Str, max-chars: Int, suffix: Str?): Str {
+    sfx or(suffix, "")
+    cond {
+        lte(length(text), max-chars) => { text }
+        => { concat(slice(text, 0, max-chars), sfx) }
+    }
+}

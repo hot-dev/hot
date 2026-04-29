@@ -1,0 +1,173 @@
+::ai::test::tool ns
+meta ["test"]
+
+::tool ::ai::tool
+
+// ---------------------------------------------------------------------------
+// Fixture functions used as tools
+// ---------------------------------------------------------------------------
+
+add-fn
+meta {doc: "Add two integers and return the sum."}
+fn (x: Int, y: Int): Int {
+    add(x, y)
+}
+
+greet-fn
+meta {doc: "Build a greeting for `name`."}
+fn (name: Str): Str {
+    `Hello, ${name}!`
+}
+
+untyped-input-fn
+meta {doc: "Echo back the entire input map (back-compat path)."}
+fn (input: Map): Map {
+    input
+}
+
+aliased-fn
+meta {
+    doc: "Original docstring (should lose to tool.description).",
+    tool: {name: "alias_name", description: "Tool-meta description."}
+}
+fn (q: Str): Str {
+    q
+}
+
+// ---------------------------------------------------------------------------
+// schema-from-fn
+// ---------------------------------------------------------------------------
+
+test-schema-from-fn-shape
+meta ["test"]
+fn () {
+    schema ::tool/schema-from-fn(add-fn)
+    assert-eq("::ai::test::tool/add-fn", schema.name)
+    assert-eq("Add two integers and return the sum.", schema.description)
+    assert-eq("object", schema.input-schema.type)
+    props schema.input-schema.properties
+    assert(is-some(get(props, "x")), "x property present")
+    assert(is-some(get(props, "y")), "y property present")
+}
+
+// ---------------------------------------------------------------------------
+// from-fn
+// ---------------------------------------------------------------------------
+
+test-from-fn-defaults
+meta ["test"]
+fn () {
+    t ::tool/from-fn(add-fn)
+    assert(is-type(t, ::tool/Tool), "from-fn returns a Tool")
+    assert-eq("::ai::test::tool/add-fn", t.name)
+    assert-eq("Add two integers and return the sum.", t.description)
+    assert-eq("object", t.input-schema.type)
+}
+
+test-from-fn-overrides
+meta ["test"]
+fn () {
+    t ::tool/from-fn(add-fn, {name: "add", description: "Sum two ints."})
+    assert-eq("add", t.name)
+    assert-eq("Sum two ints.", t.description)
+}
+
+test-from-fn-uses-tool-meta-display-name
+meta ["test"]
+fn () {
+    t ::tool/from-fn(aliased-fn)
+    assert-eq("alias_name", t.name)
+    assert-eq("Tool-meta description.", t.description)
+}
+
+test-dispatch-via-tool-meta-name
+meta ["test"]
+fn () {
+    tools ::tool/for-agent([aliased-fn])
+    call ::tool/ToolCall({
+        id: "call-alias",
+        name: "alias_name",
+        input: {q: "ping"}
+    })
+    result ::tool/dispatch(tools, call)
+    assert-eq(false, result.is-error)
+    assert-eq("ping", result.output)
+}
+
+test-for-agent-mixed
+meta ["test"]
+fn () {
+    custom ::tool/Tool({
+        name: "echo",
+        description: null,
+        input-schema: {type: "object", properties: {}},
+        output-schema: null,
+        fn: untyped-input-fn
+    })
+    tools ::tool/for-agent([add-fn, custom])
+    assert-eq(2, length(tools))
+    assert-eq("::ai::test::tool/add-fn", tools[0].name)
+    assert-eq("echo", tools[1].name)
+}
+
+// ---------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------
+
+test-dispatch-positional
+meta ["test"]
+fn () {
+    tools ::tool/for-agent([add-fn])
+    call ::tool/ToolCall({
+        id: "call-1",
+        name: "::ai::test::tool/add-fn",
+        input: {x: 2, y: 5}
+    })
+    result ::tool/dispatch(tools, call)
+    assert-eq("call-1", result.id)
+    assert-eq(7, result.output)
+    assert-eq(false, result.is-error)
+}
+
+test-dispatch-string-arg
+meta ["test"]
+fn () {
+    tools ::tool/for-agent([greet-fn])
+    call ::tool/ToolCall({
+        id: "call-2",
+        name: "::ai::test::tool/greet-fn",
+        input: {name: "Alice"}
+    })
+    result ::tool/dispatch(tools, call)
+    assert-eq("Hello, Alice!", result.output)
+}
+
+test-dispatch-unknown-tool
+meta ["test"]
+fn () {
+    tools ::tool/for-agent([add-fn])
+    call ::tool/ToolCall({
+        id: "call-3",
+        name: "missing",
+        input: {}
+    })
+    result ::tool/dispatch(tools, call)
+    assert-eq(true, result.is-error)
+}
+
+test-dispatch-named-map-arg
+meta ["test"]
+fn () {
+    // The function declares its parameter as `input: Map`, so the
+    // ToolCall must address it by that name. This mirrors how an LLM
+    // sees the auto-generated input-schema.
+    tools ::tool/for-agent([untyped-input-fn])
+    call ::tool/ToolCall({
+        id: "call-4",
+        name: "::ai::test::tool/untyped-input-fn",
+        input: {input: {a: 1, b: 2}}
+    })
+    result ::tool/dispatch(tools, call)
+    assert-eq(false, result.is-error)
+    assert-eq({a: 1, b: 2}, result.output)
+}

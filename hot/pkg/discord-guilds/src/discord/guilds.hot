@@ -1,0 +1,2623 @@
+::discord::discord::guilds ns
+
+api-request ::discord::api/request
+HttpError ::discord::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+AfkTimeouts type {
+
+}
+
+GuildWithCountsResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Any?,
+    home_header: Any?,
+    splash: Any?,
+    discovery_splash: Any?,
+    features: Vec<GuildFeatures>,
+    banner: Any?,
+    owner_id: SnowflakeType,
+    application_id: Any?,
+    region: Str,
+    afk_channel_id: Any?,
+    afk_timeout: AfkTimeouts,
+    system_channel_id: Any?,
+    system_channel_flags: Int,
+    widget_enabled: Bool,
+    widget_channel_id: Any?,
+    verification_level: VerificationLevels,
+    roles: Vec<GuildRoleResponse>,
+    default_message_notifications: UserNotificationSettings,
+    mfa_level: GuildMFALevel,
+    explicit_content_filter: GuildExplicitContentFilterTypes,
+    max_presences: Any?,
+    max_members: Int,
+    max_stage_video_channel_users: Int,
+    max_video_channel_users: Int,
+    vanity_url_code: Any?,
+    premium_tier: PremiumGuildTiers,
+    premium_subscription_count: Int,
+    preferred_locale: AvailableLocalesEnum,
+    rules_channel_id: Any?,
+    safety_alerts_channel_id: Any?,
+    public_updates_channel_id: Any?,
+    premium_progress_bar_enabled: Bool,
+    nsfw: Bool,
+    nsfw_level: GuildNSFWContentLevel,
+    emojis: Vec<EmojiResponse>,
+    stickers: Vec<GuildStickerResponse>,
+    approximate_member_count: Any?,
+    approximate_presence_count: Any?
+}
+
+ForumTagResponse type {
+    id: SnowflakeType,
+    name: Str,
+    moderated: Bool,
+    emoji_id: Any?,
+    emoji_name: Any?
+}
+
+ThreadResponse type {
+    id: SnowflakeType,
+    type: 10 | 11 | 12,
+    last_message_id: Any?,
+    flags: Int,
+    last_pin_timestamp: Any?,
+    guild_id: SnowflakeType,
+    name: Str,
+    parent_id: Any?,
+    rate_limit_per_user: Int?,
+    bitrate: Int?,
+    user_limit: Int?,
+    rtc_region: Any?,
+    video_quality_mode: VideoQualityModes?,
+    permissions: Any?,
+    owner_id: SnowflakeType,
+    thread_metadata: ThreadMetadataResponse,
+    message_count: Int,
+    member_count: Int,
+    total_message_sent: Int,
+    applied_tags: Vec<SnowflakeType>?,
+    member: ThreadMemberResponse?
+}
+
+ListGuildSoundboardSoundsResponse type {
+    items: Vec<SoundboardSoundResponse>
+}
+
+WelcomeScreenPatchRequestPartial type {
+    description: Any?,
+    welcome_channels: Any?,
+    enabled: Any?
+}
+
+WidgetUserDiscriminator type {
+
+}
+
+WidgetResponse type {
+    id: SnowflakeType,
+    name: Str,
+    instant_invite: Any?,
+    channels: Vec<WidgetChannel>,
+    members: Vec<WidgetMember>,
+    presence_count: Int
+}
+
+GuildWelcomeScreenChannelResponse type {
+    channel_id: SnowflakeType,
+    description: Str,
+    emoji_id: Any?,
+    emoji_name: Any?
+}
+
+GuildPatchRequestPartial type {
+    name: Str?,
+    description: Any?,
+    region: Any?,
+    icon: Any?,
+    verification_level: Any?,
+    default_message_notifications: Any?,
+    explicit_content_filter: Any?,
+    preferred_locale: Any?,
+    afk_timeout: Any?,
+    afk_channel_id: Any?,
+    system_channel_id: Any?,
+    splash: Any?,
+    banner: Any?,
+    system_channel_flags: Any?,
+    features: Any?,
+    discovery_splash: Any?,
+    home_header: Any?,
+    rules_channel_id: Any?,
+    safety_alerts_channel_id: Any?,
+    public_updates_channel_id: Any?,
+    premium_progress_bar_enabled: Any?
+}
+
+PremiumGuildTiers type {
+
+}
+
+OnboardingPromptOptionResponse type {
+    id: SnowflakeType,
+    title: Str,
+    description: Str,
+    emoji: SettingsEmojiResponse,
+    role_ids: Vec<SnowflakeType>,
+    channel_ids: Vec<SnowflakeType>
+}
+
+AuditLogObjectChangeResponse type {
+    key: Any?,
+    new_value: Any?,
+    old_value: Any?
+}
+
+GuildHomeSettingsResponse type {
+    guild_id: SnowflakeType,
+    enabled: Bool,
+    welcome_message: WelcomeMessageResponse?,
+    new_member_actions: Vec,
+    resource_channels: Vec
+}
+
+UpdateRoleRequestPartial type {
+    name: Any?,
+    permissions: Any?,
+    color: Any?,
+    hoist: Any?,
+    mentionable: Any?,
+    icon: Any?,
+    unicode_emoji: Any?
+}
+
+WidgetMember type {
+    id: Str,
+    username: Str,
+    discriminator: WidgetUserDiscriminator,
+    avatar: Any?,
+    status: Str,
+    avatar_url: Str,
+    activity: WidgetActivity?,
+    deaf: Bool?,
+    mute: Bool?,
+    self_deaf: Bool?,
+    self_mute: Bool?,
+    suppress: Bool?,
+    channel_id: SnowflakeType?
+}
+
+GuildTemplateRoleResponse type {
+    id: Int,
+    name: Str,
+    permissions: Str,
+    color: Int,
+    colors: Any?,
+    hoist: Bool,
+    mentionable: Bool,
+    icon: Any?,
+    unicode_emoji: Any?
+}
+
+WelcomeMessageResponse type {
+    author_ids: Vec<SnowflakeType>,
+    message: Str
+}
+
+ApplicationCommandPermissionType type {
+
+}
+
+CommandPermissionResponse type {
+    id: SnowflakeType,
+    type: ApplicationCommandPermissionType,
+    permission: Bool
+}
+
+ApplicationCommandPermission type {
+    id: SnowflakeType,
+    type: ApplicationCommandPermissionType,
+    permission: Bool
+}
+
+GuildRoleResponse type {
+    id: SnowflakeType,
+    name: Str,
+    description: Any?,
+    permissions: Str,
+    position: Int,
+    color: Int,
+    colors: GuildRoleColorsResponse,
+    hoist: Bool,
+    managed: Bool,
+    mentionable: Bool,
+    icon: Any?,
+    unicode_emoji: Any?,
+    tags: GuildRoleTagsResponse?,
+    flags: Int
+}
+
+ChannelPermissionOverwrites type {
+
+}
+
+ScheduledEventUserResponse type {
+    guild_scheduled_event_id: SnowflakeType,
+    user_id: SnowflakeType,
+    user: UserResponse?,
+    member: GuildMemberResponse?
+}
+
+GuildFeatures type {
+
+}
+
+ThreadAutoArchiveDuration type {
+
+}
+
+GuildStickerResponse type {
+    id: SnowflakeType,
+    name: Str,
+    tags: Str,
+    type: 2,
+    format_type: Any?,
+    description: Any?,
+    available: Bool,
+    guild_id: SnowflakeType,
+    user: UserResponse?
+}
+
+EmojiResponse type {
+    id: SnowflakeType,
+    name: Str,
+    user: UserResponse?,
+    roles: Vec<SnowflakeType>,
+    require_colons: Bool,
+    managed: Bool,
+    animated: Bool,
+    available: Bool
+}
+
+ChannelPermissionOverwriteResponse type {
+    id: SnowflakeType,
+    type: ChannelPermissionOverwrites,
+    allow: Str,
+    deny: Str
+}
+
+PrivateGuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool,
+    permissions: Str?
+}
+
+GuildAuditLogResponse type {
+    audit_log_entries: Vec<AuditLogEntryResponse>,
+    users: Vec<UserResponse>,
+    integrations: Vec,
+    webhooks: Vec,
+    guild_scheduled_events: Vec,
+    threads: Vec<ThreadResponse>,
+    application_commands: Vec<ApplicationCommandResponse>,
+    auto_moderation_rules: Vec
+}
+
+GuildTemplateChannelResponse type {
+    id: Any?,
+    type: 0 | 2 | 4 | 15,
+    name: Any?,
+    position: Any?,
+    topic: Any?,
+    bitrate: Int,
+    user_limit: Int,
+    nsfw: Bool,
+    rate_limit_per_user: Int,
+    parent_id: Any?,
+    default_auto_archive_duration: Any?,
+    permission_overwrites: Vec,
+    available_tags: Any?,
+    template: Str,
+    default_reaction_emoji: Any?,
+    default_thread_rate_limit_per_user: Any?,
+    default_sort_order: Any?,
+    default_forum_layout: Any?,
+    default_tag_setting: Any?,
+    icon_emoji: Any?,
+    theme_color: Any?
+}
+
+BotAddGuildMemberRequest type {
+    nick: Any?,
+    roles: Any?,
+    mute: Any?,
+    deaf: Any?,
+    access_token: Str,
+    flags: Any?
+}
+
+VoiceRegionResponse type {
+    id: Str,
+    name: Str,
+    custom: Bool,
+    deprecated: Bool,
+    optimal: Bool
+}
+
+SoundboardCreateRequest type {
+    name: Str,
+    volume: Any?,
+    emoji_id: Any?,
+    emoji_name: Any?,
+    sound: Str
+}
+
+GuildWelcomeScreenResponse type {
+    description: Any?,
+    welcome_channels: Vec<GuildWelcomeScreenChannelResponse>
+}
+
+GuildTemplateResponse type {
+    code: Str,
+    name: Str,
+    description: Any?,
+    usage_count: Int,
+    creator_id: SnowflakeType,
+    creator: Any?,
+    created_at: Str,
+    updated_at: Str,
+    source_guild_id: SnowflakeType,
+    serialized_source_guild: GuildTemplateSnapshotResponse,
+    is_dirty: Any?
+}
+
+Int53Type type {
+
+}
+
+VerificationLevels type {
+
+}
+
+GuildChannelResponse type {
+    id: SnowflakeType,
+    type: 0 | 2 | 4 | 5 | 13 | 14 | 15,
+    last_message_id: Any?,
+    flags: Int,
+    last_pin_timestamp: Any?,
+    guild_id: SnowflakeType,
+    name: Str,
+    parent_id: Any?,
+    rate_limit_per_user: Int?,
+    bitrate: Int?,
+    user_limit: Int?,
+    rtc_region: Any?,
+    video_quality_mode: VideoQualityModes?,
+    permissions: Any?,
+    topic: Any?,
+    default_auto_archive_duration: ThreadAutoArchiveDuration?,
+    default_thread_rate_limit_per_user: Int?,
+    position: Int,
+    permission_overwrites: Vec<ChannelPermissionOverwriteResponse>?,
+    nsfw: Bool?,
+    available_tags: Vec<ForumTagResponse>?,
+    default_reaction_emoji: Any?,
+    default_sort_order: Any?,
+    default_forum_layout: Any?,
+    default_tag_setting: Any?,
+    hd_streaming_until: Str?,
+    hd_streaming_buyer_id: SnowflakeType?
+}
+
+GuildBanResponse type {
+    user: UserResponse,
+    reason: Any?
+}
+
+GuildMFALevel type {
+
+}
+
+OnboardingPromptType type {
+
+}
+
+AuditLogActionTypes type {
+
+}
+
+MyGuildResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    banner: Any?,
+    owner: Bool,
+    permissions: Str,
+    features: Vec<GuildFeatures>,
+    approximate_member_count: Any?,
+    approximate_presence_count: Any?
+}
+
+GuildPruneResponse type {
+    pruned: Any?
+}
+
+ApplicationIntegrationType type {
+
+}
+
+CommandPermissionsResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    guild_id: SnowflakeType,
+    permissions: Vec<CommandPermissionResponse>
+}
+
+ApplicationCommandResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    version: SnowflakeType,
+    default_member_permissions: Any?,
+    type: ApplicationCommandType,
+    name: Str,
+    name_localized: Str?,
+    name_localizations: Any?,
+    description: Str,
+    description_localized: Str?,
+    description_localizations: Any?,
+    guild_id: SnowflakeType?,
+    dm_permission: Bool?,
+    contexts: Any?,
+    integration_types: Vec<ApplicationIntegrationType>?,
+    options: Vec?,
+    nsfw: Bool?
+}
+
+ThreadMetadataResponse type {
+    archived: Bool,
+    archive_timestamp: Any?,
+    auto_archive_duration: ThreadAutoArchiveDuration,
+    locked: Bool,
+    create_timestamp: Str?,
+    invitable: Bool?
+}
+
+GuildExplicitContentFilterTypes type {
+
+}
+
+VanityURLResponse type {
+    code: Any?,
+    uses: Int,
+    error: Any?
+}
+
+CreateGuildChannelRequest type {
+    type: Any?,
+    name: Str,
+    position: Any?,
+    topic: Any?,
+    bitrate: Any?,
+    user_limit: Any?,
+    nsfw: Any?,
+    rate_limit_per_user: Any?,
+    parent_id: Any?,
+    permission_overwrites: Any?,
+    rtc_region: Any?,
+    video_quality_mode: Any?,
+    default_auto_archive_duration: Any?,
+    default_reaction_emoji: Any?,
+    default_thread_rate_limit_per_user: Any?,
+    default_sort_order: Any?,
+    default_forum_layout: Any?,
+    default_tag_setting: Any?,
+    available_tags: Any?
+}
+
+UserGuildOnboardingResponse type {
+    guild_id: SnowflakeType,
+    prompts: Vec<OnboardingPromptResponse>,
+    default_channel_ids: Vec<SnowflakeType>,
+    enabled: Bool
+}
+
+GuildRoleColorsResponse type {
+    primary_color: Int,
+    secondary_color: Any?,
+    tertiary_color: Any?
+}
+
+VideoQualityModes type {
+
+}
+
+GuildPreviewResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Any?,
+    home_header: Any?,
+    splash: Any?,
+    discovery_splash: Any?,
+    features: Vec<GuildFeatures>,
+    approximate_member_count: Int,
+    approximate_presence_count: Int,
+    emojis: Vec<EmojiResponse>,
+    stickers: Vec<GuildStickerResponse>
+}
+
+ApplicationCommandPatchRequestPartial type {
+    name: Str?,
+    name_localizations: Any?,
+    description: Any?,
+    description_localizations: Any?,
+    options: Any?,
+    default_member_permissions: Any?,
+    dm_permission: Any?,
+    contexts: Any?,
+    integration_types: Any?,
+    handler: Any?
+}
+
+BulkBanUsersResponse type {
+    banned_users: Vec<SnowflakeType>,
+    failed_users: Vec<SnowflakeType>
+}
+
+GuildOnboardingResponse type {
+    guild_id: SnowflakeType,
+    prompts: Vec<OnboardingPromptResponse>,
+    default_channel_ids: Vec<SnowflakeType>,
+    enabled: Bool
+}
+
+PruneGuildRequest type {
+    days: Any?,
+    compute_prune_count: Any?,
+    include_roles: Any?
+}
+
+ApplicationCommandCreateRequest type {
+    name: Str,
+    name_localizations: Any?,
+    description: Any?,
+    description_localizations: Any?,
+    options: Any?,
+    default_member_permissions: Any?,
+    dm_permission: Any?,
+    contexts: Any?,
+    integration_types: Any?,
+    handler: Any?,
+    type: Any?
+}
+
+AvailableLocalesEnum type {
+
+}
+
+UpdateGuildOnboardingRequest type {
+    prompts: Any?,
+    enabled: Any?,
+    default_channel_ids: Any?,
+    mode: Any?
+}
+
+GuildTemplateSnapshotResponse type {
+    name: Str,
+    description: Any?,
+    region: Any?,
+    verification_level: VerificationLevels,
+    default_message_notifications: UserNotificationSettings,
+    explicit_content_filter: GuildExplicitContentFilterTypes,
+    preferred_locale: AvailableLocalesEnum,
+    afk_channel_id: Any?,
+    afk_timeout: AfkTimeouts,
+    system_channel_id: Any?,
+    system_channel_flags: Int,
+    roles: Vec<GuildTemplateRoleResponse>,
+    channels: Vec<GuildTemplateChannelResponse>
+}
+
+AuditLogEntryResponse type {
+    id: SnowflakeType,
+    action_type: AuditLogActionTypes,
+    user_id: Any?,
+    target_id: Any?,
+    changes: Vec<AuditLogObjectChangeResponse>?,
+    options: Map?,
+    reason: Str?
+}
+
+SoundboardSoundResponse type {
+    name: Str,
+    sound_id: SnowflakeType,
+    volume: Dec,
+    emoji_id: Any?,
+    emoji_name: Any?,
+    guild_id: SnowflakeType?,
+    available: Bool,
+    user: UserResponse?
+}
+
+WidgetSettingsResponse type {
+    enabled: Bool,
+    channel_id: Any?
+}
+
+BulkBanUsersRequest type {
+    user_ids: Vec<SnowflakeType>,
+    delete_message_seconds: Any?
+}
+
+WidgetChannel type {
+    id: SnowflakeType,
+    name: Str,
+    position: Int
+}
+
+ApplicationCommandType type {
+
+}
+
+SettingsEmojiResponse type {
+    id: Any?,
+    name: Any?,
+    animated: Bool
+}
+
+WidgetActivity type {
+    name: Str
+}
+
+SoundboardPatchRequestPartial type {
+    name: Str?,
+    volume: Any?,
+    emoji_id: Any?,
+    emoji_name: Any?
+}
+
+OnboardingPromptResponse type {
+    id: SnowflakeType,
+    title: Str,
+    options: Vec<OnboardingPromptOptionResponse>,
+    single_select: Bool,
+    required: Bool,
+    in_onboarding: Bool,
+    type: OnboardingPromptType
+}
+
+CreateRoleRequest type {
+    name: Any?,
+    permissions: Any?,
+    color: Any?,
+    hoist: Any?,
+    mentionable: Any?,
+    icon: Any?,
+    unicode_emoji: Any?
+}
+
+ThreadMemberResponse type {
+    id: SnowflakeType,
+    user_id: SnowflakeType,
+    join_timestamp: Str,
+    flags: Int,
+    member: GuildMemberResponse?
+}
+
+GuildResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Any?,
+    home_header: Any?,
+    splash: Any?,
+    discovery_splash: Any?,
+    features: Vec<GuildFeatures>,
+    banner: Any?,
+    owner_id: SnowflakeType,
+    application_id: Any?,
+    region: Str,
+    afk_channel_id: Any?,
+    afk_timeout: AfkTimeouts,
+    system_channel_id: Any?,
+    system_channel_flags: Int,
+    widget_enabled: Bool,
+    widget_channel_id: Any?,
+    verification_level: VerificationLevels,
+    roles: Vec<GuildRoleResponse>,
+    default_message_notifications: UserNotificationSettings,
+    mfa_level: GuildMFALevel,
+    explicit_content_filter: GuildExplicitContentFilterTypes,
+    max_presences: Any?,
+    max_members: Int,
+    max_stage_video_channel_users: Int,
+    max_video_channel_users: Int,
+    vanity_url_code: Any?,
+    premium_tier: PremiumGuildTiers,
+    premium_subscription_count: Int,
+    preferred_locale: AvailableLocalesEnum,
+    rules_channel_id: Any?,
+    safety_alerts_channel_id: Any?,
+    public_updates_channel_id: Any?,
+    premium_progress_bar_enabled: Bool,
+    nsfw: Bool,
+    nsfw_level: GuildNSFWContentLevel,
+    emojis: Vec<EmojiResponse>,
+    stickers: Vec<GuildStickerResponse>
+}
+
+SnowflakeType type {
+
+}
+
+GuildRoleTagsResponse type {
+    premium_subscriber: Any?,
+    bot_id: SnowflakeType?,
+    integration_id: SnowflakeType?,
+    subscription_listing_id: SnowflakeType?,
+    available_for_purchase: Any?,
+    guild_connections: Any?
+}
+
+UserNotificationSettings type {
+
+}
+
+UserResponse type {
+    id: SnowflakeType,
+    username: Str,
+    avatar: Any?,
+    discriminator: Str,
+    public_flags: Int,
+    flags: Int53Type,
+    bot: Bool?,
+    system: Bool?,
+    banner: Any?,
+    accent_color: Any?,
+    global_name: Any?,
+    avatar_decoration_data: Any?,
+    collectibles: Any?,
+    primary_guild: Any?
+}
+
+GuildNSFWContentLevel type {
+
+}
+
+GuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool
+}
+
+GuildRoleMemberCountsRequest type {
+
+}
+
+GuildRoleMemberCountsResponse type {
+    value: Map
+}
+
+
+member-counts
+meta {doc: """GET /guilds/{guild_id}/roles/member-counts"""}
+fn (request: GuildRoleMemberCountsRequest): GuildRoleMemberCountsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/roles/member-counts`)
+  if(is-ok-response(response), GuildRoleMemberCountsResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildsOnboardingRequest type {
+
+}
+
+GetGuildsOnboardingResponse type {
+    guild_id: SnowflakeType,
+    prompts: Vec<OnboardingPromptResponse>,
+    default_channel_ids: Vec<SnowflakeType>,
+    enabled: Bool
+}
+
+
+get-onboarding
+meta {doc: """GET /guilds/{guild_id}/onboarding"""}
+fn (request: GetGuildsOnboardingRequest): GetGuildsOnboardingResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/onboarding`)
+  if(is-ok-response(response), GetGuildsOnboardingResponse(response.body), err(HttpError(response)))
+}
+
+PutGuildsOnboardingRequest type {
+    prompts: Any?,
+    enabled: Any?,
+    default_channel_ids: Any?,
+    mode: Any?
+}
+
+PutGuildsOnboardingResponse type {
+    guild_id: SnowflakeType,
+    prompts: Vec<OnboardingPromptResponse>,
+    default_channel_ids: Vec<SnowflakeType>,
+    enabled: Bool
+}
+
+
+put-onboarding
+meta {doc: """PUT /guilds/{guild_id}/onboarding"""}
+fn (request: PutGuildsOnboardingRequest): PutGuildsOnboardingResponse {
+  response api-request("PUT", `${::discord/BASE_URL}/guilds/{guild_id}/onboarding`, {}, request)
+  if(is-ok-response(response), PutGuildsOnboardingResponse(response.body), err(HttpError(response)))
+}
+
+ListMyGuildsRequest type {
+  before: Str,
+  after: Str,
+  limit: Str,
+  with-counts: Str
+}
+
+ListMyGuildsResponse type {
+    value: Any
+}
+
+
+list
+meta {doc: """GET /users/@me/guilds"""}
+fn (request: ListMyGuildsRequest): ListMyGuildsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/users/@me/guilds?before=${request.before}&after=${request.after}&limit=${request.limit}&with_counts=${request.with-counts}`)
+  if(is-ok-response(response), ListMyGuildsResponse(response.body), err(HttpError(response)))
+}
+
+PreviewPruneGuildRequest type {
+  days: Str,
+  include-roles: Str
+}
+
+PreviewPruneGuildResponse type {
+    pruned: Any?
+}
+
+
+preview-guild
+meta {doc: """GET /guilds/{guild_id}/prune"""}
+fn (request: PreviewPruneGuildRequest): PreviewPruneGuildResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/prune?days=${request.days}&include_roles=${request.include-roles}`)
+  if(is-ok-response(response), PreviewPruneGuildResponse(response.body), err(HttpError(response)))
+}
+
+PruneGuildRequest type {
+    days: Any?,
+    compute_prune_count: Any?,
+    include_roles: Any?
+}
+
+PruneGuildResponse type {
+    pruned: Any?
+}
+
+
+guild
+meta {doc: """POST /guilds/{guild_id}/prune"""}
+fn (request: PruneGuildRequest): PruneGuildResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/prune`, {}, request)
+  if(is-ok-response(response), PruneGuildResponse(response.body), err(HttpError(response)))
+}
+
+BulkBanUsersFromGuildRequest type {
+    user_ids: Vec<SnowflakeType>,
+    delete_message_seconds: Any?
+}
+
+BulkBanUsersFromGuildResponse type {
+    banned_users: Vec<SnowflakeType>,
+    failed_users: Vec<SnowflakeType>
+}
+
+
+bulk-users-from-guild
+meta {doc: """POST /guilds/{guild_id}/bulk-ban"""}
+fn (request: BulkBanUsersFromGuildRequest): BulkBanUsersFromGuildResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/bulk-ban`, {}, request)
+  if(is-ok-response(response), BulkBanUsersFromGuildResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildApplicationCommandsRequest type {
+  with-localizations: Str
+}
+
+ListGuildApplicationCommandsResponse type {
+    value: Any
+}
+
+
+list-application-commands
+meta {doc: """GET /applications/{application_id}/guilds/{guild_id}/commands"""}
+fn (request: ListGuildApplicationCommandsRequest): ListGuildApplicationCommandsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands?with_localizations=${request.with-localizations}`)
+  if(is-ok-response(response), ListGuildApplicationCommandsResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildApplicationCommandRequest type {
+    name: Str,
+    name_localizations: Any?,
+    description: Any?,
+    description_localizations: Any?,
+    options: Any?,
+    default_member_permissions: Any?,
+    dm_permission: Any?,
+    contexts: Any?,
+    integration_types: Any?,
+    handler: Any?,
+    type: Any?
+}
+
+CreateGuildApplicationCommandResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    version: SnowflakeType,
+    default_member_permissions: Any?,
+    type: ApplicationCommandType,
+    name: Str,
+    name_localized: Str?,
+    name_localizations: Any?,
+    description: Str,
+    description_localized: Str?,
+    description_localizations: Any?,
+    guild_id: SnowflakeType?,
+    dm_permission: Bool?,
+    contexts: Any?,
+    integration_types: Vec<ApplicationIntegrationType>?,
+    options: Vec?,
+    nsfw: Bool?
+}
+
+
+create-application-command
+meta {doc: """POST /applications/{application_id}/guilds/{guild_id}/commands"""}
+fn (request: CreateGuildApplicationCommandRequest): CreateGuildApplicationCommandResponse {
+  response api-request("POST", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands`, {}, request)
+  if(is-ok-response(response), CreateGuildApplicationCommandResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildApplicationCommandPermissionsRequest type {
+
+}
+
+ListGuildApplicationCommandPermissionsResponse type {
+    value: Vec<CommandPermissionsResponse>
+}
+
+
+list-application-command-permissions
+meta {
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/permissions"""
+}
+fn (request: ListGuildApplicationCommandPermissionsRequest): ListGuildApplicationCommandPermissionsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands/permissions`)
+  if(is-ok-response(response), ListGuildApplicationCommandPermissionsResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildApplicationCommandRequest type {
+
+}
+
+GetGuildApplicationCommandResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    version: SnowflakeType,
+    default_member_permissions: Any?,
+    type: ApplicationCommandType,
+    name: Str,
+    name_localized: Str?,
+    name_localizations: Any?,
+    description: Str,
+    description_localized: Str?,
+    description_localizations: Any?,
+    guild_id: SnowflakeType?,
+    dm_permission: Bool?,
+    contexts: Any?,
+    integration_types: Vec<ApplicationIntegrationType>?,
+    options: Vec?,
+    nsfw: Bool?
+}
+
+
+get-application-command
+meta {
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/{command_id}"""
+}
+fn (request: GetGuildApplicationCommandRequest): GetGuildApplicationCommandResponse {
+  response api-request("GET", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands/{command_id}`)
+  if(is-ok-response(response), GetGuildApplicationCommandResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildApplicationCommandRequest type {
+    name: Str?,
+    name_localizations: Any?,
+    description: Any?,
+    description_localizations: Any?,
+    options: Any?,
+    default_member_permissions: Any?,
+    dm_permission: Any?,
+    contexts: Any?,
+    integration_types: Any?,
+    handler: Any?
+}
+
+UpdateGuildApplicationCommandResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    version: SnowflakeType,
+    default_member_permissions: Any?,
+    type: ApplicationCommandType,
+    name: Str,
+    name_localized: Str?,
+    name_localizations: Any?,
+    description: Str,
+    description_localized: Str?,
+    description_localizations: Any?,
+    guild_id: SnowflakeType?,
+    dm_permission: Bool?,
+    contexts: Any?,
+    integration_types: Vec<ApplicationIntegrationType>?,
+    options: Vec?,
+    nsfw: Bool?
+}
+
+
+update-application-command
+meta {
+    doc: """PATCH /applications/{application_id}/guilds/{guild_id}/commands/{command_id}"""
+}
+fn (request: UpdateGuildApplicationCommandRequest): UpdateGuildApplicationCommandResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands/{command_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildApplicationCommandResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildApplicationCommandRequest type {
+
+}
+
+DeleteGuildApplicationCommandResponse type {
+
+}
+
+
+delete-application-command
+meta {
+    doc: """DELETE /applications/{application_id}/guilds/{guild_id}/commands/{command_id}"""
+}
+fn (request: DeleteGuildApplicationCommandRequest): DeleteGuildApplicationCommandResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands/{command_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+GetGuildApplicationCommandPermissionsRequest type {
+
+}
+
+GetGuildApplicationCommandPermissionsResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    guild_id: SnowflakeType,
+    permissions: Vec<CommandPermissionResponse>
+}
+
+
+get-application-command-permissions
+meta {
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/{command_id}/permissions"""
+}
+fn (request: GetGuildApplicationCommandPermissionsRequest): GetGuildApplicationCommandPermissionsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands/{command_id}/permissions`)
+  if(is-ok-response(response), GetGuildApplicationCommandPermissionsResponse(response.body), err(HttpError(response)))
+}
+
+SetGuildApplicationCommandPermissionsRequest type {
+    permissions: Any?
+}
+
+SetGuildApplicationCommandPermissionsResponse type {
+    id: SnowflakeType,
+    application_id: SnowflakeType,
+    guild_id: SnowflakeType,
+    permissions: Vec<CommandPermissionResponse>
+}
+
+
+set-application-command-permissions
+meta {
+    doc: """PUT /applications/{application_id}/guilds/{guild_id}/commands/{command_id}/permissions"""
+}
+fn (request: SetGuildApplicationCommandPermissionsRequest): SetGuildApplicationCommandPermissionsResponse {
+  response api-request("PUT", `${::discord/BASE_URL}/applications/{application_id}/guilds/{guild_id}/commands/{command_id}/permissions`, {}, request)
+  if(is-ok-response(response), SetGuildApplicationCommandPermissionsResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildTemplateRequest type {
+
+}
+
+GetGuildTemplateResponse type {
+    code: Str,
+    name: Str,
+    description: Any?,
+    usage_count: Int,
+    creator_id: SnowflakeType,
+    creator: Any?,
+    created_at: Str,
+    updated_at: Str,
+    source_guild_id: SnowflakeType,
+    serialized_source_guild: GuildTemplateSnapshotResponse,
+    is_dirty: Any?
+}
+
+
+get-template
+meta {doc: """GET /guilds/templates/{code}"""}
+fn (request: GetGuildTemplateRequest): GetGuildTemplateResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/templates/{code}`)
+  if(is-ok-response(response), GetGuildTemplateResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildRequest type {
+  with-counts: Str
+}
+
+GetGuildResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Any?,
+    home_header: Any?,
+    splash: Any?,
+    discovery_splash: Any?,
+    features: Vec<GuildFeatures>,
+    banner: Any?,
+    owner_id: SnowflakeType,
+    application_id: Any?,
+    region: Str,
+    afk_channel_id: Any?,
+    afk_timeout: AfkTimeouts,
+    system_channel_id: Any?,
+    system_channel_flags: Int,
+    widget_enabled: Bool,
+    widget_channel_id: Any?,
+    verification_level: VerificationLevels,
+    roles: Vec<GuildRoleResponse>,
+    default_message_notifications: UserNotificationSettings,
+    mfa_level: GuildMFALevel,
+    explicit_content_filter: GuildExplicitContentFilterTypes,
+    max_presences: Any?,
+    max_members: Int,
+    max_stage_video_channel_users: Int,
+    max_video_channel_users: Int,
+    vanity_url_code: Any?,
+    premium_tier: PremiumGuildTiers,
+    premium_subscription_count: Int,
+    preferred_locale: AvailableLocalesEnum,
+    rules_channel_id: Any?,
+    safety_alerts_channel_id: Any?,
+    public_updates_channel_id: Any?,
+    premium_progress_bar_enabled: Bool,
+    nsfw: Bool,
+    nsfw_level: GuildNSFWContentLevel,
+    emojis: Vec<EmojiResponse>,
+    stickers: Vec<GuildStickerResponse>,
+    approximate_member_count: Any?,
+    approximate_presence_count: Any?
+}
+
+
+get
+meta {doc: """GET /guilds/{guild_id}"""}
+fn (request: GetGuildRequest): GetGuildResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}?with_counts=${request.with-counts}`)
+  if(is-ok-response(response), GetGuildResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildRequest type {
+    name: Str?,
+    description: Any?,
+    region: Any?,
+    icon: Any?,
+    verification_level: Any?,
+    default_message_notifications: Any?,
+    explicit_content_filter: Any?,
+    preferred_locale: Any?,
+    afk_timeout: Any?,
+    afk_channel_id: Any?,
+    system_channel_id: Any?,
+    splash: Any?,
+    banner: Any?,
+    system_channel_flags: Any?,
+    features: Any?,
+    discovery_splash: Any?,
+    home_header: Any?,
+    rules_channel_id: Any?,
+    safety_alerts_channel_id: Any?,
+    public_updates_channel_id: Any?,
+    premium_progress_bar_enabled: Any?
+}
+
+UpdateGuildResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Any?,
+    home_header: Any?,
+    splash: Any?,
+    discovery_splash: Any?,
+    features: Vec<GuildFeatures>,
+    banner: Any?,
+    owner_id: SnowflakeType,
+    application_id: Any?,
+    region: Str,
+    afk_channel_id: Any?,
+    afk_timeout: AfkTimeouts,
+    system_channel_id: Any?,
+    system_channel_flags: Int,
+    widget_enabled: Bool,
+    widget_channel_id: Any?,
+    verification_level: VerificationLevels,
+    roles: Vec<GuildRoleResponse>,
+    default_message_notifications: UserNotificationSettings,
+    mfa_level: GuildMFALevel,
+    explicit_content_filter: GuildExplicitContentFilterTypes,
+    max_presences: Any?,
+    max_members: Int,
+    max_stage_video_channel_users: Int,
+    max_video_channel_users: Int,
+    vanity_url_code: Any?,
+    premium_tier: PremiumGuildTiers,
+    premium_subscription_count: Int,
+    preferred_locale: AvailableLocalesEnum,
+    rules_channel_id: Any?,
+    safety_alerts_channel_id: Any?,
+    public_updates_channel_id: Any?,
+    premium_progress_bar_enabled: Bool,
+    nsfw: Bool,
+    nsfw_level: GuildNSFWContentLevel,
+    emojis: Vec<EmojiResponse>,
+    stickers: Vec<GuildStickerResponse>
+}
+
+
+update
+meta {doc: """PATCH /guilds/{guild_id}"""}
+fn (request: UpdateGuildRequest): UpdateGuildResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildAuditLogEntriesRequest type {
+  user-id: Str,
+  target-id: Str,
+  action-type: Str,
+  before: Str,
+  after: Str,
+  limit: Str
+}
+
+ListGuildAuditLogEntriesResponse type {
+    audit_log_entries: Vec<AuditLogEntryResponse>,
+    users: Vec<UserResponse>,
+    integrations: Vec,
+    webhooks: Vec,
+    guild_scheduled_events: Vec,
+    threads: Vec<ThreadResponse>,
+    application_commands: Vec<ApplicationCommandResponse>,
+    auto_moderation_rules: Vec
+}
+
+
+list-audit-log-entries
+meta {doc: """GET /guilds/{guild_id}/audit-logs"""}
+fn (request: ListGuildAuditLogEntriesRequest): ListGuildAuditLogEntriesResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/audit-logs?user_id=${request.user-id}&target_id=${request.target-id}&action_type=${request.action-type}&before=${request.before}&after=${request.after}&limit=${request.limit}`)
+  if(is-ok-response(response), ListGuildAuditLogEntriesResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildBansRequest type {
+  limit: Str,
+  before: Str,
+  after: Str
+}
+
+ListGuildBansResponse type {
+    value: Any
+}
+
+
+list-bans
+meta {doc: """GET /guilds/{guild_id}/bans"""}
+fn (request: ListGuildBansRequest): ListGuildBansResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/bans?limit=${request.limit}&before=${request.before}&after=${request.after}`)
+  if(is-ok-response(response), ListGuildBansResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildBanRequest type {
+
+}
+
+GetGuildBanResponse type {
+    user: UserResponse,
+    reason: Any?
+}
+
+
+get-ban
+meta {doc: """GET /guilds/{guild_id}/bans/{user_id}"""}
+fn (request: GetGuildBanRequest): GetGuildBanResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/bans/{user_id}`)
+  if(is-ok-response(response), GetGuildBanResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildChannelsRequest type {
+
+}
+
+ListGuildChannelsResponse type {
+    value: Any
+}
+
+
+list-channels
+meta {doc: """GET /guilds/{guild_id}/channels"""}
+fn (request: ListGuildChannelsRequest): ListGuildChannelsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/channels`)
+  if(is-ok-response(response), ListGuildChannelsResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildChannelRequest type {
+    type: Any?,
+    name: Str,
+    position: Any?,
+    topic: Any?,
+    bitrate: Any?,
+    user_limit: Any?,
+    nsfw: Any?,
+    rate_limit_per_user: Any?,
+    parent_id: Any?,
+    permission_overwrites: Any?,
+    rtc_region: Any?,
+    video_quality_mode: Any?,
+    default_auto_archive_duration: Any?,
+    default_reaction_emoji: Any?,
+    default_thread_rate_limit_per_user: Any?,
+    default_sort_order: Any?,
+    default_forum_layout: Any?,
+    default_tag_setting: Any?,
+    available_tags: Any?
+}
+
+CreateGuildChannelResponse type {
+    id: SnowflakeType,
+    type: 0 | 2 | 4 | 5 | 13 | 14 | 15,
+    last_message_id: Any?,
+    flags: Int,
+    last_pin_timestamp: Any?,
+    guild_id: SnowflakeType,
+    name: Str,
+    parent_id: Any?,
+    rate_limit_per_user: Int?,
+    bitrate: Int?,
+    user_limit: Int?,
+    rtc_region: Any?,
+    video_quality_mode: VideoQualityModes?,
+    permissions: Any?,
+    topic: Any?,
+    default_auto_archive_duration: ThreadAutoArchiveDuration?,
+    default_thread_rate_limit_per_user: Int?,
+    position: Int,
+    permission_overwrites: Vec<ChannelPermissionOverwriteResponse>?,
+    nsfw: Bool?,
+    available_tags: Vec<ForumTagResponse>?,
+    default_reaction_emoji: Any?,
+    default_sort_order: Any?,
+    default_forum_layout: Any?,
+    default_tag_setting: Any?,
+    hd_streaming_until: Str?,
+    hd_streaming_buyer_id: SnowflakeType?
+}
+
+
+create-channel
+meta {doc: """POST /guilds/{guild_id}/channels"""}
+fn (request: CreateGuildChannelRequest): CreateGuildChannelResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/channels`, {}, request)
+  if(is-ok-response(response), CreateGuildChannelResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildEmojisRequest type {
+
+}
+
+ListGuildEmojisResponse type {
+    value: Any
+}
+
+
+list-emojis
+meta {doc: """GET /guilds/{guild_id}/emojis"""}
+fn (request: ListGuildEmojisRequest): ListGuildEmojisResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/emojis`)
+  if(is-ok-response(response), ListGuildEmojisResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildEmojiRequest type {
+    name: Str,
+    image: Str,
+    roles: Any?
+}
+
+CreateGuildEmojiResponse type {
+    id: SnowflakeType,
+    name: Str,
+    user: UserResponse?,
+    roles: Vec<SnowflakeType>,
+    require_colons: Bool,
+    managed: Bool,
+    animated: Bool,
+    available: Bool
+}
+
+
+create-emoji
+meta {doc: """POST /guilds/{guild_id}/emojis"""}
+fn (request: CreateGuildEmojiRequest): CreateGuildEmojiResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/emojis`, {}, request)
+  if(is-ok-response(response), CreateGuildEmojiResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildEmojiRequest type {
+
+}
+
+GetGuildEmojiResponse type {
+    id: SnowflakeType,
+    name: Str,
+    user: UserResponse?,
+    roles: Vec<SnowflakeType>,
+    require_colons: Bool,
+    managed: Bool,
+    animated: Bool,
+    available: Bool
+}
+
+
+get-emoji
+meta {doc: """GET /guilds/{guild_id}/emojis/{emoji_id}"""}
+fn (request: GetGuildEmojiRequest): GetGuildEmojiResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/emojis/{emoji_id}`)
+  if(is-ok-response(response), GetGuildEmojiResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildEmojiRequest type {
+    name: Str?,
+    roles: Any?
+}
+
+UpdateGuildEmojiResponse type {
+    id: SnowflakeType,
+    name: Str,
+    user: UserResponse?,
+    roles: Vec<SnowflakeType>,
+    require_colons: Bool,
+    managed: Bool,
+    animated: Bool,
+    available: Bool
+}
+
+
+update-emoji
+meta {doc: """PATCH /guilds/{guild_id}/emojis/{emoji_id}"""}
+fn (request: UpdateGuildEmojiRequest): UpdateGuildEmojiResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/emojis/{emoji_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildEmojiResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildEmojiRequest type {
+
+}
+
+DeleteGuildEmojiResponse type {
+
+}
+
+
+delete-emoji
+meta {doc: """DELETE /guilds/{guild_id}/emojis/{emoji_id}"""}
+fn (request: DeleteGuildEmojiRequest): DeleteGuildEmojiResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/emojis/{emoji_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ListGuildIntegrationsRequest type {
+
+}
+
+ListGuildIntegrationsResponse type {
+    value: Any
+}
+
+
+list-integrations
+meta {doc: """GET /guilds/{guild_id}/integrations"""}
+fn (request: ListGuildIntegrationsRequest): ListGuildIntegrationsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/integrations`)
+  if(is-ok-response(response), ListGuildIntegrationsResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildIntegrationRequest type {
+
+}
+
+DeleteGuildIntegrationResponse type {
+
+}
+
+
+delete-integration
+meta {doc: """DELETE /guilds/{guild_id}/integrations/{integration_id}"""}
+fn (request: DeleteGuildIntegrationRequest): DeleteGuildIntegrationResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/integrations/{integration_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ListGuildInvitesRequest type {
+
+}
+
+ListGuildInvitesResponse type {
+    value: Any
+}
+
+
+list-invites
+meta {doc: """GET /guilds/{guild_id}/invites"""}
+fn (request: ListGuildInvitesRequest): ListGuildInvitesResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/invites`)
+  if(is-ok-response(response), ListGuildInvitesResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildMembersRequest type {
+  limit: Str,
+  after: Str
+}
+
+ListGuildMembersResponse type {
+    value: Vec<GuildMemberResponse>
+}
+
+
+list-members
+meta {doc: """GET /guilds/{guild_id}/members"""}
+fn (request: ListGuildMembersRequest): ListGuildMembersResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/members?limit=${request.limit}&after=${request.after}`)
+  if(is-ok-response(response), ListGuildMembersResponse(response.body), err(HttpError(response)))
+}
+
+UpdateMyGuildMemberRequest type {
+    nick: Any?
+}
+
+UpdateMyGuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool,
+    permissions: Str?
+}
+
+
+update-member
+meta {doc: """PATCH /guilds/{guild_id}/members/@me"""}
+fn (request: UpdateMyGuildMemberRequest): UpdateMyGuildMemberResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/members/@me`, {}, request)
+  if(is-ok-response(response), UpdateMyGuildMemberResponse(response.body), err(HttpError(response)))
+}
+
+SearchGuildMembersRequest type {
+  limit: Str,
+  query: Str
+}
+
+SearchGuildMembersResponse type {
+    value: Vec<GuildMemberResponse>
+}
+
+
+search-members
+meta {doc: """GET /guilds/{guild_id}/members/search"""}
+fn (request: SearchGuildMembersRequest): SearchGuildMembersResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/members/search?limit=${request.limit}&query=${request.query}`)
+  if(is-ok-response(response), SearchGuildMembersResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildMemberRequest type {
+
+}
+
+GetGuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool
+}
+
+
+get-member
+meta {doc: """GET /guilds/{guild_id}/members/{user_id}"""}
+fn (request: GetGuildMemberRequest): GetGuildMemberResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/members/{user_id}`)
+  if(is-ok-response(response), GetGuildMemberResponse(response.body), err(HttpError(response)))
+}
+
+AddGuildMemberRequest type {
+    nick: Any?,
+    roles: Any?,
+    mute: Any?,
+    deaf: Any?,
+    access_token: Str,
+    flags: Any?
+}
+
+AddGuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool
+}
+
+
+add-member
+meta {doc: """PUT /guilds/{guild_id}/members/{user_id}"""}
+fn (request: AddGuildMemberRequest): AddGuildMemberResponse {
+  response api-request("PUT", `${::discord/BASE_URL}/guilds/{guild_id}/members/{user_id}`, {}, request)
+  if(is-ok-response(response), AddGuildMemberResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildMemberRequest type {
+    nick: Any?,
+    roles: Any?,
+    mute: Any?,
+    deaf: Any?,
+    channel_id: Any?,
+    communication_disabled_until: Any?,
+    flags: Any?
+}
+
+UpdateGuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool
+}
+
+
+update-member
+meta {doc: """PATCH /guilds/{guild_id}/members/{user_id}"""}
+fn (request: UpdateGuildMemberRequest): UpdateGuildMemberResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/members/{user_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildMemberResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildMemberRequest type {
+
+}
+
+DeleteGuildMemberResponse type {
+
+}
+
+
+delete-member
+meta {doc: """DELETE /guilds/{guild_id}/members/{user_id}"""}
+fn (request: DeleteGuildMemberRequest): DeleteGuildMemberResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/members/{user_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+AddGuildMemberRoleRequest type {
+
+}
+
+AddGuildMemberRoleResponse type {
+
+}
+
+
+add-member-role
+meta {doc: """PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id}"""}
+fn (request: AddGuildMemberRoleRequest): AddGuildMemberRoleResponse {
+  response api-request("PUT", `${::discord/BASE_URL}/guilds/{guild_id}/members/{user_id}/roles/{role_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+DeleteGuildMemberRoleRequest type {
+
+}
+
+DeleteGuildMemberRoleResponse type {
+
+}
+
+
+delete-member-role
+meta {doc: """DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}"""}
+fn (request: DeleteGuildMemberRoleRequest): DeleteGuildMemberRoleResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/members/{user_id}/roles/{role_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+GetGuildNewMemberWelcomeRequest type {
+
+}
+
+GetGuildNewMemberWelcomeResponse type {
+    guild_id: SnowflakeType,
+    enabled: Bool,
+    welcome_message: WelcomeMessageResponse?,
+    new_member_actions: Vec,
+    resource_channels: Vec
+}
+
+
+get-new-member-welcome
+meta {doc: """GET /guilds/{guild_id}/new-member-welcome"""}
+fn (request: GetGuildNewMemberWelcomeRequest): GetGuildNewMemberWelcomeResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/new-member-welcome`)
+  if(is-ok-response(response), GetGuildNewMemberWelcomeResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildPreviewRequest type {
+
+}
+
+GetGuildPreviewResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Any?,
+    home_header: Any?,
+    splash: Any?,
+    discovery_splash: Any?,
+    features: Vec<GuildFeatures>,
+    approximate_member_count: Int,
+    approximate_presence_count: Int,
+    emojis: Vec<EmojiResponse>,
+    stickers: Vec<GuildStickerResponse>
+}
+
+
+get-preview
+meta {doc: """GET /guilds/{guild_id}/preview"""}
+fn (request: GetGuildPreviewRequest): GetGuildPreviewResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/preview`)
+  if(is-ok-response(response), GetGuildPreviewResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildVoiceRegionsRequest type {
+
+}
+
+ListGuildVoiceRegionsResponse type {
+    value: Any
+}
+
+
+list-voice-regions
+meta {doc: """GET /guilds/{guild_id}/regions"""}
+fn (request: ListGuildVoiceRegionsRequest): ListGuildVoiceRegionsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/regions`)
+  if(is-ok-response(response), ListGuildVoiceRegionsResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildRolesRequest type {
+
+}
+
+ListGuildRolesResponse type {
+    value: Vec<GuildRoleResponse>
+}
+
+
+list-roles
+meta {doc: """GET /guilds/{guild_id}/roles"""}
+fn (request: ListGuildRolesRequest): ListGuildRolesResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/roles`)
+  if(is-ok-response(response), ListGuildRolesResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildRoleRequest type {
+    name: Any?,
+    permissions: Any?,
+    color: Any?,
+    hoist: Any?,
+    mentionable: Any?,
+    icon: Any?,
+    unicode_emoji: Any?
+}
+
+CreateGuildRoleResponse type {
+    id: SnowflakeType,
+    name: Str,
+    description: Any?,
+    permissions: Str,
+    position: Int,
+    color: Int,
+    colors: GuildRoleColorsResponse,
+    hoist: Bool,
+    managed: Bool,
+    mentionable: Bool,
+    icon: Any?,
+    unicode_emoji: Any?,
+    tags: GuildRoleTagsResponse?,
+    flags: Int
+}
+
+
+create-role
+meta {doc: """POST /guilds/{guild_id}/roles"""}
+fn (request: CreateGuildRoleRequest): CreateGuildRoleResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/roles`, {}, request)
+  if(is-ok-response(response), CreateGuildRoleResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildRoleRequest type {
+
+}
+
+GetGuildRoleResponse type {
+    id: SnowflakeType,
+    name: Str,
+    description: Any?,
+    permissions: Str,
+    position: Int,
+    color: Int,
+    colors: GuildRoleColorsResponse,
+    hoist: Bool,
+    managed: Bool,
+    mentionable: Bool,
+    icon: Any?,
+    unicode_emoji: Any?,
+    tags: GuildRoleTagsResponse?,
+    flags: Int
+}
+
+
+get-role
+meta {doc: """GET /guilds/{guild_id}/roles/{role_id}"""}
+fn (request: GetGuildRoleRequest): GetGuildRoleResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/roles/{role_id}`)
+  if(is-ok-response(response), GetGuildRoleResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildRoleRequest type {
+    name: Any?,
+    permissions: Any?,
+    color: Any?,
+    hoist: Any?,
+    mentionable: Any?,
+    icon: Any?,
+    unicode_emoji: Any?
+}
+
+UpdateGuildRoleResponse type {
+    id: SnowflakeType,
+    name: Str,
+    description: Any?,
+    permissions: Str,
+    position: Int,
+    color: Int,
+    colors: GuildRoleColorsResponse,
+    hoist: Bool,
+    managed: Bool,
+    mentionable: Bool,
+    icon: Any?,
+    unicode_emoji: Any?,
+    tags: GuildRoleTagsResponse?,
+    flags: Int
+}
+
+
+update-role
+meta {doc: """PATCH /guilds/{guild_id}/roles/{role_id}"""}
+fn (request: UpdateGuildRoleRequest): UpdateGuildRoleResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/roles/{role_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildRoleResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildRoleRequest type {
+
+}
+
+DeleteGuildRoleResponse type {
+
+}
+
+
+delete-role
+meta {doc: """DELETE /guilds/{guild_id}/roles/{role_id}"""}
+fn (request: DeleteGuildRoleRequest): DeleteGuildRoleResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/roles/{role_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ListGuildScheduledEventsRequest type {
+  with-user-count: Str
+}
+
+ListGuildScheduledEventsResponse type {
+    value: Any
+}
+
+
+list-scheduled-events
+meta {doc: """GET /guilds/{guild_id}/scheduled-events"""}
+fn (request: ListGuildScheduledEventsRequest): ListGuildScheduledEventsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/scheduled-events?with_user_count=${request.with-user-count}`)
+  if(is-ok-response(response), ListGuildScheduledEventsResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildScheduledEventRequest type {
+    value: Any
+}
+
+CreateGuildScheduledEventResponse type {
+    value: Any
+}
+
+
+create-scheduled-event
+meta {doc: """POST /guilds/{guild_id}/scheduled-events"""}
+fn (request: CreateGuildScheduledEventRequest): CreateGuildScheduledEventResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/scheduled-events`, {}, request)
+  if(is-ok-response(response), CreateGuildScheduledEventResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildScheduledEventRequest type {
+  with-user-count: Str
+}
+
+GetGuildScheduledEventResponse type {
+    value: Any
+}
+
+
+get-scheduled-event
+meta {doc: """GET /guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}"""}
+fn (request: GetGuildScheduledEventRequest): GetGuildScheduledEventResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}?with_user_count=${request.with-user-count}`)
+  if(is-ok-response(response), GetGuildScheduledEventResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildScheduledEventRequest type {
+    value: Any
+}
+
+UpdateGuildScheduledEventResponse type {
+    value: Any
+}
+
+
+update-scheduled-event
+meta {doc: """PATCH /guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}"""}
+fn (request: UpdateGuildScheduledEventRequest): UpdateGuildScheduledEventResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildScheduledEventResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildScheduledEventRequest type {
+
+}
+
+DeleteGuildScheduledEventResponse type {
+
+}
+
+
+delete-scheduled-event
+meta {doc: """DELETE /guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}"""}
+fn (request: DeleteGuildScheduledEventRequest): DeleteGuildScheduledEventResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ListGuildScheduledEventUsersRequest type {
+  with-member: Str,
+  limit: Str,
+  before: Str,
+  after: Str
+}
+
+ListGuildScheduledEventUsersResponse type {
+    value: Any
+}
+
+
+list-scheduled-event-users
+meta {
+    doc: """GET /guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}/users"""
+}
+fn (request: ListGuildScheduledEventUsersRequest): ListGuildScheduledEventUsersResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/scheduled-events/{guild_scheduled_event_id}/users?with_member=${request.with-member}&limit=${request.limit}&before=${request.before}&after=${request.after}`)
+  if(is-ok-response(response), ListGuildScheduledEventUsersResponse(response.body), err(HttpError(response)))
+}
+
+ListGuildSoundboardSoundsRequest type {
+
+}
+
+ListGuildSoundboardSoundsResponse type {
+    items: Vec<SoundboardSoundResponse>
+}
+
+
+list-soundboard-sounds
+meta {doc: """GET /guilds/{guild_id}/soundboard-sounds"""}
+fn (request: ListGuildSoundboardSoundsRequest): ListGuildSoundboardSoundsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/soundboard-sounds`)
+  if(is-ok-response(response), ListGuildSoundboardSoundsResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildSoundboardSoundRequest type {
+    name: Str,
+    volume: Any?,
+    emoji_id: Any?,
+    emoji_name: Any?,
+    sound: Str
+}
+
+CreateGuildSoundboardSoundResponse type {
+    name: Str,
+    sound_id: SnowflakeType,
+    volume: Dec,
+    emoji_id: Any?,
+    emoji_name: Any?,
+    guild_id: SnowflakeType?,
+    available: Bool,
+    user: UserResponse?
+}
+
+
+create-soundboard-sound
+meta {doc: """POST /guilds/{guild_id}/soundboard-sounds"""}
+fn (request: CreateGuildSoundboardSoundRequest): CreateGuildSoundboardSoundResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/soundboard-sounds`, {}, request)
+  if(is-ok-response(response), CreateGuildSoundboardSoundResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildSoundboardSoundRequest type {
+
+}
+
+GetGuildSoundboardSoundResponse type {
+    name: Str,
+    sound_id: SnowflakeType,
+    volume: Dec,
+    emoji_id: Any?,
+    emoji_name: Any?,
+    guild_id: SnowflakeType?,
+    available: Bool,
+    user: UserResponse?
+}
+
+
+get-soundboard-sound
+meta {doc: """GET /guilds/{guild_id}/soundboard-sounds/{sound_id}"""}
+fn (request: GetGuildSoundboardSoundRequest): GetGuildSoundboardSoundResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/soundboard-sounds/{sound_id}`)
+  if(is-ok-response(response), GetGuildSoundboardSoundResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildSoundboardSoundRequest type {
+    name: Str?,
+    volume: Any?,
+    emoji_id: Any?,
+    emoji_name: Any?
+}
+
+UpdateGuildSoundboardSoundResponse type {
+    name: Str,
+    sound_id: SnowflakeType,
+    volume: Dec,
+    emoji_id: Any?,
+    emoji_name: Any?,
+    guild_id: SnowflakeType?,
+    available: Bool,
+    user: UserResponse?
+}
+
+
+update-soundboard-sound
+meta {doc: """PATCH /guilds/{guild_id}/soundboard-sounds/{sound_id}"""}
+fn (request: UpdateGuildSoundboardSoundRequest): UpdateGuildSoundboardSoundResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/soundboard-sounds/{sound_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildSoundboardSoundResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildSoundboardSoundRequest type {
+
+}
+
+DeleteGuildSoundboardSoundResponse type {
+
+}
+
+
+delete-soundboard-sound
+meta {doc: """DELETE /guilds/{guild_id}/soundboard-sounds/{sound_id}"""}
+fn (request: DeleteGuildSoundboardSoundRequest): DeleteGuildSoundboardSoundResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/soundboard-sounds/{sound_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ListGuildStickersRequest type {
+
+}
+
+ListGuildStickersResponse type {
+    value: Vec<GuildStickerResponse>
+}
+
+
+list-stickers
+meta {doc: """GET /guilds/{guild_id}/stickers"""}
+fn (request: ListGuildStickersRequest): ListGuildStickersResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/stickers`)
+  if(is-ok-response(response), ListGuildStickersResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildStickerRequest type {
+    name: Str,
+    tags: Str,
+    description: Any?,
+    file: Str
+}
+
+CreateGuildStickerResponse type {
+    id: SnowflakeType,
+    name: Str,
+    tags: Str,
+    type: 2,
+    format_type: Any?,
+    description: Any?,
+    available: Bool,
+    guild_id: SnowflakeType,
+    user: UserResponse?
+}
+
+
+create-sticker
+meta {doc: """POST /guilds/{guild_id}/stickers"""}
+fn (request: CreateGuildStickerRequest): CreateGuildStickerResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/stickers`, {}, request)
+  if(is-ok-response(response), CreateGuildStickerResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildStickerRequest type {
+
+}
+
+GetGuildStickerResponse type {
+    id: SnowflakeType,
+    name: Str,
+    tags: Str,
+    type: 2,
+    format_type: Any?,
+    description: Any?,
+    available: Bool,
+    guild_id: SnowflakeType,
+    user: UserResponse?
+}
+
+
+get-sticker
+meta {doc: """GET /guilds/{guild_id}/stickers/{sticker_id}"""}
+fn (request: GetGuildStickerRequest): GetGuildStickerResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/stickers/{sticker_id}`)
+  if(is-ok-response(response), GetGuildStickerResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildStickerRequest type {
+    name: Str?,
+    tags: Str?,
+    description: Any?
+}
+
+UpdateGuildStickerResponse type {
+    id: SnowflakeType,
+    name: Str,
+    tags: Str,
+    type: 2,
+    format_type: Any?,
+    description: Any?,
+    available: Bool,
+    guild_id: SnowflakeType,
+    user: UserResponse?
+}
+
+
+update-sticker
+meta {doc: """PATCH /guilds/{guild_id}/stickers/{sticker_id}"""}
+fn (request: UpdateGuildStickerRequest): UpdateGuildStickerResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/stickers/{sticker_id}`, {}, request)
+  if(is-ok-response(response), UpdateGuildStickerResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildStickerRequest type {
+
+}
+
+DeleteGuildStickerResponse type {
+
+}
+
+
+delete-sticker
+meta {doc: """DELETE /guilds/{guild_id}/stickers/{sticker_id}"""}
+fn (request: DeleteGuildStickerRequest): DeleteGuildStickerResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/stickers/{sticker_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ListGuildTemplatesRequest type {
+
+}
+
+ListGuildTemplatesResponse type {
+    value: Any
+}
+
+
+list-templates
+meta {doc: """GET /guilds/{guild_id}/templates"""}
+fn (request: ListGuildTemplatesRequest): ListGuildTemplatesResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/templates`)
+  if(is-ok-response(response), ListGuildTemplatesResponse(response.body), err(HttpError(response)))
+}
+
+CreateGuildTemplateRequest type {
+    name: Str,
+    description: Any?
+}
+
+CreateGuildTemplateResponse type {
+    code: Str,
+    name: Str,
+    description: Any?,
+    usage_count: Int,
+    creator_id: SnowflakeType,
+    creator: Any?,
+    created_at: Str,
+    updated_at: Str,
+    source_guild_id: SnowflakeType,
+    serialized_source_guild: GuildTemplateSnapshotResponse,
+    is_dirty: Any?
+}
+
+
+create-template
+meta {doc: """POST /guilds/{guild_id}/templates"""}
+fn (request: CreateGuildTemplateRequest): CreateGuildTemplateResponse {
+  response api-request("POST", `${::discord/BASE_URL}/guilds/{guild_id}/templates`, {}, request)
+  if(is-ok-response(response), CreateGuildTemplateResponse(response.body), err(HttpError(response)))
+}
+
+SyncGuildTemplateRequest type {
+
+}
+
+SyncGuildTemplateResponse type {
+    code: Str,
+    name: Str,
+    description: Any?,
+    usage_count: Int,
+    creator_id: SnowflakeType,
+    creator: Any?,
+    created_at: Str,
+    updated_at: Str,
+    source_guild_id: SnowflakeType,
+    serialized_source_guild: GuildTemplateSnapshotResponse,
+    is_dirty: Any?
+}
+
+
+sync-template
+meta {doc: """PUT /guilds/{guild_id}/templates/{code}"""}
+fn (request: SyncGuildTemplateRequest): SyncGuildTemplateResponse {
+  response api-request("PUT", `${::discord/BASE_URL}/guilds/{guild_id}/templates/{code}`)
+  if(is-ok-response(response), SyncGuildTemplateResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildTemplateRequest type {
+    name: Str?,
+    description: Any?
+}
+
+UpdateGuildTemplateResponse type {
+    code: Str,
+    name: Str,
+    description: Any?,
+    usage_count: Int,
+    creator_id: SnowflakeType,
+    creator: Any?,
+    created_at: Str,
+    updated_at: Str,
+    source_guild_id: SnowflakeType,
+    serialized_source_guild: GuildTemplateSnapshotResponse,
+    is_dirty: Any?
+}
+
+
+update-template
+meta {doc: """PATCH /guilds/{guild_id}/templates/{code}"""}
+fn (request: UpdateGuildTemplateRequest): UpdateGuildTemplateResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/templates/{code}`, {}, request)
+  if(is-ok-response(response), UpdateGuildTemplateResponse(response.body), err(HttpError(response)))
+}
+
+DeleteGuildTemplateRequest type {
+
+}
+
+DeleteGuildTemplateResponse type {
+    code: Str,
+    name: Str,
+    description: Any?,
+    usage_count: Int,
+    creator_id: SnowflakeType,
+    creator: Any?,
+    created_at: Str,
+    updated_at: Str,
+    source_guild_id: SnowflakeType,
+    serialized_source_guild: GuildTemplateSnapshotResponse,
+    is_dirty: Any?
+}
+
+
+delete-template
+meta {doc: """DELETE /guilds/{guild_id}/templates/{code}"""}
+fn (request: DeleteGuildTemplateRequest): DeleteGuildTemplateResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/guilds/{guild_id}/templates/{code}`)
+  if(is-ok-response(response), DeleteGuildTemplateResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildVanityUrlRequest type {
+
+}
+
+GetGuildVanityUrlResponse type {
+    code: Any?,
+    uses: Int,
+    error: Any?
+}
+
+
+get-vanity-url
+meta {doc: """GET /guilds/{guild_id}/vanity-url"""}
+fn (request: GetGuildVanityUrlRequest): GetGuildVanityUrlResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/vanity-url`)
+  if(is-ok-response(response), GetGuildVanityUrlResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildWebhooksRequest type {
+
+}
+
+GetGuildWebhooksResponse type {
+    value: Any
+}
+
+
+get-webhooks
+meta {doc: """GET /guilds/{guild_id}/webhooks"""}
+fn (request: GetGuildWebhooksRequest): GetGuildWebhooksResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/webhooks`)
+  if(is-ok-response(response), GetGuildWebhooksResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildWelcomeScreenRequest type {
+
+}
+
+GetGuildWelcomeScreenResponse type {
+    description: Any?,
+    welcome_channels: Vec<GuildWelcomeScreenChannelResponse>
+}
+
+
+get-welcome-screen
+meta {doc: """GET /guilds/{guild_id}/welcome-screen"""}
+fn (request: GetGuildWelcomeScreenRequest): GetGuildWelcomeScreenResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/welcome-screen`)
+  if(is-ok-response(response), GetGuildWelcomeScreenResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildWelcomeScreenRequest type {
+    description: Any?,
+    welcome_channels: Any?,
+    enabled: Any?
+}
+
+UpdateGuildWelcomeScreenResponse type {
+    description: Any?,
+    welcome_channels: Vec<GuildWelcomeScreenChannelResponse>
+}
+
+
+update-welcome-screen
+meta {doc: """PATCH /guilds/{guild_id}/welcome-screen"""}
+fn (request: UpdateGuildWelcomeScreenRequest): UpdateGuildWelcomeScreenResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/welcome-screen`, {}, request)
+  if(is-ok-response(response), UpdateGuildWelcomeScreenResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildWidgetSettingsRequest type {
+
+}
+
+GetGuildWidgetSettingsResponse type {
+    enabled: Bool,
+    channel_id: Any?
+}
+
+
+get-widget-settings
+meta {doc: """GET /guilds/{guild_id}/widget"""}
+fn (request: GetGuildWidgetSettingsRequest): GetGuildWidgetSettingsResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/widget`)
+  if(is-ok-response(response), GetGuildWidgetSettingsResponse(response.body), err(HttpError(response)))
+}
+
+UpdateGuildWidgetSettingsRequest type {
+    channel_id: Any?,
+    enabled: Any?
+}
+
+UpdateGuildWidgetSettingsResponse type {
+    enabled: Bool,
+    channel_id: Any?
+}
+
+
+update-widget-settings
+meta {doc: """PATCH /guilds/{guild_id}/widget"""}
+fn (request: UpdateGuildWidgetSettingsRequest): UpdateGuildWidgetSettingsResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/guilds/{guild_id}/widget`, {}, request)
+  if(is-ok-response(response), UpdateGuildWidgetSettingsResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildWidgetRequest type {
+
+}
+
+GetGuildWidgetResponse type {
+    id: SnowflakeType,
+    name: Str,
+    instant_invite: Any?,
+    channels: Vec<WidgetChannel>,
+    members: Vec<WidgetMember>,
+    presence_count: Int
+}
+
+
+get-widget
+meta {doc: """GET /guilds/{guild_id}/widget.json"""}
+fn (request: GetGuildWidgetRequest): GetGuildWidgetResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/widget.json`)
+  if(is-ok-response(response), GetGuildWidgetResponse(response.body), err(HttpError(response)))
+}
+
+GetGuildWidgetPngRequest type {
+  style: Str
+}
+
+GetGuildWidgetPngResponse type {
+    value: Str
+}
+
+
+get-widget-png
+meta {doc: """GET /guilds/{guild_id}/widget.png"""}
+fn (request: GetGuildWidgetPngRequest): GetGuildWidgetPngResponse {
+  response api-request("GET", `${::discord/BASE_URL}/guilds/{guild_id}/widget.png?style=${request.style}`)
+  if(is-ok-response(response), GetGuildWidgetPngResponse(response.body), err(HttpError(response)))
+}
+
+GetMyGuildMemberRequest type {
+
+}
+
+GetMyGuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool,
+    permissions: Str?
+}
+
+
+get-member
+meta {doc: """GET /users/@me/guilds/{guild_id}/member"""}
+fn (request: GetMyGuildMemberRequest): GetMyGuildMemberResponse {
+  response api-request("GET", `${::discord/BASE_URL}/users/@me/guilds/{guild_id}/member`)
+  if(is-ok-response(response), GetMyGuildMemberResponse(response.body), err(HttpError(response)))
+}

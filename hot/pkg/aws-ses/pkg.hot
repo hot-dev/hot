@@ -1,0 +1,18 @@
+::hot::pkg ns
+
+hot.pkg.aws-ses {
+  name: "hot.dev/aws-ses",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "AWS SES API bindings for sending transactional and marketing emails.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["cloud", "email"],
+  deps: {
+    "hot.dev/hot-std": {},
+    "hot.dev/aws-core": "1.1.0"
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

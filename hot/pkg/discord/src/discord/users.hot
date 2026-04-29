@@ -1,0 +1,147 @@
+::discord::users ns
+
+api-request ::discord::api/request
+HttpError ::discord::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Users
+// ============================================================================
+
+get-current-user
+meta {
+    doc: """
+GET /users/@me - Get the current bot user. Returns the user object for the authenticated bot.
+
+**Example**
+
+```hot
+::users ::discord::users
+
+response ::users/get-current-user()
+response.id        // => "123456789"
+response.username  // => "my-bot"
+```
+"""
+}
+fn (): Map {
+  response api-request("GET", `${::discord::core/BASE_URL}/users/@me`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+GetUserRequest type {
+  user_id: Str
+}
+
+get-user
+meta {
+    doc: """
+GET /users/{user_id} - Get a user by ID. Returns limited user information (username, avatar, banner, etc.).
+
+**Example**
+
+```hot
+::users ::discord::users
+
+response ::users/get-user(::users/GetUserRequest({
+  user_id: "123456789"
+}))
+response.username  // => "some-user"
+```
+"""
+}
+fn (request: GetUserRequest): Map {
+  response api-request("GET", `${::discord::core/BASE_URL}/users/${request.user_id}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ModifyCurrentUserRequest type {
+  username: Str?,
+  avatar: Str?
+}
+
+modify-current-user
+meta {
+    doc: """PATCH /users/@me - Modify the current bot user. Can change `username` and `avatar` (base64-encoded image data URI)."""
+}
+fn (request: ModifyCurrentUserRequest): Map {
+  body merge({}, {
+    username: request.username,
+    avatar: request.avatar
+  })
+  response api-request("PATCH", `${::discord::core/BASE_URL}/users/@me`, {}, body)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+GetCurrentUserGuildsRequest type {
+  before: Str?,
+  after: Str?,
+  limit: Int?,
+  with_counts: Bool?
+}
+
+get-current-user-guilds
+meta {
+    doc: """GET /users/@me/guilds - List guilds the current bot is a member of. Returns partial guild objects. Supports pagination with `before`/`after` guild IDs."""
+}
+fn (request: GetCurrentUserGuildsRequest): Vec<Map> {
+  response api-request("GET", `${::discord::core/BASE_URL}/users/@me/guilds?before=${or(request.before, "")}&after=${or(request.after, "")}&limit=${or(request.limit, "")}&with_counts=${or(request.with_counts, "")}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+LeaveGuildRequest type {
+  guild_id: Str
+}
+
+leave-guild
+meta {
+    doc: """DELETE /users/@me/guilds/{guild_id} - Leave a guild. The bot will no longer be a member."""
+}
+fn (request: LeaveGuildRequest): Bool {
+  response api-request("DELETE", `${::discord::core/BASE_URL}/users/@me/guilds/${request.guild_id}`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}
+
+CreateDMRequest type {
+  recipient_id: Str
+}
+
+create-dm
+meta {
+    doc: """
+POST /users/@me/channels - Create a new DM channel with a user. If a DM already exists, the existing channel is returned.
+
+**Example**
+
+```hot
+::users ::discord::users
+::messages ::discord::messages
+
+// Open DM channel
+dm ::users/create-dm(::users/CreateDMRequest({
+  recipient_id: "123456789"
+}))
+
+// Send a DM
+::messages/create-message(::messages/CreateMessageRequest({
+  channel_id: dm.id,
+  content: "Hello via DM!"
+}))
+```
+"""
+}
+fn (request: CreateDMRequest): Map {
+  response api-request("POST", `${::discord::core/BASE_URL}/users/@me/channels`, {}, {recipient_id: request.recipient_id})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+GetCurrentUserConnectionsRequest type Map
+
+get-current-user-connections
+meta {
+    doc: """GET /users/@me/connections - Get the current user's connected accounts (Twitch, YouTube, etc.). Requires the `connections` OAuth2 scope."""
+}
+fn (request: GetCurrentUserConnectionsRequest): Vec<Map> {
+  response api-request("GET", `${::discord::core/BASE_URL}/users/@me/connections`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

@@ -1,0 +1,20 @@
+::aws ns
+meta {
+    ctx: {"aws.access-key-id": {required: true}, "aws.secret-access-key": {required: true}, "aws.session-token": {required: false}, "aws.region": {required: false}}
+}
+
+// AWS Core Package
+// Provides common types and utilities for AWS service packages
+
+// Re-export core types
+Credentials ::aws::core/Credentials
+Region ::aws::core/Region
+AwsError ::aws::core/AwsError
+
+// Re-export auth functions
+sign-request ::aws::core/sign-request
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+
+// Default AWS region
+DEFAULT_REGION "us-east-1"

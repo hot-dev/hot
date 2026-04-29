@@ -1,0 +1,122 @@
+::hot::resource ns
+meta {
+    doc: """
+    Read-only access to project resources — files and directories
+    bundled with a Hot deploy via `hot.project.<name>.resources.paths`.
+
+    Resources use a "classpath" lookup model: the union of files under
+    every configured root is exposed by relative path. Use this module
+    to read prompts, schemas, JSON config, container payloads, or any
+    other static asset that should travel with your code.
+
+    **Example**
+
+    ```hot
+    ::res ::hot::resource
+
+    prompt ::res/load-str("prompts/welcome.md")
+    schema from-json(::res/load-str("schemas/user.json"))
+    js-files ::res/list-matching("**/*.js")
+    ```
+    """
+}
+
+ResourceRef
+meta {
+    doc: """
+    Metadata about a single resource entry.
+
+    - `path` — relative path used for lookup, e.g. `"prompts/welcome.md"`.
+    - `hash` — Blake3 content hash. Empty in dev mode until first read;
+       populated at `hot build`/`hot deploy` time.
+    - `size` — file size in bytes.
+    """
+}
+type {
+    path: Str,
+    hash: Str,
+    size: Int
+}
+
+load
+meta {
+    doc: """
+    Read a resource as raw `Bytes`. Errors when the path is not in
+    the resource registry.
+
+    **Example**
+
+    ```hot
+    bytes load("images/logo.png")
+    ```
+    """
+}
+fn (rel-path: Str): Bytes {
+    call-lib(::hot::resource/load, [rel-path])
+}
+
+load-str
+meta {
+    doc: """
+    Read a resource as a UTF-8 `Str`. Errors when the path is missing
+    or the file is not valid UTF-8.
+
+    **Example**
+
+    ```hot
+    text load-str("prompts/welcome.md")
+    ```
+    """
+}
+fn (rel-path: Str): Str {
+    call-lib(::hot::resource/load-str, [rel-path])
+}
+
+path
+meta {
+    doc: """
+    Return the canonical `hot://res/<rel-path>` URI for a resource.
+    Useful for handing references to subsystems (Box mounts, file
+    pipelines) that resolve `hot://` URIs themselves.
+    """
+}
+fn (rel-path: Str): Str {
+    call-lib(::hot::resource/path, [rel-path])
+}
+
+exists
+meta {
+    doc: """Return true when `rel-path` is present in the registry."""
+}
+fn (rel-path: Str): Bool {
+    call-lib(::hot::resource/exists, [rel-path])
+}
+
+list
+meta {
+    doc: """
+    Return every registered resource as a `Vec<ResourceRef>`. Order
+    matches the order in which roots were declared, then alphabetical
+    within each root.
+    """
+}
+fn (): Vec<ResourceRef> {
+    call-lib(::hot::resource/list, [])
+}
+
+list-matching
+meta {
+    doc: """
+    Return every resource whose relative path matches `glob`. Uses
+    `.gitignore`-style globbing (`**`, `*`, `?`, character classes).
+
+    **Example**
+
+    ```hot
+    docs list-matching("docs/**/*.md")
+    ```
+    """
+}
+fn (glob: Str): Vec<ResourceRef> {
+    call-lib(::hot::resource/list-matching, [glob])
+}

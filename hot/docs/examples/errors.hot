@@ -1,0 +1,91 @@
+// Documentation examples for: resources/docs/language/errors.md
+::docs::examples::errors ns
+
+// =============================================================================
+// Imports and setup (not shown in docs)
+// =============================================================================
+
+ok ::hot::type/ok
+err ::hot::type/err
+is-ok ::hot::type/is-ok
+is-err ::hot::type/is-err
+eq ::hot::cmp/eq
+div ::hot::math/div
+if ::hot::bool/if
+length ::hot::coll/length
+assert ::hot::test/assert
+assert-eq ::hot::test/assert-eq
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: result-create
+create-results fn (): Map {
+  success ok(42)
+  failure err("Not found")
+  {success: success, failure: failure}
+}
+// @end: result-create
+
+// @doc: safe-divide
+safe-divide fn (a: Int, b: Int): Result {
+  if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+// @end: safe-divide
+
+// @doc: check-result
+check-result fn (result: Result): Str {
+  if(is-ok(result),
+    `Success: ${result.$val}`,
+    `Error: ${result.$val}`)
+}
+// @end: check-result
+
+// @doc: pattern-let-it-fail
+// Pattern: Let errors propagate automatically
+fetch-user fn (id: Str): Result { ok({id: id, name: "Alice"}) }
+fetch-posts fn (user-id: Str): Result { ok([{title: "Post 1"}]) }
+
+process-user fn (id: Str): Map {
+  user fetch-user(id)        // Auto-unwraps or fails
+  posts fetch-posts(user.id) // Auto-unwraps or fails
+  {user: user, posts: posts} // Only runs if both succeeded
+}
+// @end: pattern-let-it-fail
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-create-results
+meta ["test"] fn () {
+  results create-results()
+  assert(is-ok(results.success), "success is ok")
+  assert(is-err(results.failure), "failure is err")
+  assert-eq(results.success.$val, 42, "success value is 42")
+  assert-eq(results.failure.$val, "Not found", "failure message")
+}
+
+test-safe-divide
+meta ["test"] fn () {
+  ok-result safe-divide(10, 2)
+  err-result safe-divide(10, 0)
+  assert(is-ok(ok-result), "10/2 is ok")
+  assert-eq(ok-result.$val, 5, "10/2 = 5")
+  assert(is-err(err-result), "10/0 is err")
+  assert-eq(err-result.$val, "Division by zero", "division by zero message")
+}
+
+test-check-result
+meta ["test"] fn () {
+  assert-eq(check-result(ok(42)), "Success: 42", "ok result message")
+  assert-eq(check-result(err("oops")), "Error: oops", "err result message")
+}
+
+test-process-user
+meta ["test"] fn () {
+  result process-user("user-1")
+  assert-eq(result.user.name, "Alice", "user name")
+  assert-eq(length(result.posts), 1, "has posts")
+}

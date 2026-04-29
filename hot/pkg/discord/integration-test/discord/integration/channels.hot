@@ -1,0 +1,35 @@
+::discord::integration::channels ns
+meta ["test"]
+
+DISCORD_TEST_CHANNEL_ID ::hot::env/get("DISCORD_TEST_CHANNEL_ID", "")
+DISCORD_TEST_GUILD_ID ::hot::env/get("DISCORD_TEST_GUILD_ID", "")
+
+test-get-channel
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_CHANNEL_ID, "Set DISCORD_TEST_CHANNEL_ID in .env for Discord integration tests")
+
+  response ::discord::channels/get-channel(::discord::channels/GetChannelRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID
+  }))
+
+  assert(response.id, "get-channel should return channel id")
+  assert-eq(DISCORD_TEST_CHANNEL_ID, response.id, "channel id should match requested id")
+  assert(response.name, "channel should have name")
+}
+
+test-get-guild-channels
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_GUILD_ID, "Set DISCORD_TEST_GUILD_ID in .env for Discord integration tests")
+
+  response ::discord::channels/get-guild-channels(::discord::channels/GetGuildChannelsRequest({
+    guild_id: DISCORD_TEST_GUILD_ID
+  }))
+
+  assert(gt(length(response), 0), "get-guild-channels should return at least one channel")
+
+  first-channel first(response)
+  assert(first-channel.id, "channel should have id")
+  assert(first-channel.name, "channel should have name")
+}

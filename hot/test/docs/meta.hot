@@ -1,0 +1,96 @@
+// Documentation examples for: resources/docs/language/meta.md
+::hot::test::docs::meta ns
+meta ["test"]
+
+// =============================================================================
+// Imports
+// =============================================================================
+// Note: All functions used here are core (assert-eq, assert, starts-with, etc.)
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: meta-map-form
+greet-meta
+meta {doc: "Greets a user by name"}
+fn (name: Str): Str {
+  `Hello, ${name}!`
+}
+// @end: meta-map-form
+
+// @doc: meta-multiple-fields
+process-meta
+meta {
+    doc: "Process incoming data",
+    core: true
+}
+fn (data: Any): Any {
+  data
+}
+// @end: meta-multiple-fields
+
+// @doc: meta-vector-form
+test-greet-demo
+meta ["test"]
+fn () {
+  assert-eq(greet-meta("World"), "Hello, World!")
+}
+// @end: meta-vector-form
+
+// @doc: meta-doc-field
+add-demo
+meta {doc: "Add two numbers together"}
+fn (a: Int, b: Int): Int {
+  ::hot::math/add(a, b)
+}
+
+User
+meta {doc: "Represents a user in the system"}
+type {
+  name: Str,
+  email: Str
+}
+// @end: meta-doc-field
+
+// @doc: meta-test-functions
+test-add-demo
+meta ["test"]
+fn () {
+  assert-eq(add-demo(1, 2), 3)
+}
+
+test-greet-check
+meta ["test"]
+fn () {
+  result greet-meta("World")
+  assert(starts-with(result, "Hello"))
+}
+// @end: meta-test-functions
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-meta-map-form
+meta ["test"] fn () {
+  assert-eq("Hello, World!", greet-meta("World"), "greet-meta")
+}
+
+test-meta-multiple-fields
+meta ["test"] fn () {
+  result process-meta({key: "value"})
+  assert-eq("value", result.key, "process-meta returns data")
+}
+
+test-add-demo-fn
+meta ["test"] fn () {
+  assert-eq(3, add-demo(1, 2), "add-demo")
+}
+
+test-user-type
+meta ["test"] fn () {
+  user User({name: "Alice", email: "alice@example.com"})
+  assert-eq("Alice", user.name, "user name")
+  assert-eq("alice@example.com", user.email, "user email")
+}

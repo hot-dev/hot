@@ -1,0 +1,3 @@
+::whatsapp::core ns
+
+BASE_URL "https://graph.facebook.com/v21.0"

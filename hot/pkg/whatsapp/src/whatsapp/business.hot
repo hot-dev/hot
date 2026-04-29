@@ -1,0 +1,109 @@
+::whatsapp::business ns
+
+::api ::whatsapp::api
+
+// ============================================================================
+// Business Profile
+// ============================================================================
+
+get-business-profile
+meta {
+    doc: """
+Get the WhatsApp Business Profile for a phone number. Returns about text, address, description, email, websites, and profile picture URL.
+
+**Example**
+
+```hot
+::business ::whatsapp::business
+
+response ::business/get-business-profile("109876543210")
+response.data[0].about        // => "Hot Dev official support"
+response.data[0].description  // => "We build tools for developers"
+```
+"""
+}
+fn (phone-number-id: Str): Map {
+  ::api/request("GET", ::api/url(`${phone-number-id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`))
+}
+
+UpdateBusinessProfileRequest type {
+  phone_number_id: Str,
+  about: Str?,
+  address: Str?,
+  description: Str?,
+  email: Str?,
+  websites: Vec<Str>?,
+  vertical: Str?,
+  profile_picture_handle: Str?
+}
+
+update-business-profile
+meta {
+    doc: """
+Update the WhatsApp Business Profile. All fields are optional -- only provided fields are updated.
+
+`vertical` is the business category: "AUTOMOTIVE", "BEAUTY", "EDUCATION", "ENTERTAINMENT", "FINANCE", "FOOD", "GOVT", "HEALTH", "HOTEL", "NONPROFIT", "PROF_SERVICES", "RETAIL", "TECH", "TRAVEL", "OTHER".
+
+**Example**
+
+```hot
+::business ::whatsapp::business
+
+::business/update-business-profile(::business/UpdateBusinessProfileRequest({
+  phone_number_id: "109876543210",
+  about: "Hot Dev - Build faster",
+  description: "We build tools for developers",
+  websites: ["https://hot.dev"]
+}))
+```
+"""
+}
+fn (request: UpdateBusinessProfileRequest): Map {
+  body {messaging_product: "whatsapp"}
+    |> assoc-some("about", request.about)
+    |> assoc-some("address", request.address)
+    |> assoc-some("description", request.description)
+    |> assoc-some("email", request.email)
+    |> assoc-some("websites", request.websites)
+    |> assoc-some("vertical", request.vertical)
+    |> assoc-some("profile_picture_handle", request.profile_picture_handle)
+
+  ::api/request("POST", ::api/url(`${request.phone_number_id}/whatsapp_business_profile`), {}, body)
+}
+
+// ============================================================================
+// Phone Numbers
+// ============================================================================
+
+get-phone-number
+meta {
+    doc: """
+Get information about a specific phone number. Returns the display phone number, verified name, quality rating, and status.
+
+**Example**
+
+```hot
+::business ::whatsapp::business
+
+response ::business/get-phone-number("109876543210")
+response.display_phone_number // => "+1 555 123 4567"
+response.verified_name        // => "Hot Dev"
+response.quality_rating       // => "GREEN"
+```
+"""
+}
+fn (phone-number-id: Str): Map {
+  ::api/request("GET", ::api/url(`${phone-number-id}?fields=display_phone_number,verified_name,quality_rating,platform_type,status,name_status,code_verification_status`))
+}
+
+ListPhoneNumbersRequest type {
+  waba_id: Str
+}
+
+list-phone-numbers
+meta {
+    doc: """List all phone numbers registered to a WhatsApp Business Account."""
+}
+fn (request: ListPhoneNumbersRequest): Map {
+  ::api/request("GET", ::api/url(`${request.waba_id}/phone_numbers?fields=display_phone_number,verified_name,quality_rating,status`))
+}

@@ -1,0 +1,129 @@
+::mcp::integration::tools ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for MCP Tools
+// =============================================================================
+// These tests require an MCP server that exposes at least one tool.
+// Set MCP_TEST_SERVER_URL in .env (e.g. http://localhost:4681/mcp/local/my-service)
+
+::mcp ::mcp::client
+::tools ::mcp::tools
+::types ::mcp::types
+
+MCP_TEST_SERVER_URL ::hot::env/get("MCP_TEST_SERVER_URL", "")
+
+// Helper: initialize a session for each test
+init-session fn (): ::types/Session {
+  ::mcp/initialize(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    null
+  )
+}
+
+// -----------------------------------------------------------------------------
+// Tool Listing
+// -----------------------------------------------------------------------------
+
+test-list-tools
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  tools ::tools/list(session)
+
+  assert(gte(length(tools), 0), "tools/list should return a Vec (even if empty)")
+}
+
+test-list-tools-page
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  page ::tools/list-page(session, null)
+
+  assert(page.tools, "list-page should return a map with tools")
+  assert(gte(length(page.tools), 0), "tools should be a Vec")
+}
+
+test-list-all-tools
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  all-tools ::tools/list-all(session)
+
+  assert(gte(length(all-tools), 0), "list-all should return all tools")
+}
+
+// -----------------------------------------------------------------------------
+// Tool Calling
+// -----------------------------------------------------------------------------
+
+test-call-tool
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  tools ::tools/list(session)
+
+  // Only test call if there's at least one tool available
+  if(gt(length(tools), 0), {
+    tool first(tools)
+    println(`Calling tool: ${tool.name}`)
+
+    // Call with empty arguments (may fail for tools requiring args, but should get a response)
+    result ::tools/call(session, tool.name, {})
+
+    assert(result.content, "tool call should return content")
+    // is-error may be true if we passed wrong args, but the shape should be valid
+    assert(or(eq(result.is-error, true), eq(result.is-error, false)), "is-error should be a boolean")
+  }, {
+    println("No tools available, skipping tool call test")
+  })
+}
+
+test-call-nonexistent-tool-returns-error
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+
+  result ::tools/call(session, "nonexistent_tool_that_does_not_exist", {})
+  assert(is-err(result), "calling a nonexistent tool should return an error")
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Tool Call
+// -----------------------------------------------------------------------------
+
+test-call-stream-tool
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  tools ::tools/list(session)
+
+  if(gt(length(tools), 0), {
+    tool first(tools)
+    println(`Streaming call to tool: ${tool.name}`)
+
+    events collect(::tools/call-stream(session, tool.name, {}))
+    assert(gte(length(events), 0), "streaming call should return events")
+
+    // The last event should contain a JSON-RPC response (result or error)
+    if(gt(length(events), 0), {
+      last-event last(events)
+      assert(last-event.data, "stream events should have parsed data")
+    }, null)
+  }, {
+    println("No tools available, skipping streaming tool call test")
+  })
+}

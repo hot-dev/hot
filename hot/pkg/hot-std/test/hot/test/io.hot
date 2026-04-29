@@ -1,0 +1,65 @@
+::hot::test::io ns
+meta ["test"]
+
+// Note: print and println are core, so no aliasing needed. assert-eq is now core too.
+
+test-print
+meta ["test"] fn () {
+
+    // Test basic println functionality
+    hello "hello"
+    print_result println(hello)
+    assert-eq("hello\n", print_result, "println(hello) returns string with newline")
+    // Test template string printing
+    template_result println(`${hello}`)
+    assert-eq("hello\n", template_result, "println template string returns string with newline")
+    // Test various data types (should return string representations with newlines)
+    string_input "hello\n"
+    string_result println(string_input)
+    assert-eq("hello\n\n", string_result, "println(string) returns string with added newline")
+    number_input 123
+    number_result println(number_input)
+    assert-eq("123\n", number_result, "println(number) returns number string with newline")
+    decimal_input 1.23
+    decimal_result println(decimal_input)
+    assert-eq("1.23\n", decimal_result, "println(decimal) returns decimal string with newline")
+    bool_true_input true
+    bool_true_result println(bool_true_input)
+    assert-eq("true\n", bool_true_result, "println(true) returns true string with newline")
+    // Test complex types (should return string representations with newlines)
+    bool_false_result println(false)
+    assert-eq("false\n", bool_false_result, "println(false) returns false string with newline")
+    array_result println([1, 2, 3])
+    assert-eq("[1, 2, 3]\n", array_result, "println(array) returns array string with newline")
+    map_result println({a: 1, b: 2, c: 3})
+    assert-eq(`{a: 1, b: 2, c: 3}\n`, map_result, "println(map) returns map string with newline")
+    null_result println(null)
+    assert-eq("null\n", null_result, "println(null) returns null string with newline")
+}
+
+// We ignore this test because the test runner itself is a test of this functionality
+// test-capture
+// meta ["test"] fn () {
+//     assert-eq ::hot::test/assert-eq
+//     assert ::hot::test/assert
+//     eq ::hot::cmp/eq
+//     println ::hot::io/println
+//     // Test capture and release functionality
+//     // Note: Due to limitations with the gag crate in test environments,
+//     // we primarily test the API correctness rather than actual output capture
+//     out capture-stdout()
+//     // Verify we got a capture handle (should be a boxed value)
+//     println("Testing capture-stdout API...")
+//     // The println during capture may not be visible in test environment due to
+//     // conflicts between gag crate's BufferRedirect and Rust's test framework
+//     println("This may not be visible during capture (expected in test env)")
+//     // Test that release-capture works and returns true for success
+//     release_result release-capture(out)
+//     assert(release_result, "capture-stdout and release-capture work")
+//     // This should now be visible since capture is released
+//     println("stdout should be released here - API test complete")
+//     // Test multiple capture/release cycles
+//     out2 capture-stderr()
+//     release_result2 release-capture(out2)
+//     assert(release_result2, "capture-stderr and release-capture work")
+// }

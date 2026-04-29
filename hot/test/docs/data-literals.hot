@@ -1,0 +1,277 @@
+// Documentation examples for: resources/docs/language/data-literals.md
+::hot::test::docs::data-literals ns
+meta ["test"]
+
+// =============================================================================
+// Imports
+// =============================================================================
+// Note: Most functions used here are core (add, assert-eq, first, last, etc.)
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: strings-basic
+greeting "Hello, world!"
+path "/api/users"
+empty-str ""
+// @end: strings-basic
+
+// @doc: template-strings
+name-tpl "Alice"
+message `Hello, ${name-tpl}!`              // "Hello, Alice!"
+calculation `2 + 2 = ${add(2, 2)}`         // "2 + 2 = 4"
+// @end: template-strings
+
+// @doc: block-strings
+simple-tq """Hello, world!"""
+
+multiline-tq """
+    SELECT *
+    FROM users
+    WHERE active = true
+    """
+// @end: block-strings
+
+// @doc: block-template-strings
+table-name "users"
+max-rows 100
+query-tbt ```
+    SELECT * FROM ${table-name}
+    WHERE active = true
+    LIMIT ${max-rows}
+    ```
+// @end: block-template-strings
+
+// @doc: template-multiline
+title "Welcome"
+body "This is the content."
+html `
+  <div>
+    <h1>${title}</h1>
+    <p>${body}</p>
+  </div>
+`
+// @end: template-multiline
+
+// @doc: integers
+count-num 42
+negative -17
+zero-num 0
+// @end: integers
+
+// @doc: decimals
+price 19.99
+rate 0.05
+pi 3.14159265358979323846
+// @end: decimals
+
+// @doc: dec-precision
+// These are exact in Hot, no floating-point errors
+total-dec add(0.1, 0.2)   // Exactly 0.3
+// @end: dec-precision
+
+// @doc: booleans
+active true
+disabled false
+// @end: booleans
+
+// @doc: null-values
+nothing null
+user-avatar null
+// @end: null-values
+
+// @doc: vectors
+numbers [1, 2, 3]
+names ["Alice", "Bob", "Carol"]
+mixed ["text", 42, true, null]
+empty-vec []
+// @end: vectors
+
+// @doc: vec-nested
+matrix [
+  [1, 2, 3],
+  [4, 5, 6],
+  [7, 8, 9]
+]
+// @end: vec-nested
+
+// @doc: vec-access
+numbers-access [10, 20, 30]
+first-num first(numbers-access)   // 10
+last-num last(numbers-access)     // 30
+// @end: vec-access
+
+// @doc: maps
+user-map {name: "Alice", age: 30}
+config-map {debug: true, port: 8080}
+empty-map {}
+// @end: maps
+
+// @doc: maps-nested
+settings {
+  database: {
+    host: "localhost",
+    port: 5432
+  },
+  cache: {
+    enabled: true,
+    ttl: 3600
+  }
+}
+// @end: maps-nested
+
+// @doc: map-access
+user-access {name: "Alice", email: "alice@example.com"}
+name-access user-access.name     // "Alice"
+email-access user-access.email   // "alice@example.com"
+// @end: map-access
+
+// @doc: type-annotations
+// Simple types
+count-typed: Int 42
+price-typed: Dec 19.99
+name-str: Str "Alice"
+
+// Generic types
+numbers-typed: Vec<Int> [1, 2, 3]
+prices-typed: Vec<Dec> [9.99, 19.99]
+user-typed: Map<Str, Any> {name: "Alice", age: 30}
+// @end: type-annotations
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-strings
+meta ["test"] fn () {
+  assert-eq("Hello, world!", greeting, "greeting")
+  assert-eq("/api/users", path, "path")
+  assert-eq("", empty-str, "empty string")
+}
+
+test-templates
+meta ["test"] fn () {
+  assert-eq("Hello, Alice!", message, "template message")
+  assert-eq("2 + 2 = 4", calculation, "template calculation")
+}
+// @result: template-strings
+// `Hello, ${name}!`        → "Hello, Alice!"
+// `2 + 2 = ${add(2, 2)}`   → "2 + 2 = 4"
+// @end: template-strings
+
+test-triple-backtick-templates
+meta ["test"] fn () {
+  assert-eq("SELECT * FROM users\nWHERE active = true\nLIMIT 100", query-tbt, "block template string")
+
+  // Inline (single-line) triple-backtick
+  name "world"
+  inline ```hello ${name}```
+  assert-eq("hello world", inline, "inline triple-backtick")
+
+  // Literal $ not followed by { should pass through
+  price-str ```Price is $50 for ${name}```
+  assert-eq("Price is $50 for world", price-str, "literal dollar sign")
+
+  // No escape processing: backslashes are literal
+  raw ```path: C:\Users\${name}\docs```
+  assert-eq("path: C:\\Users\\world\\docs", raw, "backslashes are literal")
+
+  // Empty triple-backtick
+  empty ``````
+  assert-eq("", empty, "empty triple-backtick")
+
+  // Single and double backticks inside content
+  markdown ```Use `code` and ``double`` in ${name}```
+  assert-eq("Use `code` and ``double`` in world", markdown, "backticks inside content")
+
+  // Expression in interpolation
+  computed ```result: ${add(1, 2)}```
+  assert-eq("result: 3", computed, "expression interpolation")
+
+  // Multi-line with indent stripping and multiple interpolations
+  a "Alice"
+  b "Bob"
+  multi ```
+      Hello ${a}!
+      Goodbye ${b}!
+      ```
+  assert-eq("Hello Alice!\nGoodbye Bob!", multi, "multi-line with indent stripping")
+}
+
+test-integers
+meta ["test"] fn () {
+  assert-eq(42, count-num, "count")
+  assert-eq(-17, negative, "negative")
+  assert-eq(0, zero-num, "zero")
+}
+
+test-decimals
+meta ["test"] fn () {
+  assert-eq(19.99, price, "price")
+  assert-eq(0.05, rate, "rate")
+}
+
+test-dec-precision
+meta ["test"] fn () {
+  assert-eq(0.3, total-dec, "dec precision")
+}
+// @result: dec-precision
+// add(0.1, 0.2) → 0.3  // Exact, no floating-point error!
+// @end: dec-precision
+
+test-booleans
+meta ["test"] fn () {
+  assert-eq(true, active, "active")
+  assert-eq(false, disabled, "disabled")
+}
+
+test-null
+meta ["test"] fn () {
+  assert-eq(null, nothing, "nothing")
+  assert-eq(null, user-avatar, "user-avatar")
+}
+
+test-vectors
+meta ["test"] fn () {
+  assert-eq([1, 2, 3], numbers, "numbers")
+  assert-eq(["Alice", "Bob", "Carol"], names, "names")
+  assert-eq([], empty-vec, "empty vec")
+}
+
+test-vec-access
+meta ["test"] fn () {
+  assert-eq(10, first(numbers-access), "first")
+  assert-eq(30, last(numbers-access), "last")
+}
+
+test-maps
+meta ["test"] fn () {
+  assert-eq("Alice", user-map.name, "user name")
+  assert-eq(30, user-map.age, "user age")
+  assert-eq(true, config-map.debug, "debug")
+}
+
+test-nested-maps
+meta ["test"] fn () {
+  assert-eq("localhost", settings.database.host, "db host")
+  assert-eq(5432, settings.database.port, "db port")
+  assert-eq(true, settings.cache.enabled, "cache enabled")
+}
+
+test-map-access
+meta ["test"] fn () {
+  assert-eq("Alice", name-access, "name access")
+  assert-eq("alice@example.com", email-access, "email access")
+}
+// @result: map-access
+// user.name  → "Alice"
+// user.email → "alice@example.com"
+// @end: map-access
+
+test-typed-literals
+meta ["test"] fn () {
+  assert-eq(42, count-typed, "typed count")
+  assert-eq(19.99, price-typed, "typed price")
+  assert-eq("Alice", name-str, "typed name")
+}

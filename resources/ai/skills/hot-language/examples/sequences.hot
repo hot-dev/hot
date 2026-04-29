@@ -1,0 +1,165 @@
+// Sequence processing in Hot
+::examples::sequences ns
+
+// ============================================
+// EAGER COLLECTION FUNCTIONS
+// ============================================
+
+// map - transform each element
+numbers [1, 2, 3, 4, 5]
+doubled map(numbers, mul(%, 2))  // [2, 4, 6, 8, 10]
+
+// pmap - parallel map (good for I/O-bound operations)
+// Each transformation runs concurrently
+urls ["url1", "url2", "url3"]
+fetch-url fn (url: Str): Str { `fetched:${url}` }
+fetched pmap(urls, fetch-url)  // Runs in parallel
+
+// filter - keep elements matching predicate
+evens filter(numbers, eq(mod(%, 2), 0))  // [2, 4]
+
+// reduce - fold to single value
+sum reduce(numbers, (acc, x) { add(acc, x) }, 0)  // 15
+
+// ============================================
+// RANGE FUNCTION (EAGER)
+// ============================================
+
+// range is a core function that returns a Vec
+zero-to-four range(5)           // [0, 1, 2, 3, 4]
+one-to-five range(1, 6)         // [1, 2, 3, 4, 5]
+evens-to-ten range(0, 10, 2)    // [0, 2, 4, 6, 8]
+countdown range(5, 0, -1)       // [5, 4, 3, 2, 1]
+
+// Sum 1 to 100
+sum-to-100 reduce(range(1, 101), add, 0)  // 5050
+
+// ============================================
+// COLLECTION PIPELINES
+// ============================================
+
+// Chain operations with pipe operator
+// Piped value becomes FIRST argument
+result [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    |> filter(eq(mod(%, 2), 0))           // Keep evens: [2, 4, 6, 8, 10]
+    |> map(mul(%, %))                     // Square: [4, 16, 36, 64, 100]
+    |> reduce(add, 0)                    // Sum: 220
+
+// ============================================
+// OTHER COLLECTION FUNCTIONS
+// ============================================
+
+items [1, 2, 3, 4, 5]
+
+first-item first(items)        // 1
+last-item last(items)          // 5
+rest-items rest(items)         // [2, 3, 4, 5]
+item-count length(items)       // 5
+reversed reverse(items)        // [5, 4, 3, 2, 1]
+
+unsorted [3, 1, 4, 1, 5, 9, 2, 6]
+sorted sort(unsorted)          // [1, 1, 2, 3, 4, 5, 6, 9]
+
+// Concatenate vectors (flatten nested)
+parts [[1, 2, 3], [4, 5, 6]]
+combined flatten(parts)          // [1, 2, 3, 4, 5, 6]
+
+nested [[1, 2], [3, 4], [5]]
+flat flatten(nested)           // [1, 2, 3, 4, 5]
+
+// ============================================
+// MAP OPERATIONS
+// ============================================
+
+scores {"alice": 100, "bob": 95, "carol": 88}
+
+// map with (key, value) callback
+formatted map(scores, (name, score) { `${name}: ${score}` })
+// ["alice: 100", "bob: 95", "carol: 88"]
+
+// filter with (key, value) predicate
+high-scores filter(scores, (name, score) { gte(score, 90) })
+// [["alice", 100], ["bob", 95]]
+
+// Get keys and values
+all-names keys(scores)   // ["alice", "bob", "carol"]
+all-scores vals(scores)  // [100, 95, 88]
+
+// ============================================
+// LAZY ITERATORS
+// ============================================
+
+// Iter() creates a lazy iterator from a collection
+it Iter([1, 2, 3, 4, 5])
+
+// next() returns a Next record with value and done flag
+first-next next(it)   // {value: 1, done: false}
+second-next next(it)  // {value: 2, done: false}
+
+// collect() gathers remaining values into a Vec
+remaining collect(it) // [3, 4, 5]
+
+// take() gets first n values
+another-iter Iter([1, 2, 3, 4, 5])
+first-three take(another-iter, 3)  // [1, 2, 3]
+
+// ============================================
+// LAZY RANGE (::hot::iter/range)
+// ============================================
+
+// For very large ranges, use the lazy iterator version
+// It doesn't allocate all values at once
+::iter ::hot::iter
+
+// Create a lazy range iterator
+big-range ::iter/range(1, 1000001)  // Doesn't allocate 1M items
+
+// Process lazily - only computes what's needed
+lazy-sum reduce(big-range, add, 0)  // 500000500000
+
+// ============================================
+// FOR-EACH ITERATION
+// ============================================
+
+// for-each applies a function to each element
+// Uses tail-call optimization - stack-safe for any size
+process fn (n: Int): Null {
+    // Side effect: would normally log or update state
+    null
+}
+
+process-all fn (items: Vec): Null {
+    for-each(Iter(items), process)
+}
+
+// ============================================
+// WHEN TO USE EACH APPROACH
+// ============================================
+
+// EAGER (map, filter, reduce, range):
+// - Small to medium data
+// - Need all results
+// - Random access to elements
+eager-example fn (): Vec {
+    range(1, 100)
+        |> filter(eq(mod(%, 3), 0))
+        |> map(mul(%, 2))
+}
+
+// LAZY (Iter, for-each, ::iter/range):
+// - Large or unbounded data
+// - Streaming data
+// - Only need partial results
+// - Memory efficiency matters
+lazy-example fn (): Int {
+    reduce(::iter/range(1, 10000001), add, 0)
+}
+
+// PARALLEL (pmap):
+// - I/O-bound operations
+// - Independent tasks
+// - Want concurrent execution
+parallel-example fn (ids: Vec<Str>): Vec {
+    fetch-item fn (id: Str): Map { {id: id} }
+    pmap(ids, fetch-item)
+}

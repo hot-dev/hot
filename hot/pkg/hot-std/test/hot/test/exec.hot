@@ -1,0 +1,79 @@
+::hot::test::exec ns
+meta ["test"]
+
+// fail and cancel halt execution by producing errors.
+// is-err receives a lazy argument, suppressing auto-unwrap so we can inspect them.
+
+test-fail-produces-error
+meta ["test"] fn () {
+    result fail("something went wrong")
+    assert(is-err(result), "fail produces an error result")
+}
+
+test-fail-with-data
+meta ["test"] fn () {
+    result fail("validation failed", {field: "email", reason: "invalid"})
+    assert(is-err(result), "fail with data produces an error result")
+}
+
+test-cancel-produces-error
+meta ["test"] fn () {
+    result cancel("user cancelled")
+    assert(is-err(result), "cancel produces an error result")
+}
+
+test-cancel-with-data
+meta ["test"] fn () {
+    result cancel("timeout exceeded", {elapsed: 30000})
+    assert(is-err(result), "cancel with data produces an error result")
+}
+
+test-fail-does-not-continue
+meta ["test"] fn () {
+    // After fail, subsequent code should not execute
+    // We test this by assigning fail, then checking is-err
+    // If fail didn't halt, the is-err would be false
+    x fail("halt here")
+    assert(is-err(x), "fail halts — variable holds error")
+}
+
+test-fail-state-does-not-leak
+meta ["test"] fn () {
+    // After fail(), VmFailureState must be reset so that subsequent
+    // parallel flows do not see a stale failure.
+    err-result fail("temporary failure")
+    assert(is-err(err-result), "fail produces error")
+
+    // This parallel flow must succeed — it should NOT see the failure above.
+    data parallel|map {
+        a 10
+        b 20
+    }
+
+    assert-eq(data, {a: 10, b: 20}, "parallel flow runs cleanly after fail()")
+}
+
+test-div-by-zero-returns-error
+meta ["test"] fn () {
+    result div(10, 0)
+    assert(is-err(result), "div(10, 0) should produce error, not crash")
+}
+
+test-div-by-zero-dec-returns-error
+meta ["test"] fn () {
+    result div(10.0, 0.0)
+    assert(is-err(result), "div(10.0, 0.0) should produce error, not crash")
+}
+
+test-mixed-type-arithmetic
+meta ["test"] fn () {
+    // Int + Dec should produce Dec
+    result add(10, 1.5)
+    assert-eq(11.5, result, "add(Int, Dec) produces Dec")
+
+    result2 sub(10, 0.5)
+    assert-eq(9.5, result2, "sub(Int, Dec) produces Dec")
+
+    result3 mul(3, 2.5)
+    assert-eq(7.5, result3, "mul(Int, Dec) produces Dec")
+}

@@ -1,0 +1,156 @@
+<!-- Cancelled Runs Component (for Quick Issues) -->
+
+<!-- Desktop Table View -->
+<div class="overflow-x-auto hidden md:block">
+    <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+        <thead class="bg-gray-50 dark:bg-gray-800">
+            <tr>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Run ID</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Type</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Start</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Stream ID</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Project</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+            {% for run in runs %}
+            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors">
+                <td class="px-3 py-2 whitespace-nowrap">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <a href="/runs/{{ run.run_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono text-xs" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</a>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.run_id }}" title="Copy {{ run.run_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
+                    {% match run.event_fn %}
+                    {% when Some with (event_fn) %}
+                        <code class="language-hot">{{ event_fn }}</code>
+                    {% when None %}
+                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                    {% endmatch %}
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
+                    <div class="flex items-center gap-1">
+                        {{ run.run_type }}
+                        {% if run.is_retry %}
+                            <span class="px-1 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                        {% endif %}
+                    </div>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                    {{ run.start_time_formatted }}
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-900 dark:text-white">
+                    {{ run.duration_formatted }}
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <a href="/streams/{{ run.stream_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono text-xs" data-full-uuid="{{ run.stream_id }}" title="{{ run.stream_id }}">{{ run.stream_id|shortuuid }}</a>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.stream_id }}" title="Copy {{ run.stream_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
+                    {{ run.project_name }}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="7" class="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-500">
+                        <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
+                    </svg>
+                    No cancelled runs
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Mobile Card View -->
+<div class="md:hidden space-y-3">
+    {% for run in runs %}
+    <div class="mobile-card backdrop-blur-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+        <div class="flex justify-between items-start mb-3">
+            <div class="text-sm font-medium text-gray-900 dark:text-white min-w-0 flex-1">
+                Run <div class="uuid-container inline-flex items-center gap-1">
+                    <span class="uuid-display font-mono font-semibold truncate" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</span>
+                    <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors flex-shrink-0" data-uuid="{{ run.run_id }}" title="Copy {{ run.run_id }} to clipboard">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200 flex-shrink-0">Cancelled</span>
+        </div>
+
+        <div class="space-y-2 text-sm">
+            <div class="flex justify-between">
+                <span class="text-gray-600 dark:text-gray-400">FN:</span>
+                <span class="text-gray-700 dark:text-gray-300">
+                    {% match run.event_fn %}
+                    {% when Some with (event_fn) %}
+                        <code class="language-hot text-xs">{{ event_fn }}</code>
+                    {% when None %}
+                        <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                    {% endmatch %}
+                </span>
+            </div>
+            <div class="flex justify-between items-center">
+                <span class="text-gray-600 dark:text-gray-400">Type:</span>
+                <div class="flex items-center gap-1">
+                    <span class="text-gray-700 dark:text-gray-300 text-xs">{{ run.run_type }}</span>
+                    {% if run.is_retry %}
+                        <span class="px-1 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600 dark:text-gray-400">Start:</span>
+                <span class="text-gray-700 dark:text-gray-300 text-xs">{{ run.start_time_formatted }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600 dark:text-gray-400">Duration:</span>
+                <span class="text-gray-700 dark:text-gray-300 text-xs">{{ run.duration_formatted }}</span>
+            </div>
+            <div class="flex justify-between items-center">
+                <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Stream:</span>
+                <div class="uuid-container inline-flex items-center gap-1 min-w-0 flex-1 justify-end">
+                    <span class="uuid-display font-mono text-xs truncate" data-full-uuid="{{ run.stream_id }}" title="{{ run.stream_id }}">{{ run.stream_id|shortuuid }}</span>
+                    <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors flex-shrink-0" data-uuid="{{ run.stream_id }}" title="Copy {{ run.stream_id }} to clipboard">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600 dark:text-gray-400">Project:</span>
+                <span class="text-gray-700 dark:text-gray-300 text-xs">{{ run.project_name }}</span>
+            </div>
+        </div>
+
+        <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+            <a href="/runs/{{ run.run_id }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all duration-200 font-medium text-sm">View Details</a>
+        </div>
+    </div>
+    {% else %}
+    <div class="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-500">
+            <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
+        </svg>
+        No cancelled runs
+    </div>
+    {% endfor %}
+</div>

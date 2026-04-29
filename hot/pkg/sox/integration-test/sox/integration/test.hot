@@ -1,0 +1,67 @@
+::sox::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::sox
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-sox
+// ============================================================================
+
+
+// Small public WAV sample (verified HTTP 200)
+TEST_WAV_URL "https://filesamples.com/samples/audio/wav/sample3.wav"
+
+setup-test-input fn (url: Str, name: Str): Str {
+    hot-path `hot://sox-test/${name}`
+    cmd `wget -q -O /tmp/test-audio '${url}' && hotbox cp /tmp/test-audio '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 60,
+        size: "nano",
+        network: "internet",
+    })
+    result ::hot::task/await(info.id)
+    hot-path
+}
+
+test-info-real-audio
+meta ["test"] fn () {
+    input setup-test-input(TEST_WAV_URL, "info-test.wav")
+    info ::sox/info(input)
+    assert(is-some(get(info, "Channels")), "should have Channels")
+    assert(is-some(get(info, "Sample Rate")), "should have Sample Rate")
+}
+
+test-convert-wav-to-mp3
+meta ["test"] fn () {
+    input setup-test-input(TEST_WAV_URL, "convert-test.wav")
+    result ::sox/convert(input, {
+        format: "mp3",
+        size: "small",
+    })
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("mp3", result.format)
+    assert(starts-with(result.url, "hot://sox/"), "URL should use sox namespace")
+}
+
+test-normalize-audio
+meta ["test"] fn () {
+    input setup-test-input(TEST_WAV_URL, "norm-test.wav")
+    result ::sox/normalize(input, {format: "wav", size: "small",})
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("wav", result.format)
+}
+
+test-trim-audio
+meta ["test"] fn () {
+    input setup-test-input(TEST_WAV_URL, "trim-test.wav")
+    result ::sox/audio-trim(input, {
+        start: "0:01",
+        end: "0:03",
+        format: "wav",
+        size: "small",
+    })
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("wav", result.format)
+}

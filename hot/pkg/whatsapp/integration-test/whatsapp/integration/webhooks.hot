@@ -1,0 +1,81 @@
+::whatsapp::integration::webhooks ns
+meta ["test"]
+
+test-verify-challenge
+meta ["test"]
+fn () {
+  // Valid challenge
+  valid-query {
+    "hub.mode": "subscribe",
+    "hub.verify_token": "test-verify-token",
+    "hub.challenge": "challenge-string-123"
+  }
+
+  result ::whatsapp::webhooks/verify-challenge(valid-query, "test-verify-token")
+  assert-eq("challenge-string-123", result, "should return challenge on valid token")
+}
+
+test-verify-challenge-invalid-token
+meta ["test"]
+fn () {
+  query {
+    "hub.mode": "subscribe",
+    "hub.verify_token": "wrong-token",
+    "hub.challenge": "challenge-string-123"
+  }
+
+  result ::whatsapp::webhooks/verify-challenge(query, "correct-token")
+  assert(is-err(result), "should return error for invalid token")
+}
+
+test-verify-challenge-invalid-mode
+meta ["test"]
+fn () {
+  query {
+    "hub.mode": "unsubscribe",
+    "hub.verify_token": "test-verify-token",
+    "hub.challenge": "challenge-string-123"
+  }
+
+  result ::whatsapp::webhooks/verify-challenge(query, "test-verify-token")
+  assert(is-err(result), "should return error for invalid mode")
+}
+
+test-verify-request-signature
+meta ["test"]
+fn () {
+  // HMAC-SHA256 of "test-body" with key "test-secret"
+  expected-sig ::hot::base16/encode(::hot::hmac/hmac-sha256("test-secret", "test-body"))
+
+  valid-request {
+    headers: {"x-hub-signature-256": `sha256=${expected-sig}`},
+    body-raw: "test-body"
+  }
+
+  result ::whatsapp::webhooks/verify-request(valid-request, "test-secret")
+  assert(result, "should verify valid signature")
+}
+
+test-verify-request-invalid-signature
+meta ["test"]
+fn () {
+  invalid-request {
+    headers: {"x-hub-signature-256": "sha256=invalid"},
+    body-raw: "test-body"
+  }
+
+  result ::whatsapp::webhooks/verify-request(invalid-request, "test-secret")
+  assert(not(result), "should reject invalid signature")
+}
+
+test-verify-request-missing-header
+meta ["test"]
+fn () {
+  no-header-request {
+    headers: {},
+    body-raw: "test-body"
+  }
+
+  result ::whatsapp::webhooks/verify-request(no-header-request, "test-secret")
+  assert(not(result), "should reject missing signature header")
+}

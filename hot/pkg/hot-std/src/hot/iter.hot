@@ -1,0 +1,212 @@
+::hot::iter ns
+meta {
+    doc: """
+    Iterator support for lazy sequences and streaming data.
+
+    Iterators enable processing of data streams lazily, fetching values on-demand.
+    This is particularly useful for:
+    - Streaming HTTP responses (SSE, NDJSON)
+    - Large datasets that don't fit in memory
+    - Real-time data processing with automatic `stream:data` emissions
+    """
+}
+
+Iter
+meta {
+    core: true,
+    doc: """
+    Iterator type constructor - creates a lazy iterator from Vec, Map, or Str.
+
+    **Example**
+
+    ```hot
+    it Iter([1, 2, 3])
+    is-iter(it)  // true
+    collect(it)  // [1, 2, 3]
+    ```
+    """
+}
+type
+
+fn (v: Vec<Any>): Iter {
+    call-lib(::hot::iter/Iter, [v])
+}
+fn (m: Map<Any, Any>): Iter {
+    call-lib(::hot::iter/Iter, [m])
+}
+fn (s: Str): Iter {
+    call-lib(::hot::iter/Iter, [s])
+}
+fn (it: Iter): Iter {
+    it
+}
+
+Next
+meta {
+    core: true,
+    doc: """
+    Result type from calling `next` on an iterator.
+
+    **Fields**
+    - `value` - The current value (null if done)
+    - `done` - Whether the iterator is exhausted
+    """
+}
+type {
+    value: Any,
+    done: Bool
+}
+
+next
+meta {
+    core: true,
+    doc: """
+    Get the next value from an iterator.
+
+    Returns a Next result with the next value and a done flag.
+
+    **Example**
+
+    ```hot
+    iter Iter([1, 2, 3])
+
+    first next(iter)
+    first.value   // 1
+    first.done    // false
+
+    second next(iter)
+    second.value  // 2
+
+    // After exhaustion
+    // result.done is true, result.value is null
+    ```
+    """
+}
+fn (iter: Any): Next {
+    call-lib(::hot::iter/next, [iter])
+}
+
+collect
+meta {
+    core: true,
+    doc: """
+    Collect all values from an iterator into a vector.
+
+    **Warning**: This will block until the iterator is exhausted.
+    For infinite or long-running iterators, use `for-each` or `take` instead.
+
+    **Example**
+
+    ```hot
+    iter Iter([1, 2, 3])
+    next(iter)        // consume first value
+    collect(iter)     // [2, 3]
+    ```
+    """
+}
+fn (iter: Any): Vec<Any> {
+    call-lib(::hot::iter/collect, [iter])
+}
+
+is-iter
+meta {
+    core: true,
+    doc: """
+    Check if a value is an Iter.
+
+    **Example**
+
+    ```hot
+    it Iter([1, 2, 3])
+    is-iter(it)           // true
+    is-iter([1, 2, 3])    // false
+    ```
+    """
+}
+fn (value: Any): Bool {
+    ::hot::type/is-type(value, ::hot::iter/Iter)
+}
+
+range
+meta {
+    doc: """
+    Create a lazy range iterator over integers.
+
+    **Example**
+
+    ```hot
+    numbers ::hot::iter/range(1, 10001)
+    sum ::hot::coll/reduce(numbers, fn (acc, n) { ::hot::math/add(acc, n) }, 0)
+    ```
+    """
+}
+fn (start: Int, end: Int, step: Int): Any {
+    call-lib(::hot::iter/range, [start, end, step])
+},
+(start: Int, end: Int): Any {
+    call-lib(::hot::iter/range, [start, end])
+},
+(end: Int): Any {
+    call-lib(::hot::iter/range, [end])
+}
+
+for-each
+meta {
+    core: true,
+    doc: """
+    Apply a function to each value from an iterable.
+
+    Accepts Vec, Map, Str, or Iter. Auto-converts to Iter if needed.
+    Uses tail-call optimization for efficient iteration.
+
+    **Example**
+
+    ```hot
+    for-each([1, 2, 3], print(%))
+    ```
+    """
+}
+fn (coll: Any, f: Fn): Null {
+    iter Iter(coll)
+    result next(iter)
+    cond {
+        result.done => { null }
+        => {
+            f(result.value)
+            for-each(iter, f)
+        }
+    }
+}
+
+take
+meta {
+    core: true,
+    doc: """
+    Take the first n values from an iterable.
+
+    Accepts Vec, Map, Str, or Iter. Returns a vector with at most n values.
+
+    **Example**
+
+    ```hot
+    take([1, 2, 3, 4, 5], 3)  // [1, 2, 3]
+    take(range(1000), 5)      // [0, 1, 2, 3, 4]
+    ```
+    """
+}
+fn
+(coll: Any, n: Int): Vec<Any> {
+    take(Iter(coll), n, 0, [])
+},
+(iter: Iter, n: Int, count: Int, acc: Vec<Any>): Vec<Any> {
+    cond {
+        ::hot::cmp/gte(count, n) => { acc }
+        => {
+            result next(iter)
+            cond {
+                result.done => { acc }
+                => { take(iter, n, ::hot::math/add(count, 1), ::hot::coll/concat(acc, [result.value])) }
+            }
+        }
+    }
+}

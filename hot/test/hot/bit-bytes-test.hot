@@ -1,0 +1,197 @@
+::test::hot::bit-bytes-test ns
+
+// ============================================================================
+// Tests for ::hot::bit - Bitwise Operations
+// ============================================================================
+
+test-bit-and
+meta {test: true}
+fn () {
+    // 12 = 0b1100, 10 = 0b1010, result = 0b1000 = 8
+    ::hot::test/assert-eq(8, ::hot::bit/and(12, 10), "bit/and basic")
+    ::hot::test/assert-eq(0, ::hot::bit/and(0, 255), "bit/and zeros")
+    ::hot::test/assert-eq(255, ::hot::bit/and(255, 255), "bit/and ones")
+}
+
+test-bit-or
+meta {test: true}
+fn () {
+    // 12 = 0b1100, 10 = 0b1010, result = 0b1110 = 14
+    ::hot::test/assert-eq(14, ::hot::bit/or(12, 10), "bit/or basic")
+    ::hot::test/assert-eq(42, ::hot::bit/or(42, 0), "bit/or with zero")
+}
+
+test-bit-xor
+meta {test: true}
+fn () {
+    // 12 = 0b1100, 10 = 0b1010, result = 0b0110 = 6
+    ::hot::test/assert-eq(6, ::hot::bit/xor(12, 10), "bit/xor basic")
+    ::hot::test/assert-eq(0, ::hot::bit/xor(42, 42), "bit/xor same")
+}
+
+test-bit-not
+meta {test: true}
+fn () {
+    ::hot::test/assert-eq(-1, ::hot::bit/not(0), "bit/not zero")
+    // For 8-bit patterns: ~0xFF = 0xFFFFFF00 in 64-bit signed = -256
+    // For single byte context, we'd typically mask: not(255) & 255 = 0
+}
+
+test-bit-shift
+meta {test: true}
+fn () {
+    ::hot::test/assert-eq(16, ::hot::bit/shift-left(1, 4), "bit/shift-left")
+    ::hot::test/assert-eq(4, ::hot::bit/shift-right(16, 2), "bit/shift-right")
+    ::hot::test/assert-eq(12, ::hot::bit/shift-left(3, 2), "bit/shift-left")
+    ::hot::test/assert-eq(3, ::hot::bit/shift-right(12, 2), "bit/shift-right")
+}
+
+// ============================================================================
+// Tests for ::hot::bytes - Binary Data Operations
+// ============================================================================
+
+test-bytes-to-int
+meta {test: true}
+fn () {
+    // Big-endian: [0, 0, 0, 1] = 1
+    ::hot::test/assert-eq(1, ::hot::bytes/to-int(Bytes([1])), "to-int single byte")
+    // [1, 0] big-endian = 256
+    ::hot::test/assert-eq(256, ::hot::bytes/to-int(Bytes([1, 0])), "to-int two bytes BE")
+    // [0, 1] big-endian = 1
+    ::hot::test/assert-eq(1, ::hot::bytes/to-int(Bytes([0, 1])), "to-int two bytes BE")
+    // Little-endian: [1, 0] = 1
+    ::hot::test/assert-eq(1, ::hot::bytes/to-int(Bytes([1, 0]), "little"), "to-int two bytes LE")
+}
+
+test-bytes-from-int
+meta {test: true}
+fn () {
+    result1 ::hot::bytes/from-int(256, 2)
+    ::hot::test/assert-eq(Bytes([1, 0]), result1, "from-int 256 size 2 BE")
+
+    result2 ::hot::bytes/from-int(256, 2, "little")
+    ::hot::test/assert-eq(Bytes([0, 1]), result2, "from-int 256 size 2 LE")
+
+    result3 ::hot::bytes/from-int(1, 4)
+    ::hot::test/assert-eq(Bytes([0, 0, 0, 1]), result3, "from-int 1 size 4 BE")
+}
+
+test-bytes-crc32
+meta {test: true}
+fn () {
+    // Known CRC32 value for "hello"
+    data Bytes([104, 101, 108, 108, 111])  // "hello" in ASCII
+    crc ::hot::bytes/crc32(data)
+    // CRC32 of "hello" = 0x3610A686 = 907060870
+    ::hot::test/assert-eq(907060870, crc, "crc32 hello")
+}
+
+test-bytes-get
+meta {test: true}
+fn () {
+    data Bytes([10, 20, 30, 40])
+    ::hot::test/assert-eq(10, ::hot::bytes/get(data, 0), "get index 0")
+    ::hot::test/assert-eq(20, ::hot::bytes/get(data, 1), "get index 1")
+    ::hot::test/assert-eq(40, ::hot::bytes/get(data, 3), "get index 3")
+}
+
+test-bytes-to-vec
+meta {test: true}
+fn () {
+    data Bytes([1, 2, 3])
+    vec ::hot::bytes/to-vec(data)
+    ::hot::test/assert-eq([1, 2, 3], vec, "to-vec")
+}
+
+// ============================================================================
+// Tests for ::hot::coll extensions for Bytes
+// ============================================================================
+
+test-coll-length-bytes
+meta {test: true}
+fn () {
+    data Bytes([1, 2, 3, 4, 5])
+    ::hot::test/assert-eq(5, ::hot::coll/length(data), "length bytes")
+    ::hot::test/assert-eq(0, ::hot::coll/length(Bytes([])), "length empty bytes")
+}
+
+test-coll-concat-bytes
+meta {test: true}
+fn () {
+    a Bytes([1, 2])
+    b Bytes([3, 4])
+    result ::hot::coll/concat(a, b)
+    ::hot::test/assert-eq(Bytes([1, 2, 3, 4]), result, "concat bytes")
+}
+
+test-coll-slice-bytes
+meta {test: true}
+fn () {
+    data Bytes([10, 20, 30, 40, 50])
+    sliced ::hot::coll/slice(data, 1, 4)
+    ::hot::test/assert-eq(Bytes([20, 30, 40]), sliced, "slice bytes")
+
+    sliced2 ::hot::coll/slice(data, 2)
+    ::hot::test/assert-eq(Bytes([30, 40, 50]), sliced2, "slice bytes from")
+}
+
+// ============================================================================
+// Tests for deep-get indexing on function results
+// ============================================================================
+
+test-bytes-indexing-fn-result
+meta {test: true}
+fn () {
+    // Direct indexing on Bytes constructor result
+    b0 Bytes([10, 20, 30])[0]
+    b1 Bytes([10, 20, 30])[1]
+    b2 Bytes([10, 20, 30])[2]
+    ::hot::test/assert-eq(10, b0, "Bytes(...)[0]")
+    ::hot::test/assert-eq(20, b1, "Bytes(...)[1]")
+    ::hot::test/assert-eq(30, b2, "Bytes(...)[2]")
+}
+
+test-bytes-indexing-variable
+meta {test: true}
+fn () {
+    // Indexing on variable holding Bytes
+    data Bytes([100, 200, 255])
+    b0 data[0]
+    b1 data[1]
+    b2 data[2]
+    ::hot::test/assert-eq(100, b0, "data[0]")
+    ::hot::test/assert-eq(200, b1, "data[1]")
+    ::hot::test/assert-eq(255, b2, "data[2]")
+}
+
+test-chained-slice-index
+meta {test: true}
+fn () {
+    // Chained access: slice then index
+    sliced ::hot::coll/slice(Bytes([1, 2, 3, 4, 5]), 1, 4)[0]
+    ::hot::test/assert-eq(2, sliced, "slice(...)[0]")
+}
+
+test-vec-indexing-variable
+meta {test: true}
+fn () {
+    // Indexing on vector variable
+    data ["a", "b", "c"]
+    v0 data[0]
+    v1 data[1]
+    v2 data[2]
+    ::hot::test/assert-eq("a", v0, "vec data[0]")
+    ::hot::test/assert-eq("b", v1, "vec data[1]")
+    ::hot::test/assert-eq("c", v2, "vec data[2]")
+}
+
+test-map-prop-access-fn-result
+meta {test: true}
+fn () {
+    // Property access on map-returning function (simulated with identity)
+    result {"name": "test", "value": 42}
+    n result.name
+    v result.value
+    ::hot::test/assert-eq("test", n, "map.name")
+    ::hot::test/assert-eq(42, v, "map.value")
+}

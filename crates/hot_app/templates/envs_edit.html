@@ -1,0 +1,92 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-4">
+    <div class="max-w-2xl">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            {% if error_message != "" %}
+            <div class="mb-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+                {{ error_message }}
+            </div>
+            {% endif %}
+
+            <form action="/envs/{{ env.env_id }}/edit" method="post">
+                <div class="mb-6">
+                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Environment Name <span class="text-red-500">*</span>
+                    </label>
+                    <input type="text" id="name" name="name" value="{{ env.name }}"
+                           class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white"
+                           placeholder="e.g., development, staging, production"
+                           pattern="[a-z0-9\-]+"
+                           title="Only lowercase letters, numbers, and hyphens are allowed"
+                           required>
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                        Only lowercase letters, numbers, and hyphens. Used in URLs and API endpoints.
+                    </p>
+                </div>
+
+                <!-- Environment Info (Read-only) -->
+                <div class="mb-6 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+                    <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Environment Information</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Environment ID</dt>
+                            <dd class="mt-1 text-xs text-gray-900 dark:text-white">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ env.env_id }}" title="{{ env.env_id }}">{{ env.env_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ env.env_id }}" title="Copy {{ env.env_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </dd>
+                        </div>
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Status</dt>
+                            <dd class="mt-1 text-xs">
+                                {% if env.active %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
+                                    <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                        <circle cx="4" cy="4" r="3" />
+                                    </svg>
+                                    Active
+                                </span>
+                                {% else %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                                    <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                        <circle cx="4" cy="4" r="3" />
+                                    </svg>
+                                    Inactive
+                                </span>
+                                {% endif %}
+                            </dd>
+                        </div>
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Created</dt>
+                            <dd class="mt-1 text-xs text-gray-900 dark:text-white">{{ env.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Last Updated</dt>
+                            <dd class="mt-1 text-xs text-gray-900 dark:text-white">{{ env.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-between">
+                    <a href="/envs" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-200">
+                        Cancel
+                    </a>
+                    <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                        </svg>
+                        Update Environment
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

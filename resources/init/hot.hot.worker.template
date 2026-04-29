@@ -1,0 +1,73 @@
+// Hot Configuration File - Worker
+// Configuration for running the Worker component.
+// Run `hot conf generate all` to see all available options.
+
+::hot::conf ns
+
+::env ::hot::env
+
+// Database Configuration
+hot.db.uri ::env/get("HOT_DB_URI", "")
+hot.db.schema "hot"
+
+// Logging Configuration
+hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
+hot.log.target "stdout"
+hot.log.dir ".hot/log"
+
+// Redis Configuration
+hot.redis.uri ::env/get("HOT_REDIS_URI", "")
+hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
+
+// Execution Engine Configuration
+hot.engine.isolation Bool(::env/get("HOT_ENGINE_ISOLATION", "true"))
+hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
+
+// Queue Configuration
+hot.queue.type "redis"
+
+// Email Configuration
+// The worker sends queued app emails and alert emails.
+hot.product.web-url ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev")
+hot.email.app-url ::env/get("HOT_APP_URL", "https://app.hot.dev")
+hot.email.web-url ::env/get("HOT_EMAIL_WEB_URL", ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev"))
+hot.email.docs-url ::env/get("HOT_EMAIL_DOCS_URL", "https://hot.dev/docs")
+hot.email.logo-url ::env/get("HOT_EMAIL_LOGO_URL", "https://assets.hot.dev/email/hot_logo_email.png")
+hot.email.from ::env/get("HOT_EMAIL_FROM", "hi@notifications.hot.dev")
+hot.email.from-name ::env/get("HOT_EMAIL_FROM_NAME", "Hot Dev")
+hot.email.alerts.from ::env/get("HOT_EMAIL_ALERTS_FROM", "alerts@notifications.hot.dev")
+hot.email.alerts.from-name ::env/get("HOT_EMAIL_ALERTS_FROM_NAME", "Hot Alerts")
+
+// Worker Configuration
+hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
+hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "110"))
+
+// Emitter Configuration (required for runs to be written to database)
+hot.emitter.type "db"
+
+// Task Worker Configuration
+hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
+
+// Box (Container) Configuration
+hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "false"))
+hot.box.backend ::env/get("HOT_BOX_BACKEND", "docker")
+
+// Build Storage Configuration (workers load bytecode from builds)
+hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "s3")
+hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
+hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "builds/")
+hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "us-east-1")
+hot.build.aws.access-key-id ::env/get("HOT_BUILD_AWS_ACCESS_KEY_ID", "")
+hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
+
+// File Storage Configuration (workers execute code that may use file ops)
+hot.file.mode ::env/get("HOT_FILE_MODE", "service")
+hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "s3")
+hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
+hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
+hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "us-east-1")
+hot.file.aws.access-key-id ::env/get("HOT_FILE_AWS_ACCESS_KEY_ID", "")
+hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
+
+// Daemon Mode
+hot.daemon true

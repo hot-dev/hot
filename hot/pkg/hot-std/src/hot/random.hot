@@ -1,0 +1,84 @@
+::hot::random ns
+meta {
+    doc: """Cryptographically secure random generation. For non-cryptographic random, use ::hot::math/rand."""
+}
+
+random-bytes
+meta {
+    core: true,
+    doc: """
+    Generate cryptographically secure random bytes.
+    Returns bytes by default, or encoded string if encoding specified.
+
+    **Example**
+
+    ```hot
+    // Generate 32 random bytes
+    bytes random-bytes(32)
+
+    // Generate as hex string (useful for tokens)
+    token random-bytes(32, "hex")
+    // 64-character hex string
+
+    // Generate as base64 string
+    secret random-bytes(32, "base64")
+    // 44-character base64 string
+
+    // Supported encodings: "hex", "base64", "bytes"
+    ```
+    """
+}
+fn
+(length: Int): Bytes {
+    call-lib(::hot::random/random-bytes, [length])
+},
+(length: Int, encoding: Str): Str | Bytes {
+    call-lib(::hot::random/random-bytes, [length, encoding])
+}
+
+
+random-string
+meta {
+    core: true,
+    doc: """
+    Generate a cryptographically secure random alphanumeric string.
+    Uses secure random for character selection (no modulo bias).
+
+    **Example**
+
+    ```hot
+    // Generate a 32-character random string
+    token random-string(32)
+    // "xK7mP2nQ9rT4vW8yB1cD3fG6hJ0kL5sN"
+
+    // Generate API key
+    api-key random-string(40)
+    ```
+    """
+}
+fn (length: Int): Str {
+    call-lib(::hot::random/random-string, [length])
+}
+
+
+secure-compare
+meta {
+    core: true,
+    doc: """
+    Compare two strings or byte arrays in constant time to prevent timing attacks.
+    Essential for comparing secrets, tokens, or HMAC signatures.
+
+    **Example**
+
+    ```hot
+    // Compare secrets safely
+    is-valid secure-compare(user-token, stored-token)
+
+    // Compare HMAC signatures
+    is-authentic secure-compare(computed-sig, received-sig)
+    ```
+    """
+}
+fn (a: Str | Bytes, b: Str | Bytes): Bool {
+    call-lib(::hot::random/secure-compare, [a, b])
+}

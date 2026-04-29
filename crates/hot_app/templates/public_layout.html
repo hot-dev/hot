@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - hot.dev</title>
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/x-icon" href="{{ page_context.assets_prefix }}img/favicon.ico">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ page_context.assets_prefix }}img/favicon-16x16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ page_context.assets_prefix }}img/favicon-32x32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ page_context.assets_prefix }}img/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ page_context.assets_prefix }}img/android-chrome-192x192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="{{ page_context.assets_prefix }}img/android-chrome-512x512.png">
+    <link rel="manifest" href="{{ page_context.assets_prefix }}img/site.webmanifest">
+
+    <!-- Prevent flash by applying theme before page loads -->
+    <script>
+        // Default to dark mode unless user explicitly chose light
+        if (localStorage.getItem('theme') !== 'light') {
+            document.documentElement.classList.add('dark');
+        }
+    </script>
+    <script src="{{ page_context.asset("js/htmx.min.js") }}" defer></script>
+    <script src="{{ page_context.asset("js/alpine.min.js") }}" defer></script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ page_context.css_url }}">
+</head>
+<body class="flex flex-col min-h-screen bg-gray-50 dark:bg-gray-900 grid-bg">
+    <!-- Top Bar -->
+    <header class="glass backdrop-blur-md bg-gray-100/90 dark:bg-gray-800/90 text-gray-800 dark:text-white py-2 px-4 sm:px-6 flex justify-between items-center sticky top-0 z-10" style="backdrop-filter: blur(10px);">
+        <div class="flex items-center">
+            <div class="text-xl font-bold text-red-600 dark:text-red-400 flex items-center">
+                <a href="/">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo-200w.webp" alt="hot.dev logo" class="h-8 sm:h-10 w-auto mr-2 block dark:hidden" width="200" height="54">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo_white-200w.webp" alt="hot.dev logo" class="h-8 sm:h-10 w-auto mr-2 hidden dark:block" width="200" height="54">
+                </a>
+            </div>
+        </div>
+        <div class="flex items-center space-x-3 sm:space-x-6">
+            <!-- Theme Toggle -->
+            <div class="flex flex-col items-center cursor-pointer" id="theme-toggle-container">
+                <div class="w-14 flex justify-between text-gray-300 text-[10px] mb-1 pointer-events-none">
+                    <span class="group relative inline-flex">
+                        <svg aria-label="Light" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
+                        <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Light</span>
+                    </span>
+                    <span class="group relative inline-flex">
+                        <svg aria-label="Dark" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
+                        <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Dark</span>
+                    </span>
+                </div>
+                <div class="relative pointer-events-none rounded-full">
+                    <div class="w-14 h-3 bg-gray-500 dark:bg-gray-700 rounded-full"></div>
+                    <div id="theme-thumb" class="absolute top-0 left-0 h-3 w-7 bg-white dark:bg-gray-300 rounded-full transition-transform duration-200 shadow-sm"></div>
+                </div>
+            </div>
+
+            <!-- Sign In Button -->
+            <div class="flex items-center">
+                <a href="/signin" class="bg-hot-red-500 hover:bg-hot-red-600 text-white text-sm sm:text-base font-medium py-1.5 sm:py-2 px-3 sm:px-4 rounded-md transition-colors duration-200">
+                    Sign In
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content - Full width without sidebar -->
+    <main class="flex-1 p-4 sm:p-6 dark:text-gray-200">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="glass backdrop-blur-md bg-gray-100/90 dark:bg-gray-800/90 text-gray-800 dark:text-white py-4 px-4 sm:px-6 text-center" style="backdrop-filter: blur(10px);">
+        <p class="text-xs sm:text-sm">&copy; {{ page_context.current_year }} Hot Dev, LLC</p>
+        <p class="text-xs sm:text-sm mt-2 sm:mt-4"><a href="{{ page_context.web_url }}" class="text-blue-600 dark:text-blue-400">hot.dev</a></p>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="{{ page_context.assets_prefix }}js/theme.js" defer></script>
+
+    <style>
+        /* Enable native mobile pull-to-refresh */
+        body {
+            overscroll-behavior-y: auto;
+        }
+    </style>
+
+    <script>
+        // Theme toggle functionality
+        document.addEventListener('DOMContentLoaded', () => {
+            const isDark = document.documentElement.classList.contains('dark');
+            const themeToggle = document.getElementById('theme-toggle');
+
+            // Set initial theme toggle state
+            themeToggle.checked = isDark;
+
+            // Handle theme toggle changes
+            themeToggle.addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    document.documentElement.classList.add('dark');
+                    localStorage.setItem('theme', 'dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    localStorage.setItem('theme', 'light');
+                }
+                // Dispatch theme change event after DOM update
+                setTimeout(() => {
+                    const isDark = document.documentElement.classList.contains('dark');
+                    window.dispatchEvent(new CustomEvent('themeChanged', {
+                        detail: { isDark }
+                    }));
+                }, 0);
+            });
+        });
+    </script>
+</body>
+</html>

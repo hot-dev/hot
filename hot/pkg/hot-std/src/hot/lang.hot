@@ -1,0 +1,228 @@
+::hot::lang ns
+meta {doc: """Language introspection and function invocation utilities."""}
+
+namespaces
+meta {
+    core: true,
+    doc: """
+    Return all loaded namespaces.
+
+    **Example**
+
+    ```hot
+    all-ns namespaces()
+    // [::hot::coll, ::hot::str, ::myapp::users, ...]
+    ```
+    """
+}
+fn (): Vec<Namespace> { call-lib(::hot::lang/namespaces, []) }
+
+
+functions-in-namespace
+meta {
+    core: true,
+    doc: """
+    Return all functions defined in `namespace`.
+
+    **Example**
+
+    ```hot
+    fns functions-in-namespace(Namespace("::hot::math"))
+    // [add, sub, mul, div, ...]
+    ```
+    """
+}
+fn (namespace: Namespace): Vec<Fn> {
+    call-lib(::hot::lang/functions-in-namespace, [namespace])
+}
+
+
+// Function invocation and resolution utilities (moved from ::hot::function)
+
+call
+meta {
+    core: true,
+    doc: """
+    Call function `f` with `args` (default empty vec). Supports both single-argument and no-argument forms.
+
+    **Example**
+
+    ```hot
+    // Call a function by reference
+    add-fn ::hot::math/add
+    call(add-fn, [1, 2])  // 3
+
+    // Call with no arguments
+    call(::hot::math/rand)  // 0.7234...
+    ```
+    """
+}
+fn
+(f: Fn, args: Vec<Any>): Any {
+    // Delegate to the Rust call function via call-lib
+    // Pass args directly since it's already a Vec<Any>
+    call-lib(::hot::lang/call-internal, [f, args])
+},
+(f: Fn): Any {
+    // Single-argument form - call with empty args
+    call(f, [])
+}
+
+
+try-call
+meta {
+    core: true,
+    doc: """
+    Call function `f` with `args`, catching ALL errors including runtime errors.
+    Returns a plain Map (not a Result) so the return value won't be auto-unwrapped.
+
+    On success: `{ok: true, value: <result>}`
+    On failure: `{ok: false, error: "error message"}`
+
+    **Example**
+
+    ```hot
+    result try-call(some-function, [arg1, arg2])
+    if(result.ok, result.value, println(result.error))
+    ```
+    """
+}
+fn
+(f: Fn, args: Vec<Any>): Map {
+    call-lib(::hot::lang/try-call, [f, args])
+},
+(f: Fn): Map {
+    try-call(f, [])
+}
+
+
+resolve
+meta {
+    core: true,
+    doc: """
+    Resolve a fully-qualified function name string to a Fn value.
+
+    **Example**
+
+    ```hot
+    add-fn resolve("::hot::math/add")
+    call(add-fn, [1, 2])  // 3
+    ```
+    """
+}
+fn (function-str: Str): Fn {
+    call-lib(::hot::lang/resolve, [function-str])
+}
+
+
+call-event-handler
+meta {
+    on-event: "hot:call",
+    once: true,
+    doc: """
+    Event handler: call a function specified in event data.
+
+    The `once: true` flag ensures this handler runs only once per event,
+    even when multiple projects are deployed in the same environment.
+    """
+}
+fn (event: Map): Any {
+    // event.data.args is always a Vec
+    call(resolve(event.data.fn), event.data.args)
+}
+
+
+schedule-event-handler
+meta {
+    on-event: "hot:schedule",
+    once: true,
+    doc: """
+    Event handler: execute scheduled function from event data.
+
+    The `once: true` flag ensures this handler runs only once per event,
+    even when multiple projects are deployed in the same environment.
+    """
+}
+fn (event: Map): Any {
+    // event.data.args is always a Vec
+    call(resolve(event.data.fn), event.data.args)
+}
+
+
+schedule-new-event-handler
+meta {
+    on-event: "hot:schedule:new",
+    once: true,
+    doc: """
+    Event handler: create a new schedule (one-time or recurring).
+
+    The `once: true` flag ensures this handler runs only once per event,
+    even when multiple projects are deployed in the same environment.
+
+    **Supported schedule formats**
+
+    - ISO datetime: `"2024-01-15T10:30:00Z"`
+    - Duration: `"10 minutes"`, `"2h"`, `"1 day 3 hours"`
+    - Natural: `"in 10 minutes"`, `"2 hours from now"`
+    - Cron: `"0 30 9 * * MON"`, `"@daily"`
+    - English: `"every day at 9am"`, `"every Monday at 2 PM"`
+
+    **Example**
+
+    ```hot
+    // Schedule for specific time
+    send("hot:schedule:new", {
+        fn: "::myapp::orders/process",
+        args: [{order_id: "123"}],
+        schedule: "2024-01-15T10:30:00Z"
+    })
+
+    // Schedule for 10 minutes from now
+    send("hot:schedule:new", {
+        fn: "::myapp::reminders/send",
+        args: [{user_id: user.id}],
+        schedule: "in 10 minutes"
+    })
+
+    // Create a recurring schedule dynamically
+    send("hot:schedule:new", {
+        fn: "::myapp::reports/daily",
+        args: [],
+        schedule: "every day at 9am"
+    })
+    ```
+
+    Returns the schedule_id which can be used to cancel.
+    """
+}
+fn (event: Map): Str {
+    call-lib(::hot::schedule/create, [event.data.fn, event.data.args, event.data.schedule])
+}
+
+
+schedule-cancel-event-handler
+meta {
+    on-event: "hot:schedule:cancel",
+    once: true,
+    doc: """
+    Event handler: cancel a scheduled call (one-time or recurring).
+
+    The `once: true` flag ensures this handler runs only once per event,
+    even when multiple projects are deployed in the same environment.
+
+    **Example**
+
+    ```hot
+    // Cancel by schedule-id
+    send("hot:schedule:cancel", {schedule-id: "01234567-..."})
+
+    // Cancel by function name (cancels all schedules for this function)
+    send("hot:schedule:cancel", {fn: "::myapp::jobs/heavy-process"})
+    ```
+
+    Returns true if schedule was found and cancelled.
+    """
+}
+fn (event: Map): Bool {
+    call-lib(::hot::schedule/cancel, [event.data])
+}

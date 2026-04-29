@@ -1,0 +1,63 @@
+{% extends "public_layout.html" %}
+{% block content %}
+<div class="flex justify-center items-center mt-10">
+    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
+        <div class="mb-8 text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 dark:bg-red-900 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-red-600 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+            </div>
+            <h1 class="text-xl font-bold">Organization Invitation</h1>
+            <p class="text-gray-600 dark:text-gray-400 mt-2">You've been invited to join an organization</p>
+        </div>
+
+        {% if error_message != "" %}
+        <div class="mb-6 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+            {{ error_message }}
+        </div>
+        {% else %}
+        <!-- Invitation Details -->
+        <div class="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+            <h3 class="font-medium text-gray-900 dark:text-white mb-2">Invitation Details</h3>
+            <div class="space-y-2 text-sm text-gray-600 dark:text-gray-400">
+                <div><strong>Organization:</strong> {{ org_name }}</div>
+                <div><strong>Role:</strong> {{ role_name }}</div>
+                <div><strong>Invited by:</strong> {{ invited_by_name }}</div>
+                <div><strong>Your email:</strong> {{ email }}</div>
+            </div>
+        </div>
+
+        {% if is_authenticated %}
+        <!-- Authenticated user: show accept button -->
+        <form action="/invite" method="post">
+            <input type="hidden" name="code" value="{{ invite_code }}" />
+            <button type="submit" class="w-full px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                Accept Invitation
+            </button>
+        </form>
+        <div class="mt-4 text-center">
+            <a href="/" class="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200">Cancel</a>
+        </div>
+        {% else %}
+        <!-- Authentication required message -->
+        <div class="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
+            <h3 class="font-medium text-blue-900 dark:text-blue-100 mb-2">Authentication Required</h3>
+            <p class="text-sm text-blue-700 dark:text-blue-300">
+                To accept this invitation, you need to sign in or create an account with the email address {{ email }}.
+            </p>
+        </div>
+
+        <div class="flex items-center space-x-4">
+            <a href="/signin?invite_code={{ invite_code }}" class="flex-1 text-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222] transition-all duration-200">
+                Sign In
+            </a>
+            <a href="/signup?invite_code={{ invite_code }}" class="flex-1 text-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                Create Account
+            </a>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

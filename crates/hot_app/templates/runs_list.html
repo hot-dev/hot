@@ -1,0 +1,1129 @@
+{% extends "private_layout.html" %}
+
+{% block sse_data_attrs %}data-sse-mode="manual"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
+{% block content %}
+<div>
+    <!-- Filter Controls -->
+    <div x-data="runsListFilters"
+         data-selected-statuses="{% for status in selected_statuses %}{{ status }}{% if !loop.last %},{% endif %}{% endfor %}"
+         data-selected-types="{% for run_type in selected_run_types %}{{ run_type }}{% if !loop.last %},{% endif %}{% endfor %}"
+         data-time-range="{{ selected_time_range }}"
+         data-selected-project="{{ selected_project }}"
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <!-- First Row: Search -->
+        <div class="mb-3">
+            <div class="relative">
+                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
+                        <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 100 13.5 6.75 6.75 0 000-13.5zM2.25 10.5a8.25 8.25 0 1114.59 5.28l4.69 4.69a.75.75 0 11-1.06 1.06l-4.69-4.69A8.25 8.25 0 012.25 10.5z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+                <input
+                    type="text"
+                    x-model="searchQuery"
+                    placeholder="Search by Run ID, Name, Stream ID, Project, or Run Type..."
+                    class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+            </div>
+        </div>
+
+        <!-- Second Row: Filter Dropdowns -->
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <!-- Project Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <!-- Dropdown Button -->
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
+                            </svg>
+                            <span x-text="selectedProject === '' ? 'All Projects' : getProjectName(selectedProject)"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <!-- Dropdown Menu -->
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="setProject(''); open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>All Projects</span>
+                                    <svg x-show="selectedProject === ''" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            {% for project in projects %}
+                            <a @click="setProject('{{ project.project_id }}'); open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>{{ project.name }}</span>
+                                    <svg x-show="selectedProject === '{{ project.project_id }}'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Run Status Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <!-- Dropdown Button -->
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M2.25 13.5a8.25 8.25 0 0 1 8.25-8.25.75.75 0 0 1 .75.75v6.75H18a.75.75 0 0 1 .75.75 8.25 8.25 0 0 1-16.5 0Z" clip-rule="evenodd" />
+                                <path fill-rule="evenodd" d="M12.75 3a.75.75 0 0 1 .75-.75 8.25 8.25 0 0 1 8.25 8.25.75.75 0 0 1-.75.75h-7.5V3Z" clip-rule="evenodd" />
+                            </svg>
+                            <span x-text="selectedStatuses.length === 5 ? 'All Statuses' : selectedStatuses.length + ' selected'"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <!-- Dropdown Menu -->
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="toggleStatus('running')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Running</span>
+                                    <svg x-show="selectedStatuses.includes('running')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('succeeded')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Succeeded</span>
+                                    <svg x-show="selectedStatuses.includes('succeeded')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('failed')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Failed</span>
+                                    <svg x-show="selectedStatuses.includes('failed')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('cancelled')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Cancelled</span>
+                                    <svg x-show="selectedStatuses.includes('cancelled')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleStatus('pending_retry')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Pending Retry</span>
+                                    <svg x-show="selectedStatuses.includes('pending_retry')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Run Type Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false }" class="relative">
+                    <!-- Dropdown Button -->
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>
+                            </svg>
+                            <span x-text="selectedTypes.length === 6 ? 'All Run Types' : selectedTypes.length + ' selected'"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <!-- Dropdown Menu -->
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="toggleType('call')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Call</span>
+                                    <svg x-show="selectedTypes.includes('call')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleType('event')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Event</span>
+                                    <svg x-show="selectedTypes.includes('event')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleType('schedule')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Schedule</span>
+                                    <svg x-show="selectedTypes.includes('schedule')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleType('run')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Run</span>
+                                    <svg x-show="selectedTypes.includes('run')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleType('eval')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Eval</span>
+                                    <svg x-show="selectedTypes.includes('eval')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="toggleType('repl')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>REPL</span>
+                                    <svg x-show="selectedTypes.includes('repl')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Time Range Filter -->
+            <div class="w-full">
+                <div x-data="{ open: false, selectedText: getTimeRangeText() }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/>
+                                <path fill-rule="evenodd" d="M6.75 2.25A.75.75 0 0 1 7.5 3v1.5h9V3A.75.75 0 0 1 18 3v1.5h.75a3 3 0 0 1 3 3v11.25a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V7.5a3 3 0 0 1 3-3H6V3a.75.75 0 0 1 .75-.75Zm13.5 9a1.5 1.5 0 0 0-1.5-1.5H5.25a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5v-7.5Z" clip-rule="evenodd"/>
+                            </svg>
+                            <span x-text="selectedText"></span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                        <div class="py-1">
+                            <a @click="setTimeRange('all', 'All Time'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>All Time</span>
+                                    <svg x-show="timeRange === 'all'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="setTimeRange('P90D', 'Last 90 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 90 Days</span>
+                                    <svg x-show="timeRange === 'P90D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="setTimeRange('P60D', 'Last 60 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 60 Days</span>
+                                    <svg x-show="timeRange === 'P60D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="setTimeRange('P30D', 'Last 30 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 30 Days</span>
+                                    <svg x-show="timeRange === 'P30D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="setTimeRange('P15D', 'Last 15 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 15 Days</span>
+                                    <svg x-show="timeRange === 'P15D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="setTimeRange('P7D', 'Last 7 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 7 Days</span>
+                                    <svg x-show="timeRange === 'P7D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                            <a @click="setTimeRange('P1D', 'Last 24 Hours'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>Last 24 Hours</span>
+                                    <svg x-show="timeRange === 'P1D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Desktop Table View with Value Inspector -->
+    <div class="hidden md:flex flex-col rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+        <!-- Header with Inspector Toggle -->
+        <div class="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-3 py-2 flex justify-end">
+            <button id="inspector-toggle-btn" class="inline-flex items-center p-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors" title="Value Inspector ON/OFF">
+                <!-- OFF state: just outline with dividing line -->
+                <svg id="inspector-icon-off" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="1" y="1" width="14" height="14" stroke-width="1.5" rx="1"></rect>
+                    <line x1="10" y1="1" x2="10" y2="15" stroke-width="1.5"></line>
+                </svg>
+                <!-- ON state: filled right panel -->
+                <svg id="inspector-icon-on" class="w-4 h-4 hidden" fill="currentColor" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="1" y="1" width="14" height="14" fill="none" stroke-width="1.5" rx="1"></rect>
+                    <rect x="10" y="1" width="5" height="14" fill="currentColor" rx="1"></rect>
+                </svg>
+            </button>
+        </div>
+
+        <!-- Content area with table and inspector -->
+        <div class="flex flex-row flex-1 min-h-0">
+            <!-- Table Section -->
+            <div id="runs-table-section" class="flex-1 flex flex-col overflow-hidden transition-all duration-300">
+                <!-- HTMX target for table content updates -->
+                <div id="runs-table-content" class="responsive-table flex-1 overflow-auto">
+            <table class="w-full table-fixed md:table-auto divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-800">
+                    <tr>
+                        <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Run ID</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">FN</th>
+                        <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Result</th>
+                        <th class="w-20 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Type</th>
+                        <th class="w-20 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Start</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Stop</th>
+                        <th class="w-20 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Duration</th>
+                        <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Stream ID</th>
+                        <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Event ID</th>
+                        <th class="w-24 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Origin Run ID</th>
+                        <th class="w-32 md:w-auto px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Project</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for run in runs %}
+                    <tr class="clickable-row hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150 cursor-pointer"
+                        data-run-id="{{ run.run_id }}"
+                        data-stream-id="{{ run.stream_id }}"
+                        data-event-fn="{% match run.event_fn %}{% when Some with (event_fn) %}{{ event_fn|escape }}{% when None %}{% endmatch %}"
+                        data-run-type="{{ run.run_type }}"
+                        data-status="{{ run.status }}"
+                        data-start-time="{{ run.start_time_formatted }}"
+                        data-stop-time="{{ run.stop_time_formatted }}"
+                        data-duration="{{ run.duration_formatted }}"
+                        data-project-name="{{ run.project_name }}"
+                        data-result-hot="{% match run.result %}{% when Some with (result) %}{{ result|escape }}{% when None %}{% endmatch %}"
+                        data-result-json="{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{% match run.result %}{% when Some with (result) %}{{ result|escape }}{% when None %}{% endmatch %}{% endmatch %}"
+                        data-event-id="{% match run.event_id %}{% when Some with (id) %}{{ id }}{% when None %}{% endmatch %}"
+                        data-origin-run-id="{% match run.origin_run_id %}{% when Some with (id) %}{{ id }}{% when None %}{% endmatch %}"
+                        data-is-retry="{{ run.is_retry }}"
+                        data-retry-attempt="{{ run.retry_attempt }}"
+                        data-is-completed="{{ run.is_completed }}">
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
+                                <div class="uuid-container inline-flex items-center gap-1">
+                                    <a href="/runs/{{ run.run_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</a>
+                                    <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.run_id }}" title="Copy {{ run.run_id }} to clipboard">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                {% match run.event_fn %}
+                                {% when Some with (event_fn) %}
+                                    <code class="language-hot">{{ event_fn }}</code>
+                                {% when None %}
+                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                {% endmatch %}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 text-xs text-gray-700 dark:text-gray-300">
+                                {% match run.result %}
+                                {% when Some with (result) %}
+                                    <div class="flex items-center gap-2">
+                                        <code class="language-hot truncate block max-w-xs result-cell" data-result-text="{{ result|truncate(length=50) }}">{{ result|truncate(length=50) }}</code>
+                                        <button onclick="event.stopPropagation(); openContentModalWithFormats('Result', '{{ result|escape }}', '{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}')" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                {% when None %}
+                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                {% endmatch %}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                <div class="flex items-center gap-1">
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
+                                    {% if run.is_retry %}
+                                        <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap">
+                                {% if run.status == "failed" %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                                {% else if run.status == "pending_retry" %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending retry</span>
+                                {% else if run.status == "cancelled" %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">{{ run.status }}</span>
+                                {% else if run.is_completed %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                                {% else %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ run.status }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                {{ run.start_time_formatted }}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                {% if run.is_completed %}
+                                    {{ run.stop_time_formatted }}
+                                {% else %}
+                                    <span class="text-blue-600 dark:text-blue-400">Running</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                                {{ run.duration_formatted }}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                <div class="uuid-container inline-flex items-center gap-1">
+                                    <a href="/streams/{{ run.stream_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all" data-full-uuid="{{ run.stream_id }}" title="{{ run.stream_id }}">{{ run.stream_id|shortuuid }}</a>
+                                    <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.stream_id }}" title="Copy {{ run.stream_id }} to clipboard">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                {% match run.event_id %}
+                                {% when Some with (event_id) %}
+                                    <div class="uuid-container inline-flex items-center gap-1">
+                                        <a href="/events/{{ event_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all" data-full-uuid="{{ event_id }}" title="{{ event_id }}">{{ event_id|shortuuid }}</a>
+                                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ event_id }}" title="Copy {{ event_id }} to clipboard">
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                {% when None %}
+                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                {% endmatch %}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                {% match run.origin_run_id %}
+                                {% when Some with (origin_run_id) %}
+                                    <div class="uuid-container inline-flex items-center gap-1">
+                                        <a href="/runs/{{ origin_run_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all" data-full-uuid="{{ origin_run_id }}" title="{{ origin_run_id }}">{{ origin_run_id|shortuuid }}</a>
+                                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ origin_run_id }}" title="Copy {{ origin_run_id }} to clipboard">
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                {% when None %}
+                                    <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                                {% endmatch %}
+                            </td>
+                            <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                                {{ run.project_name }}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    {% if runs.len() == 0 %}
+                    <tr>
+                        <td colspan="11" class="px-6 py-4 text-center text-xs text-gray-500 dark:text-gray-400">
+                            No runs found.
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+
+        <!-- Pagination -->
+        {% if has_prev_page || has_next_page %}
+        <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+            <div class="flex items-center justify-between">
+                <div class="flex-1 flex justify-between sm:hidden">
+                    {% if has_prev_page %}
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</button>
+                    {% endif %}
+                    {% if has_next_page %}
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Next</button>
+                    {% endif %}
+                </div>
+                <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                    <div>
+                        <p class="text-sm text-gray-700 dark:text-gray-300">
+                            Showing <span class="font-medium">{{ runs.len() }}</span> of <span class="font-medium">{{ total_runs|commafy }}</span> runs
+                        </p>
+                    </div>
+                    <div>
+                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                            {% if has_prev_page %}
+                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                <span class="sr-only">Previous</span>
+                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                            {% endif %}
+
+                            {% for page_num in start_page..=end_page %}
+                            {% if page_num == current_page_num %}
+                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                            {% else %}
+                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</button>
+                            {% endif %}
+                            {% endfor %}
+
+                            {% if has_next_page %}
+                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                <span class="sr-only">Next</span>
+                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                            {% endif %}
+                        </nav>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        </div>
+        </div>
+
+        <!-- Value Inspector Panel (initially hidden) -->
+        <div id="value-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col" style="min-width: 20rem;">
+            <div class="bg-gray-100 dark:bg-gray-800 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+                <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
+                    <div class="text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider truncate" style="max-width: 12rem;">
+                        Value Inspector
+                    </div>
+                </div>
+
+                <div id="inspector-run-info" class="px-2 md:px-3 pb-1.5 text-xs text-gray-500 dark:text-gray-400" title="">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="font-medium">Run ID:</span>
+                        <span id="inspector-run-id" class="uuid-display font-mono" data-full-uuid=""></span>
+                        <button id="inspector-copy-btn" class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors hidden" data-uuid="" title="Copy to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scrollable content area -->
+            <div class="flex-1 p-2 md:p-3 pt-2 overflow-y-auto min-h-0">
+                <div id="inspector-content" class="space-y-3">
+                    <div class="text-gray-500 dark:text-gray-400 italic text-center py-4">
+                        Click on a row to inspect run details
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    </div>
+
+    <!-- Mobile Card View -->
+    <div class="md:hidden p-4 overflow-auto">
+        <div class="space-y-4">
+        {% for run in runs %}
+        <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+            <div class="flex justify-between items-start mb-3">
+                <div class="text-sm font-medium text-gray-900 dark:text-white">
+                    Run <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ run.run_id }}" title="Copy {{ run.run_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                {% if run.status == "failed" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                {% else if run.status == "pending_retry" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending retry</span>
+                {% else if run.status == "cancelled" %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">{{ run.status }}</span>
+                {% else if run.is_completed %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                {% else %}
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ run.status }}</span>
+                {% endif %}
+            </div>
+
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between items-center">
+                    <span class="text-gray-600 dark:text-gray-400">Type:</span>
+                    <div class="flex items-center gap-1">
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
+                        {% if run.is_retry %}
+                            <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Start Time:</span>
+                    <span class="text-gray-700 dark:text-gray-300">{{ run.start_time_formatted }}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">Duration:</span>
+                    <span class="text-gray-700 dark:text-gray-300">
+                        {{ run.duration_formatted }}
+                    </span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-600 dark:text-gray-400">FN:</span>
+                    <span class="text-gray-700 dark:text-gray-300">
+                        {% match run.event_fn %}
+                        {% when Some with (event_fn) %}
+                            <code class="language-hot text-xs">{{ event_fn }}</code>
+                        {% when None %}
+                            <span class="text-gray-400 dark:text-gray-500 italic">-</span>
+                        {% endmatch %}
+                    </span>
+                </div>
+                {% match run.result %}
+                {% when Some with (result) %}
+                <div class="flex justify-between items-center gap-2">
+                    <span class="text-gray-600 dark:text-gray-400 flex-shrink-0">Result:</span>
+                    <div class="flex items-center justify-between gap-2 flex-1 min-w-0">
+                        <code class="language-hot text-gray-700 dark:text-gray-300 font-mono text-xs truncate">{{ result|truncate(length=30) }}</code>
+                        <button onclick="openContentModalWithFormats('Result', '{{ result|escape }}', '{% match run.result_json %}{% when Some with (json) %}{{ json|escape }}{% when None %}{{ result|escape }}{% endmatch %}')" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full result">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                {% when None %}
+                {% endmatch %}
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                <a href="/runs/{{ run.run_id }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all duration-200 font-medium">View Details</a>
+            </div>
+        </div>
+        {% endfor %}
+        {% if runs.len() == 0 %}
+        <div class="text-center text-gray-500 dark:text-gray-400 py-8">
+            No runs found.
+        </div>
+        {% endif %}
+        </div>
+    </div>
+</div>
+
+<style>
+.inspector-section-title {
+    border-bottom: 1px solid #e5e7eb;
+    padding-bottom: 0.5rem;
+}
+.dark .inspector-section-title {
+    border-bottom-color: #374151;
+}
+.inspector-value {
+    line-height: 1.6;
+}
+</style>
+
+<script>
+let inspectorOpen = false;
+let currentSelectedRow = null;
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function toggleInspector() {
+    const panel = document.getElementById('value-inspector-panel');
+    const iconOff = document.getElementById('inspector-icon-off');
+    const iconOn = document.getElementById('inspector-icon-on');
+
+    if (inspectorOpen) {
+        panel.classList.add('hidden');
+        iconOff.classList.remove('hidden');
+        iconOn.classList.add('hidden');
+        inspectorOpen = false;
+    } else {
+        panel.classList.remove('hidden');
+        iconOff.classList.add('hidden');
+        iconOn.classList.remove('hidden');
+        inspectorOpen = true;
+    }
+}
+
+function highlightRow(row) {
+    // Remove highlight from previous row
+    if (currentSelectedRow) {
+        currentSelectedRow.classList.remove('bg-blue-50', 'dark:bg-blue-900/20');
+    }
+    // Add highlight to current row
+    row.classList.add('bg-blue-50', 'dark:bg-blue-900/20');
+    currentSelectedRow = row;
+}
+
+function showRunInInspector(row) {
+    const runId = row.dataset.runId;
+    const streamId = row.dataset.streamId;
+    const eventFn = row.dataset.eventFn;
+    const runType = row.dataset.runType;
+    const status = row.dataset.status;
+    const startTime = row.dataset.startTime;
+    const stopTime = row.dataset.stopTime;
+    const duration = row.dataset.duration;
+    const projectName = row.dataset.projectName;
+    const resultHot = row.dataset.resultHot;
+    const resultJson = row.dataset.resultJson;
+    const eventId = row.dataset.eventId;
+    const originRunId = row.dataset.originRunId;
+    const isRetry = row.dataset.isRetry === 'true';
+    const retryAttempt = row.dataset.retryAttempt;
+    const retriesExhausted = row.dataset.retriesExhausted === 'true';
+    const isCompleted = row.dataset.isCompleted === 'true';
+
+    // Update header with run ID
+    const runIdEl = document.getElementById('inspector-run-id');
+    const copyBtn = document.getElementById('inspector-copy-btn');
+    runIdEl.textContent = runId;
+    runIdEl.dataset.fullUuid = runId;
+    copyBtn.dataset.uuid = runId;
+    copyBtn.classList.remove('hidden');
+
+    // Build content HTML
+    const contentEl = document.getElementById('inspector-content');
+    let html = '';
+
+    // Function
+    if (eventFn) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Function</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100"><code class="language-hot">${escapeHtml(eventFn)}</code></div>
+            </div>
+        `;
+    }
+
+    // Project/Scope
+    if (projectName) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Scope</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs text-gray-900 dark:text-gray-100">${escapeHtml(projectName)}</div>
+            </div>
+        `;
+    }
+
+    // Type with retry info
+    if (runType) {
+        let typeHtml = `<span class="px-2 py-1 rounded-full bg-gray-200 text-gray-800 dark:bg-gray-800 dark:text-gray-200">${escapeHtml(runType)}</span>`;
+        if (retriesExhausted) {
+            typeHtml += ` <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻✗</span>`;
+        } else if (isRetry) {
+            typeHtml += ` <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻${retryAttempt}</span>`;
+        }
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Type</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">${typeHtml}</div>
+            </div>
+        `;
+    }
+
+    // Status
+    if (status) {
+        const statusClass = status === 'succeeded' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                           status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                           status === 'cancelled' ? 'bg-gray-200 text-gray-800 dark:bg-gray-800 dark:text-gray-300' :
+                           status === 'pending_retry' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                           'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Status</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
+                    <span class="px-2 py-1 rounded-full ${statusClass}">${escapeHtml(status)}</span>
+                </div>
+            </div>
+        `;
+    }
+
+    // Duration
+    if (duration) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Duration</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${escapeHtml(duration)}</div>
+            </div>
+        `;
+    }
+
+    // Start Time
+    if (startTime) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Start Time</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${escapeHtml(startTime)}</div>
+            </div>
+        `;
+    }
+
+    // Stop Time (only if completed)
+    if (isCompleted && stopTime) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Stop Time</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">${escapeHtml(stopTime)}</div>
+            </div>
+        `;
+    }
+
+    // Stream ID
+    if (streamId) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Stream ID</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">
+                    <a href="/streams/${streamId}" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">${escapeHtml(streamId)}</a>
+                </div>
+            </div>
+        `;
+    }
+
+    // Event ID
+    if (eventId) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Event ID</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">
+                    <a href="/events/${eventId}" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">${escapeHtml(eventId)}</a>
+                </div>
+            </div>
+        `;
+    }
+
+    // Origin Run ID
+    if (originRunId) {
+        html += `
+            <div>
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Origin Run ID</div>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100">
+                    <a href="/runs/${originRunId}" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">${escapeHtml(originRunId)}</a>
+                </div>
+            </div>
+        `;
+    }
+
+    // Result (with expand button)
+    if (resultHot) {
+        const resultId = 'result-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        html += `
+            <div class="relative">
+                <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Result</div>
+                <div id="${resultId}-hot" style="display: none;">${escapeHtml(resultHot)}</div>
+                <div id="${resultId}-json" style="display: none;">${escapeHtml(resultJson || resultHot)}</div>
+                <button onclick="openContentModalWithFormats('Result', document.getElementById('${resultId}-hot').textContent, document.getElementById('${resultId}-json').textContent)" class="absolute top-0 right-0 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full result">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </button>
+                <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 font-mono text-xs text-gray-900 dark:text-gray-100 max-h-40 overflow-auto"><code class="language-hot whitespace-pre-wrap">${escapeHtml(resultHot)}</code></div>
+            </div>
+        `;
+    }
+
+    // View Details link
+    html += `
+        <div class="pt-2 border-t border-gray-200 dark:border-gray-700">
+            <a href="/runs/${runId}" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium text-xs">View Run Details →</a>
+        </div>
+    `;
+
+    contentEl.innerHTML = html;
+
+    // Apply syntax highlighting
+    contentEl.querySelectorAll('code.language-hot').forEach(codeEl => {
+        if (typeof Prism !== 'undefined') {
+            Prism.highlightElement(codeEl);
+        }
+    });
+}
+
+// Handle inspector toggle button and row clicks
+document.addEventListener('DOMContentLoaded', function() {
+    const toggleBtn = document.getElementById('inspector-toggle-btn');
+
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', toggleInspector);
+    }
+
+    // Handle row clicks
+    document.addEventListener('click', function(e) {
+        const row = e.target.closest('.clickable-row');
+        if (row) {
+            // Don't trigger row click if clicking on a link or button
+            if (e.target.closest('a') || e.target.closest('button')) {
+                return;
+            }
+
+            // Show inspector if not open
+            if (!inspectorOpen) {
+                toggleInspector();
+            }
+
+            highlightRow(row);
+            showRunInInspector(row);
+        }
+    });
+
+    // Apply syntax highlighting to all result cells
+    highlightResultCells();
+});
+
+// Function to apply syntax highlighting to result cells in the table
+function highlightResultCells() {
+    if (typeof Prism === 'undefined') {
+        return; // Prism not loaded yet
+    }
+
+    const resultCells = document.querySelectorAll('.result-cell');
+
+    resultCells.forEach(cell => {
+        const resultText = cell.getAttribute('data-result-text');
+        if (!resultText || resultText === '-') {
+            return;
+        }
+
+        const span = cell.querySelector('span');
+        if (!span) {
+            return;
+        }
+
+        // Create a temporary element to hold the highlighted code
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = `<code class="language-hot">${escapeHtml(resultText)}</code>`;
+        const codeEl = tempDiv.querySelector('code');
+
+        if (codeEl) {
+            // Apply Prism highlighting
+            Prism.highlightElement(codeEl);
+
+            // Replace the span content with the highlighted version
+            // We keep the inline styles from Prism
+            span.innerHTML = codeEl.innerHTML;
+            span.classList.add('language-hot');
+        }
+    });
+}
+</script>
+
+<script>
+// SSE refresh callback - used by the SSE status indicator component
+// For list pages, this is called when user clicks "New Data Available"
+window.sseRefreshCallback = function() {
+    if (window.runsListComponent) {
+        window.runsListComponent.applyFilters();
+    }
+};
+
+function runsListFilters() {
+    return {
+        selectedStatuses: [],
+        selectedTypes: [],
+        timeRange: 'all',
+        selectedProject: '',
+        searchQuery: '',
+        searchTimeout: null,
+        currentPage: 1,
+        availableProjects: [
+            {% for project in projects %}
+            { id: '{{ project.project_id }}', name: '{{ project.name }}' },
+            {% endfor %}
+        ],
+
+        init() {
+            // Read initial state from data attributes
+            const container = this.$el;
+            const statusesStr = container.getAttribute('data-selected-statuses');
+            const typesStr = container.getAttribute('data-selected-types');
+            const timeRange = container.getAttribute('data-time-range');
+            const project = container.getAttribute('data-selected-project');
+
+            this.selectedStatuses = statusesStr ? statusesStr.split(',').filter(s => s.length > 0) : ['running', 'succeeded', 'failed', 'cancelled', 'pending_retry'];
+            this.selectedTypes = typesStr ? typesStr.split(',').filter(s => s.length > 0) : ['call', 'event', 'schedule', 'run', 'eval', 'repl'];
+            this.timeRange = timeRange || 'all';
+            this.selectedProject = project || '';
+            this.searchQuery = '{{ search_query }}';
+            this.currentPage = {{ current_page_num }};
+
+            // Watch for changes and apply filters automatically
+            this.$watch('selectedProject', () => { this.currentPage = 1; this.applyFilters(); });
+            this.$watch('selectedStatuses', () => { this.currentPage = 1; this.applyFilters(); });
+            this.$watch('selectedTypes', () => { this.currentPage = 1; this.applyFilters(); });
+            this.$watch('timeRange', () => { this.currentPage = 1; this.applyFilters(); });
+            this.$watch('searchQuery', () => this.debouncedSearch());
+
+            // Expose this component globally for pagination buttons
+            window.runsListComponent = this;
+        },
+
+        debouncedSearch() {
+            clearTimeout(this.searchTimeout);
+            this.searchTimeout = setTimeout(() => { this.currentPage = 1; this.applyFilters(); }, 300);
+        },
+
+        getProjectName(projectId) {
+            if (!projectId || projectId === '') return 'All Projects';
+            const project = this.availableProjects.find(p => p.id === projectId);
+            return project ? project.name : 'Unknown Project';
+        },
+
+        setProject(projectId) {
+            this.selectedProject = projectId;
+        },
+
+        toggleStatus(status) {
+            if (this.selectedStatuses.includes(status)) {
+                this.selectedStatuses = this.selectedStatuses.filter(s => s !== status);
+            } else {
+                this.selectedStatuses.push(status);
+            }
+        },
+
+        toggleType(type) {
+            if (this.selectedTypes.includes(type)) {
+                this.selectedTypes = this.selectedTypes.filter(t => t !== type);
+            } else {
+                this.selectedTypes.push(type);
+            }
+        },
+
+        setTimeRange(range, text) {
+            this.timeRange = range;
+        },
+
+        getTimeRangeText() {
+            const timeRangeMap = {
+                'all': 'All Time',
+                'P90D': 'Last 90 Days',
+                'P60D': 'Last 60 Days',
+                'P30D': 'Last 30 Days',
+                'P15D': 'Last 15 Days',
+                'P7D': 'Last 7 Days',
+                'P1D': 'Last 24 Hours'
+            };
+            return timeRangeMap[this.timeRange] || 'All Time';
+        },
+
+        goToPage(page) {
+            this.currentPage = page;
+            this.applyFilters();
+        },
+
+        applyFilters() {
+            // Build the URL with current filters
+            const params = new URLSearchParams();
+
+            if (this.currentPage > 1) {
+                params.set('p', this.currentPage);
+            }
+
+            if (this.selectedProject && this.selectedProject !== '') {
+                params.set('project', this.selectedProject);
+            }
+
+            if (this.selectedStatuses.length > 0 && this.selectedStatuses.length < 5) {
+                params.set('statuses', this.selectedStatuses.join(','));
+            }
+
+            if (this.selectedTypes.length > 0 && this.selectedTypes.length < 6) {
+                params.set('run_types', this.selectedTypes.join(','));
+            }
+
+            if (this.timeRange !== 'all') {
+                params.set('time_range', this.timeRange);
+            }
+
+            if (this.searchQuery && this.searchQuery.trim() !== '') {
+                params.set('search', this.searchQuery.trim());
+            }
+
+            // Build URL for both HTMX and browser history
+            const baseUrl = '/runs';
+            const queryString = params.toString();
+            const url = queryString ? `${baseUrl}?${queryString}` : baseUrl;
+
+            // On mobile, do full page navigation since HTMX only updates the desktop table
+            if (window.innerWidth < 768) {
+                window.location.href = url;
+                return;
+            }
+
+            // Update browser URL without reload
+            history.pushState({}, '', url);
+
+            // Use HTMX to fetch and swap the table content
+            // Formatting (UUIDs, syntax highlighting) is applied automatically via global htmx:afterSwap listener
+            htmx.ajax('GET', url, {
+                target: '#runs-table-content',
+                swap: 'innerHTML'
+            }).then(() => {
+                // Additional page-specific formatting
+                if (typeof highlightResultCells === 'function') {
+                    highlightResultCells();
+                }
+            });
+        }
+    };
+}
+</script>
+{% endblock %}

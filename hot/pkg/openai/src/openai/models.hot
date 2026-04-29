@@ -1,0 +1,70 @@
+::openai::models ns
+meta {doc: """OpenAI Models API - List and retrieve available models."""}
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// =============================================================================
+// Types
+// =============================================================================
+
+Model type {
+    id: Str,
+    object: Str,
+    created: Int,
+    owned_by: Str
+}
+
+ModelsListResponse type {
+    object: Str,
+    data: Vec<Model>
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+list
+meta {
+    doc: """
+    GET /models - List all available models.
+
+    Returns a ModelsListResponse with a `data` field containing a Vec of Model objects.
+
+    **Example**
+
+    ```hot
+    models ::openai::models/list()
+    first-model first(models.data)
+    first-model.id       // => "gpt-4o-mini"
+    first-model.owned_by // => "system"
+    ```
+    """
+}
+fn (): ModelsListResponse {
+    response api-request("GET", `${::openai/BASE_URL}/models`)
+    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    GET /models/{model_id} - Retrieve a specific model by its ID.
+
+    Returns a Model with `id`, `object`, `created`, and `owned_by` fields.
+
+    **Example**
+
+    ```hot
+    model ::openai::models/get("gpt-4o")
+    model.id       // => "gpt-4o"
+    model.owned_by // => "system"
+    model.created  // => 1715367049
+    ```
+    """
+}
+fn (model_id: Str): Model {
+    response api-request("GET", `${::openai/BASE_URL}/models/${model_id}`)
+    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+}

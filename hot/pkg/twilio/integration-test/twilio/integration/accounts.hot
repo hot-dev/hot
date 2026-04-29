@@ -1,0 +1,26 @@
+::twilio::integration::accounts ns
+meta ["test"]
+
+test-get-account
+meta ["test"]
+fn () {
+  response ::twilio::accounts/get-account()
+
+  assert(response.sid, "get-account should return SID")
+  assert(starts-with(response.sid, "AC"), "account SID should start with AC")
+  assert(response.friendly_name, "account should have friendly_name")
+  assert-eq("active", response.status, "account should be active")
+}
+
+test-list-phone-numbers
+meta ["test"]
+fn () {
+  response ::twilio::accounts/get-incoming-phone-numbers(::twilio::accounts/GetIncomingPhoneNumbersRequest({}))
+
+  assert(response.incoming_phone_numbers, "should return phone numbers array")
+  assert(gt(length(response.incoming_phone_numbers), 0), "account should have at least one phone number")
+
+  first-number first(response.incoming_phone_numbers)
+  assert(first-number.sid, "phone number should have SID")
+  assert(first-number.phone_number, "phone number should have phone_number")
+}

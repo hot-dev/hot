@@ -1,0 +1,86 @@
+# Packages to publish to pkg.hot.dev
+# One package name per line. Lines starting with # are comments.
+# Packages not listed here will NOT be published.
+#
+# To publish a package:
+#   1. Add the package name below
+#   2. Ensure docs are generated in resources/pkg-docs/{pkg}/{version}/docs.json
+#   3. Run the pkg-publish workflow or scripts
+
+# AI Services
+anthropic
+gemini
+hot-ai
+mcp
+openai
+xai
+
+# AWS Services
+aws-core
+aws-bedrock
+aws-dynamodb
+aws-eventstream
+aws-lambda
+aws-s3
+aws-secrets-manager
+aws-ses
+aws-sns
+aws-sqs
+
+# Communication
+#discord
+
+slack
+#slack-admin
+
+# Email
+postmark
+resend
+
+# Payments
+#stripe
+#stripe-billing
+#stripe-checkout
+#stripe-climate
+#stripe-connect
+#stripe-core
+#stripe-customers
+#stripe-entitlements
+#stripe-files
+#stripe-identity
+#stripe-issuing
+#stripe-misc
+#stripe-payments
+#stripe-products
+#stripe-radar
+#stripe-reporting
+#stripe-subscriptions
+#stripe-tax
+#stripe-terminal
+#stripe-treasury
+#stripe-webhooks
+
+# Backend-as-a-Service
+#supabase
+#supabase-admin
+
+# Communication (SMS/Voice)
+#twilio
+#telegram
+#whatsapp
+
+# Protocols
+json-rpc
+
+# Hot Box Containers
+ffmpeg
+imagemagick
+libreoffice
+pandoc
+playwright
+sox
+tesseract
+whisper
+
+# Standard Library (bundled with CLI, but docs are published)
+hot-std

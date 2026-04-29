@@ -1,0 +1,34 @@
+::hot::test::meta ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+get-meta ::hot::meta/get
+example_var
+meta "A variable with metadata" "Hello, World!"
+
+test-meta
+meta ["test"] fn () {
+    a meta 1 42
+    b meta "local var metadata" "test value"
+
+    // Test meta for example_var (namespaced variable)
+    example_meta get-meta(::hot::test::meta/example_var)
+    println(`example_meta: ${example_meta}`)
+    expected_meta "A variable with metadata"
+    assert-eq(
+        expected_meta,
+        example_meta,
+        "get-meta(::hot::test::meta/example_var) returns correct metadata"
+    )
+    // Test meta for local variable with lazy evaluation
+    local_meta get-meta(a)
+    expected_local_meta 1
+    // The metadata for variable 'a meta 1 42'
+    assert-eq(expected_local_meta, local_meta, "get-meta(a) returns correct local variable metadata")
+    // Test meta for another local variable
+    b_meta get-meta(b)
+    expected_b_meta "local var metadata"
+    // The metadata for variable 'b meta "local var metadata" "test value"'
+    assert-eq(expected_b_meta, b_meta, "get-meta(b) returns correct local variable metadata for string")
+}

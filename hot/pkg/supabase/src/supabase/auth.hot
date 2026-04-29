@@ -1,0 +1,289 @@
+::supabase::auth ns
+
+::api ::supabase::api
+
+// ============================================================================
+// Sign Up
+// ============================================================================
+
+SignUpRequest type {
+  email: Str?,
+  phone: Str?,
+  password: Str,
+  data: Map?
+}
+
+sign-up
+meta {
+    doc: """
+Create a new user with email/password or phone/password. Returns the user object and session (if auto-confirm is enabled).
+
+`data` is optional user metadata stored on the user object.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+result ::auth/sign-up(::auth/SignUpRequest({
+  email: "alice@example.com",
+  password: "securePassword123",
+  data: {name: "Alice"}
+}))
+result.user.id  // => "uuid-..."
+```
+"""
+}
+fn (request: SignUpRequest): Map {
+  body {password: request.password}
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+    |> assoc-some("data", request.data)
+
+  ::api/request("POST", "/auth/v1/signup", {}, body)
+}
+
+// ============================================================================
+// Sign In
+// ============================================================================
+
+SignInPasswordRequest type {
+  email: Str?,
+  phone: Str?,
+  password: Str
+}
+
+sign-in-password
+meta {
+    doc: """
+Sign in with email/password or phone/password. Returns `access_token`, `refresh_token`, `expires_in`, and `user`.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+session ::auth/sign-in-password(::auth/SignInPasswordRequest({
+  email: "alice@example.com",
+  password: "securePassword123"
+}))
+session.access_token   // => "eyJ..."
+session.refresh_token  // => "abc..."
+session.user.id        // => "uuid-..."
+```
+"""
+}
+fn (request: SignInPasswordRequest): Map {
+  body {password: request.password}
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+
+  ::api/request("POST", "/auth/v1/token?grant_type=password", {}, body)
+}
+
+SignInOtpRequest type {
+  email: Str?,
+  phone: Str?,
+  create_user: Bool?,
+  data: Map?
+}
+
+sign-in-otp
+meta {
+    doc: """
+Send a magic link (email) or OTP code (phone). The user clicks the link or enters the code to complete sign-in.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+// Magic link via email
+::auth/sign-in-otp(::auth/SignInOtpRequest({
+  email: "alice@example.com"
+}))
+
+// OTP via phone
+::auth/sign-in-otp(::auth/SignInOtpRequest({
+  phone: "+15551234567"
+}))
+```
+"""
+}
+fn (request: SignInOtpRequest): Map {
+  body {}
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+    |> assoc-some("create_user", request.create_user)
+    |> assoc-some("data", request.data)
+
+  ::api/request("POST", "/auth/v1/otp", {}, body)
+}
+
+// ============================================================================
+// Verify OTP / Magic Link
+// ============================================================================
+
+VerifyOtpRequest type {
+  type: Str,
+  token: Str?,
+  token_hash: Str?,
+  email: Str?,
+  phone: Str?
+}
+
+verify-otp
+meta {
+    doc: """
+Verify an OTP or magic link token. `type` can be: "signup", "recovery", "invite", "magiclink", "email_change", "sms", "phone_change".
+
+For SMS/phone OTP, provide `phone` + `token`. For email magic link, provide `email` + `token` or `token_hash`.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+session ::auth/verify-otp(::auth/VerifyOtpRequest({
+  type: "sms",
+  phone: "+15551234567",
+  token: "123456"
+}))
+session.access_token  // => "eyJ..."
+```
+"""
+}
+fn (request: VerifyOtpRequest): Map {
+  ::api/request("POST", "/auth/v1/verify", {}, untype(request))
+}
+
+// ============================================================================
+// Token Refresh
+// ============================================================================
+
+refresh-token
+meta {
+    doc: """
+Exchange a refresh token for a new access token.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+session ::auth/refresh-token("current-refresh-token")
+session.access_token   // => "new-eyJ..."
+session.refresh_token  // => "new-abc..."
+```
+"""
+}
+fn (refresh-token-value: Str): Map {
+  ::api/request("POST", "/auth/v1/token?grant_type=refresh_token", {}, {refresh_token: refresh-token-value})
+}
+
+// ============================================================================
+// Sign Out
+// ============================================================================
+
+sign-out
+meta {
+    doc: """
+Sign out a user by invalidating their session. Pass the user's access token. Optional `scope`: "global" (all sessions), "local" (current only, default), "others" (all except current).
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+::auth/sign-out("user-access-token")
+```
+"""
+}
+fn
+(access-token: Str): Any {
+  sign-out(access-token, "local")
+},
+(access-token: Str, scope: Str): Any {
+  ::api/request-as("POST", `/auth/v1/logout?scope=${scope}`, {}, {}, access-token)
+}
+
+// ============================================================================
+// Get / Update User
+// ============================================================================
+
+get-user
+meta {
+    doc: """
+Get the currently authenticated user. Pass the user's access token.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+user ::auth/get-user("user-access-token")
+user.id     // => "uuid-..."
+user.email  // => "alice@example.com"
+```
+"""
+}
+fn (access-token: Str): Map {
+  ::api/request-as("GET", "/auth/v1/user", {}, {}, access-token)
+}
+
+UpdateUserRequest type {
+  email: Str?,
+  phone: Str?,
+  password: Str?,
+  data: Map?,
+  nonce: Str?
+}
+
+update-user
+meta {
+    doc: """
+Update the authenticated user's email, phone, password, or metadata. Pass the user's access token.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+updated ::auth/update-user(::auth/UpdateUserRequest({
+  data: {name: "Alice Smith"}
+}), "user-access-token")
+```
+"""
+}
+fn (request: UpdateUserRequest, access-token: Str): Map {
+  body {}
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+    |> assoc-some("password", request.password)
+    |> assoc-some("data", request.data)
+    |> assoc-some("nonce", request.nonce)
+
+  ::api/request-as("PUT", "/auth/v1/user", {}, body, access-token)
+}
+
+// ============================================================================
+// Password Recovery
+// ============================================================================
+
+recover-password
+meta {
+    doc: """
+Send a password reset email.
+
+**Example**
+
+```hot
+::auth ::supabase::auth
+
+::auth/recover-password("alice@example.com")
+```
+"""
+}
+fn (email: Str): Map {
+  ::api/request("POST", "/auth/v1/recover", {}, {email: email})
+}

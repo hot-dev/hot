@@ -1,0 +1,322 @@
+::supabase::storage ns
+
+::api ::supabase::api
+::core ::supabase::core
+
+// ============================================================================
+// Buckets
+// ============================================================================
+
+list-buckets
+meta {
+    doc: """
+List all storage buckets.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+buckets ::storage/list-buckets()
+// => [{id: "avatars", name: "avatars", public: true, ...}, ...]
+```
+"""
+}
+fn (): Vec<Map> {
+  ::api/request("GET", "/storage/v1/bucket")
+}
+
+get-bucket
+meta {
+    doc: """Get a bucket by ID."""
+}
+fn (bucket-id: Str): Map {
+  ::api/request("GET", `/storage/v1/bucket/${bucket-id}`)
+}
+
+CreateBucketRequest type {
+  name: Str,
+  id: Str?,
+  public: Bool?,
+  file_size_limit: Int?,
+  allowed_mime_types: Vec<Str>?
+}
+
+create-bucket
+meta {
+    doc: """
+Create a new storage bucket. Set `public: true` for publicly accessible files.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+::storage/create-bucket(::storage/CreateBucketRequest({
+  name: "avatars",
+  public: true,
+  file_size_limit: 5242880,
+  allowed_mime_types: ["image/png", "image/jpeg"]
+}))
+```
+"""
+}
+fn (request: CreateBucketRequest): Map {
+  body {name: request.name, id: or(request.id, request.name)}
+    |> assoc-some("public", request.public)
+    |> assoc-some("file_size_limit", request.file_size_limit)
+    |> assoc-some("allowed_mime_types", request.allowed_mime_types)
+
+  ::api/request("POST", "/storage/v1/bucket", {}, body)
+}
+
+UpdateBucketRequest type {
+  bucket_id: Str,
+  public: Bool?,
+  file_size_limit: Int?,
+  allowed_mime_types: Vec<Str>?
+}
+
+update-bucket
+meta {
+    doc: """Update a bucket's settings."""
+}
+fn (request: UpdateBucketRequest): Map {
+  body {}
+    |> assoc-some("public", request.public)
+    |> assoc-some("file_size_limit", request.file_size_limit)
+    |> assoc-some("allowed_mime_types", request.allowed_mime_types)
+
+  ::api/request("PUT", `/storage/v1/bucket/${request.bucket_id}`, {}, body)
+}
+
+empty-bucket
+meta {
+    doc: """Remove all objects from a bucket without deleting the bucket itself."""
+}
+fn (bucket-id: Str): Map {
+  ::api/request("POST", `/storage/v1/bucket/${bucket-id}/empty`, {}, {})
+}
+
+delete-bucket
+meta {
+    doc: """Delete a bucket. The bucket must be empty first (use `empty-bucket`)."""
+}
+fn (bucket-id: Str): Map {
+  ::api/request("DELETE", `/storage/v1/bucket/${bucket-id}`)
+}
+
+// ============================================================================
+// Objects
+// ============================================================================
+
+upload
+meta {
+    doc: """
+Upload a file to a bucket. `content` is the file content as a string. `content-type` is the MIME type.
+
+Set `upsert: true` to overwrite existing files.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+result ::storage/upload("avatars", "users/alice.txt", "Hello World", "text/plain", false)
+result.Key  // => "avatars/users/alice.txt"
+```
+"""
+}
+fn
+(bucket: Str, path: Str, content: Str, content-type: Str): Map {
+  upload(bucket, path, content, content-type, false)
+},
+(bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): Map {
+  headers {Content-Type: content-type}
+  headers if(upsert, {...headers, "x-upsert": "true"}, headers)
+
+  ::api/do-request("POST", `/storage/v1/object/${bucket}/${path}`, headers, content, ::core/anon-key(), ::core/anon-key())
+}
+
+download
+meta {
+    doc: """
+Download a file from a private bucket. Returns the file content.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+content ::storage/download("documents", "reports/q1.pdf")
+```
+"""
+}
+fn (bucket: Str, path: Str): Any {
+  ::api/request("GET", `/storage/v1/object/authenticated/${bucket}/${path}`)
+}
+
+get-object-info
+meta {
+    doc: """Get metadata about an object (size, MIME type, cache control, etc.)."""
+}
+fn (bucket: Str, path: Str): Map {
+  ::api/request("GET", `/storage/v1/object/info/${bucket}/${path}`)
+}
+
+ListObjectsRequest type {
+  bucket: Str,
+  prefix: Str?,
+  limit: Int?,
+  offset: Int?,
+  search: Str?,
+  sort_by: Map?
+}
+
+list-objects
+meta {
+    doc: """
+List objects in a bucket. Filter by `prefix` (folder path), `search` (filename pattern). `sort_by` is `{column: "name", order: "asc"}`.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+objects ::storage/list-objects(::storage/ListObjectsRequest({
+  bucket: "avatars",
+  prefix: "users/",
+  limit: 100
+}))
+// => [{name: "alice.jpg", id: "...", metadata: {...}}, ...]
+```
+"""
+}
+fn (request: ListObjectsRequest): Vec<Map> {
+  body {}
+    |> assoc-some("prefix", request.prefix)
+    |> assoc-some("limit", request.limit)
+    |> assoc-some("offset", request.offset)
+    |> assoc-some("search", request.search)
+    |> assoc-some("sortBy", request.sort_by)
+
+  ::api/request("POST", `/storage/v1/object/list/${request.bucket}`, {}, body)
+}
+
+MoveObjectRequest type {
+  bucket_id: Str,
+  source_key: Str,
+  destination_key: Str,
+  destination_bucket: Str?
+}
+
+move-object
+meta {
+    doc: """Move an object within or between buckets."""
+}
+fn (request: MoveObjectRequest): Map {
+  body {
+    bucketId: request.bucket_id,
+    sourceKey: request.source_key,
+    destinationKey: request.destination_key
+  } |> assoc-some("destinationBucket", request.destination_bucket)
+
+  ::api/request("POST", "/storage/v1/object/move", {}, body)
+}
+
+CopyObjectRequest type {
+  bucket_id: Str,
+  source_key: Str,
+  destination_key: Str,
+  destination_bucket: Str?
+}
+
+copy-object
+meta {
+    doc: """Copy an object within or between buckets."""
+}
+fn (request: CopyObjectRequest): Map {
+  body {
+    bucketId: request.bucket_id,
+    sourceKey: request.source_key,
+    destinationKey: request.destination_key
+  } |> assoc-some("destinationBucket", request.destination_bucket)
+
+  ::api/request("POST", "/storage/v1/object/copy", {}, body)
+}
+
+delete-object
+meta {
+    doc: """Delete a single object from a bucket."""
+}
+fn (bucket: Str, path: Str): Any {
+  ::api/request("DELETE", `/storage/v1/object/${bucket}/${path}`)
+}
+
+delete-objects
+meta {
+    doc: """
+Delete multiple objects from a bucket.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+::storage/delete-objects("avatars", ["old/file1.jpg", "old/file2.jpg"])
+```
+"""
+}
+fn (bucket: Str, prefixes: Vec<Str>): Any {
+  ::api/request("DELETE", `/storage/v1/object/${bucket}`, {}, {prefixes: prefixes})
+}
+
+// ============================================================================
+// URLs
+// ============================================================================
+
+get-public-url
+meta {
+    doc: """
+Build the public URL for an object in a public bucket. This is a pure string operation -- no API call.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+url ::storage/get-public-url("avatars", "users/alice.jpg")
+// => "https://xxxx.supabase.co/storage/v1/object/public/avatars/users/alice.jpg"
+```
+"""
+}
+fn (bucket: Str, path: Str): Str {
+  `${::core/project-url()}/storage/v1/object/public/${bucket}/${path}`
+}
+
+create-signed-url
+meta {
+    doc: """
+Create a signed URL for temporary access to a private object. `expires-in` is the validity in seconds.
+
+**Example**
+
+```hot
+::storage ::supabase::storage
+
+result ::storage/create-signed-url("documents", "reports/q1.pdf", 3600)
+result.signedURL  // => "/storage/v1/object/sign/documents/reports/q1.pdf?token=..."
+```
+"""
+}
+fn (bucket: Str, path: Str, expires-in: Int): Map {
+  ::api/request("POST", `/storage/v1/object/sign/${bucket}/${path}`, {}, {expiresIn: expires-in})
+}
+
+create-signed-urls
+meta {
+    doc: """Create signed URLs for multiple objects in a bucket at once."""
+}
+fn (bucket: Str, paths: Vec<Str>, expires-in: Int): Vec<Map> {
+  ::api/request("POST", `/storage/v1/object/sign/${bucket}`, {}, {expiresIn: expires-in, paths: paths})
+}

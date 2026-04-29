@@ -1,0 +1,232 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2">
+    <div class="mb-6 border-b border-gray-200 dark:border-gray-700">
+        <div class="flex items-center justify-between">
+            <nav class="-mb-px flex space-x-4 sm:space-x-8" aria-label="Tabs">
+                <a href="/settings/alerts/destinations"
+                   class="border-red-500 text-red-600 dark:text-red-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    Destinations
+                </a>
+                <a href="/settings/alerts/subscriptions"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    Subscriptions
+                </a>
+                <a href="/settings/alerts/channels"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    Channels
+                </a>
+                <a href="/settings/alerts/history"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    History
+                </a>
+            </nav>
+            {% if is_admin %}
+            <a href="/settings/alerts/destinations/new" class="inline-flex items-center mb-2 px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                New Destination
+            </a>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if !page_context.has_alerts() %}
+    <!-- Upgrade prompt for plans without alerts -->
+    <div class="text-center py-12 sm:py-16 bg-white dark:bg-gray-800 rounded-lg shadow-md">
+        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+        </svg>
+        <h3 class="mt-4 text-base sm:text-lg font-medium text-gray-900 dark:text-white">Alerts</h3>
+        <p class="mt-2 text-xs sm:text-sm text-gray-500 dark:text-gray-400 max-w-md mx-auto px-4">
+            Set up alert destinations, subscriptions, and custom channels to get notified via email, Slack, PagerDuty, or webhooks when events occur in your environment.
+        </p>
+        <p class="mt-4 text-sm text-gray-600 dark:text-gray-400">
+            Available on <span class="font-medium text-hot-red-500">Starter</span> plans and above.
+        </p>
+        <div class="mt-6">
+            {% match page_context.current_org %}
+            {% when Some with (org) %}
+            <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                Upgrade Plan
+            </a>
+            {% when None %}
+            {% endmatch %}
+        </div>
+    </div>
+    {% else %}
+
+    {% if !flash_message.is_empty() %}
+    <div class="mb-4 rounded-md p-4 
+        {% if flash_type == "error" %}bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800
+        {% else %}bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800{% endif %}">
+        <div class="flex">
+            <div class="flex-shrink-0">
+                {% if flash_type == "error" %}
+                <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z" clip-rule="evenodd" />
+                </svg>
+                {% else %}
+                <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z" clip-rule="evenodd" />
+                </svg>
+                {% endif %}
+            </div>
+            <div class="ml-3">
+                <p class="text-sm {% if flash_type == "error" %}text-red-700 dark:text-red-300{% else %}text-blue-700 dark:text-blue-300{% endif %}">
+                    {{ flash_message }}
+                </p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if page_context.show_cloud_upsells %}
+    <div class="mb-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/30 px-4 py-3">
+        <div class="flex items-start">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-500 dark:text-blue-400 mt-0.5 mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div>
+                <p class="text-sm text-blue-800 dark:text-blue-200">
+                    <span class="font-medium">Alert delivery requires the Pro plan.</span>
+                    Alerts are matched and recorded locally; delivery to destinations (email, Slack, PagerDuty, webhooks) is available on Hot Cloud's <span class="font-medium">Pro</span> plan or above.
+                    <a href="{{ page_context.pricing_url }}" target="_blank" class="underline hover:text-blue-600 dark:hover:text-blue-300">Learn more</a>
+                </p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+        {% if destinations.len() > 0 %}
+        <div class="overflow-x-auto">
+            <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-900">
+                    <tr>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Name
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Type
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Status
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Created
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Actions
+                        </th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for dest in destinations %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-medium text-gray-900 dark:text-white">
+                                {{ dest.name }}
+                            </div>
+                            {% if let Some(detail) = destination_details.get(&dest.alert_destination_id) %}
+                            <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                {{ detail }}
+                            </div>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium 
+                                {% match dest.destination_type_id %}
+                                    {% when 1 %}bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300
+                                    {% when 2 %}bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300
+                                    {% when 3 %}bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300
+                                    {% when _ %}bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300
+                                {% endmatch %}
+                            ">
+                                {% match dest.destination_type_id %}
+                                    {% when 1 %}Email
+                                    {% when 2 %}Slack
+                                    {% when 3 %}PagerDuty
+                                    {% when 4 %}Webhook
+                                    {% when _ %}Unknown
+                                {% endmatch %}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if !dest.verified %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300">
+                                <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                    <circle cx="4" cy="4" r="3" />
+                                </svg>
+                                Pending verification
+                            </span>
+                            {% else if dest.enabled %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
+                                <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                    <circle cx="4" cy="4" r="3" />
+                                </svg>
+                                Enabled
+                            </span>
+                            {% else %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                                <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                    <circle cx="4" cy="4" r="3" />
+                                </svg>
+                                Disabled
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-gray-500 dark:text-gray-400">
+                                {{ dest.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M") }}
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
+                            <div class="flex items-center justify-end space-x-2">
+                                {% if is_admin && !dest.verified %}
+                                <form method="post" action="/settings/alerts/destinations/{{ dest.alert_destination_id }}/resend-verification" class="inline">
+                                    <button type="submit" class="text-yellow-600 hover:text-yellow-700 dark:text-yellow-400 dark:hover:text-yellow-300">
+                                        Resend Verification
+                                    </button>
+                                </form>
+                                {% endif %}
+                                {% if is_admin %}
+                                <a href="/settings/alerts/destinations/{{ dest.alert_destination_id }}/edit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+                                    Edit
+                                </a>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center py-12">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Alert Destinations</h3>
+            <p class="text-gray-500 dark:text-gray-400 mb-4">
+                Create destinations to receive alerts via email, Slack, PagerDuty, or webhooks.
+            </p>
+            {% if is_admin %}
+            <a href="/settings/alerts/destinations/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                New Destination
+            </a>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    {% endif %}
+</div>
+{% endblock %}

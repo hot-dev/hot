@@ -1,0 +1,49 @@
+::discord::integration::webhooks ns
+meta ["test"]
+
+DISCORD_TEST_CHANNEL_ID ::hot::env/get("DISCORD_TEST_CHANNEL_ID", "")
+
+test-webhook-lifecycle
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_CHANNEL_ID, "Set DISCORD_TEST_CHANNEL_ID in .env for Discord integration tests")
+
+  // Step 1: Create a webhook
+  create-response ::discord::webhooks/create-webhook(::discord::webhooks/CreateWebhookRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    name: "Hot Test Webhook"
+  }))
+
+  assert(create-response.id, `create-webhook should return id. response=${to-json(create-response)}`)
+  assert(create-response.token, "create-webhook should return token")
+  assert-eq("Hot Test Webhook", create-response.name, "webhook name should match")
+
+  // Step 2: Execute the webhook
+  exec-response ::discord::webhooks/execute-webhook(::discord::webhooks/ExecuteWebhookRequest({
+    webhook_id: create-response.id,
+    webhook_token: create-response.token,
+    content: "Hello from Hot integration test!",
+    wait: true
+  }))
+
+  assert(exec-response.id, "execute-webhook with wait should return message id")
+
+  // Step 3: Get the webhook
+  get-response ::discord::webhooks/get-webhook-with-token(::discord::webhooks/GetWebhookWithTokenRequest({
+    webhook_id: create-response.id,
+    webhook_token: create-response.token
+  }))
+
+  assert-eq(create-response.id, get-response.id, "get-webhook should return same id")
+
+  // Step 4: Clean up - delete the webhook message and webhook
+  ::discord::webhooks/delete-webhook-message(::discord::webhooks/DeleteWebhookMessageRequest({
+    webhook_id: create-response.id,
+    webhook_token: create-response.token,
+    message_id: exec-response.id
+  }))
+
+  ::discord::webhooks/delete-webhook(::discord::webhooks/DeleteWebhookRequest({
+    webhook_id: create-response.id
+  }))
+}

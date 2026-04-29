@@ -1,0 +1,238 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2">
+    <div class="mb-6 border-b border-gray-200 dark:border-gray-700">
+        <nav class="-mb-px flex space-x-4 sm:space-x-8" aria-label="Tabs">
+            <a href="/settings/alerts/destinations"
+               class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                Destinations
+            </a>
+            <a href="/settings/alerts/subscriptions"
+               class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                Subscriptions
+            </a>
+            <a href="/settings/alerts/channels"
+               class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                Channels
+            </a>
+            <a href="/settings/alerts/history"
+               class="border-red-500 text-red-600 dark:text-red-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                History
+            </a>
+        </nav>
+    </div>
+
+    <!-- Alert Info -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6">
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Alert Information</h2>
+        <dl class="grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2">
+            <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Alert ID</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">{{ alert.alert_id }}</dd>
+            </div>
+            <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Channel</dt>
+                <dd class="mt-1">
+                    <code class="text-sm text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ alert.channel }}</code>
+                </dd>
+            </div>
+            <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Created At</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white">{{ alert.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
+            </div>
+            <div>
+                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Environment ID</dt>
+                <dd class="mt-1 text-sm text-gray-900 dark:text-white font-mono">{{ alert.env_id }}</dd>
+            </div>
+        </dl>
+    </div>
+
+    <!-- Alert Data -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6">
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Alert Data</h2>
+        <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-700" style="max-height: 12rem; overflow-y: auto;">
+            <button onclick="openAlertDataWithFormats()" class="absolute top-2 right-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 rounded bg-gray-100 dark:bg-gray-800" title="View full data">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
+            </button>
+            <pre><code class="language-hot text-xs whitespace-pre-wrap">{{ data_hot }}</code></pre>
+        </div>
+        <!-- Store both formats for toggle support -->
+        <script type="application/json" id="alert-data-hot">{{ data_hot|escape }}</script>
+        <script type="application/json" id="alert-data-json">{{ data_json|escape }}</script>
+        {% if let Some(rid) = &run_id_from_data %}
+        <div class="mt-4 flex items-center gap-2 text-sm">
+            <span class="font-medium text-gray-500 dark:text-gray-400">Run:</span>
+            <a href="/runs/{{ rid }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono" data-full-uuid="{{ rid }}" title="{{ rid }}">{{ rid|shortuuid }}</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Deliveries -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+            <h2 class="text-lg font-medium text-gray-900 dark:text-white">Deliveries ({{ delivery_details.len() }})</h2>
+        </div>
+        {% if delivery_details.len() > 0 %}
+        <div class="overflow-x-auto">
+            <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-900">
+                    <tr>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Destination
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Type
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Status
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Attempts
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Sent At
+                        </th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for detail in delivery_details %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-medium text-gray-900 dark:text-white">
+                                {% if let Some(dest) = &detail.destination %}
+                                {{ dest.name }}
+                                {% else %}
+                                <span class="text-gray-400">Unknown</span>
+                                {% endif %}
+                            </div>
+                            {% if let Some(email) = &detail.resolved_user_email %}
+                            <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                {{ email }}
+                            </div>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if let Some(dest) = &detail.destination %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium 
+                                {% match dest.destination_type_id %}
+                                    {% when 1 %}bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300
+                                    {% when 2 %}bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300
+                                    {% when 3 %}bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300
+                                    {% when _ %}bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300
+                                {% endmatch %}
+                            ">
+                                {% match dest.destination_type_id %}
+                                    {% when 1 %}Email
+                                    {% when 2 %}Slack
+                                    {% when 3 %}PagerDuty
+                                    {% when 4 %}Webhook
+                                    {% when _ %}Unknown
+                                {% endmatch %}
+                            </span>
+                            {% else %}
+                            <span class="text-gray-400">-</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% match detail.delivery.status_id %}
+                                {% when 1 %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300">
+                                    <svg class="w-2 h-2 mr-1 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
+                                        <circle cx="4" cy="4" r="3" />
+                                    </svg>
+                                    Pending
+                                </span>
+                                {% when 2 %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
+                                    <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                        <circle cx="4" cy="4" r="3" />
+                                    </svg>
+                                    Sent
+                                </span>
+                                {% when 3 %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300">
+                                    <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                        <circle cx="4" cy="4" r="3" />
+                                    </svg>
+                                    Failed
+                                </span>
+                                {% when 4 %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300">
+                                    <svg class="w-2 h-2 mr-1 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
+                                        <circle cx="4" cy="4" r="3" />
+                                    </svg>
+                                    Retrying
+                                </span>
+                                {% when _ %}
+                                <span class="text-gray-400">Unknown</span>
+                            {% endmatch %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                            {{ detail.delivery.attempts }} / {{ detail.delivery.max_attempts }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                            {% if let Some(sent_at) = detail.delivery.sent_at %}
+                            {{ sent_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}
+                            {% else %}
+                            <span class="text-gray-400">-</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <!-- Error row if failed -->
+                    {% if detail.delivery.last_error.is_some() %}
+                    <tr class="bg-red-50 dark:bg-red-900/20">
+                        <td colspan="5" class="px-6 py-3">
+                            <div class="text-sm text-red-700 dark:text-red-300">
+                                <span class="font-medium">Error:</span> 
+                                {{ detail.delivery.last_error.as_ref().unwrap() }}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center py-8">
+            <p class="text-gray-500 dark:text-gray-400">No deliveries for this alert.</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Back link -->
+    <div class="mt-6">
+        <a href="/settings/alerts/history" class="text-hot-red-500 hover:text-hot-red-600">
+            &larr; Back to Alert History
+        </a>
+    </div>
+</div>
+
+<script>
+// Apply syntax highlighting to alert data
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof Prism !== 'undefined') {
+        document.querySelectorAll('code.language-hot').forEach(function(el) {
+            Prism.highlightElement(el);
+        });
+    }
+});
+
+// Open alert data modal with both Hot and JSON formats for toggle
+function openAlertDataWithFormats() {
+    var hotEl = document.getElementById('alert-data-hot');
+    var jsonEl = document.getElementById('alert-data-json');
+    if (hotEl && jsonEl) {
+        var textarea = document.createElement('textarea');
+        textarea.innerHTML = hotEl.textContent;
+        var hotContent = textarea.value;
+        textarea.innerHTML = jsonEl.textContent;
+        var jsonContent = textarea.value;
+        openContentModalWithFormats('Alert Data', hotContent, jsonContent);
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,294 @@
+::hot::term ns
+meta {doc: """Terminal colors and ANSI escape codes."""}
+
+colors {
+    black: 30,
+    red: 31,
+    green: 32,
+    yellow: 33,
+    blue: 34,
+    magenta: 35,
+    cyan: 36,
+    white: 37,
+    bright-black: 90,
+    bright-red: 91,
+    bright-green: 92,
+    bright-yellow: 93,
+    bright-blue: 94,
+    bright-magenta: 95,
+    bright-cyan: 96,
+    bright-white: 97
+}
+
+color
+meta {
+    doc: """
+    Wrap `s` with ANSI escape codes for color code `c`.
+
+    **Example**
+
+    ```hot
+
+    ::hot::term/color(31, "Error!")  // Red text
+    ::hot::term/color(32, "Success") // Green text
+    ```
+    """
+}
+fn (c: Int, s: Str): Str { `\x1b[${c}m${s}\x1b[0m` }
+
+
+black
+meta {
+    doc: """
+    Colorize `s` black.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/black("dark text"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.black, s)
+}
+
+red
+meta {
+    doc: """
+    Colorize `s` red.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/red("Error: something failed"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.red, s)
+}
+
+green
+meta {
+    doc: """
+    Colorize `s` green.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/green("✓ Test passed"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.green, s)
+}
+
+yellow
+meta {
+    doc: """
+    Colorize `s` yellow.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/yellow("Warning: deprecated"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.yellow, s)
+}
+
+blue
+meta {
+    doc: """
+    Colorize `s` blue.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/blue("Info: processing..."))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.blue, s)
+}
+
+magenta
+meta {
+    doc: """
+    Colorize `s` magenta.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/magenta("Debug output"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.magenta, s)
+}
+
+cyan
+meta {
+    doc: """
+    Colorize `s` cyan.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/cyan("Hint: try this"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.cyan, s)
+}
+
+white
+meta {
+    doc: """
+    Colorize `s` white.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/white("Normal text"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.white, s)
+}
+
+bright-black
+meta {
+    doc: """
+    Colorize `s` bright-black (gray).
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-black("Dimmed text"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-black, s)
+}
+
+bright-red
+meta {
+    doc: """
+    Colorize `s` bright-red.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-red("Critical error!"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-red, s)
+}
+
+bright-green
+meta {
+    doc: """
+    Colorize `s` bright-green.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-green("All tests passed!"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-green, s)
+}
+
+bright-yellow
+meta {
+    doc: """
+    Colorize `s` bright-yellow.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-yellow("Important notice"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-yellow, s)
+}
+
+bright-blue
+meta {
+    doc: """
+    Colorize `s` bright-blue.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-blue("Link: click here"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-blue, s)
+}
+
+bright-magenta
+meta {
+    doc: """
+    Colorize `s` bright-magenta.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-magenta("Verbose output"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-magenta, s)
+}
+
+bright-cyan
+meta {
+    doc: """
+    Colorize `s` bright-cyan.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-cyan("Highlighted"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-cyan, s)
+}
+
+bright-white
+meta {
+    doc: """
+    Colorize `s` bright-white.
+
+    **Example**
+
+    ```hot
+    println(::hot::term/bright-white("Bold text"))
+    ```
+    """
+}
+fn (s: Str): Str {
+    color(colors.bright-white, s)
+}

@@ -1,0 +1,62 @@
+::hot::test::hex ns
+meta ["test"]
+
+// Test hex encode from string
+test-hex-encode-string
+meta ["test"] fn () {
+    result ::hot::hex/encode("Hello")
+    assert-eq("48656c6c6f", result, "hex encode 'Hello' should produce correct hex")
+}
+
+// Test hex encode from bytes
+test-hex-encode-bytes
+meta ["test"] fn () {
+    bytes Bytes("Hello")
+    result ::hot::hex/encode(bytes)
+    assert-eq("48656c6c6f", result, "hex encode bytes should produce correct hex")
+}
+
+// Test hex decode
+test-hex-decode
+meta ["test"] fn () {
+    result ::hot::hex/decode("48656c6c6f")
+    expected Bytes("Hello")
+    assert-eq(expected, result, "hex decode should produce correct bytes")
+}
+
+// Test hex roundtrip
+test-hex-roundtrip
+meta ["test"] fn () {
+    original "The quick brown fox"
+    encoded ::hot::hex/encode(original)
+    decoded ::hot::hex/decode(encoded)
+    assert-eq(Bytes(original), decoded, "hex roundtrip should preserve data")
+}
+
+// Test hex is-valid
+test-hex-is-valid
+meta ["test"] fn () {
+    // Valid hex strings
+    assert(::hot::hex/is-valid("48656c6c6f"), "Valid lowercase hex should pass")
+    assert(::hot::hex/is-valid("DEADBEEF"), "Valid uppercase hex should pass")
+    assert(::hot::hex/is-valid(""), "Empty string is valid hex")
+
+    // Invalid hex strings
+    assert(not(::hot::hex/is-valid("48656c6c6")), "Odd length should be invalid")
+    assert(not(::hot::hex/is-valid("ghijkl")), "Non-hex chars should be invalid")
+    assert(not(::hot::hex/is-valid("hello")), "Non-hex word should be invalid")
+}
+
+// Test hex encode empty
+test-hex-encode-empty
+meta ["test"] fn () {
+    result ::hot::hex/encode("")
+    assert-eq("", result, "hex encode empty string should produce empty string")
+}
+
+// Test hex decode empty
+test-hex-decode-empty
+meta ["test"] fn () {
+    result ::hot::hex/decode("")
+    assert-eq(Bytes(""), result, "hex decode empty string should produce empty bytes")
+}

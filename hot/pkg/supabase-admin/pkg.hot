@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.supabase-admin {
+  name: "hot.dev/supabase-admin",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "Supabase Management API bindings for Hot. Manage projects, organizations, databases, edge functions, branches, and custom domains.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["database"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

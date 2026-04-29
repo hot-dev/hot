@@ -1,0 +1,182 @@
+// Error handling patterns in Hot
+::examples::error-handling ns
+
+// ============================================
+// RESULT TYPE BASICS
+// ============================================
+
+// Create results
+success ok(42)
+failure err("Something went wrong")
+
+// Check without triggering auto-unwrap
+check-success is-ok(success)   // true
+check-failure is-err(failure)  // true
+
+// ============================================
+// RETURN TYPE IS THE SUCCESS TYPE
+// ============================================
+
+// Return type annotation is the Ok value type, NOT Result
+// Hot wraps/unwraps automatically
+safe-divide fn (a: Int, b: Int): Int {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+
+// Calling it - result auto-unwraps on success
+ten safe-divide(20, 2)  // 10 (not ok(10))
+
+// ============================================
+// AUTO-UNWRAPPING
+// ============================================
+
+// Stub HTTP function
+fetch-user fn (id: Str): Map {
+    if(eq(id, ""), err("Invalid ID"), ok({id: id, name: "Alice"}))
+}
+
+fetch-posts fn (userId: Str): Vec {
+    ok(["post1", "post2"])
+}
+
+render fn (user: Map, posts: Vec): Str {
+    `${user.name} has ${length(posts)} posts`
+}
+
+// Results auto-unwrap when used
+// If any step fails, execution halts and error propagates
+process-user fn (id: Str): Str {
+    user fetch-user(id)          // Auto-unwraps or fails
+    posts fetch-posts(user.id)   // Auto-unwraps or fails
+    render(user, posts)          // Only runs if both succeeded
+}
+
+// ============================================
+// CHECKING RESULTS EXPLICITLY
+// ============================================
+
+// is-ok and is-err don't trigger auto-unwrap
+// because their arguments are lazy
+handle-division fn (a: Int, b: Int): Str {
+    result safe-divide(a, b)
+
+    if(is-ok(result),
+        `Result: ${result}`,
+        "Cannot divide by zero")
+}
+
+// ============================================
+// PATTERN MATCHING ON RESULTS
+// ============================================
+
+// Use match for cleaner result handling
+handle-with-match fn (id: Str): Str {
+    result fetch-user(id)
+
+    match result {
+        Result.Ok => { `Found user: ${result.name}` }
+        Result.Err => { `Error: ${result}` }
+    }
+}
+
+// ============================================
+// LAZY ARGUMENTS
+// ============================================
+
+// Arguments marked 'lazy' aren't evaluated until needed
+// This enables short-circuit evaluation and safe result inspection
+
+// maybe-run only evaluates action if should-run is true
+maybe-run fn (should-run: Bool, lazy action: Any): Any {
+    if(should-run, do action, null)
+}
+
+// Usage:
+will-run maybe-run(true, add(1, 2))    // 3
+wont-run maybe-run(false, add(1, 2))   // null (add never called)
+
+// ============================================
+// SHORT-CIRCUIT EVALUATION
+// ============================================
+
+// and() and or() use lazy arguments for short-circuit behavior
+is-valid fn (data: Map): Bool { not(is-empty(data)) }
+is-authorized fn (user: Map): Bool { eq(user.role, "admin") }
+
+// Second arg only evaluated if first is true
+check-both fn (data: Map, user: Map): Bool {
+    and(is-valid(data), is-authorized(user))
+}
+
+// Second arg only evaluated if first is falsy
+expensive-fallback fn (): Str { "computed fallback" }
+
+get-with-fallback fn (cached: Any): Str {
+    or(cached, expensive-fallback())
+}
+
+// ============================================
+// ERROR HANDLING PATTERNS
+// ============================================
+
+// Pattern 1: Let errors propagate (most common)
+simple-flow fn (id: Str): Str {
+    user fetch-user(id)
+    posts fetch-posts(user.id)
+    render(user, posts)
+}
+
+// Pattern 2: Check and handle explicitly
+explicit-handling fn (id: Str): Str {
+    result fetch-user(id)
+
+    if(is-ok(result),
+        `User: ${result.name}`,
+        "User not found")
+}
+
+// Pattern 3: Provide default values
+fetch-config fn (): Map { err("Config not found") }
+default-config fn (): Map { {timeout: 30, retries: 3} }
+
+with-default fn (): Map {
+    result fetch-config()
+    if(is-ok(result), result, default-config())
+}
+
+// Pattern 4: Fail with context using fail()
+validate-email fn (data: Map): Map {
+    if(is-empty(data.email),
+        fail("Email is required", {field: "email", code: "REQUIRED"}),
+        data)
+}
+
+// ============================================
+// COMBINING PATTERNS
+// ============================================
+
+// Real-world example: API endpoint handler
+ApiResponse type {
+    status: Int,
+    body: Any
+}
+
+handle-api-request fn (userId: Str, action: Str): ApiResponse {
+    // Validate input
+    validation cond {
+        is-empty(userId) => { err("User ID required") }
+        is-empty(action) => { err("Action required") }
+        => { ok({userId: userId, action: action}) }
+    }
+
+    // Check validation result
+    if(is-err(validation),
+        ApiResponse({status: 400, body: validation}),
+        serial {
+            // Fetch data (auto-unwraps or propagates error)
+            user fetch-user(userId)
+
+            // Return success response
+            ApiResponse({status: 200, body: user})
+        })
+}

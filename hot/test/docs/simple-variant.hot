@@ -1,0 +1,12 @@
+// Simple variant union test - absolutely minimal
+::hot::test::simple-variant ns
+meta ["test"]
+
+// Note: assert-eq is core
+
+// Just a simple test without variant types
+test-no-variant
+meta ["test"] fn () {
+  x 1
+  assert-eq(1, x, "x should be 1")
+}

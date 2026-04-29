@@ -1,0 +1,43 @@
+::openai::integration::moderations ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for OpenAI Moderations API
+// =============================================================================
+// These tests require OPENAI_API_KEY to be set in context
+
+test-moderations-create-safe
+meta ["test"]
+fn () {
+    response ::openai::moderations/create(::openai::moderations/ModerationRequest({
+        input: "I love programming and helping others learn to code!"
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(response.results, "Response should have results")
+    assert(gt(length(response.results), 0), "Should have at least one result")
+
+    result response.results[0]
+    assert-eq(false, result.flagged, "Safe content should not be flagged")
+    assert(result.categories, "Result should have categories")
+    assert(result.category_scores, "Result should have category scores")
+}
+
+test-moderations-create-multiple
+meta ["test"]
+fn () {
+    response ::openai::moderations/create(::openai::moderations/ModerationRequest({
+        input: ["Hello world", "How are you today?"]
+    }))
+
+    assert(response.results, "Response should have results")
+    assert-eq(2, length(response.results), "Should have two results")
+}
+
+test-moderations-check-convenience
+meta ["test"]
+fn () {
+    is-flagged ::openai::moderations/check("I love helping people!")
+
+    assert-eq(false, is-flagged, "Safe content should not be flagged")
+}

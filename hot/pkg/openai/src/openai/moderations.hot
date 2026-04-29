@@ -1,0 +1,136 @@
+::openai::moderations ns
+meta {doc: """OpenAI Moderations API - Check content for harmful material."""}
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// =============================================================================
+// Types
+// =============================================================================
+
+ModerationRequest type {
+    input: Any,
+    model: Str?
+}
+
+ModerationCategories type {
+    hate: Bool,
+    hate_threatening: Bool?,
+    harassment: Bool,
+    harassment_threatening: Bool?,
+    self_harm: Bool?,
+    self_harm_intent: Bool?,
+    self_harm_instructions: Bool?,
+    sexual: Bool,
+    sexual_minors: Bool?,
+    violence: Bool,
+    violence_graphic: Bool?
+}
+
+ModerationCategoryScores type {
+    hate: Dec,
+    hate_threatening: Dec?,
+    harassment: Dec,
+    harassment_threatening: Dec?,
+    self_harm: Dec?,
+    self_harm_intent: Dec?,
+    self_harm_instructions: Dec?,
+    sexual: Dec,
+    sexual_minors: Dec?,
+    violence: Dec,
+    violence_graphic: Dec?
+}
+
+ModerationResult type {
+    flagged: Bool,
+    categories: ModerationCategories,
+    category_scores: ModerationCategoryScores
+}
+
+ModerationResponse type {
+    id: Str,
+    model: Str,
+    results: Vec<ModerationResult>
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+create
+meta {
+    doc: """
+    POST /moderations - Check content for potentially harmful material.
+
+    Returns a ModerationResponse with `id`, `model`, and `results` containing flagged status and category scores.
+
+    **Example - Single text**
+
+    ```hot
+    response ::openai::moderations/create(ModerationRequest({
+        input: "I love programming and helping others learn to code!"
+    }))
+
+    result response.results[0]
+    result.flagged          // => false
+    result.categories       // => {hate: false, harassment: false, ...}
+    result.category_scores  // => {hate: 0.00001, harassment: 0.00002, ...}
+    ```
+
+    **Example - Multiple texts**
+
+    ```hot
+    response ::openai::moderations/create(ModerationRequest({
+        input: ["Hello world", "How are you today?"]
+    }))
+
+    length(response.results) // => 2
+    ```
+    """
+}
+fn (request: ModerationRequest): ModerationResponse {
+    response api-request("POST", `${::openai/BASE_URL}/moderations`, {}, request)
+    if(is-ok-response(response), ModerationResponse(response.body), err(HttpError(response)))
+}
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+check
+meta {
+    doc: """
+    Simple moderation check - returns true if content is flagged.
+
+    **Example**
+
+    ```hot
+    is-flagged ::openai::moderations/check("Hello world")
+    // Returns: false
+    ```
+    """
+}
+fn (text: Str): Bool {
+    response create(ModerationRequest({input: text}))
+
+    match response {
+        ModerationResponse => {
+            cond {
+                gt(length(response.results), 0) => { response.results[0].flagged }
+                => { false }
+            }
+        }
+        => { false }
+    }
+}
+
+// =============================================================================
+// Available Models
+// =============================================================================
+
+// Latest and most capable moderation model
+OMNI_MODERATION_LATEST "omni-moderation-latest"
+
+// Stable version
+TEXT_MODERATION_STABLE "text-moderation-stable"

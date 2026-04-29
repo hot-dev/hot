@@ -1,0 +1,135 @@
+::anthropic::files ns
+meta {
+    doc: """Anthropic Files API (Beta) - Upload and manage files for use across API calls."""
+}
+
+api-request ::anthropic::api/request
+HttpError ::anthropic::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// Beta header required for Files API
+BETA_HEADER "files-api-2025-04-14"
+
+// =============================================================================
+// Types
+// =============================================================================
+
+FileMetadata type {
+    id: Str,
+    type: Str,
+    filename: Str,
+    mime_type: Str,
+    size_bytes: Int,
+    created_at: Str,
+    downloadable: Bool?
+}
+
+FilesListResponse type {
+    data: Vec<FileMetadata>,
+    has_more: Bool,
+    first_id: Str?,
+    last_id: Str?
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+list
+meta {
+    doc: """
+    GET /v1/files - List uploaded files.
+
+    Returns a paginated list of files uploaded to your account. Optionally pass
+    a `limit` to control page size. Each file includes metadata such as
+    `filename`, `mime_type`, `size_bytes`, and `created_at`.
+
+    **Example**
+
+    ```hot
+    // List all files
+    files ::anthropic::files/list()
+    assert(is-vec(files.data))
+    map(files.data, %.filename)
+
+    // List with a limit
+    files ::anthropic::files/list(5)
+    assert(lte(length(files.data), 5))
+    ```
+    """
+}
+fn
+(): FilesListResponse {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/files`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+},
+(limit: Int): FilesListResponse {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/files?limit=${limit}`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    GET /v1/files/{file_id} - Get file metadata.
+
+    Returns metadata about a specific file.
+
+    **Example**
+
+    ```hot
+    file ::anthropic::files/get("file_abc123")
+    file.filename   // => "document.pdf"
+    file.size_bytes // => 102400
+    ```
+    """
+}
+fn (file_id: Str): FileMetadata {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), FileMetadata(response.body), err(HttpError(response)))
+}
+
+delete
+meta {
+    doc: """
+    DELETE /v1/files/{file_id} - Delete a file.
+
+    Permanently deletes a file.
+
+    **Example**
+
+    ```hot
+    ::anthropic::files/delete("file_abc123")
+    ```
+    """
+}
+fn (file_id: Str): Map {
+    response api-request("DELETE", `${::anthropic/BASE_URL}/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+download
+meta {
+    doc: """
+    GET /v1/files/{file_id}/content - Download file content.
+
+    Downloads the content of a file. Only available for downloadable files.
+
+    **Example**
+
+    ```hot
+    content ::anthropic::files/download("file_abc123")
+    ```
+    """
+}
+fn (file_id: Str): Any {
+    response api-request("GET", `${::anthropic/BASE_URL}/v1/files/${file_id}/content`, {anthropic-beta: BETA_HEADER})
+    if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+// Note: upload requires multipart/form-data which needs special handling
+// upload
+// meta {doc: """POST /v1/files - Upload a file."""}
+// fn (filename: Str, content: Bytes, mime_type: Str): FileMetadata {
+//     // Requires multipart/form-data support
+// }

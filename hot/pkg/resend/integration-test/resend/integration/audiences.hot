@@ -1,0 +1,39 @@
+::resend::integration::audiences ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Resend Audiences & Contacts API
+// =============================================================================
+// These tests require resend.api.key (full_access) to be set in context
+// Note: Resend rate limits to 2 req/sec. Tests are kept to 1-2 API calls each.
+
+// -----------------------------------------------------------------------------
+// Audiences — List (read-only)
+// -----------------------------------------------------------------------------
+
+test-list-audiences
+meta ["test"]
+fn () {
+    audiences ::resend::audiences/retrieve-list-audiences(::resend::audiences/GETAudiencesRequest({}))
+    assert(audiences.data, "Audiences list should have 'data' field")
+}
+
+// -----------------------------------------------------------------------------
+// Audiences — Create & Delete lifecycle
+// -----------------------------------------------------------------------------
+
+test-audience-create-and-delete
+meta ["test"]
+fn () {
+    // Create a test audience
+    created ::resend::audiences/create-list-contacts(::resend::audiences/POSTAudiencesRequest({
+        name: "Hot Integration Test Audience"
+    }))
+    assert(created.id, "Created audience should have an id")
+
+    // Delete the audience (cleanup)
+    deleted ::resend::audiences/remove-existing-audience(::resend::audiences/DELETEAudiencesIdRequest({
+        id: created.id
+    }))
+    assert(deleted.deleted, "Audience should be marked as deleted")
+}

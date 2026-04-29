@@ -1,0 +1,366 @@
+// Documentation examples for: resources/docs/language/types.md
+::hot::test::docs::types ns
+meta ["test"]
+
+// =============================================================================
+// Imports
+// =============================================================================
+// Note: All functions used here are core (Str, Int, Dec, round, map, mul, if, assert-eq, assert, is-null, etc.)
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: type-annotations-vars
+name: Str "Alice"
+count: Int 42
+prices: Vec<Dec> [9.99, 19.99]
+// @end: type-annotations-vars
+
+// @doc: type-annotations-fn
+greet-typed fn (name: Str): Str {
+  `Hello, ${name}!`
+}
+
+process fn (items: Vec<Int>, multiplier: Int): Vec<Int> {
+  map(items, (x) { mul(x, multiplier) })
+}
+// @end: type-annotations-fn
+
+// @doc: types-optional
+find-user-stub fn (id: Str): Map? {
+  // Returns User or null
+  if(::hot::cmp/gt(::hot::coll/length(id), 0), {id: id, name: "Found"}, null)
+}
+
+greet-with-title fn (name: Str, title: Str?): Str {
+  if(title,
+    `Hello, ${title} ${name}!`,
+    `Hello, ${name}!`)
+}
+// @end: types-optional
+
+// @doc: custom-type-struct
+Person type {
+  name: Str,
+  age: Int,
+  email: Str?
+}
+// @end: custom-type-struct
+
+// @doc: type-as-constructor
+Point type {
+  x: Int,
+  y: Int
+}
+
+// Create an instance - type name IS the constructor
+alice-point Point({x: 10, y: 20})
+// @end: type-as-constructor
+
+// @doc: type-custom-constructor
+// Struct definition + constructor function in single declaration
+Point2D type {
+    x: Int,
+    y: Int
+}
+fn (x: Int, y: Int): Point2D {
+  Point2D({x: x, y: y})
+}
+// @end: type-custom-constructor
+
+// @doc: type-custom-constructor-overloaded
+// Multiple constructor arities
+Range type {
+    start: Int,
+    end: Int
+}
+fn
+(end: Int): Range { Range({start: 0, end: end}) },
+(start: Int, end: Int): Range { Range({start: start, end: end}) }
+// @end: type-custom-constructor-overloaded
+
+// @doc: type-coercion
+Date type {
+  year: Int,
+  month: Int,
+  day: Int
+}
+
+// Define Date -> Str conversion (separate from type definition)
+Date -> Str fn (date: Date): Str {
+  `${date.year}-${date.month}-${date.day}`
+}
+// @end: type-coercion
+
+// @doc: types-optional-simple
+// No types - still valid Hot
+name-simple "Alice"
+greet-simple fn (name) { `Hello, ${name}!` }
+// @end: types-optional-simple
+
+// @doc: generic-types
+names-generic: Vec<Str> ["Alice", "Bob"]
+counts-generic: Map<Str, Int> {apples: 5, oranges: 3}
+matrix-generic: Vec<Vec<Int>> [[1, 2], [3, 4]]
+// @end: generic-types
+
+// @doc: union-types
+process-union fn (value: Str | Int): Str {
+  Str(value)
+}
+// @end: union-types
+
+// @doc: literal-unions
+// String literals
+Fruit type "apple" | "banana" | "orange"
+
+// Use in functions
+pick-fruit fn (fruit: Fruit): Str {
+  `You picked a ${fruit}!`
+}
+
+apple-fruit: Fruit "apple"
+// @end: literal-unions
+
+// @doc: empty-types
+Token type {
+
+}
+
+Admin type {
+
+}
+
+token Token()
+admin Admin()
+// @end: empty-types
+
+// @doc: enum-simple
+// Simple variants (no data)
+Direction enum {
+  Up,
+  Down,
+  Left,
+  Right
+}
+
+// Create values
+up-dir Direction.Up
+down-dir Direction.Down
+// @end: enum-simple
+
+// @doc: enum-with-data
+// Define the payload types first
+Circle type {
+    radius: Dec
+}
+
+Rectangle type {
+    width: Dec,
+    height: Dec
+}
+
+// Define the enum
+Shape enum {
+  Point,
+  Circle(Circle),
+  Rectangle(Rectangle)
+}
+
+// Create values
+shape-point Shape.Point
+shape-circle Shape.Circle({radius: 5.0})
+shape-rect Shape.Rectangle({width: 10.0, height: 20.0})
+// @end: enum-with-data
+
+// @doc: match-variant
+describe-direction fn (dir): Str {
+  match dir {
+    Direction.Up => "going up"
+    Direction.Down => "going down"
+    Direction.Left => "going left"
+    Direction.Right => "going right"
+  }
+}
+
+describe-direction(Direction.Up)    // "going up"
+describe-direction(Direction.Down)  // "going down"
+// @end: match-variant
+
+// @doc: type-checking
+Coord type {
+    x: Int,
+    y: Int
+}
+
+c Coord({x: 1, y: 2})
+
+is-type(c, Coord)        // true
+is-type("hello", Coord)  // false
+// @end: type-checking
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-type-annotations
+meta ["test"] fn () {
+  assert-eq("Alice", name, "name var")
+  assert-eq(42, count, "count var")
+  assert-eq(2, ::hot::coll/length(prices), "prices length")
+}
+
+test-typed-functions
+meta ["test"] fn () {
+  assert-eq("Hello, World!", greet-typed("World"), "greet-typed")
+  result process([1, 2, 3], 2)
+  assert-eq(3, ::hot::coll/length(result), "process length")
+}
+// @result: type-annotations-fn
+// greet-typed("World")        → "Hello, World!"
+// process([1, 2, 3], 2)       → [2, 4, 6]
+// @end: type-annotations-fn
+
+test-optional-types
+meta ["test"] fn () {
+  found find-user-stub("123")
+  not-found find-user-stub("")
+  assert-eq("Found", found.name, "found user")
+  assert(is-null(not-found), "not found is null")
+
+  assert-eq("Hello, Alice!", greet-with-title("Alice", null), "no title")
+  assert-eq("Hello, Dr Smith!", greet-with-title("Smith", "Dr"), "with title")
+}
+
+test-custom-type
+meta ["test"] fn () {
+  p Person({name: "Bob", age: 25, email: null})
+  assert-eq("Bob", p.name, "person name")
+  assert-eq(25, p.age, "person age")
+}
+
+test-point-constructor
+meta ["test"] fn () {
+  assert-eq(10, alice-point.x, "point x")
+  assert-eq(20, alice-point.y, "point y")
+}
+// @result: type-as-constructor
+// alice-point.x → 10
+// alice-point.y → 20
+// @end: type-as-constructor
+
+test-custom-constructor
+meta ["test"] fn () {
+  p Point2D(10, 20)
+  assert-eq(10, p.x, "point2d x")
+  assert-eq(20, p.y, "point2d y")
+}
+// @result: type-custom-constructor
+// Point2D(10, 20) → {x: 10, y: 20}
+// @end: type-custom-constructor
+
+test-custom-constructor-overloaded
+meta ["test"] fn () {
+  r1 Range(10)
+  assert-eq(0, r1.start, "range1 start")
+  assert-eq(10, r1.end, "range1 end")
+
+  r2 Range(5, 15)
+  assert-eq(5, r2.start, "range2 start")
+  assert-eq(15, r2.end, "range2 end")
+}
+// @result: type-custom-constructor-overloaded
+// Range(10)    → {start: 0, end: 10}
+// Range(5, 15) → {start: 5, end: 15}
+// @end: type-custom-constructor-overloaded
+
+test-type-coercion
+meta ["test"] fn () {
+  d Date({year: 2024, month: 12, day: 25})
+  formatted Str(d)
+  assert-eq("2024-12-25", formatted, "date to string")
+}
+// @result: type-coercion
+// d Date({year: 2024, month: 12, day: 25})
+// Str(d) → "2024-12-25"
+// @end: type-coercion
+
+test-types-optional-simple
+meta ["test"] fn () {
+  assert-eq("Alice", name-simple, "name-simple")
+  assert-eq("Hello, Bob!", greet-simple("Bob"), "greet-simple")
+}
+
+test-generic-types
+meta ["test"] fn () {
+  assert-eq(2, ::hot::coll/length(names-generic), "names length")
+  assert-eq(5, counts-generic.apples, "apples count")
+  assert-eq(2, ::hot::coll/length(matrix-generic), "matrix length")
+}
+
+test-union-types
+meta ["test"] fn () {
+  assert-eq("42", process-union(42), "process int")
+  assert-eq("hello", process-union("hello"), "process str")
+}
+
+test-literal-unions
+meta ["test"] fn () {
+  assert-eq("You picked a apple!", pick-fruit("apple"), "pick apple")
+  assert-eq("apple", apple-fruit, "apple fruit value")
+}
+
+test-empty-types
+meta ["test"] fn () {
+  // Just verify they are constructed correctly
+  assert-eq(token.$type, "::hot::test::docs::types/Token", "token type")
+  assert-eq(admin.$type, "::hot::test::docs::types/Admin", "admin type")
+}
+
+test-enum-simple
+meta ["test"] fn () {
+  // Just verify they are constructed correctly
+  assert(::hot::str/ends-with(up-dir.$type, "/Direction.Up"), "up is Direction.Up")
+  assert(::hot::str/ends-with(down-dir.$type, "/Direction.Down"), "down is Direction.Down")
+}
+
+test-enum-with-data
+meta ["test"] fn () {
+  // Verify shape construction
+  assert(::hot::str/ends-with(shape-point.$type, "/Shape.Point"), "point is Shape.Point")
+  assert(::hot::str/ends-with(shape-circle.$type, "/Shape.Circle"), "circle is Shape.Circle")
+  assert-eq(5.0, shape-circle.radius, "circle radius")
+}
+
+test-match-variant
+meta ["test"] fn () {
+  assert-eq("going up", describe-direction(Direction.Up), "match up")
+  assert-eq("going down", describe-direction(Direction.Down), "match down")
+}
+
+test-type-checking
+meta ["test"] fn () {
+  assert-eq(true, is-type(c, Coord), "is-type positive check")
+  assert-eq(false, is-type("hello", Coord), "is-type negative check")
+}
+
+// Regression: optional struct fields with custom/Fn types must round-trip
+// `null` as actual `Val::Null` rather than the typed shell
+// `{$type: "...", $val: null}`. Without the fix, `is-null` and friends
+// silently lied for any `Fn?` / `MyType?` field set to null.
+NullableHolder type {
+  callback: Fn?,
+  ref: Coord?,
+  tag: Str?
+}
+
+empty-holder NullableHolder({callback: null, ref: null, tag: null})
+
+test-nullable-fields-preserve-null
+meta ["test"] fn () {
+  assert(is-null(empty-holder.callback), "Fn? null stays null")
+  assert(is-null(empty-holder.ref), "custom-type? null stays null")
+  assert(is-null(empty-holder.tag), "Str? null stays null")
+  assert-eq(false, is-some(empty-holder.callback), "is-some on null Fn? returns false")
+}

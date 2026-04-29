@@ -1,0 +1,279 @@
+::twilio::messages ns
+
+api-request ::twilio::api/request
+HttpError ::twilio::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+::ctx ::hot::ctx
+
+account-url fn (): Str {
+  `${::twilio::core/BASE_URL}/Accounts/${::ctx/get("twilio.account.sid")}`
+}
+
+// ============================================================================
+// Send Messages (SMS / MMS / WhatsApp)
+// ============================================================================
+
+CreateMessageRequest type {
+  To: Str,
+  From: Str?,
+  MessagingServiceSid: Str?,
+  Body: Str?,
+  MediaUrl: Vec<Str>?,
+  StatusCallback: Str?,
+  MaxPrice: Str?,
+  ValidityPeriod: Int?,
+  SendAt: Str?,
+  ScheduleType: Str?,
+  ContentSid: Str?,
+  ContentVariables: Str?
+}
+
+CreateMessageResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  messaging_service_sid: Str?,
+  to: Str?,
+  from: Str?,
+  body: Str?,
+  status: Str?,
+  num_segments: Str?,
+  num_media: Str?,
+  direction: Str?,
+  price: Str?,
+  price_unit: Str?,
+  error_code: Int?,
+  error_message: Str?,
+  uri: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  date_sent: Str?
+}
+
+create-message
+meta {
+    ctx: {"twilio.account.sid": {required: true}, "twilio.auth.token": {required: true}},
+    doc: """
+POST /Accounts/{AccountSid}/Messages.json - Send an SMS, MMS, or WhatsApp message.
+
+Provide `From` (your Twilio number) or `MessagingServiceSid`. For MMS, include `MediaUrl`. For WhatsApp, prefix numbers with `whatsapp:` (e.g. `whatsapp:+15551234567`).
+
+**Example: Send SMS**
+
+```hot
+::messages ::twilio::messages
+
+response ::messages/create-message(::messages/CreateMessageRequest({
+  To: "+15558675310",
+  From: "+15017122661",
+  Body: "Hello from Hot!"
+}))
+response.sid     // => "SM..."
+response.status  // => "queued"
+```
+
+**Example: Send MMS**
+
+```hot
+response ::messages/create-message(::messages/CreateMessageRequest({
+  To: "+15558675310",
+  From: "+15017122661",
+  Body: "Check out this image!",
+  MediaUrl: ["https://example.com/image.jpg"]
+}))
+```
+
+**Example: Send WhatsApp**
+
+```hot
+response ::messages/create-message(::messages/CreateMessageRequest({
+  To: "whatsapp:+15558675310",
+  From: "whatsapp:+15017122661",
+  Body: "Hello from Hot via WhatsApp!"
+}))
+```
+"""
+}
+fn (request: CreateMessageRequest): CreateMessageResponse {
+  body {
+    To: request.To,
+    From: request.From,
+    MessagingServiceSid: request.MessagingServiceSid,
+    Body: request.Body,
+    StatusCallback: request.StatusCallback,
+    MaxPrice: request.MaxPrice,
+    ValidityPeriod: request.ValidityPeriod,
+    SendAt: request.SendAt,
+    ScheduleType: request.ScheduleType,
+    ContentSid: request.ContentSid,
+    ContentVariables: request.ContentVariables
+  }
+
+  response api-request("POST", `${account-url()}/Messages.json`, {}, body)
+  if(is-ok-response(response), CreateMessageResponse(response.body), err(HttpError(response)))
+}
+
+GetMessageRequest type {
+  sid: Str
+}
+
+GetMessageResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  from: Str?,
+  body: Str?,
+  status: Str?,
+  num_segments: Str?,
+  num_media: Str?,
+  direction: Str?,
+  price: Str?,
+  price_unit: Str?,
+  error_code: Int?,
+  error_message: Str?,
+  uri: Str?,
+  date_created: Str?,
+  date_updated: Str?,
+  date_sent: Str?
+}
+
+get-message
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}/Messages/{Sid}.json - Get details of a specific message by SID. Returns delivery status, price, error info, and timestamps.
+
+**Example**
+
+```hot
+::messages ::twilio::messages
+
+response ::messages/get-message(::messages/GetMessageRequest({
+  sid: "SM1234567890abcdef1234567890abcdef"
+}))
+response.status  // => "delivered"
+response.price   // => "-0.0075"
+```
+"""
+}
+fn (request: GetMessageRequest): GetMessageResponse {
+  response api-request("GET", `${account-url()}/Messages/${request.sid}.json`)
+  if(is-ok-response(response), GetMessageResponse(response.body), err(HttpError(response)))
+}
+
+ListMessagesRequest type {
+  To: Str?,
+  From: Str?,
+  DateSent: Str?,
+  PageSize: Int?,
+  Page: Int?
+}
+
+ListMessagesResponse type {
+  messages: Vec<Map>?,
+  end: Int?,
+  first_page_uri: Str?,
+  next_page_uri: Str?,
+  page: Int?,
+  page_size: Int?,
+  previous_page_uri: Str?,
+  start: Int?,
+  uri: Str?
+}
+
+list-messages
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """
+GET /Accounts/{AccountSid}/Messages.json - List messages. Filter by `To`, `From`, or `DateSent` (YYYY-MM-DD). Supports pagination.
+
+**Example**
+
+```hot
+::messages ::twilio::messages
+
+response ::messages/list-messages(::messages/ListMessagesRequest({
+  PageSize: 20
+}))
+response.messages  // => [{sid: "SM...", body: "Hello", status: "delivered", ...}, ...]
+```
+"""
+}
+fn (request: ListMessagesRequest): ListMessagesResponse {
+  response api-request("GET", `${account-url()}/Messages.json?To=${or(request.To, "")}&From=${or(request.From, "")}&DateSent=${or(request.DateSent, "")}&PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  if(is-ok-response(response), ListMessagesResponse(response.body), err(HttpError(response)))
+}
+
+UpdateMessageRequest type {
+  sid: Str,
+  Body: Str?,
+  Status: Str?
+}
+
+UpdateMessageResponse type {
+  sid: Str?,
+  account_sid: Str?,
+  to: Str?,
+  from: Str?,
+  body: Str?,
+  status: Str?,
+  date_updated: Str?
+}
+
+update-message
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """POST /Accounts/{AccountSid}/Messages/{Sid}.json - Update a message. Set `Body: ""` to redact message content. Set `Status: "canceled"` to cancel a scheduled message."""
+}
+fn (request: UpdateMessageRequest): UpdateMessageResponse {
+  body {
+    Body: request.Body,
+    Status: request.Status
+  }
+
+  response api-request("POST", `${account-url()}/Messages/${request.sid}.json`, {}, body)
+  if(is-ok-response(response), UpdateMessageResponse(response.body), err(HttpError(response)))
+}
+
+DeleteMessageRequest type {
+  sid: Str
+}
+
+delete-message
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """DELETE /Accounts/{AccountSid}/Messages/{Sid}.json - Delete a message record. The message content is permanently removed."""
+}
+fn (request: DeleteMessageRequest): Bool {
+  response api-request("DELETE", `${account-url()}/Messages/${request.sid}.json`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}
+
+// ============================================================================
+// Message Media
+// ============================================================================
+
+ListMediaRequest type {
+  message_sid: Str,
+  PageSize: Int?,
+  Page: Int?
+}
+
+ListMediaResponse type {
+  media_list: Vec<Map>?,
+  end: Int?,
+  page: Int?,
+  page_size: Int?,
+  start: Int?,
+  uri: Str?
+}
+
+list-media
+meta {
+    ctx: {"twilio.account.sid": {required: true}},
+    doc: """GET /Accounts/{AccountSid}/Messages/{MessageSid}/Media.json - List media resources attached to a message (e.g., MMS images)."""
+}
+fn (request: ListMediaRequest): ListMediaResponse {
+  response api-request("GET", `${account-url()}/Messages/${request.message_sid}/Media.json?PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  if(is-ok-response(response), ListMediaResponse(response.body), err(HttpError(response)))
+}

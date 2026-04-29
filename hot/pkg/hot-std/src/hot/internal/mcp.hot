@@ -1,0 +1,54 @@
+::hot::internal::mcp ns
+meta {
+    doc: """
+    Internal helpers used by `::ai::tool`/`::ai::skill` to introspect
+    and dispatch Hot functions as MCP/agent tools. Not a public API:
+    function signatures may change between releases.
+
+    Schemas are populated at compile time from every Hot function with
+    typed parameters and stored in a process-global registry inside
+    the engine. These wrappers give Hot code a `call-lib` entry point
+    into that registry.
+    """,
+    no-doc: true
+}
+
+schema-from-fn
+meta {
+    doc: """
+    Look up `{name, input-schema, output-schema?, description?}` for a
+    Hot function reference. Errors when the function is not registered
+    (e.g. compiled without typed parameters).
+    """,
+    no-doc: true
+}
+fn (f: Fn): Map {
+    call-lib(::hot::internal::mcp/schema-from-fn, [f])
+}
+
+all-tool-schemas
+meta {
+    doc: """
+    Snapshot of every registered tool schema as a `Vec<Map>`. Useful
+    for diagnostics and admin tooling.
+    """,
+    no-doc: true
+}
+fn (): Vec<Map> {
+    call-lib(::hot::internal::mcp/all-tool-schemas, [])
+}
+
+invoke-with-input
+meta {
+    doc: """
+    Call `f` with fields from `input` reordered into positional
+    arguments matching the function's signature. Missing fields are
+    passed as null; extra fields are ignored. When the function has
+    no registered schema, the whole `input` map is passed as the sole
+    argument (back-compat path for `(input: Map): Any` tools).
+    """,
+    no-doc: true
+}
+fn (f: Fn, input: Map): Any {
+    call-lib(::hot::internal::mcp/invoke-with-input, [f, input])
+}

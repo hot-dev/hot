@@ -1,0 +1,3 @@
+::telegram::core ns
+
+BASE_URL "https://api.telegram.org"

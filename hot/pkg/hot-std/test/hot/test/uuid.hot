@@ -1,0 +1,36 @@
+::hot::test::uuid ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+
+// Test function to validate UUID functionality
+test-uuid
+meta ["test"] fn () {
+
+    // Test UUID v4 generation
+    uuid4 Uuid(4)
+    // Check that uuid4.value is a string (Result should be auto-unwrapped)
+    assert(is-str(uuid4.$val), "uuid-v4 value should be a string")
+    assert(is-uuid(uuid4), "is-uuid should return true for uuid-v4")
+    // Test UUID v7 generation
+    uuid7 Uuid(7)
+    assert(is-str(uuid7.$val), "uuid-v7 value should be a string")
+    assert(is-uuid(uuid7), "is-uuid should return true for uuid-v7")
+    // Test is-uuid with string
+    valid_uuid_str "550e8400-e29b-41d4-a716-446655440000"
+    assert(is-uuid(valid_uuid_str), "is-uuid should return true for valid UUID string")
+    invalid_uuid_str "not-a-uuid"
+    assert-eq(false, is-uuid(invalid_uuid_str), "is-uuid should return false for invalid UUID string")
+    // Test is-uuid with non-UUID values
+    assert-eq(false, is-uuid(123), "is-uuid should return false for numbers")
+    assert-eq(false, is-uuid(true), "is-uuid should return false for booleans")
+    assert-eq(false, is-uuid([]), "is-uuid should return false for vectors")
+    assert-eq(false, is-uuid({}), "is-uuid should return false for maps")
+
+    // Test Uuid() zero-arg (should generate a valid UUID, not a function reference)
+    uuid0 Uuid()
+    assert(is-str(uuid0.$val), "Uuid() zero-arg $val should be a string")
+    assert(is-uuid(uuid0), "Uuid() zero-arg should return a valid UUID")
+    assert-eq(36, length(uuid0.$val), "Uuid() zero-arg $val should be a 36-char UUID string")
+}

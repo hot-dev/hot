@@ -1,0 +1,66 @@
+::slack::webhooks ns
+
+// Namespace aliases
+::ctx  ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+
+// ============================================================================
+// Slack Webhook Signature Verification
+// ============================================================================
+// Slack signs every Events API callback with HMAC-SHA256 using your app's
+// signing secret. The signature is sent in the X-Slack-Signature header.
+//
+// See: https://api.slack.com/authentication/verifying-requests-from-slack
+
+verify-request
+meta {
+    ctx: {"slack.signing.secret": {required: false}},
+    doc: """
+  Verify a Slack webhook request signature using HMAC-SHA256. Returns true if the request is authentic. Uses the `slack.signing.secret` context variable by default, or accepts an explicit signing secret as a second argument for multi-app scenarios.
+
+  The function checks the `x-slack-request-timestamp` and `x-slack-signature` headers against the computed HMAC using constant-time comparison to prevent timing attacks.
+
+  **Example**
+
+  ```hot
+  // Using context variable (1-arity, most common)
+  is-valid ::slack::webhooks/verify-request(request)
+
+  // With explicit signing secret (2-arity, for multi-app)
+  is-valid ::slack::webhooks/verify-request(request, "your-signing-secret")
+  ```
+  """
+}
+fn
+// 1-arity: read signing secret from ctx (default)
+(request: HttpRequest): Bool {
+  secret or(::ctx/get("slack.signing.secret"), "")
+  if(is-empty(secret),
+    fail("slack.signing.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+// 2-arity: explicit signing secret (override for multi-app)
+(request: HttpRequest, signing-secret: Str): Bool {
+  // Extract the timestamp and signature from headers
+  timestamp get(request.headers, "x-slack-request-timestamp", "")
+  signature get(request.headers, "x-slack-signature", "")
+
+  // Reject if secret or headers are missing
+  cond {
+    is-empty(signing-secret) => { false }
+    is-empty(timestamp) => { false }
+    is-empty(signature) => { false }
+    => {
+      // Build the base string: v0:{timestamp}:{body_raw}
+      base-string `v0:${timestamp}:${request.body-raw}`
+
+      // Compute the expected signature
+      expected `v0=${::hmac/hmac-sha256(signing-secret, base-string)}`
+
+      // Constant-time comparison to prevent timing attacks
+      secure-compare(expected, signature)
+    }
+  }
+}

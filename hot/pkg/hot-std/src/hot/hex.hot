@@ -1,0 +1,64 @@
+::hot::hex ns
+meta {doc: """Hexadecimal encoding and decoding functions."""}
+
+encode
+meta {
+    core: true,
+    doc: """
+    Encode bytes or string to hexadecimal string.
+
+    **Example**
+
+    ```hot
+    encode("Hello")
+    // "48656c6c6f"
+
+    encode([0x48, 0x65, 0x6c, 0x6c, 0x6f])
+    // "48656c6c6f"
+    ```
+    """
+}
+fn (data: Str | Bytes): Str {
+    call-lib(::hot::hex/encode, [data])
+}
+
+
+decode
+meta {
+    core: true,
+    doc: """
+    Decode hexadecimal string to bytes.
+
+    **Example**
+
+    ```hot
+    decode("48656c6c6f")
+    // [0x48, 0x65, 0x6c, 0x6c, 0x6f] (bytes for "Hello")
+
+    // Convert to string
+    Str(::hot::base64/decode(::hot::base64/encode(decode("48656c6c6f"))))
+    ```
+    """
+}
+fn (hex-str: Str): Bytes {
+    call-lib(::hot::hex/decode, [hex-str])
+}
+
+
+is-valid
+meta {
+    doc: """
+    Check if a string is valid hexadecimal (even length, valid hex characters).
+
+    **Example**
+
+    ```hot
+    is-valid("48656c6c6f")  // true
+    is-valid("48656c6c6")   // false (odd length)
+    is-valid("ghijkl")      // false (invalid chars)
+    ```
+    """
+}
+fn (s: Str): Bool {
+    call-lib(::hot::hex/is-valid, [s])
+}

@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.whisper {
+  name: "hot.dev/whisper",
+  version: "1.1.0",
+  hot-min-version: "1.2.4",
+  description: "OpenAI Whisper speech-to-text via Hot Box containers. Transcribe audio to text with language detection.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["ai", "media"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

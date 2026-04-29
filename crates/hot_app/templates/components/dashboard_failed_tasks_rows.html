@@ -1,0 +1,99 @@
+<!-- Desktop Table View -->
+<div class="overflow-x-auto hidden md:block">
+    <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+        <thead class="bg-gray-50 dark:bg-gray-800">
+            <tr>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Task ID</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">FN</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Origin FN</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created</th>
+                <th scope="col" class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+            {% for task in tasks %}
+            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors cursor-pointer" onclick="window.location.href='/tasks/{{ task.task_id }}'">
+                <td class="px-3 py-2 whitespace-nowrap">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <a href="/tasks/{{ task.task_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono text-xs" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</a>
+                    </div>
+                </td>
+                <td class="px-3 py-2 text-xs text-gray-600 dark:text-gray-400">
+                    <code class="language-hot">{{ task.function_name }}</code>
+                    {% if let Some(image) = task.container_image %}
+                    <div class="mt-0.5 text-[10px] text-gray-400 dark:text-gray-500 truncate max-w-40" title="{{ image }}">
+                        <span class="font-medium">img:</span> {{ image }}
+                    </div>
+                    {% endif %}
+                    {% if let Some(snippet) = task.container_cmd_snippet %}
+                    <div class="mt-0.5 text-[10px] text-gray-400 dark:text-gray-500 truncate max-w-40 font-mono" title="{{ snippet }}">{{ snippet }}</div>
+                    {% endif %}
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                    {% match task.origin_run_fn %}
+                    {% when Some with (fn_name) %}
+                    <code class="language-hot">{{ fn_name }}</code>
+                    {% when None %}
+                    <span class="text-gray-400 dark:text-gray-600">-</span>
+                    {% endmatch %}
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                    {{ task.created_at_formatted }}
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                    {{ task.duration_formatted }}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-500">
+                        <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
+                    </svg>
+                    No failed tasks
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Mobile Card View -->
+<div class="md:hidden space-y-3">
+    {% for task in tasks %}
+    <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-3">
+        <div class="flex justify-between items-center mb-2">
+            <div class="uuid-container inline-flex items-center gap-1">
+                <a href="/tasks/{{ task.task_id }}" class="uuid-display uuid-link text-blue-600 dark:text-blue-400 font-mono text-xs" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</a>
+            </div>
+            <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ task.status }}</span>
+        </div>
+        <div class="text-xs text-gray-600 dark:text-gray-400">
+            <code class="language-hot">{{ task.function_name }}</code>
+            {% if let Some(image) = task.container_image %}
+            <div class="mt-0.5 text-[10px] text-gray-400 dark:text-gray-500 truncate" title="{{ image }}">
+                <span class="font-medium">img:</span> {{ image }}
+            </div>
+            {% endif %}
+        </div>
+        {% match task.origin_run_fn %}
+        {% when Some with (fn_name) %}
+        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            Origin: <code class="language-hot">{{ fn_name }}</code>
+        </div>
+        {% when None %}
+        {% endmatch %}
+        <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400 mt-1">
+            <span>{{ task.created_at_formatted }}</span>
+            <span>{{ task.duration_formatted }}</span>
+        </div>
+    </div>
+    {% else %}
+    <div class="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 mx-auto mb-2 text-green-500">
+            <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
+        </svg>
+        No failed tasks
+    </div>
+    {% endfor %}
+</div>

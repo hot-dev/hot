@@ -1,0 +1,110 @@
+::postmark::integration::server ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Postmark Server & Stats API
+// =============================================================================
+// These tests require postmark.server.token to be set in context
+
+// -----------------------------------------------------------------------------
+// Server Configuration (read-only)
+// -----------------------------------------------------------------------------
+
+test-get-server-configuration
+meta ["test"]
+fn () {
+    response ::postmark::get/get-server-configuration(::postmark::get/GetCurrentServerConfigurationRequest({}))
+
+    assert(response.ID, "Server should have an ID")
+    assert(response.Name, "Server should have a Name")
+    assert(response.ApiTokens, "Server should have ApiTokens")
+}
+
+// -----------------------------------------------------------------------------
+// Delivery Stats
+// -----------------------------------------------------------------------------
+
+test-get-delivery-stats
+meta ["test"]
+fn () {
+    response ::postmark::get/get-delivery-stats(::postmark::get/GetDeliveryStatsRequest({}))
+
+    assert(gte(response.InactiveMails, 0), "InactiveMails should be >= 0")
+}
+
+// -----------------------------------------------------------------------------
+// Bounces
+// -----------------------------------------------------------------------------
+
+test-get-bounces
+meta ["test"]
+fn () {
+    response ::postmark::get/get-bounces(::postmark::get/GetBouncesRequest({
+        count: "10",
+        offset: "0",
+        type-param: "",
+        inactive: "",
+        email-filter: "",
+        message-id: "",
+        tag: "",
+        todate: "",
+        fromdate: ""
+    }))
+
+    assert(gte(response.TotalCount, 0), "TotalCount should be >= 0")
+}
+
+// -----------------------------------------------------------------------------
+// Message Search
+// -----------------------------------------------------------------------------
+
+test-outbound-message-search
+meta ["test"]
+fn () {
+    response ::postmark::search/outbound-message-search(::postmark::search/SearchOutboundMessagesRequest({
+        count: "10",
+        offset: "0",
+        recipient: "",
+        fromemail: "",
+        tag: "",
+        status: "",
+        todate: "",
+        fromdate: ""
+    }))
+
+    assert(gte(response.TotalCount, 0), "TotalCount should be >= 0")
+}
+
+test-inbound-message-search
+meta ["test"]
+fn () {
+    response ::postmark::search/inbound-message-search(::postmark::search/SearchInboundMessagesRequest({
+        count: "10",
+        offset: "0",
+        recipient: "",
+        fromemail: "",
+        subject: "",
+        mailboxhash: "",
+        tag: "",
+        status: "",
+        todate: "",
+        fromdate: ""
+    }))
+
+    assert(gte(response.TotalCount, 0), "TotalCount should be >= 0")
+}
+
+// -----------------------------------------------------------------------------
+// Inbound Rules
+// -----------------------------------------------------------------------------
+
+test-list-inbound-rules
+meta ["test"]
+fn () {
+    response ::postmark::list/list-inbound-rule-triggers(::postmark::list/ListInboundRulesRequest({
+        count: "10",
+        offset: "0"
+    }))
+
+    assert(gte(response.TotalCount, 0), "TotalCount should be >= 0")
+}

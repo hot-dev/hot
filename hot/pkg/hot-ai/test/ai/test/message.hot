@@ -1,0 +1,110 @@
+::ai::test::message ns
+meta ["test"]
+
+::msg     ::ai::message
+::session ::ai::session
+Role      ::msg/Role
+
+test-role-variants
+meta ["test"] fn () {
+    assert-eq(Role.User, Role.User)
+    assert(ne(Role.User, Role.Assistant))
+    assert(ne(Role.Assistant, Role.System))
+}
+
+test-user-msg
+meta ["test"] fn () {
+    m ::msg/user-msg("Hello")
+    assert-eq(Role.User, m.role)
+    assert-eq("Hello", m.content)
+}
+
+test-assistant-msg
+meta ["test"] fn () {
+    m ::msg/assistant-msg("Hi there!")
+    assert-eq(Role.Assistant, m.role)
+    assert-eq("Hi there!", m.content)
+}
+
+test-system-msg
+meta ["test"] fn () {
+    m ::msg/system-msg("You are helpful.")
+    assert-eq(Role.System, m.role)
+    assert-eq("You are helpful.", m.content)
+}
+
+test-message-create
+meta ["test"] fn () {
+    sess ::session/Session({id: "chan-1"})
+    user ::session/Identity({id: "U1", name: "Alice"})
+    m ::msg/Message({
+        id: "msg-001",
+        content: "Hello everyone",
+        sender: user,
+        session: sess,
+        timestamp: 1700000000,
+        source: "telegram",
+    })
+    assert-eq("msg-001", m.id)
+    assert-eq("Hello everyone", m.content)
+    assert-eq("Alice", m.sender.name)
+    assert-eq("chan-1", m.session.id)
+    assert-eq("telegram", m.source)
+}
+
+test-agent-message
+meta ["test"] fn () {
+    sess ::session/Session({id: "chan-1"})
+    user ::session/Identity({id: "U1", name: "Alice"})
+    am ::msg/AgentMessage({
+        session: sess,
+        sender: user,
+        from-agent: "personal",
+        to-agent: "research",
+        content: "Find info about X",
+    })
+    assert-eq("personal", am.from-agent)
+    assert-eq("research", am.to-agent)
+    assert-eq("Find info about X", am.content)
+    assert-eq("Alice", am.sender.name)
+}
+
+test-format-messages
+meta ["test"] fn () {
+    sess ::session/Session({id: "s1"})
+    alice ::session/Identity({id: "U1", name: "Alice"})
+    bob ::session/Identity({id: "U2", name: "Bob"})
+
+    messages [
+        ::msg/Message({id: "1", content: "hello", sender: alice, session: sess, timestamp: 1}),
+        ::msg/Message({id: "2", content: "hi there", sender: bob, session: sess, timestamp: 2}),
+    ]
+
+    result ::msg/format-messages(messages)
+    assert(contains(result, "[Alice]: hello"))
+    assert(contains(result, "[Bob]: hi there"))
+}
+
+test-format-messages-no-name
+meta ["test"] fn () {
+    sess ::session/Session({id: "s1"})
+    user ::session/Identity({id: "U999"})
+
+    messages [
+        ::msg/Message({id: "1", content: "test", sender: user, session: sess, timestamp: 1}),
+    ]
+
+    result ::msg/format-messages(messages)
+    assert(contains(result, "[U999]: test"))
+}
+
+test-format-chat-messages
+meta ["test"] fn () {
+    messages [
+        ::msg/user-msg("What's up?"),
+        ::msg/assistant-msg("Not much!"),
+    ]
+    result ::msg/format-chat-messages(messages)
+    assert(contains(result, "user: What's up?"))
+    assert(contains(result, "assistant: Not much!"))
+}

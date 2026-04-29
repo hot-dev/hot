@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.slack-admin {
+  name: "hot.dev/slack-admin",
+  version: "0.10.0",
+  hot-min-version: "1.2.0",
+  description: "Slack Admin API bindings for Hot. Includes admin endpoints for Conversations, Teams, Users, Apps, Emoji, Invite Requests, and Usergroups.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["messaging"],
+  deps: {
+    "hot.dev/slack": {
+      local: "../slack",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/slack"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

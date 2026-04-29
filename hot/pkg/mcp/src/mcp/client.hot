@@ -1,0 +1,152 @@
+::mcp::client ns
+meta {
+    doc: """MCP client session management. Handles the initialize handshake and provides internal request helpers used by tools, resources, and prompts modules."""
+}
+
+::rpc ::json-rpc::client
+::types ::mcp::types
+
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+PROTOCOL_VERSION "2025-11-25"
+
+// ============================================================================
+// Session Initialization
+// ============================================================================
+
+// Initialize an MCP session with a remote server.
+// Performs the full handshake: initialize request + initialized notification.
+initialize
+meta {
+    doc: """
+Connect to an MCP server and perform the initialize handshake.
+
+Sends an `initialize` request followed by an `initialized` notification.
+Returns a Session that must be passed to all subsequent operations
+(tools/list, tools/call, resources/read, etc.).
+
+**Example**
+
+```hot
+::mcp ::mcp::client
+::types ::mcp::types
+
+// Basic initialization (no client capabilities)
+session ::mcp/initialize(
+  "https://my-server.example.com/mcp",
+  ::types/ClientInfo({name: "my-app", version: "1.0.0"}),
+  null
+)
+session.server-info.name // => "my-server"
+session.protocol-version // => "2025-11-25"
+
+// With client capabilities
+session ::mcp/initialize(
+  "https://my-server.example.com/mcp",
+  ::types/ClientInfo({name: "my-app", version: "1.0.0"}),
+  ::types/ClientCapabilities({roots: {listChanged: true}, sampling: {}})
+)
+session.server-capabilities // => {tools: {...}, resources: {...}, ...}
+```
+"""
+}
+fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?): ::types/Session {
+  // Step 1: Send initialize request
+  req ::rpc/request("initialize", {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: or(untype(capabilities), {}),
+    clientInfo: untype(client-info)
+  })
+
+  response ::rpc/send(url, {}, req)
+  result response.result
+
+  server-info ::types/ServerInfo(result.serverInfo)
+  server-caps ::types/ServerCapabilities(or(result.capabilities, {}))
+  session-id get(result, "sessionId", null)
+
+  // Build session headers for all subsequent requests
+  session-headers {"Mcp-Protocol-Version": PROTOCOL_VERSION}
+    |> assoc-some("Mcp-Session-Id", session-id)
+
+  // Step 2: Send initialized notification
+  ::rpc/notify(url, session-headers, ::rpc/notification("notifications/initialized", null))
+
+  ::types/Session({
+    url: url,
+    session-id: session-id,
+    protocol-version: or(result.protocolVersion, PROTOCOL_VERSION),
+    server-info: server-info,
+    server-capabilities: server-caps,
+    headers: session-headers
+  })
+}
+
+// ============================================================================
+// Internal Request Helpers
+// ============================================================================
+
+// Send a request within an active session and return the result map.
+session-request
+meta {
+    doc: """
+Send a JSON-RPC request within an active MCP session. Returns the result map from the response.
+
+This is an internal helper used by the tools, resources, and prompts modules.
+
+**Example**
+
+```hot
+::client ::mcp::client
+result ::client/session-request(session, "ping", null)
+// => {}
+```
+"""
+}
+fn (session: ::types/Session, method: Str, params: Map?): Map {
+  req ::rpc/request(method, params)
+  response ::rpc/send(session.url, session.headers, req)
+  or(response.result, {})
+}
+
+// Send a streaming request within an active session.
+// Returns a StreamingHttpResponse whose .body is an SSE-parsed iterator.
+session-request-stream
+meta {
+    doc: """
+Send a streaming JSON-RPC request within an active MCP session.
+
+Returns a StreamingHttpResponse whose `.body` is an SSE-parsed iterator
+yielding events with `.event`, `.data`, and `.id` fields.
+"""
+}
+fn (session: ::types/Session, method: Str, params: Map?): StreamingHttpResponse {
+  req ::rpc/request(method, params)
+  ::rpc/send-stream(session.url, session.headers, req)
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+// Ping the server to check connectivity.
+ping
+meta {
+    doc: """
+Ping the MCP server to verify the session is alive.
+
+Returns true if the server responds successfully.
+
+**Example**
+
+```hot
+::mcp ::mcp::client
+alive ::mcp/ping(session)
+// alive => true
+```
+"""
+}
+fn (session: ::types/Session): Bool {
+  session-request(session, "ping", null)
+  true
+}

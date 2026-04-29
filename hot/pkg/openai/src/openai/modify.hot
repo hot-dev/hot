@@ -1,0 +1,357 @@
+::openai::modify ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ModifyAssistantRequest type {
+    model: Any?,
+    reasoning_effort: ReasoningEffort?,
+    name: Str?,
+    description: Str?,
+    instructions: Str?,
+    tools: Vec<AssistantTool>?,
+    tool_resources: Map?,
+    metadata: Metadata?,
+    temperature: Dec?,
+    top_p: Dec?,
+    response_format: AssistantsApiResponseFormatOption?
+}
+
+ModifyMessageRequest type {
+    metadata: Metadata?
+}
+
+// Message content -- can be text or an array of content parts
+MessageContent type Any
+
+// Whether to allow parallel function calls during tool use
+ParallelToolCalls type Bool
+
+MessageObject type {
+    id: Str,
+    object: "thread.message",
+    created_at: Int,
+    thread_id: Str,
+    status: "in_progress" | "incomplete" | "completed",
+    incomplete_details: Map,
+    completed_at: Int,
+    incomplete_at: Int,
+    role: "user" | "assistant",
+    content: Vec<MessageContent>,
+    assistant_id: Str,
+    run_id: Str,
+    attachments: Vec<Map>,
+    metadata: Metadata
+}
+
+// Reasoning effort level (e.g. "low", "medium", "high")
+ReasoningEffort type Str
+
+ThreadObject type {
+    id: Str,
+    object: "thread",
+    created_at: Int,
+    tool_resources: Map,
+    metadata: Metadata
+}
+
+ModifyThreadRequest type {
+    tool_resources: Map?,
+    metadata: Metadata?
+}
+
+// Tool definition for an assistant (code_interpreter, file_search, or function)
+AssistantTool type Map
+
+RunCompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int
+}
+
+VectorStoreObject type {
+    id: Str,
+    object: "vector_store",
+    created_at: Int,
+    name: Str,
+    usage_bytes: Int,
+    file_counts: Map,
+    status: "expired" | "in_progress" | "completed",
+    expires_after: VectorStoreExpirationAfter?,
+    expires_at: Int?,
+    last_active_at: Int,
+    metadata: Metadata
+}
+
+// Response format: "auto", or {type: "json_object"}, or {type: "json_schema", json_schema: {...}}
+AssistantsApiResponseFormatOption type Any
+
+Certificate type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+VectorStoreExpirationAfter type {
+    anchor: "last_active_at",
+    days: Int
+}
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+RunObject type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+UpdateVectorStoreRequest type {
+    name: Str?,
+    expires_after: Any?,
+    metadata: Metadata?
+}
+
+ModifyCertificateRequest type {
+    name: Str
+}
+
+AssistantObject type {
+    id: Str,
+    object: "assistant",
+    created_at: Int,
+    name: Str,
+    description: Str,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    tool_resources: Map?,
+    metadata: Metadata,
+    temperature: Dec?,
+    top_p: Dec?,
+    response_format: AssistantsApiResponseFormatOption?
+}
+
+ModifyRunRequest type {
+    metadata: Metadata?
+}
+
+// Run status identifier (e.g. "queued", "in_progress", "completed", "failed", "cancelled", "expired")
+RunStatus type Str
+
+ModifyAssistantRequest type {
+    model: Any?,
+    reasoning_effort: ReasoningEffort?,
+    name: Str?,
+    description: Str?,
+    instructions: Str?,
+    tools: Vec<AssistantTool>?,
+    tool_resources: Map?,
+    metadata: Metadata?,
+    temperature: Dec?,
+    top_p: Dec?,
+    response_format: AssistantsApiResponseFormatOption?
+}
+
+ModifyAssistantResponse type {
+    id: Str,
+    object: "assistant",
+    created_at: Int,
+    name: Str,
+    description: Str,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    tool_resources: Map?,
+    metadata: Metadata,
+    temperature: Dec?,
+    top_p: Dec?,
+    response_format: AssistantsApiResponseFormatOption?
+}
+
+
+modify-assistant
+meta {
+    doc: """POST /assistants/{assistant_id} - Update an assistant's configuration (model, name, instructions, tools, etc.)."""
+}
+fn (assistant-id: Str, request: ModifyAssistantRequest): ModifyAssistantResponse {
+  response api-request("POST", `${::openai/BASE_URL}/assistants/${assistant-id}`, {}, request)
+  if(is-ok-response(response), ModifyAssistantResponse(response.body), err(HttpError(response)))
+}
+
+ModifyCertificateRequest type {
+    name: Str
+}
+
+ModifyCertificateResponse type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+
+modify-certificate
+meta {
+    doc: """POST /organization/certificates/{certificate_id} - Update the name of a certificate."""
+}
+fn (request: ModifyCertificateRequest): ModifyCertificateResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/certificates/{certificate_id}`, {}, request)
+  if(is-ok-response(response), ModifyCertificateResponse(response.body), err(HttpError(response)))
+}
+
+ModifyThreadRequest type {
+    tool_resources: Map?,
+    metadata: Metadata?
+}
+
+ModifyThreadResponse type {
+    id: Str,
+    object: "thread",
+    created_at: Int,
+    tool_resources: Map,
+    metadata: Metadata
+}
+
+
+modify-thread
+meta {
+    doc: """POST /threads/{thread_id} - Update a thread's tool resources or metadata."""
+}
+fn (thread-id: Str, request: ModifyThreadRequest): ModifyThreadResponse {
+  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}`, {}, request)
+  if(is-ok-response(response), ModifyThreadResponse(response.body), err(HttpError(response)))
+}
+
+ModifyMessageRequest type {
+    metadata: Metadata?
+}
+
+ModifyMessageResponse type {
+    id: Str,
+    object: "thread.message",
+    created_at: Int,
+    thread_id: Str,
+    status: "in_progress" | "incomplete" | "completed",
+    incomplete_details: Map,
+    completed_at: Int,
+    incomplete_at: Int,
+    role: "user" | "assistant",
+    content: Vec<MessageContent>,
+    assistant_id: Str,
+    run_id: Str,
+    attachments: Vec<Map>,
+    metadata: Metadata
+}
+
+
+modify-message
+meta {
+    doc: """POST /threads/{thread_id}/messages/{message_id} - Update a message's metadata."""
+}
+fn (thread-id: Str, message-id: Str, request: ModifyMessageRequest): ModifyMessageResponse {
+  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/messages/${message-id}`, {}, request)
+  if(is-ok-response(response), ModifyMessageResponse(response.body), err(HttpError(response)))
+}
+
+ModifyRunRequest type {
+    metadata: Metadata?
+}
+
+ModifyRunResponse type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+
+modify-run
+meta {doc: """POST /threads/{thread_id}/runs/{run_id} - Update a run's metadata."""}
+fn (thread-id: Str, run-id: Str, request: ModifyRunRequest): ModifyRunResponse {
+  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/runs/${run-id}`, {}, request)
+  if(is-ok-response(response), ModifyRunResponse(response.body), err(HttpError(response)))
+}
+
+ModifyVectorStoreRequest type {
+    name: Str?,
+    expires_after: Any?,
+    metadata: Metadata?
+}
+
+ModifyVectorStoreResponse type {
+    id: Str,
+    object: "vector_store",
+    created_at: Int,
+    name: Str,
+    usage_bytes: Int,
+    file_counts: Map,
+    status: "expired" | "in_progress" | "completed",
+    expires_after: VectorStoreExpirationAfter?,
+    expires_at: Int?,
+    last_active_at: Int,
+    metadata: Metadata
+}
+
+
+modify-vector-store
+meta {
+    doc: """POST /vector_stores/{vector_store_id} - Update a vector store's name, expiration, or metadata."""
+}
+fn (vector-store-id: Str, request: ModifyVectorStoreRequest): ModifyVectorStoreResponse {
+  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}`, {}, request)
+  if(is-ok-response(response), ModifyVectorStoreResponse(response.body), err(HttpError(response)))
+}

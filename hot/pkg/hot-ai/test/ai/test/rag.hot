@@ -1,0 +1,125 @@
+::ai::test::rag ns
+meta ["test"]
+
+::rag ::ai::rag
+::msg ::ai::message
+
+Role        ::msg/Role
+ChatMessage ::msg/ChatMessage
+
+// ============================================================================
+// format-session-results
+// ============================================================================
+
+test-format-session-results-basic
+meta ["test"] fn () {
+    results [
+        {score: 0.9, value: {sender-name: "alice", content: "hi team"}},
+        {score: 0.7, value: {sender-name: "bob",   content: "hello"}},
+    ]
+    lines ::rag/format-session-results(results)
+    assert-eq(2, length(lines))
+    assert-eq("[alice]: hi team", first(lines))
+    assert-eq("[bob]: hello",     last(lines))
+}
+
+test-format-session-results-missing-name
+meta ["test"] fn () {
+    results [{score: 0.5, value: {content: "anon msg"}}]
+    lines ::rag/format-session-results(results)
+    assert-eq("[unknown]: anon msg", first(lines))
+}
+
+test-format-session-results-empty
+meta ["test"] fn () {
+    lines ::rag/format-session-results([])
+    assert(is-empty(lines))
+}
+
+// ============================================================================
+// format-kb-results
+// ============================================================================
+
+test-format-kb-results-with-content
+meta ["test"] fn () {
+    results [
+        {score: 0.8, value: {content: "The cat sat on the mat"}},
+        {score: 0.6, value: {content: "Dogs bark"}},
+    ]
+    lines ::rag/format-kb-results(results)
+    assert-eq(2, length(lines))
+    assert-eq("[KB] The cat sat on the mat", first(lines))
+}
+
+test-format-kb-results-empty
+meta ["test"] fn () {
+    assert(is-empty(::rag/format-kb-results([])))
+}
+
+// ============================================================================
+// format-thread-lines
+// ============================================================================
+
+test-format-thread-lines-empty
+meta ["test"] fn () {
+    assert-eq("", ::rag/format-thread-lines([]))
+}
+
+test-format-thread-lines-basic
+meta ["test"] fn () {
+    history [
+        ChatMessage({role: Role.User,      content: "What is 2+2?"}),
+        ChatMessage({role: Role.Assistant, content: "4"}),
+    ]
+    text ::rag/format-thread-lines(history)
+    assert(contains(text, "Previous conversation:"))
+    assert(contains(text, "user: What is 2+2?"))
+    assert(contains(text, "assistant: 4"))
+    assert(ends-with(text, "---\n"))
+}
+
+test-format-thread-lines-system
+meta ["test"] fn () {
+    history [ChatMessage({role: Role.System, content: "be brief"})]
+    text ::rag/format-thread-lines(history)
+    assert(contains(text, "system: be brief"))
+}
+
+// ============================================================================
+// build-rag-prompt
+// ============================================================================
+
+test-build-rag-prompt-no-context-no-history
+meta ["test"] fn () {
+    p ::rag/build-rag-prompt("", "", "What is love?")
+    assert-eq("What is love?", p)
+}
+
+test-build-rag-prompt-context-only
+meta ["test"] fn () {
+    p ::rag/build-rag-prompt("", "[alice]: loved it", "What is love?")
+    assert(contains(p, "Context from memory:"))
+    assert(contains(p, "[alice]: loved it"))
+    assert(contains(p, "Question: What is love?"))
+}
+
+test-build-rag-prompt-history-only
+meta ["test"] fn () {
+    p ::rag/build-rag-prompt("Previous conversation:\nuser: hi\n---\n", "", "What now?")
+    assert(contains(p, "Previous conversation:"))
+    assert(contains(p, "Question: What now?"))
+    assert(not(contains(p, "Context from memory:")))
+}
+
+test-build-rag-prompt-full
+meta ["test"] fn () {
+    p ::rag/build-rag-prompt(
+        "Previous conversation:\nuser: hi\n---\n",
+        "[bob]: relevant fact",
+        "So what?"
+    )
+    assert(contains(p, "Previous conversation:"))
+    assert(contains(p, "Context from memory:"))
+    assert(contains(p, "[bob]: relevant fact"))
+    assert(contains(p, "Question: So what?"))
+}

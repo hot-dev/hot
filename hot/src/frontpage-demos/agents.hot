@@ -1,0 +1,179 @@
+::demo::agents ns
+
+::store ::hot::store
+
+// ---------------------------------------------------------------------------
+// Agent definition
+// ---------------------------------------------------------------------------
+
+LeadQualifier
+meta {
+    doc: "Qualifies inbound leads, scores them, and routes to sales or nurture.",
+    agent: {
+        name: "Lead Qualifier",
+        description: "Scores inbound leads and routes to sales or nurture pipeline",
+        tags: ["sales", "ai"],
+    },
+}
+type {
+  threshold: Dec,
+  model: Str,
+}
+
+qualifier LeadQualifier({
+  threshold: 0.7,
+  model: "claude-sonnet",
+})
+
+leads ::store/Map({name: "demo:leads"})
+
+// ---------------------------------------------------------------------------
+// Webhook: inbound signup
+// ---------------------------------------------------------------------------
+
+on-signup
+meta {
+    doc: "Accepts inbound signups via webhook and queues them for qualification",
+    agent: LeadQualifier,
+    webhook: {service: "leads", path: "/signup"},
+    on-event: "demo:lead-signup"
+}
+fn (request) {
+  lead or(request.body, request.data)
+  ::store/put(leads, or(lead.email, Uuid()), lead)
+  send("lead:new", lead)
+  {ok: true}
+}
+
+// ---------------------------------------------------------------------------
+// Event handler: score and route
+// ---------------------------------------------------------------------------
+
+qualify-lead
+meta {
+    doc: "Scores a lead and routes to sales if qualified, nurture otherwise",
+    agent: LeadQualifier,
+    on-event: "lead:new"
+}
+fn (event) {
+  lead event.data
+  score add(mul(rand(), 0.6), 0.3)
+  qualified gte(score, qualifier.threshold)
+
+  ::store/put(leads, or(lead.email, Uuid()), {
+    ...lead,
+    score: round(mul(score, 100)),
+    qualified: qualified,
+  })
+
+  if(qualified,
+    send("lead:qualified", {email: lead.email, score: score}),
+    send("lead:nurture", {email: lead.email, score: score}))
+}
+
+// ---------------------------------------------------------------------------
+// Event handler: qualified lead -> notify sales
+// ---------------------------------------------------------------------------
+
+notify-sales
+meta {
+    doc: "Posts a Slack alert to #sales when a lead scores above threshold",
+    agent: LeadQualifier,
+    on-event: "lead:qualified"
+}
+fn (event) {
+  send("slack:post", {
+    channel: "#sales",
+    text: `Hot lead: ${event.data.email} (score ${round(mul(event.data.score, 100))})`,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Event handler: nurture lead -> queue drip campaign
+// ---------------------------------------------------------------------------
+
+nurture-lead
+meta {
+    doc: "Nurtures leads by sending a welcome email and re-queueing for scoring",
+    agent: LeadQualifier,
+    on-event: "lead:nurture",
+    sends: [
+        {event: "email:send", doc: "Send welcome drip email"},
+        {event: "lead:new", doc: "Re-queue for scoring after nurture delay"},
+    ],
+}
+fn (event) {
+  send("email:send", {
+    to: event.data.email,
+    subject: "Thanks for signing up!",
+    template: "nurture-welcome",
+  })
+
+  // Re-queue lead for qualification after nurture touch
+  send("lead:new", {
+    ...event.data,
+    source: "nurture-requeue",
+  })
+}
+
+// ---------------------------------------------------------------------------
+// MCP tool: lookup lead by email (callable by external AI agents)
+// ---------------------------------------------------------------------------
+
+lookup-lead
+meta {
+    agent: LeadQualifier,
+    mcp: {
+        service: "leads",
+        name: "lookup_lead",
+        description: "Look up a lead by email address",
+    },
+}
+fn (params) {
+  email or(params.email, "")
+  result ::store/get(leads, email)
+  if(is-some(result), result, err("Lead not found"))
+}
+
+// ---------------------------------------------------------------------------
+// Webhook: CRM update (external system pushes lead status changes)
+// ---------------------------------------------------------------------------
+
+on-crm-update
+meta {
+    doc: "Syncs lead status changes pushed from an external CRM",
+    agent: LeadQualifier,
+    webhook: {service: "leads", path: "/crm-update"},
+}
+fn (request) {
+  data or(request.body, request.data)
+  ::store/put(leads, or(data.email, Uuid()), {
+    ...data,
+    source: "crm",
+  })
+  send("lead:updated", data)
+  {ok: true}
+}
+
+// ---------------------------------------------------------------------------
+// Schedule: weekly pipeline summary
+// ---------------------------------------------------------------------------
+
+weekly-pipeline
+meta {
+    doc: "Generates a weekly pipeline summary and posts it to Slack",
+    agent: LeadQualifier,
+    schedule: "every monday at 9am",
+    on-event: "demo:pipeline-summary",
+}
+fn (event) {
+  total add(20, rand-int(30))
+  qualified add(5, rand-int(10))
+
+  send("slack:post", {
+    channel: "#sales",
+    text: `Pipeline: ${total} leads, ${qualified} qualified this week`,
+  })
+
+  {total: total, qualified: qualified}
+}

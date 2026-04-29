@@ -1,0 +1,236 @@
+// Tests for match flow interaction with Result types
+// Verifies that match properly handles Result.Ok/Result.Err pattern matching
+// even when the matched value comes from a function call (auto-wrapped in Result)
+::hot::test::docs::match-result ns
+meta ["test"]
+
+// =============================================================================
+// Helper functions that return Results
+// =============================================================================
+
+safe-divide fn (a: Int, b: Int): Int {
+  if(eq(b, 0), err("Division by zero"), div(a, b))
+}
+
+fetch-user fn (id: Str): Map {
+  if(eq(id, "valid"), {name: "Alice", id: id}, err("User not found"))
+}
+
+// =============================================================================
+// Pattern 1: match on Result from direct ok()/err() constructors
+// =============================================================================
+
+test-match-ok-constructor
+meta ["test"] fn () {
+  result ok(42)
+  message match result {
+    Result.Ok => { `Success: ${result}` }
+    Result.Err => { `Error: ${result}` }
+  }
+
+  assert-eq("Success: 42", message, "match should match Result.Ok from ok() constructor")
+}
+
+test-match-err-constructor
+meta ["test"] fn () {
+  result err("something went wrong")
+  message match result {
+    Result.Ok => { `Success: ${result}` }
+    Result.Err => { `Error: ${result}` }
+  }
+
+  assert-eq("Error: something went wrong", message, "match should match Result.Err from err() constructor")
+}
+
+// =============================================================================
+// Pattern 2: match on Result from a function call return
+// This is the critical pattern — function returns are auto-wrapped in Result.Ok.
+// The match subject should be treated as lazy so the Result is intact for matching.
+// Inside the branch body, the value should auto-unwrap when used.
+// =============================================================================
+
+test-match-ok-from-function-call
+meta ["test"] fn () {
+  result safe-divide(10, 2)
+  message match result {
+    Result.Ok => { `Success: ${result}` }
+    Result.Err => { `Error: ${result}` }
+  }
+
+  assert-eq("Success: 5", message, "match should match Result.Ok from function call")
+}
+
+test-match-err-from-function-call
+meta ["test"] fn () {
+  result safe-divide(10, 0)
+  message match result {
+    Result.Ok => { `Success: ${result}` }
+    Result.Err => { `Error: ${result}` }
+  }
+
+  assert-eq("Error: Division by zero", message, "match should match Result.Err from function call")
+}
+
+// =============================================================================
+// Pattern 3: Using the unwrapped value inside the branch body
+// Inside Result.Ok branch, the matched variable should auto-unwrap so you can
+// access fields, do math, etc.
+// =============================================================================
+
+test-match-ok-access-value
+meta ["test"] fn () {
+  result safe-divide(20, 4)
+  doubled match result {
+    Result.Ok => { mul(result, 2) }
+    Result.Err => { 0 }
+  }
+
+  assert-eq(10, doubled, "should access unwrapped value inside Result.Ok branch")
+}
+
+test-match-ok-access-fields
+meta ["test"] fn () {
+  result fetch-user("valid")
+  name match result {
+    Result.Ok => { result.name }
+    Result.Err => { "unknown" }
+  }
+
+  assert-eq("Alice", name, "should access fields of unwrapped value inside Result.Ok branch")
+}
+
+test-match-err-access-message
+meta ["test"] fn () {
+  result fetch-user("invalid")
+  name match result {
+    Result.Ok => { result.name }
+    Result.Err => { `Error: ${result}` }
+  }
+
+  assert-eq("Error: User not found", name, "should access error message inside Result.Err branch")
+}
+
+// =============================================================================
+// Pattern 4: fn match with Result parameter
+// When a function is defined as `fn match (r: Result): T`, the parameter
+// should be matched without auto-unwrapping.
+// =============================================================================
+
+handle-result fn match (r: Result): Str {
+  Result.Ok => { `Got: ${r}` }
+  Result.Err => { `Error: ${r}` }
+}
+
+test-fn-match-ok-from-constructor
+meta ["test"] fn () {
+  assert-eq("Got: 42", handle-result(ok(42)), "fn match should handle ok() constructor")
+}
+
+test-fn-match-err-from-constructor
+meta ["test"] fn () {
+  assert-eq("Error: bad", handle-result(err("bad")), "fn match should handle err() constructor")
+}
+
+test-fn-match-ok-from-function-call
+meta ["test"] fn () {
+  result safe-divide(10, 2)
+  assert-eq("Got: 5", handle-result(result), "fn match should handle Result.Ok from function call")
+}
+
+test-fn-match-err-from-function-call
+meta ["test"] fn () {
+  result safe-divide(10, 0)
+  assert-eq("Error: Division by zero", handle-result(result), "fn match should handle Result.Err from function call")
+}
+
+// =============================================================================
+// Pattern 5: match inside a function (the AI package pattern)
+// This mirrors the exact pattern used in the AI package chat convenience functions:
+// call an API, match on the result, extract data from the Ok branch.
+// =============================================================================
+
+ApiResponse type {
+    content: Vec<Map>
+}
+
+mock-api-call fn (input: Str): ApiResponse {
+  if(is-empty(input),
+    err("Empty input"),
+    ApiResponse({content: [{type: "text", text: `Response to: ${input}`}]})
+  )
+}
+
+extract-text fn (input: Str): Str {
+  result mock-api-call(input)
+  match result {
+    Result.Err => { err(result) }
+    Result.Ok => {
+      first-block result.content[0]
+      or(first-block.text, "")
+    }
+  }
+}
+
+test-api-pattern-success
+meta ["test"] fn () {
+  text extract-text("hello")
+  assert-eq("Response to: hello", text, "API pattern should extract text from Ok result")
+}
+
+test-api-pattern-error
+meta ["test"] fn () {
+  result extract-text("")
+  assert(is-err(result), "API pattern should propagate error from Err result")
+}
+
+// =============================================================================
+// Pattern 6: match-all with Result patterns
+// match-all executes ALL matching arms and returns a Map keyed by branch name.
+// Verify that EnsureResult wrapping works for match-all just as it does for match.
+// =============================================================================
+
+test-match-all-ok
+meta ["test"] fn () {
+  result ok(42)
+  outcomes match-all result {
+    Result.Ok => { `ok: ${result}` }
+    Result.Err => { `err: ${result}` }
+  }
+
+  assert-eq("ok: 42", get(outcomes, "Result.Ok"), "match-all should execute Result.Ok branch")
+  assert(is-null(get(outcomes, "Result.Err", null)), "match-all should not execute non-matching Result.Err branch")
+}
+
+test-match-all-err
+meta ["test"] fn () {
+  result err("boom")
+  outcomes match-all result {
+    Result.Ok => { `ok: ${result}` }
+    Result.Err => { `err: ${result}` }
+  }
+
+  assert-eq("err: boom", get(outcomes, "Result.Err"), "match-all should execute Result.Err branch")
+  assert(is-null(get(outcomes, "Result.Ok", null)), "match-all should not execute non-matching Result.Ok branch")
+}
+
+test-match-all-ok-from-function-call
+meta ["test"] fn () {
+  result safe-divide(10, 2)
+  outcomes match-all result {
+    Result.Ok => { mul(result, 10) }
+    Result.Err => { 0 }
+  }
+
+  assert-eq(50, get(outcomes, "Result.Ok"), "match-all should handle Result.Ok from function call")
+}
+
+test-match-all-err-from-function-call
+meta ["test"] fn () {
+  result safe-divide(10, 0)
+  outcomes match-all result {
+    Result.Ok => { mul(result, 10) }
+    Result.Err => { `failed: ${result}` }
+  }
+
+  assert-eq("failed: Division by zero", get(outcomes, "Result.Err"), "match-all should handle Result.Err from function call")
+}

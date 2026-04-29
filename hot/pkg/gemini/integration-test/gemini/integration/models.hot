@@ -1,0 +1,49 @@
+::gemini::integration::models ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Gemini Models API
+// =============================================================================
+// These tests require GEMINI_API_KEY to be set in context
+
+test-models-list
+meta ["test"]
+fn () {
+    models ::gemini::models/list(::gemini::models/ModelsListRequest({
+        page-size: "10",
+        page-token: ""
+    }))
+
+    assert(is-vec(models.models), "Response should have models array")
+    assert(gt(length(models.models), 0), "Should have at least one model")
+
+    // Check first model has expected fields
+    first-model first(models.models)
+    assert(first-model.name, "Model should have name")
+}
+
+test-models-get
+meta ["test"]
+fn () {
+    model ::gemini::models/get(::gemini::models/ModelsGetRequest({
+        model: "gemini-2.0-flash"
+    }))
+
+    assert(model.name, "Model should have name")
+    assert(model.displayName, "Model should have displayName")
+    assert(model.inputTokenLimit, "Model should have inputTokenLimit")
+}
+
+test-models-count-tokens
+meta ["test"]
+fn () {
+    response ::gemini::models/count-tokens("gemini-2.0-flash", ::gemini::models/ModelsCountTokensRequest({
+        contents: [::gemini::models/Content({
+            role: "user",
+            parts: [::gemini::models/Part({text: "Hello, world!"})]
+        })]
+    }))
+
+    assert(response.totalTokens, "Response should have totalTokens")
+    assert(gt(response.totalTokens, 0), "Token count should be positive")
+}

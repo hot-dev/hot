@@ -1,0 +1,142 @@
+::supabase::admin::domains ns
+
+::api ::supabase::admin::api
+
+// ============================================================================
+// Custom Hostnames
+// ============================================================================
+
+get-custom-hostname
+meta {
+    doc: """
+Get the custom hostname configuration for a project.
+
+**Example**
+
+```hot
+::domains ::supabase::admin::domains
+
+config ::domains/get-custom-hostname("my-project-ref")
+// => {custom_hostname: "api.myapp.com", status: "ACTIVE", ...}
+```
+"""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/custom-hostname`)
+}
+
+UpdateCustomHostnameRequest type {
+  project_ref: Str,
+  custom_hostname: Str
+}
+
+update-custom-hostname
+meta {
+    doc: """
+Configure a custom hostname for a project. You must set up DNS records (CNAME) before activating.
+
+**Example**
+
+```hot
+::domains ::supabase::admin::domains
+
+::domains/update-custom-hostname(::domains/UpdateCustomHostnameRequest({
+  project_ref: "my-project-ref",
+  custom_hostname: "api.myapp.com"
+}))
+```
+"""
+}
+fn (request: UpdateCustomHostnameRequest): Map {
+  ::api/request("POST", `/projects/${request.project_ref}/custom-hostname/initialize`, {}, {
+    custom_hostname: request.custom_hostname
+  })
+}
+
+verify-custom-hostname
+meta {
+    doc: """Verify DNS configuration for a custom hostname."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("POST", `/projects/${project-ref}/custom-hostname/reverify`, {}, {})
+}
+
+activate-custom-hostname
+meta {
+    doc: """Activate a verified custom hostname. DNS must be verified first."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("POST", `/projects/${project-ref}/custom-hostname/activate`, {}, {})
+}
+
+delete-custom-hostname
+meta {
+    doc: """Remove the custom hostname configuration for a project."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/custom-hostname`)
+}
+
+// ============================================================================
+// Vanity Subdomains
+// ============================================================================
+
+get-vanity-subdomain
+meta {
+    doc: """Get the vanity subdomain configuration for a project."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("GET", `/projects/${project-ref}/vanity-subdomain`)
+}
+
+CheckVanitySubdomainRequest type {
+  project_ref: Str,
+  vanity_subdomain: Str
+}
+
+check-vanity-subdomain
+meta {
+    doc: """
+Check if a vanity subdomain is available.
+
+**Example**
+
+```hot
+::domains ::supabase::admin::domains
+
+result ::domains/check-vanity-subdomain(::domains/CheckVanitySubdomainRequest({
+  project_ref: "my-project-ref",
+  vanity_subdomain: "myapp"
+}))
+result.available  // => true
+```
+"""
+}
+fn (request: CheckVanitySubdomainRequest): Map {
+  ::api/request("POST", `/projects/${request.project_ref}/vanity-subdomain/check-availability`, {}, {
+    vanity_subdomain: request.vanity_subdomain
+  })
+}
+
+ActivateVanitySubdomainRequest type {
+  project_ref: Str,
+  vanity_subdomain: Str
+}
+
+activate-vanity-subdomain
+meta {
+    doc: """Activate a vanity subdomain for a project (e.g. `myapp.supabase.co`)."""
+}
+fn (request: ActivateVanitySubdomainRequest): Map {
+  ::api/request("POST", `/projects/${request.project_ref}/vanity-subdomain/activate`, {}, {
+    vanity_subdomain: request.vanity_subdomain
+  })
+}
+
+delete-vanity-subdomain
+meta {
+    doc: """Remove the vanity subdomain for a project."""
+}
+fn (project-ref: Str): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/vanity-subdomain`)
+}

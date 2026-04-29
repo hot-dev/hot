@@ -1,0 +1,22 @@
+::resend::integration::api-keys ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Resend API Keys
+// =============================================================================
+// These tests require resend.api.key (full_access) to be set in context
+// Note: Create/delete tests are omitted because the CRUD lifecycle needs
+// 3 API calls, which exceeds Resend's 2 req/sec rate limit within one test.
+
+// -----------------------------------------------------------------------------
+// List API Keys (read-only)
+// -----------------------------------------------------------------------------
+
+test-list-api-keys
+meta ["test"]
+fn () {
+    keys ::resend::api::keys/retrieve-list-api-keys(::resend::api::keys/GETApiKeysRequest({}))
+
+    assert(keys.data, "Response should have 'data' field")
+    assert(gte(length(keys.data), 1), "Should have at least 1 API key")
+}

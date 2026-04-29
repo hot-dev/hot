@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.hot-ai {
+  name: "hot.dev/hot-ai",
+  version: "1.3.0",
+  hot-min-version: "1.4.0",
+  description: "Dependency-free building blocks for AI agents: sessions, identities, messages, scoped memory, RAG, context management, and inter-agent communication.",
+  author: "Hot Dev",
+  email: "hi@hot.dev",
+  license: "Apache-2.0",
+  tags: ["hot", "ai"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

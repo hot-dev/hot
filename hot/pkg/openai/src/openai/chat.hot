@@ -1,0 +1,435 @@
+::openai::chat ns
+
+// ============================================================================
+// OpenAI Chat Completions - Convenience Functions with Streaming
+// ============================================================================
+
+api-request ::openai::api/request
+api-request-stream ::openai::api/request-stream
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Literal union for chat message roles
+Role type "user" | "system" | "assistant" | "tool"
+
+// Literal union for finish reasons
+FinishReason type "stop" | "length" | "tool_calls" | "content_filter" | "function_call"
+
+// Chat message
+Message type {
+    role: Role,
+    content: Any,
+    name: Str?,
+    tool_calls: Vec<Map>?,
+    tool_call_id: Str?
+}
+
+// Chat completion request
+ChatCompletionRequest type {
+    model: Str,
+    messages: Vec<Message>,
+    max_completion_tokens: Int?,
+    temperature: Dec?,
+    top_p: Dec?,
+    n: Int?,
+    stream: Bool?,
+    stop: Any?,
+    presence_penalty: Dec?,
+    frequency_penalty: Dec?,
+    logit_bias: Map?,
+    user: Str?,
+    tools: Vec<Map>?,
+    tool_choice: Any?,
+    response_format: Map?
+}
+
+// Chat completion response
+ChatCompletionResponse type {
+    id: Str,
+    object: Str,
+    created: Int,
+    model: Str,
+    choices: Vec<ChatChoice>,
+    usage: Usage?
+}
+
+ChatChoice type {
+    index: Int,
+    message: Message,
+    finish_reason: FinishReason?
+}
+
+Usage type {
+    prompt_tokens: Int,
+    completion_tokens: Int,
+    total_tokens: Int
+}
+
+// Streaming chunk types
+ChatCompletionChunk type {
+    id: Str,
+    object: Str,
+    created: Int,
+    model: Str,
+    choices: Vec<StreamChoice>
+}
+
+StreamChoice type {
+    index: Int,
+    delta: Delta,
+    finish_reason: FinishReason?
+}
+
+Delta type {
+    role: Role?,
+    content: Str?,
+    tool_calls: Vec<Map>?
+}
+
+// Streaming response wrapper
+StreamingChatResponse type {
+    status: Int,
+    headers: Map,
+    body: Any  // Iterator yielding ChatCompletionChunk
+}
+
+// ============================================================================
+// Non-Streaming API
+// ============================================================================
+
+complete
+meta {
+    doc: """
+    Create a chat completion (non-streaming).
+
+    Returns a ChatCompletionResponse with `id`, `choices`, `model`, and `usage` fields.
+
+    **Example - Simple**
+
+    ```hot
+    response ::openai::chat/complete(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 50,
+        messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}]
+    }))
+
+    response.id                         // => "chatcmpl-abc123"
+    content response.choices[0].message.content
+    response.usage.total_tokens         // => 42
+    ```
+
+    **Example - With system message**
+
+    ```hot
+    response ::openai::chat/complete(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 100,
+        messages: [
+            {role: "system", content: "You are a helpful assistant that responds in JSON."},
+            {role: "user", content: "What is 2+2? Reply with {\"answer\": <number>}"}
+        ]
+    }))
+    ```
+
+    **Example - With tools**
+
+    ```hot
+    response ::openai::chat/complete(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 200,
+        tools: [
+            {
+                type: "function",
+                function: {
+                    name: "get_weather",
+                    description: "Get the current weather for a location",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            location: {type: "string", description: "The city and state"}
+                        },
+                        required: ["location"]
+                    }
+                }
+            }
+        ],
+        messages: [{role: "user", content: "What's the weather in San Francisco?"}]
+    }))
+    ```
+    """
+}
+fn (request: ChatCompletionRequest): ChatCompletionResponse {
+    response api-request("POST", `${::openai/BASE_URL}/chat/completions`, {}, request)
+    if(is-ok-response(response), ChatCompletionResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Streaming API
+// ============================================================================
+
+complete-stream
+meta {
+    doc: """
+    Create a streaming chat completion. Returns a StreamingChatResponse with status, headers, and a body iterator that yields SSE events.
+
+    **Event Structure**
+
+    Each event from the iterator has `{event, data}` where data contains:
+    - `id` - Completion ID
+    - `choices[0].delta.content` - Text chunk (may be null)
+    - `choices[0].finish_reason` - "stop" when complete
+
+    **Example**
+
+    ```hot
+    response ::openai::chat/complete-stream(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 50,
+        messages: [{role: "user", content: "Count from 1 to 3."}]
+    }))
+
+    response.status // => 200
+    events collect(response.body)
+    length(events) // => number of SSE chunks received
+    ```
+
+    **Example - Processing chunks**
+
+    ```hot
+    response ::openai::chat/complete-stream(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 100,
+        messages: [{role: "user", content: "Hello!"}]
+    }))
+
+    for-each(response.body, fn (event) {
+        text extract-chunk-text(event)
+        cond {
+            not(is-empty(text)) => { print(text) }
+        }
+    })
+    ```
+    """
+}
+fn (request: ChatCompletionRequest): StreamingChatResponse {
+    // Force stream: true
+    streaming-request {...untype(request), stream: true}
+    response api-request-stream("POST", `${::openai/BASE_URL}/chat/completions`, {}, streaming-request, "sse")
+    cond {
+        gte(response.status, 400) => { err(HttpError(response)) }
+        => { StreamingChatResponse(response) }
+    }
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+chat
+meta {
+    doc: """
+    Simple chat - send a message and get a response string.
+
+    A convenience wrapper around `complete` that accepts a model, message, optional system prompt, and optional max tokens. Returns the assistant's reply as a plain Str.
+
+    **Example - Basic**
+
+    ```hot
+    response ::openai::chat/chat("gpt-4o-mini", "What is 1+1?")
+    // => "2"
+    ```
+
+    **Example - With system prompt**
+
+    ```hot
+    response ::openai::chat/chat("gpt-4o-mini", "What is 2+2?", "You are a math tutor. Reply with just the number.")
+    // => "4"
+    ```
+
+    **Example - With max tokens**
+
+    ```hot
+    response ::openai::chat/chat("gpt-4o-mini", "Tell me a story.", "You are a storyteller.", 200)
+    ```
+    """
+}
+fn
+(model: Str, message: Str): Str {
+    chat(model, message, null, null)
+},
+(model: Str, message: Str, system: Str): Str {
+    chat(model, message, system, null)
+},
+(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+    messages cond {
+        is-null(system) => {
+            [Message({role: "user", content: message})]
+        }
+        => {
+            [
+                Message({role: "system", content: system}),
+                Message({role: "user", content: message})
+            ]
+        }
+    }
+
+    request {
+        model: model,
+        messages: messages,
+        max_completion_tokens: or(max-tokens, 1024)
+    }
+
+    result complete(ChatCompletionRequest(request))
+
+    match result {
+        Result.Err => { err(result) }
+        Result.Ok => {
+            first-choice result.choices[0]
+            or(first-choice.message.content, "")
+        }
+    }
+}
+
+user-message
+meta {
+    doc: """
+    Create a user message for use in a chat completion request.
+
+    **Example**
+
+    ```hot
+    msg ::openai::chat/user-message("What is the capital of France?")
+    // => Message({role: "user", content: "What is the capital of France?"})
+    ```
+    """
+}
+fn (content: Str): Message {
+    Message({role: "user", content: content})
+}
+
+system-message
+meta {
+    doc: """
+    Create a system message for use in a chat completion request.
+
+    **Example**
+
+    ```hot
+    msg ::openai::chat/system-message("You are a helpful assistant that responds in JSON.")
+    // => Message({role: "system", content: "You are a helpful assistant that responds in JSON."})
+    ```
+    """
+}
+fn (content: Str): Message {
+    Message({role: "system", content: content})
+}
+
+assistant-message
+meta {
+    doc: """
+    Create an assistant message, typically for multi-turn conversation history.
+
+    **Example**
+
+    ```hot
+    messages [
+        ::openai::chat/user-message("My name is Alice."),
+        ::openai::chat/assistant-message("Nice to meet you, Alice!"),
+        ::openai::chat/user-message("What is my name?")
+    ]
+    ```
+    """
+}
+fn (content: Str): Message {
+    Message({role: "assistant", content: content})
+}
+
+extract-chunk-text
+meta {
+    doc: """
+    Extract the text content from a streaming SSE event. Returns empty string if no content in the chunk.
+
+    **Example**
+
+    ```hot
+    response ::openai::chat/complete-stream(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 50,
+        messages: [{role: "user", content: "Hello!"}]
+    }))
+
+    for-each(response.body, fn (event) {
+        text ::openai::chat/extract-chunk-text(event)
+        // text is "" for empty chunks, or the content fragment
+    })
+    ```
+    """
+}
+fn (event): Str {
+    cond {
+        is-null(event) => { "" }
+        is-null(event.data) => { "" }
+        => {
+            choices event.data.choices
+            cond {
+                or(is-null(choices), is-zero(length(choices))) => { "" }
+                => {
+                    first-choice choices[0]
+                    delta first-choice.delta
+                    cond {
+                        is-null(delta) => { "" }
+                        => { or(delta.content, "") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+is-stream-done
+meta {
+    doc: """
+    Check if a streaming event indicates the stream is complete. Returns true when the event contains a `[DONE]` marker or a non-null `finish_reason`.
+
+    **Example**
+
+    ```hot
+    response ::openai::chat/complete-stream(ChatCompletionRequest({
+        model: "gpt-4o-mini",
+        max_completion_tokens: 50,
+        messages: [{role: "user", content: "Hi"}]
+    }))
+
+    for-each(response.body, fn (event) {
+        done ::openai::chat/is-stream-done(event)
+        // done is true when stream is finished
+    })
+    ```
+    """
+}
+fn (event): Bool {
+    cond {
+        is-null(event) => { false }
+        is-null(event.data) => { false }
+        => {
+            // Check for [DONE] marker or finish_reason
+            cond {
+                eq(event.data, "[DONE]") => { true }
+                => {
+                    choices event.data.choices
+                    cond {
+                        or(is-null(choices), is-zero(length(choices))) => { false }
+                        => {
+                            first-choice choices[0]
+                            not(is-null(first-choice.finish_reason))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

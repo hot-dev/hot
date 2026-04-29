@@ -1,0 +1,71 @@
+::hot::test::type ns
+meta ["test"]
+
+
+// Note: All type predicates (is-type, is-str, is-int, is-bool, is-dec, is-vec, is-map,
+// is-byte, is-bytes, is-namespace), type constructors (Str, Int, Bool, Byte, Bytes, Dec),
+// assert, assert-eq, and not are all core functions - no aliasing needed
+
+test-type
+meta ["test"] fn () {
+    // Test dual-purpose type constructors
+    str_value Str("hello")
+    println(!str_value)
+    assert-eq("hello", str_value, "Str(\"hello\") returns \"hello\"")
+    int_value Int(42)
+    assert-eq(42, int_value, "Int(42) returns 42")
+    bool_value Bool(true)
+    assert(bool_value, "Bool(true) returns true")
+    // Test is-type function
+    str_check is-type(str_value, Str)
+    assert(str_check, "is-type(\"hello\", Str) returns true")
+    int_check is-type(int_value, Int)
+    assert(int_check, "is-type(42, Int) returns true")
+    bool_check is-type(bool_value, Bool)
+    assert(bool_check, "is-type(true, Bool) returns true")
+    wrong_check is-type(str_value, Int)
+    assert-eq(false, wrong_check, "is-type(\"hello\", Int) returns false")
+    assert(is-str("hello"), "is-str(\"hello\") returns true")
+    assert(not(is-int("hello")), "is-int(\"hello\") returns false")
+    assert(not(is-bool("hello")), "is-bool(\"hello\") returns false")
+    assert(not(is-dec("hello")), "is-dec(\"hello\") returns false")
+    assert(not(is-vec("hello")), "is-vec(\"hello\") returns false")
+    assert(not(is-map("hello")), "is-map(\"hello\") returns false")
+    assert(not(is-namespace("hello")), "is-namespace(\"hello\") returns false")
+}
+
+test-type-bytes
+meta ["test"] fn () {
+    byte_value Byte(10)
+    assert-eq(10, byte_value, "Byte(10) equal to Int 10")
+    assert-eq(Byte(10), byte_value, "Byte(10) equal to Byte(10)")
+    bytes_value Bytes([10, 20, 30])
+    assert-eq([10, 20, 30], bytes_value, "Bytes([10, 20, 30]) equals [10, 20, 30]")
+    assert(is-byte(Byte(10)), "is-byte(Byte(10)) returns true")
+    assert(is-bytes(Bytes([10, 20, 30])), "is-bytes(Bytes([10, 20, 30])) returns true")
+
+    // Test 1: Basic Byte operations
+    byte_65 Byte(65)
+    assert-eq(65, byte_65, "Byte(65) should equal 65")
+    assert(is-byte(byte_65), "is-byte should work")
+    // Test 2: Basic Bytes operations
+    hello_bytes Bytes("Hello")
+    vector_bytes Bytes([72, 101, 108, 108, 111])
+    assert-eq(hello_bytes, vector_bytes, "Both should create same bytes")
+    assert(is-bytes(hello_bytes), "is-bytes should work on string-created bytes")
+    assert(is-bytes(vector_bytes), "is-bytes should work on vector-created bytes")
+    // Test 3: Base64 encoding/decoding
+    encoded ::hot::base64/encode(hello_bytes)
+    assert-eq("SGVsbG8=", encoded, "Base64 encoding should work")
+    decoded ::hot::base64/decode(encoded)
+    assert-eq(hello_bytes, decoded, "Base64 decoding should work")
+    // Test 4: Cross-type equality
+    assert-eq(Byte(100), 100, "Byte should equal int")
+    assert-eq(Bytes([1, 2, 3]), [1, 2, 3], "Bytes should equal int vector")
+    // Test 5: Base64 validation
+    assert(::hot::base64/is-valid("SGVsbG8="), "Valid base64 should return true")
+    assert(not(::hot::base64/is-valid("invalid!")), "Invalid base64 should return false")
+    // Test 6: Type checking
+    assert(not(is-byte("not a byte")), "Non-byte should fail is-byte check")
+    assert(not(is-bytes("not bytes")), "Non-bytes should fail is-bytes check")
+}

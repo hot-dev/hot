@@ -1,0 +1,3 @@
+::openai ns
+
+BASE_URL "https://api.openai.com/v1"

@@ -1,0 +1,472 @@
+::xai::collections ns
+
+// ============================================================================
+// xAI Collections API
+// https://docs.x.ai/docs/guides/using-collections/api
+//
+// Collections enables management of documents with automatic embeddings
+// for semantic search. Files uploaded to collections are automatically
+// indexed for efficient retrieval.
+//
+// IMPORTANT: Collections API requires a Management API Key with
+// "AddFileToCollection" permission. Set via xai.management.api.key context var.
+// ============================================================================
+
+::ctx ::hot::ctx
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// Management API has a different base URL
+MANAGEMENT_BASE_URL "https://management-api.x.ai"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+    HttpError({
+        status: response.status,
+        headers: response.headers,
+        body: response.body
+    })
+}
+
+// Collection entity
+Collection type {
+    id: Str,
+    name: Str,
+    description: Str?,
+    created_at: Str?,
+    updated_at: Str?,
+    file_count: Int?,
+    metadata_fields: Vec<MetadataField>?
+}
+
+// Metadata field definition
+MetadataField type {
+    name: Str,
+    type: Str?,
+    required: Bool?,
+    unique: Bool?,
+    inject_into_chunk: Bool?
+}
+
+// Collection list response
+CollectionListResponse type {
+    collections: Vec<Collection>
+}
+
+// Create collection request
+CreateCollectionRequest type {
+    name: Str,
+    description: Str?,
+    metadata_fields: Vec<MetadataField>?
+}
+
+// Update collection request
+UpdateCollectionRequest type {
+    name: Str?,
+    description: Str?
+}
+
+// Document/File in a collection
+Document type {
+    id: Str,
+    name: Str,
+    collection_id: Str?,
+    content_type: Str?,
+    size: Int?,
+    created_at: Str?,
+    status: Str?,
+    fields: Map?
+}
+
+// Search request
+SearchRequest type {
+    query: Str,
+    collection_ids: Vec<Str>,
+    max_results: Int?,
+    retrieval_mode: RetrievalMode?
+}
+
+// Retrieval mode configuration
+RetrievalMode type {
+    type: Str  // "hybrid", "keyword", or "semantic"
+}
+
+// Search result
+SearchResult type {
+    content: Str?,
+    file_id: Str?,
+    file_name: Str?,
+    score: Dec?,
+    metadata: Map?
+}
+
+// Search response
+SearchResponse type {
+    results: Vec<SearchResult>
+}
+
+// ============================================================================
+// API Helper (uses Management API Key)
+// ============================================================================
+
+management-request
+meta {
+    doc: """Make an HTTP request with Management API Key. Required for Collections API.""",
+    ctx: {"xai.management.api.key": {}}
+}
+fn
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+    // Collections API requires Management API Key
+    management-key ::ctx/get("xai.management.api.key")
+
+    default-headers {
+        Authorization: `Bearer ${management-key}`
+    }
+
+    // For GET/DELETE requests with no body, don't send Content-Type
+    cond {
+        or(eq(body, ""), is-null(body)) => {
+            final-headers {...default-headers, ...additional-headers}
+            ::hot::http/request(HttpRequest({
+                method: method,
+                url: url,
+                headers: final-headers
+            }))
+        }
+        => {
+            headers {...default-headers, Content-Type: "application/json"}
+            final-headers {...headers, ...additional-headers}
+            ::hot::http/request(HttpRequest({
+                method: method,
+                url: url,
+                headers: final-headers,
+                body: to-json(untype(body))
+            }))
+        }
+    }
+},
+(method: Str, url: Str): HttpResponse {
+    management-request(method, url, {}, "")
+}
+
+// ============================================================================
+// Collection Management
+// ============================================================================
+
+create
+meta {
+    doc: """
+    Create a new collection for document storage and search.
+
+    Requires a Management API Key with "AddFileToCollection" permission.
+
+    **Example**
+
+    ```hot
+    collection create(CreateCollectionRequest({
+        name: "My Documents",
+        description: "Research papers and notes"
+    }))
+
+    collection.id // => "collection_abc123..."
+    collection.name // => "My Documents"
+    ```
+    """
+}
+fn (request: CreateCollectionRequest): Collection | HttpError {
+    response management-request("POST", `${MANAGEMENT_BASE_URL}/v1/collections`, {}, request)
+    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+}
+
+list
+meta {
+    doc: """
+    List all collections accessible with the Management API Key.
+
+    Returns a CollectionListResponse containing a Vec of Collection objects.
+
+    **Example**
+
+    ```hot
+    result list()
+    result.collections // => [{id: "col_abc", name: "My Docs", ...}, ...]
+
+    names map(result.collections, %.name)
+    ```
+    """
+}
+fn (): CollectionListResponse | HttpError {
+    response management-request("GET", `${MANAGEMENT_BASE_URL}/v1/collections`)
+    if(is-ok-response(response), CollectionListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    Get a collection by ID.
+
+    **Example**
+
+    ```hot
+    collection get("collection_abc123")
+    collection.name // => "My Documents"
+    collection.file_count // => 42
+    ```
+    """
+}
+fn (collection-id: Str): Collection | HttpError {
+    response management-request("GET", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}`)
+    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+}
+
+update
+meta {
+    doc: """
+    Update a collection's name or description.
+
+    **Example**
+
+    ```hot
+    collection update("collection_abc123", UpdateCollectionRequest({
+        name: "Updated Name",
+        description: "New description"
+    }))
+    collection.name // => "Updated Name"
+    ```
+    """
+}
+fn (collection-id: Str, request: UpdateCollectionRequest): Collection | HttpError {
+    response management-request("PATCH", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}`, {}, request)
+    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+}
+
+delete
+meta {
+    doc: """
+    Delete a collection and all its associated documents.
+
+    **Example**
+
+    ```hot
+    delete("collection_abc123")
+    ```
+    """
+}
+fn (collection-id: Str): Map | HttpError {
+    response management-request("DELETE", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}`)
+    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Document Management
+// ============================================================================
+
+add-document
+meta {
+    doc: """
+    Add an existing file to a collection. The file must first be uploaded via the Files API.
+
+    Optionally pass metadata fields as a third argument.
+
+    **Example**
+
+    ```hot
+    // First upload file via ::xai::files/upload, then add to collection
+    doc add-document("col_abc123", "file_xyz789")
+    doc.id // => "doc_..."
+
+    // With metadata fields
+    doc add-document("col_abc123", "file_xyz789", {category: "report", year: "2024"})
+    ```
+    """
+}
+fn (collection-id: Str, file-id: Str): Document | HttpError {
+    add-document(collection-id, file-id, {})
+},
+(collection-id: Str, file-id: Str, fields: Map): Document | HttpError {
+    body {
+        file_id: file-id,
+        fields: fields
+    }
+
+    response management-request("POST", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}/documents`, {}, body)
+    if(is-ok-response(response), Document(response.body), err(HttpError(response)))
+}
+
+remove-document
+meta {
+    doc: """
+    Remove a document from a collection by collection ID and file ID.
+
+    **Example**
+
+    ```hot
+    remove-document("col_abc123", "file_xyz789")
+    ```
+    """
+}
+fn (collection-id: Str, file-id: Str): Map | HttpError {
+    response management-request("DELETE", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}/documents/${file-id}`)
+    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Search
+// ============================================================================
+
+search
+meta {
+    doc: """
+    Search documents across one or more collections using semantic, keyword, or hybrid search.
+
+    Uses the regular API key (not the Management API Key).
+
+    **Search Modes:**
+    - `hybrid` (default) - Combines keyword and semantic for best results
+    - `keyword` - Exact matches of words, phrases, numbers
+    - `semantic` - Understands meaning and context
+
+    **Example**
+
+    ```hot
+    results search(SearchRequest({
+        query: "What were the key revenue drivers?",
+        collection_ids: ["col_abc123"],
+        max_results: 10,
+        retrieval_mode: MODE_SEMANTIC
+    }))
+
+    first-result first(results.results)
+    first-result.score // => 0.95
+    first-result.file_name // => "annual_report.pdf"
+    first-result.content // => "The key revenue drivers were..."
+    ```
+    """,
+    ctx: {"xai.api.key": {}}
+}
+fn (request: SearchRequest): SearchResponse | HttpError {
+    // Build the request body
+    body {
+        query: request.query,
+        source: {
+            collection_ids: request.collection_ids
+        }
+    }
+
+    // Add optional fields
+    body-with-max cond {
+        is-null(request.max_results) => { body }
+        => { {...body, max_results: request.max_results} }
+    }
+
+    final-body cond {
+        is-null(request.retrieval_mode) => { body-with-max }
+        => { {...body-with-max, retrieval_mode: request.retrieval_mode} }
+    }
+
+    // Search uses regular API key, not management key
+    api-key ::ctx/get("xai.api.key")
+    headers {
+        Authorization: `Bearer ${api-key}`,
+        Content-Type: "application/json"
+    }
+
+    response ::hot::http/request(HttpRequest({
+        method: "POST",
+        url: `${::xai/BASE_URL}/documents/search`,
+        headers: headers,
+        body: to-json(final-body)
+    }))
+    if(is-ok-response(response), SearchResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+search-simple
+meta {
+    doc: """
+    Simple search - query across collections using default hybrid retrieval.
+
+    A convenience wrapper around search() that takes just a query string and collection IDs.
+
+    **Example**
+
+    ```hot
+    results search-simple("revenue analysis", ["col_abc123"])
+    results.results // => [{content: "...", score: 0.92, ...}, ...]
+    ```
+    """
+}
+fn (query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+    search(SearchRequest({
+        query: query,
+        collection_ids: collection-ids
+    }))
+}
+
+keyword-search
+meta {
+    doc: """
+    Keyword search - exact word/phrase matching.
+
+    Best for finding specific terms, numbers, or exact phrases in documents.
+
+    **Example**
+
+    ```hot
+    results keyword-search("Q3 2024 revenue", ["col_abc123"])
+    results.results // => [{content: "...", score: 0.88, ...}, ...]
+    ```
+    """
+}
+fn (query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+    search(SearchRequest({
+        query: query,
+        collection_ids: collection-ids,
+        retrieval_mode: RetrievalMode({type: "keyword"})
+    }))
+}
+
+semantic-search
+meta {
+    doc: """
+    Semantic search - finds conceptually related content by meaning.
+
+    Understands context and returns results that are conceptually similar,
+    even if they don't contain the exact query terms.
+
+    **Example**
+
+    ```hot
+    results semantic-search("financial performance", ["col_abc123"])
+    results.results // => [{content: "...", score: 0.91, ...}, ...]
+    ```
+    """
+}
+fn (query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+    search(SearchRequest({
+        query: query,
+        collection_ids: collection-ids,
+        retrieval_mode: RetrievalMode({type: "semantic"})
+    }))
+}
+
+// ============================================================================
+// Retrieval Mode Constants
+// ============================================================================
+
+MODE_HYBRID RetrievalMode({type: "hybrid"})
+MODE_KEYWORD RetrievalMode({type: "keyword"})
+MODE_SEMANTIC RetrievalMode({type: "semantic"})

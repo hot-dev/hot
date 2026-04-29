@@ -1,0 +1,253 @@
+// Event handlers and scheduled functions
+::examples::events ns
+
+::http ::hot::http
+::env ::hot::env
+
+// ============================================
+// TYPES
+// ============================================
+
+User type {
+    id: Str,
+    email: Str,
+    name: Str
+}
+
+Order type {
+    id: Str,
+    user-id: Str,
+    total: Dec,
+    items: Vec<Map>
+}
+
+// ============================================
+// SIMPLE EVENT HANDLERS
+// ============================================
+
+// Basic event handler
+on-user-created
+meta {on-event: "user:created"}
+fn (event) {
+    user User(event.data)
+    send-welcome-email(user.email, user.name)
+}
+
+// Event with simple retry (3 attempts, 1s delay)
+on-order-placed
+meta {
+    on-event: "order:placed",
+    retry: 3
+}
+fn (event) {
+    order Order(event.data)
+    process-order(order)
+}
+
+// Event with custom retry config
+on-payment-received
+meta {
+    on-event: "payment:received",
+    retry: {attempts: 5, delay: 5000}
+}
+fn (event) {
+    payment event.data
+    process-payment(payment)
+}
+
+// ============================================
+// SCHEDULED FUNCTIONS
+// ============================================
+
+// Run daily at 2 AM
+daily-cleanup
+meta {schedule: "0 2 * * *"}
+fn (event) {
+    cleanup-old-sessions()
+    cleanup-temp-files()
+    ok("Cleanup complete")
+}
+
+// Run every hour
+hourly-sync
+meta {
+    schedule: "0 * * * *",
+    retry: 3
+}
+fn (event) {
+    sync-external-data()
+}
+
+// Run every 5 minutes
+health-check
+meta {schedule: "*/5 * * * *"}
+fn (event) {
+    services ["api", "database", "cache"]
+
+    results pmap(services, (service) {
+        check-service-health(service)
+    })
+
+    failures filter(results, (r) { is-err(r) })
+
+    if(gt(length(failures), 0),
+        send-alert("Health check failures", failures),
+        ok("All services healthy"))
+}
+
+// ============================================
+// EVENT HANDLER PATTERNS
+// ============================================
+
+// Access retry information
+on-critical-event
+meta {
+    on-event: "critical:action",
+    retry: {attempts: 3, delay: 10000}
+}
+fn (event) {
+    i info()
+
+    // Log retry attempt
+    if(gt(i.run.retry-attempt, 0),
+        log(`Retry attempt ${i.run.retry-attempt} of ${i.run.max-retries}`),
+        null)
+
+    // Process the event
+    result process-critical(event.data)
+
+    // On final failure, escalate
+    cond {
+        is-ok(result) => { result }
+        eq(i.run.retry-attempt, i.run.max-retries) => {
+            send-escalation(event, result)
+            result
+        }
+        => { result }
+    }
+}
+
+// Chain events
+on-user-signup
+meta {on-event: "user:signup"}
+fn (event) {
+    user event.data
+
+    // Create user in database
+    created create-user(user)
+
+    // Send downstream events
+    cond-all {
+        is-ok(created) => welcome {
+            send("user:created", unwrap(created))
+        }
+
+        is-ok(created) => analytics {
+            send("analytics:user-signup", {
+                "user-id": user.id,
+                "source": user.signup-source
+            })
+        }
+
+        is-err(created) => error {
+            send("user:signup-failed", {
+                "user": user,
+                "error": unwrap-err(created)
+            })
+        }
+    }
+
+    created
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+send-welcome-email fn (email: Str, name: Str): Map {
+    ::http/post("https://email.example.com/send", {
+        "to": email,
+        "template": "welcome",
+        "data": {"name": name}
+    })
+}
+
+process-order fn (order: Order): Map {
+    // Validate inventory
+    inventory-check check-inventory(order.items)
+
+    match inventory-check {
+        Result.Ok => {
+            // Reserve inventory and charge
+            parallel {
+                reserve reserve-inventory(order.items)
+                charge charge-payment(order.user-id, order.total)
+            }
+        }
+
+        Result.Err => {
+            send("order:failed", {"order-id": order.id, "reason": inventory-check})
+            err(inventory-check)
+        }
+    }
+}
+
+process-payment fn (payment: Map): Map {
+    // Validate payment
+    validated validate-payment(payment)
+
+    match validated {
+        Result.Ok => {
+            // Record and notify
+            p validated
+            recorded record-payment(p)
+            send("payment:processed", p)
+            recorded
+        }
+
+        Result.Err => { err(validated) }
+    }
+}
+
+cleanup-old-sessions fn (): Int {
+    threshold sub(::hot::time/now(), mul(86400000, 7))  // 7 days ago
+    delete-sessions-before(threshold)
+}
+
+cleanup-temp-files fn (): Str {
+    files list-temp-files()
+    pmap(files, delete-file)
+    ok(`Deleted ${length(files)} temp files`)
+}
+
+sync-external-data fn (): Str {
+    sources ["crm", "inventory", "analytics"]
+
+    results pmap(sources, (source) {
+        sync-source(source)
+    })
+
+    errors filter(results, is-err)
+
+    if(is-empty(errors),
+        ok("Sync complete"),
+        err(`${length(errors)} sources failed`))
+}
+
+// Placeholder implementations (return type is the Ok value type)
+check-inventory fn (items: Vec): Vec { ok(items) }
+reserve-inventory fn (items: Vec): Vec { ok(items) }
+charge-payment fn (user-id: Str, amount: Dec): Dec { ok(amount) }
+validate-payment fn (payment: Map): Map { ok(payment) }
+record-payment fn (payment: Map): Map { ok(payment) }
+delete-sessions-before fn (ts: Int): Int { ok(ts) }
+list-temp-files fn (): Vec { [] }
+delete-file fn (f: Str): Str { ok(f) }
+sync-source fn (s: Str): Str { ok(s) }
+check-service-health fn (s: Str): Str { ok(s) }
+send-alert fn (msg: Str, data: Any): Str { ok(msg) }
+log fn (msg: Str): Null { print(msg) }
+process-critical fn (data: Any): Any { ok(data) }
+send-escalation fn (event: Any, result: Result): Any { ok(event) }
+create-user fn (user: Any): Any { ok(user) }
+unwrap-err fn (r: Result): Str { "error" }

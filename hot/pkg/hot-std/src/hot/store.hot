@@ -1,0 +1,425 @@
+::hot::store ns
+meta {
+    doc: """Persistent ordered maps with optional embedding and semantic search. Available in CLI (`hot run`), event handlers, scheduled functions, and tasks."""
+}
+
+
+Embedding
+meta {
+    core: true,
+    doc: """
+    Configuration for overriding system-level embedding defaults on a store Map.
+
+    **Fields**
+    - `model` — Override the embedding model (e.g. `"bge-base-en-v1.5"`, `"text-embedding-3-small"`)
+    - `field` — Which field of the value to embed (default: `"content"`)
+    - `text-search` — Also enable keyword search (default: `false`)
+    """
+}
+type {
+    model: Str?,
+    field: Str?,
+    text-search: Bool?
+}
+
+
+Map
+meta {
+    core: true,
+    doc: """
+    A persistent, insertion-ordered map with optional embeddings and search.
+
+    **Fields**
+    - `name` — Unique store name (e.g. `"settings"`, `"kb"`, `"support:${stream-id}"`)
+    - `embedding` — `null` = off (default), `true` = system defaults, `Embedding({...})` = override
+
+    **Example**
+
+    ```hot
+    ::store ::hot::store
+
+    // Plain persistent map
+    settings ::store/Map({name: "settings"})
+
+    // With semantic search
+    kb ::store/Map({name: "kb", embedding: true})
+
+    // With overrides
+    docs ::store/Map({name: "docs", embedding: ::store/Embedding({
+      model: "text-embedding-3-small"
+      field: "body"
+      text-search: true
+    })})
+    ```
+    """
+}
+type {
+    name: Str,
+    embedding: Bool | Embedding?
+}
+
+
+put
+meta {
+    doc: """
+    Write a key-value pair to a store. Auto-embeds if the store has embedding enabled.
+    If the key already exists, the value is updated but insertion order is preserved.
+
+    **Example**
+
+    ```hot
+    ::store/put(kb, "refund-policy", {
+      title: "Refund Policy"
+      content: "Refunds are available within 30 days..."
+    })
+    ```
+    """
+}
+fn (store: Map, key: Any, value: Any): Any {
+    call-lib(::hot::store/put, [store, key, value])
+}
+
+
+get
+meta {
+    doc: """
+    Get a value by key. Returns `null` if not found (2-arity) or `default` (3-arity).
+    Mirrors `::hot::coll/get`.
+
+    **Example**
+
+    ```hot
+    doc ::store/get(kb, "refund-policy")
+    doc ::store/get(kb, "missing", {title: "default"})
+    ```
+    """
+}
+fn
+(store: Map, key: Any): Any {
+    call-lib(::hot::store/get, [store, key])
+},
+(store: Map, key: Any, default: Any): Any {
+    call-lib(::hot::store/get, [store, key, default])
+}
+
+
+delete
+meta {
+    doc: """
+    Delete an entry by key. Returns `true` if the key existed.
+
+    **Example**
+
+    ```hot
+    ::store/delete(kb, "refund-policy")
+    ```
+    """
+}
+fn (store: Map, key: Any): Bool {
+    call-lib(::hot::store/delete, [store, key])
+}
+
+
+keys
+meta {
+    doc: """
+    Return all keys in insertion order. Mirrors `::hot::coll/keys`.
+
+    **Example**
+
+    ```hot
+    all-keys ::store/keys(kb)
+    ```
+    """
+}
+fn (store: Map): Vec {
+    call-lib(::hot::store/keys, [store])
+}
+
+
+vals
+meta {
+    doc: """
+    Return all values in insertion order. Mirrors `::hot::coll/vals`.
+
+    **Example**
+
+    ```hot
+    all-vals ::store/vals(kb)
+    ```
+    """
+}
+fn (store: Map): Vec {
+    call-lib(::hot::store/vals, [store])
+}
+
+
+length
+meta {
+    doc: """
+    Return the number of entries. Mirrors `::hot::coll/length`.
+
+    **Example**
+
+    ```hot
+    count ::store/length(kb)
+    ```
+    """
+}
+fn (store: Map): Int {
+    call-lib(::hot::store/length, [store])
+}
+
+
+is-empty
+meta {
+    doc: """
+    Return `true` if the store has no entries. Mirrors `::hot::coll/is-empty`.
+
+    **Example**
+
+    ```hot
+    empty ::store/is-empty(settings)
+    ```
+    """
+}
+fn (store: Map): Bool {
+    call-lib(::hot::store/is-empty, [store])
+}
+
+
+first
+meta {
+    doc: """
+    Return the first entry (by insertion order) as `{key: ..., value: ...}`, or `null`.
+    Mirrors `::hot::coll/first`.
+    """
+}
+fn (store: Map): Any {
+    call-lib(::hot::store/first, [store])
+}
+
+
+last
+meta {
+    doc: """
+    Return the last entry (by insertion order) as `{key: ..., value: ...}`, or `null`.
+    Mirrors `::hot::coll/last`.
+    """
+}
+fn (store: Map): Any {
+    call-lib(::hot::store/last, [store])
+}
+
+
+merge
+meta {
+    doc: """
+    Merge a map of key-value pairs into the store. Mirrors `::hot::coll/merge`.
+
+    **Example**
+
+    ```hot
+    ::store/merge(settings, {
+      "smtp-host": "mail.example.com"
+      "smtp-port": 587
+    })
+    ```
+    """
+}
+fn (store: Map, entries: Map): Int {
+    call-lib(::hot::store/merge, [store, entries])
+}
+
+
+put-many
+meta {
+    doc: """
+    Batch write from a map of key-value pairs. Returns the count of entries written.
+
+    **Example**
+
+    ```hot
+    ::store/put-many(kb, {
+      "doc-1": {title: "Returns", content: "Return within 30 days..."}
+      "doc-2": {title: "Shipping", content: "We ship worldwide..."}
+    })
+    ```
+    """
+}
+fn (store: Map, entries: Map): Int {
+    call-lib(::hot::store/put-many, [store, entries])
+}
+
+
+list
+meta {
+    doc: """
+    Paginated listing in insertion order.
+
+    **Example**
+
+    ```hot
+    page ::store/list(kb, {limit: 20, offset: 0})
+    ```
+    """
+}
+fn
+(store: Map): Vec {
+    call-lib(::hot::store/list, [store])
+},
+(store: Map, opts: Map): Vec {
+    call-lib(::hot::store/list, [store, opts])
+}
+
+
+search
+meta {
+    doc: """
+    Semantic and/or keyword search. Returns a Vec of `{key, value, score}`.
+
+    **Example**
+
+    ```hot
+    results ::store/search(kb, "how do I get my money back", {limit: 5, min-score: 0.7})
+    ```
+    """
+}
+fn
+(store: Map, query: Str): Vec {
+    call-lib(::hot::store/search, [store, query])
+},
+(store: Map, query: Str, opts: Map): Vec {
+    call-lib(::hot::store/search, [store, query, opts])
+}
+
+
+filter
+meta {
+    doc: """
+    Filter entries by a predicate `fn(key, value) -> Bool`. Returns a Vec of matching entries.
+    Mirrors `::hot::coll/filter`.
+
+    **Example**
+
+    ```hot
+    billing-docs ::store/filter(kb, (k, v) { eq(v.category, "billing") })
+    ```
+    """
+}
+fn (store: Map, predicate: Fn): Vec {
+    call-lib(::hot::store/filter, [store, predicate])
+}
+
+
+find-first
+meta {
+    doc: """
+    Return the first entry matching `predicate`, or `null`.
+    Mirrors `::hot::coll/find-first`.
+
+    **Example**
+
+    ```hot
+    urgent ::store/find-first(kb, (k, v) { eq(v.priority, "urgent") })
+    ```
+    """
+}
+fn (store: Map, predicate: Fn): Any {
+    call-lib(::hot::store/find-first, [store, predicate])
+}
+
+
+some
+meta {
+    doc: """
+    Return `true` if any entry matches `predicate`. Mirrors `::hot::coll/some`.
+    """
+}
+fn (store: Map, predicate: Fn): Bool {
+    call-lib(::hot::store/some, [store, predicate])
+}
+
+
+all
+meta {
+    doc: """
+    Return `true` if all entries match `predicate`. Mirrors `::hot::coll/all`.
+    """
+}
+fn (store: Map, predicate: Fn): Bool {
+    call-lib(::hot::store/all, [store, predicate])
+}
+
+
+reduce
+meta {
+    doc: """
+    Reduce over all entries. The reducer receives `(acc, key, value)`.
+    Mirrors `::hot::coll/reduce`.
+
+    **Example**
+
+    ```hot
+    total ::store/reduce(kb, (acc, k, v) { add(acc, v.amount) }, 0)
+    ```
+    """
+}
+fn (store: Map, reducer: Fn, initial: Any): Any {
+    call-lib(::hot::store/reduce, [store, reducer, initial])
+}
+
+
+slice
+meta {
+    doc: """
+    Return a range of entries by insertion position. Mirrors `::hot::coll/slice`.
+
+    **Example**
+
+    ```hot
+    first-ten ::store/slice(kb, 0, 10)
+    ```
+    """
+}
+fn
+(store: Map, start: Int): Vec {
+    call-lib(::hot::store/slice, [store, start])
+},
+(store: Map, start: Int, end: Int): Vec {
+    call-lib(::hot::store/slice, [store, start, end])
+}
+
+
+clear
+meta {
+    doc: """
+    Remove all entries from a store but keep the store itself.
+
+    **Example**
+
+    ```hot
+    ::store/clear(settings)
+    ```
+    """
+}
+fn (store: Map): Bool {
+    call-lib(::hot::store/clear, [store])
+}
+
+
+destroy
+meta {
+    doc: """
+    Delete the store entirely (schema + data).
+
+    **Example**
+
+    ```hot
+    ::store/destroy(old-store)
+    ```
+    """
+}
+fn (store: Map): Bool {
+    call-lib(::hot::store/destroy, [store])
+}

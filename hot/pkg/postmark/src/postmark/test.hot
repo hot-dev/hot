@@ -1,0 +1,75 @@
+::postmark::test ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+TemplateValidationResult type {
+    ContentIsValid: Bool?,
+    ValidationErrors: Vec<TemplateValidationError>?,
+    RenderedContent: Str?
+}
+
+TemplateValidationResponse type {
+    AllContentIsValid: Bool?,
+    TextBody: TemplateValidationResult?,
+    HtmlBody: TemplateValidationResult?,
+    Subject: TemplateValidationResult?,
+    SuggestedTemplateModel: Map?
+}
+
+TemplateValidationError type {
+    Message: Str?,
+    Line: Int?,
+    CharacterPosition: Int?
+}
+
+TemplateValidationRequest type {
+    Subject: Str?,
+    HtmlBody: Str?,
+    TextBody: Str?,
+    TestRenderModel: Map?,
+    InlineCssForHtmlTestRender: Bool?
+}
+
+TestTemplateContentRequest type {
+    Subject: Str?,
+    HtmlBody: Str?,
+    TextBody: Str?,
+    TestRenderModel: Map?,
+    InlineCssForHtmlTestRender: Bool?
+}
+
+TestTemplateContentResponse type {
+    AllContentIsValid: Bool?,
+    TextBody: TemplateValidationResult?,
+    HtmlBody: TemplateValidationResult?,
+    Subject: TemplateValidationResult?,
+    SuggestedTemplateModel: Map?
+}
+
+
+test-template-content
+meta {
+    doc: """
+    Validate template content and render it with a test model. Returns validation results
+    indicating whether the Subject, HtmlBody, and TextBody are valid, plus a suggested template model.
+
+    **Example**
+
+    ```hot
+    response ::postmark::test/test-template-content(::postmark::test/TestTemplateContentRequest({
+        Subject: "Hello {{name}}!",
+        HtmlBody: "<html><body><p>Welcome, {{name}}!</p></body></html>",
+        TextBody: "Welcome, {{name}}!",
+        TestRenderModel: {"name": "Alice"}
+    }))
+    response.AllContentIsValid // => true
+    response.SuggestedTemplateModel // => suggested model map
+    ```
+    """
+}
+fn (request: TestTemplateContentRequest): TestTemplateContentResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/templates/validate`, {}, request)
+  if(is-ok-response(response), TestTemplateContentResponse(response.body), err(HttpError(response)))
+}

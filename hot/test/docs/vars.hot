@@ -1,0 +1,210 @@
+// Documentation examples for: resources/docs/language/vars-and-values.md
+::hot::test::docs::vars ns
+meta ["test"]
+
+// =============================================================================
+// Imports
+// =============================================================================
+// Note: Most functions used here are core (map, mul, add, Str, assert-eq, etc.)
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: var-assignment
+// Var assignment: name followed by value
+name "Alice"
+age 30
+items [1, 2, 3]
+// @end: var-assignment
+
+// @doc: var-typed
+name-typed: Str "Alice"
+count: Int 42
+prices: Vec<Dec> [9.99, 19.99, 29.99]
+// @end: var-typed
+
+// @doc: deep-path-assign
+user.name "Bob"
+user.email "bob@example.com"
+user.settings.theme "dark"
+user.settings.notifications true
+// @end: deep-path-assign
+
+// @doc: deep-path-vec
+config.servers[0] "api.example.com"
+config.servers[1] "db.example.com"
+config.retries 3
+// @end: deep-path-vec
+
+// @doc: deep-path-access
+user-nested {name: "Alice", settings: {theme: "dark"}}
+
+// Deep-get access: assign nested value to a new var
+theme user-nested.settings.theme
+// @end: deep-path-access
+
+// @doc: vec-access
+servers ["api.example.com", "db.example.com"]
+primary first(servers)
+// @end: vec-access
+
+// @doc: core-vars
+// These are core - no prefix needed
+doubled map([1, 2, 3], (x) { mul(x, 2) })
+total add(1, 2)
+name-str Str(42)
+// @end: core-vars
+
+// @doc: immutability
+numbers [1, 2, 3]
+doubled-nums map(numbers, (x) { mul(x, 2) })  // [2, 4, 6]
+// 'numbers' is still [1, 2, 3]
+// @end: immutability
+
+// @doc: property-access
+user-demo {name: "Alice", address: {city: "NYC"}}
+
+user-name user-demo.name           // "Alice"
+city user-demo.address.city        // "NYC"
+// @end: property-access
+
+// @doc: vec-indexing
+items-demo [10, 20, 30]
+first-item first(items-demo)   // 10
+last-item last(items-demo)     // 30
+// @end: vec-indexing
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-var-assignment
+meta ["test"] fn () {
+  assert-eq("Alice", name, "name var")
+  assert-eq(30, age, "age var")
+  assert-eq(3, ::hot::coll/length(items), "items length")
+}
+
+test-typed-vars
+meta ["test"] fn () {
+  assert-eq("Alice", name-typed, "typed name")
+  assert-eq(42, count, "count")
+  assert-eq(3, ::hot::coll/length(prices), "prices length")
+}
+
+test-deep-path-assign
+meta ["test"] fn () {
+  assert-eq("Bob", user.name, "user name")
+  assert-eq("bob@example.com", user.email, "user email")
+  assert-eq("dark", user.settings.theme, "user theme")
+}
+
+test-deep-path-vec
+meta ["test"] fn () {
+  // Deep path assignment with integer indices creates a vector
+  assert-eq(2, ::hot::coll/length(config.servers), "servers length")
+  assert-eq("api.example.com", config.servers[0], "server 0")
+  assert-eq("db.example.com", config.servers[1], "server 1")
+  assert-eq(3, config.retries, "retries")
+}
+
+test-deep-path-access
+meta ["test"] fn () {
+  assert-eq("dark", theme, "theme value")
+}
+// @result: deep-path-access
+// user-nested.settings.theme → "dark"
+// @end: deep-path-access
+
+test-vec-access
+meta ["test"] fn () {
+  assert-eq("api.example.com", first(servers), "primary server")
+}
+
+test-core-vars
+meta ["test"] fn () {
+  assert-eq([2, 4, 6], doubled, "doubled")
+  assert-eq(3, total, "total")
+  assert-eq("42", name-str, "string conversion")
+}
+
+test-immutability
+meta ["test"] fn () {
+  assert-eq([1, 2, 3], numbers, "original unchanged")
+  assert-eq([2, 4, 6], doubled-nums, "doubled result")
+}
+// @result: immutability
+// numbers      → [1, 2, 3]  // Original unchanged
+// doubled-nums → [2, 4, 6]  // New value returned
+// @end: immutability
+
+test-property-access
+meta ["test"] fn () {
+  assert-eq("Alice", user-name, "user name")
+  assert-eq("NYC", city, "city")
+}
+// @result: property-access
+// user.name         → "Alice"
+// user.address.city → "NYC"
+// @end: property-access
+
+test-vec-indexing
+meta ["test"] fn () {
+  assert-eq(10, first(items-demo), "first item")
+  assert-eq(30, last(items-demo), "last item")
+}
+
+// =============================================================================
+// Vec Append Syntax Tests
+// =============================================================================
+
+// @doc: vec-append
+// Use empty brackets to append to a vector
+list[] "first"
+list[] "second"
+list[] "third"
+// @end: vec-append
+
+// @doc: vec-append-nested
+// Append to nested vectors
+shopping.items[] "apple"
+shopping.items[] "banana"
+shopping.items[] "cherry"
+// @end: vec-append-nested
+
+test-vec-append
+meta ["test"] fn () {
+  assert-eq(3, ::hot::coll/length(list), "list length")
+  assert-eq("first", list[0], "first item")
+  assert-eq("second", list[1], "second item")
+  assert-eq("third", list[2], "third item")
+}
+
+test-vec-append-nested
+meta ["test"] fn () {
+  assert-eq(3, ::hot::coll/length(shopping.items), "shopping.items length")
+  assert-eq("apple", shopping.items[0], "first fruit")
+  assert-eq("banana", shopping.items[1], "second fruit")
+  assert-eq("cherry", shopping.items[2], "third fruit")
+}
+
+test-simple-append-in-fn
+meta ["test"] fn () {
+  // Test simple append inside a function
+  items []
+  items[] "first"
+  items[] "second"
+
+  assert-eq(["first", "second"], items, "items after append")
+}
+
+test-nested-append-in-fn
+meta ["test"] fn () {
+  // Test nested append inside a function
+  mydata {items: []}
+  mydata.items[] "apple"
+  mydata.items[] "banana"
+
+  assert-eq(["apple", "banana"], mydata.items, "mydata.items after nested append")
+}

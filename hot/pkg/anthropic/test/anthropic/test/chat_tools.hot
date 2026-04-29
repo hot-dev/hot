@@ -1,0 +1,129 @@
+::anthropic::test::chat-tools ns
+meta ["test"]
+
+::ct      ::anthropic::chat-tools
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+
+// ============================================================================
+// Outbound conversions
+// ============================================================================
+
+test-to-anthropic-user-message
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "user", content: "hello"})
+    out ::ct/to-anthropic-message(m)
+    assert-eq("user", out.role)
+    assert-eq("hello", out.content)
+}
+
+test-to-anthropic-assistant-text-only
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "assistant", content: "hi back"})
+    out ::ct/to-anthropic-message(m)
+    assert-eq("assistant", out.role)
+    blocks out.content
+    assert-eq(1, length(blocks))
+    assert-eq("text", blocks[0].type)
+    assert-eq("hi back", blocks[0].text)
+}
+
+test-to-anthropic-assistant-with-tools
+meta ["test"]
+fn () {
+    call ::ai-tool/ToolCall({id: "call_1", name: "get_weather", input: {city: "Paris"}})
+    m ::ai-chat/Message({role: "assistant", content: "let me check", tool-calls: [call]})
+    out ::ct/to-anthropic-message(m)
+    assert-eq("assistant", out.role)
+    blocks out.content
+    assert-eq(2, length(blocks))
+    assert-eq("text", blocks[0].type)
+    assert-eq("tool_use", blocks[1].type)
+    assert-eq("call_1", blocks[1].id)
+    assert-eq("get_weather", blocks[1].name)
+    assert-eq("Paris", blocks[1].input.city)
+}
+
+test-to-anthropic-assistant-tool-only-no-text
+meta ["test"]
+fn () {
+    call ::ai-tool/ToolCall({id: "x", name: "f", input: {}})
+    m ::ai-chat/Message({role: "assistant", content: "", tool-calls: [call]})
+    out ::ct/to-anthropic-message(m)
+    blocks out.content
+    assert-eq(1, length(blocks))
+    assert-eq("tool_use", blocks[0].type)
+}
+
+test-to-anthropic-tool-result
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "tool", content: 42, tool-call-id: "call_1"})
+    out ::ct/to-anthropic-message(m)
+    assert-eq("user", out.role)
+    blocks out.content
+    assert-eq(1, length(blocks))
+    assert-eq("tool_result", blocks[0].type)
+    assert-eq("call_1", blocks[0].tool_use_id)
+    assert-eq("42", blocks[0].content)
+}
+
+tool-fixture-fn
+meta { doc: """Fixture for to-anthropic-tool test.""" }
+fn (x: Int): Int { x }
+
+test-to-anthropic-tool-shape
+meta ["test"]
+fn () {
+    t ::ai-tool/from-fn(tool-fixture-fn, {description: "Adds one"})
+    out ::ct/to-anthropic-tool(t)
+    assert-eq("Adds one", out.description)
+    assert(is-some(out.input_schema), "input_schema present")
+}
+
+// ============================================================================
+// Inbound conversions
+// ============================================================================
+
+test-response-text-concat
+meta ["test"]
+fn () {
+    blocks [
+        {type: "text", text: "hello "},
+        {type: "tool_use", id: "x", name: "f", input: {}},
+        {type: "text", text: "world"}
+    ]
+    assert-eq("hello world", ::ct/response-text(blocks))
+}
+
+test-response-tool-calls
+meta ["test"]
+fn () {
+    blocks [
+        {type: "text", text: "result:"},
+        {type: "tool_use", id: "tu_1", name: "weather", input: {city: "NYC"}},
+        {type: "tool_use", id: "tu_2", name: "time", input: {tz: "UTC"}}
+    ]
+    calls ::ct/response-tool-calls(blocks)
+    assert-eq(2, length(calls))
+    assert-eq("tu_1", calls[0].id)
+    assert-eq("weather", calls[0].name)
+    assert-eq("NYC", calls[0].input.city)
+    assert-eq("tu_2", calls[1].id)
+}
+
+test-response-usage-shape
+meta ["test"]
+fn () {
+    u ::ct/response-usage({input_tokens: 12, output_tokens: 7, cache_read_input_tokens: 0})
+    assert-eq(12, u.input-tokens)
+    assert-eq(7, u.output-tokens)
+}
+
+test-response-usage-null
+meta ["test"]
+fn () {
+    assert(is-null(::ct/response-usage(null)), "null usage stays null")
+}

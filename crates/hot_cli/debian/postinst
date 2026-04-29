@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+# postinst script for hot
+
+if [ -x /usr/share/hot/scripts/install-completions.sh ]; then
+  HOT_BIN=/usr/bin/hot HOT_INSTALL_SCOPE=system /usr/share/hot/scripts/install-completions.sh || true
+fi
+
+exit 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+

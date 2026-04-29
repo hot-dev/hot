@@ -1,0 +1,31 @@
+::openai::validate ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ValidateGraderResponse type {
+    grader: Map?
+}
+
+ValidateGraderRequest type {
+    grader: Map
+}
+
+ValidateGraderRequest type {
+    grader: Map
+}
+
+ValidateGraderResponse type {
+    grader: Map?
+}
+
+
+validate-grader
+meta {
+    doc: """POST /fine_tuning/alpha/graders/validate - Validate a grader configuration before using it in fine-tuning."""
+}
+fn (request: ValidateGraderRequest): ValidateGraderResponse {
+  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/alpha/graders/validate`, {}, request)
+  if(is-ok-response(response), ValidateGraderResponse(response.body), err(HttpError(response)))
+}

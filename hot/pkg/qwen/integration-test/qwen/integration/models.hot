@@ -1,0 +1,28 @@
+::qwen::integration::models ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Qwen Models API
+// =============================================================================
+// These tests require qwen.api.key (DASHSCOPE_API_KEY) to be set in context.
+
+test-models-list
+meta ["test"]
+fn () {
+    models ::qwen::models/list()
+
+    assert(is-vec(models.data), "Response should have data array")
+    assert(gt(length(models.data), 0), "Should have at least one model")
+
+    first-model first(models.data)
+    assert(first-model.id, "Model should have id")
+}
+
+test-models-get
+meta ["test"]
+fn () {
+    model ::qwen::models/get("qwen3.6-plus")
+
+    assert-eq("qwen3.6-plus", model.id, "Model id should match")
+    assert(model.object, "Model should have object field")
+}

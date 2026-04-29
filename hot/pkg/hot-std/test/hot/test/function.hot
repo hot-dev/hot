@@ -1,0 +1,20 @@
+::hot::test::function ns
+meta ["test"]
+
+call ::hot::lang/call
+split ::hot::str/split
+assert-eq ::hot::test/assert-eq
+eq ::hot::cmp/eq
+
+test-function
+meta ["test"] fn () {
+
+    // Test call function with str/split
+    call_result call(::hot::str/split, ["hello,world", ","])
+    expected_result ["hello", "world"]
+    assert-eq(
+        expected_result,
+        call_result,
+        "call(::hot::str/split, [\"hello,world\", \",\"]) returns [\"hello\", \"world\"]"
+    )
+}

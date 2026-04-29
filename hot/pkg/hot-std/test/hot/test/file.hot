@@ -1,0 +1,278 @@
+::hot::test::file ns
+meta ["test"]
+
+// Import file functions
+read-file ::hot::file/read-file
+read-file-bytes ::hot::file/read-file-bytes
+write-file ::hot::file/write-file
+write-file-bytes ::hot::file/write-file-bytes
+delete-file ::hot::file/delete-file
+file-exists ::hot::file/file-exists
+file-info ::hot::file/file-info
+list-files ::hot::file/list-files
+
+// Import test utilities
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+not ::hot::bool/not
+
+// Import helpers
+is-ok ::hot::type/is-ok
+is-err ::hot::type/is-err
+ok ::hot::type/ok
+err ::hot::type/err
+length ::hot::coll/length
+gt ::hot::cmp/gt
+contains ::hot::str/contains
+
+// Test basic file write and read
+test-write-read-file
+meta ["test"] fn () {
+    // Write a simple text file
+    test-content "Hello, Hot!"
+    meta write-file("test/hello.txt", test-content)
+
+    // Verify FileMeta structure
+    assert(is-ok(meta), "write-file should return ok result")
+    assert-eq("test/hello.txt", meta.path, "FileMeta should contain correct path")
+    assert-eq(11, meta.size, "FileMeta should contain correct size")
+    assert(contains(meta.storage-backend, "local"), "FileMeta should contain storage backend")
+
+    // Read the file back
+    read-result read-file("test/hello.txt")
+    assert(is-ok(read-result), "read-file should return ok result")
+    assert-eq(test-content, read-result, "read-file should return original content")
+
+    // Clean up
+    delete-result delete-file("test/hello.txt")
+    assert(delete-result, "delete-file should return true on success")
+}
+
+// Test file exists functionality
+test-file-exists
+meta ["test"] fn () {
+    // File should not exist initially
+    assert(not(file-exists("test/exists-test.txt")), "file-exists should return false for non-existent file")
+
+    // Create file
+    write-file("test/exists-test.txt", "test content")
+
+    // File should now exist
+    assert(file-exists("test/exists-test.txt"), "file-exists should return true after file creation")
+
+    // Delete file
+    delete-file("test/exists-test.txt")
+
+    // File should not exist anymore
+    assert(not(file-exists("test/exists-test.txt")), "file-exists should return false after deletion")
+}
+
+// Test file-info without reading contents
+test-file-info
+meta ["test"] fn () {
+    // Create a test file
+    test-data "File info test data"
+    write-file("test/info-test.txt", test-data)
+
+    // Get file info
+    info-result file-info("test/info-test.txt")
+    assert(is-ok(info-result), "file-info should return ok result")
+    assert-eq("test/info-test.txt", info-result.path, "file-info should return correct path")
+    assert-eq(19, info-result.size, "file-info should return correct size")
+    assert(gt(info-result.created-at, 0), "file-info should have created-at timestamp")
+    assert(gt(info-result.updated-at, 0), "file-info should have updated-at timestamp")
+
+    // Clean up
+    delete-file("test/info-test.txt")
+}
+
+// Test binary file operations
+test-write-read-bytes
+meta ["test"] fn () {
+    // Create some binary data (UTF-8 encoded string as bytes)
+    test-bytes Bytes("Binary test data 🚀")
+    meta write-file-bytes("test/binary.dat", test-bytes)
+
+    // Verify write succeeded
+    assert(is-ok(meta), "write-file-bytes should return ok result")
+    assert(gt(meta.size, 0), "Binary file should have size > 0")
+
+    // Read binary data back
+    read-result read-file-bytes("test/binary.dat")
+    assert(is-ok(read-result), "read-file-bytes should return ok result")
+
+    // Clean up
+    delete-file("test/binary.dat")
+}
+
+// Test file overwrite (update)
+test-file-overwrite
+meta ["test"] fn () {
+    // Write initial content
+    initial-content "Initial content"
+    meta1 write-file("test/overwrite.txt", initial-content)
+    initial-file-id meta1.file-id
+
+    // Overwrite with new content
+    new-content "Updated content with more text"
+    meta2 write-file("test/overwrite.txt", new-content)
+
+    // File ID should remain the same (update, not new file)
+    assert-eq(initial-file-id, meta2.file-id, "File ID should remain same on overwrite")
+
+    // Size should be updated
+    assert(gt(meta2.size, meta1.size), "Updated file should be larger")
+
+    // Read to verify new content
+    read-result read-file("test/overwrite.txt")
+    assert-eq(new-content, read-result, "File should contain updated content")
+
+    // Clean up
+    delete-file("test/overwrite.txt")
+}
+
+// Test list-files functionality
+test-list-files
+meta ["test"] fn () {
+    // Create multiple files in a directory
+    write-file("test/list-test/file1.txt", "content 1")
+    write-file("test/list-test/file2.txt", "content 2")
+    write-file("test/list-test/file3.txt", "content 3")
+    write-file("test/list-test/sub/nested.txt", "nested content")
+
+    // List files with prefix
+    files list-files("test/list-test/")
+    assert(is-ok(files), "list-files should return ok result")
+    assert(gt(length(files), 0), "list-files should return at least one file")
+
+    // Clean up
+    delete-file("test/list-test/file1.txt")
+    delete-file("test/list-test/file2.txt")
+    delete-file("test/list-test/file3.txt")
+    delete-file("test/list-test/sub/nested.txt")
+}
+
+// Test nested directory paths
+test-nested-paths
+meta ["test"] fn () {
+    // Create file in nested directory
+    nested-path "test/deep/nested/path/file.txt"
+    nested-content "Deep nested content"
+    meta write-file(nested-path, nested-content)
+
+    // Verify write succeeded
+    assert(is-ok(meta), "write-file should handle nested paths")
+    assert-eq(nested-path, meta.path, "FileMeta should preserve nested path")
+
+    // Verify file exists
+    assert(file-exists(nested-path), "Nested file should exist")
+
+    // Read nested file
+    read-result read-file(nested-path)
+    assert-eq(nested-content, read-result, "Should read nested file correctly")
+
+    // Clean up
+    delete-file(nested-path)
+}
+
+// Test error handling for non-existent file
+test-read-nonexistent-file
+meta ["test"] fn () {
+    // Try to read a file that doesn't exist
+    read-result read-file("test/nonexistent-file.txt")
+    assert(is-err(read-result), "read-file should return error for non-existent file")
+}
+
+// Test error handling for file-info on non-existent file
+test-file-info-nonexistent
+meta ["test"] fn () {
+    // Try to get info for a file that doesn't exist
+    info-result file-info("test/does-not-exist.txt")
+    assert(is-err(info-result), "file-info should return error for non-existent file")
+}
+
+// Test delete of non-existent file
+test-delete-nonexistent
+meta ["test"] fn () {
+    // Delete should return false for non-existent file
+    delete-result delete-file("test/never-existed.txt")
+    assert(not(delete-result), "delete-file should return false for non-existent file")
+}
+
+// Test empty file
+test-empty-file
+meta ["test"] fn () {
+    // Write empty file
+    meta write-file("test/empty.txt", "")
+    assert(is-ok(meta), "write-file should handle empty content")
+    assert-eq(0, meta.size, "Empty file should have size 0")
+
+    // Read empty file
+    read-result read-file("test/empty.txt")
+    assert-eq("", read-result, "Empty file should return empty string")
+
+    // Clean up
+    delete-file("test/empty.txt")
+}
+
+// Test large-ish file
+test-large-file
+meta ["test"] fn () {
+    // Create content with multiple lines
+    large-content "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10\n"
+    meta write-file("test/large.txt", large-content)
+
+    // Verify size
+    expected-size 71
+    assert-eq(expected-size, meta.size, "Large file should have correct size")
+
+    // Verify ETag exists for content verification
+    assert(is-ok(meta.etag), "Large file should have ETag for integrity")
+
+    // Read and verify
+    read-result read-file("test/large.txt")
+    assert-eq(large-content, read-result, "Large file content should match")
+
+    // Clean up
+    delete-file("test/large.txt")
+}
+
+// Test special characters in content
+test-special-characters
+meta ["test"] fn () {
+    // Content with various special characters
+    special-content "Special chars: 日本語 🚀 émojis àccénts \"quotes\" 'apostrophes' \n\t tabs"
+    meta write-file("test/special.txt", special-content)
+
+    // Read and verify
+    read-result read-file("test/special.txt")
+    assert-eq(special-content, read-result, "Special characters should be preserved")
+
+    // Clean up
+    delete-file("test/special.txt")
+}
+
+// Test FileMeta contains required fields
+test-file-meta-fields
+meta ["test"] fn () {
+    // Create a file
+    meta write-file("test/meta-fields.txt", "test")
+
+    // Verify all required fields exist
+    assert(is-ok(meta.file-id), "FileMeta should have file-id")
+    assert(is-ok(meta.path), "FileMeta should have path")
+    assert(is-ok(meta.size), "FileMeta should have size")
+    assert(is-ok(meta.storage-backend), "FileMeta should have storage-backend")
+    assert(is-ok(meta.created-at), "FileMeta should have created-at")
+    assert(is-ok(meta.updated-at), "FileMeta should have updated-at")
+
+    // Verify field types and values
+    assert(gt(length(meta.file-id), 0), "file-id should not be empty")
+    assert-eq("test/meta-fields.txt", meta.path, "path should match")
+    assert-eq(4, meta.size, "size should be 4 bytes")
+    assert(gt(meta.created-at, 0), "created-at should be positive timestamp")
+    assert(gt(meta.updated-at, 0), "updated-at should be positive timestamp")
+
+    // Clean up
+    delete-file("test/meta-fields.txt")
+}

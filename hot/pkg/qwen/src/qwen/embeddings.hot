@@ -1,0 +1,169 @@
+::qwen::embeddings ns
+meta {
+    doc: """Qwen Embeddings API — generate vector embeddings via DashScope's OpenAI-compatible endpoint."""
+}
+
+api-request ::qwen::api/request
+HttpError ::qwen::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types
+// ============================================================================
+
+EmbeddingRequest type {
+    input: Any,
+    model: Str,
+    dimensions: Int?,
+    encoding_format: Str?
+}
+
+Embedding type {
+    object: Str,
+    embedding: Vec<Dec>,
+    index: Int
+}
+
+EmbeddingUsage type {
+    prompt_tokens: Int,
+    total_tokens: Int
+}
+
+EmbeddingResponse type {
+    object: Str,
+    data: Vec<Embedding>,
+    model: Str,
+    usage: EmbeddingUsage
+}
+
+// ============================================================================
+// API Functions
+// ============================================================================
+
+create
+meta {
+    doc: """
+    POST /embeddings — create embeddings for text using a Qwen embedding model.
+
+    Returns an EmbeddingResponse with `data` containing embedding vectors and
+    `usage` with token counts.
+
+    **Supported models** (as of 2026):
+    - `text-embedding-v4` — latest, supports dimensions 2048 / 1536 / 1024 (default) /
+      768 / 512 / 256 / 128 / 64.
+    - `text-embedding-v3` — previous generation.
+
+    **Example — single text**
+
+    ```hot
+    response create(EmbeddingRequest({
+        input: "The quick brown fox jumps over the lazy dog",
+        model: "text-embedding-v4"
+    }))
+
+    embedding response.data[0].embedding // => Vec<Dec> of 1024 dimensions
+    response.usage.total_tokens           // => 10
+    ```
+
+    **Example — batch**
+
+    ```hot
+    response create(EmbeddingRequest({
+        input: ["Hello world", "Goodbye world"],
+        model: "text-embedding-v4"
+    }))
+
+    length(response.data) // => 2
+    ```
+
+    **Example — custom dimensions**
+
+    ```hot
+    response create(EmbeddingRequest({
+        input: "Test text",
+        model: "text-embedding-v4",
+        dimensions: 256
+    }))
+
+    length(response.data[0].embedding) // => 256
+    ```
+    """
+}
+fn (request: EmbeddingRequest): EmbeddingResponse | HttpError {
+    response api-request("POST", `${::qwen/BASE_URL}/embeddings`, {}, request)
+    if(is-ok-response(response), EmbeddingResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+embed
+meta {
+    doc: """
+    Simple embedding — returns the embedding vector for a single text. Defaults
+    to `text-embedding-v4` at 1024 dimensions.
+
+    **Example**
+
+    ```hot
+    vector embed("Hello world")
+    // => Vec<Dec> with 1024 dimensions
+    ```
+    """
+}
+fn (text: Str): Vec<Dec> {
+    embed(text, "text-embedding-v4")
+},
+(text: Str, model: Str): Vec<Dec> {
+    response create(EmbeddingRequest({
+        input: text,
+        model: model
+    }))
+
+    match response {
+        EmbeddingResponse => {
+            cond {
+                gt(length(response.data), 0) => { response.data[0].embedding }
+                => { [] }
+            }
+        }
+        => { [] }
+    }
+}
+
+embed-batch
+meta {
+    doc: """
+    Embed multiple texts in a single request. Returns a Vec of embedding vectors
+    aligned with the input order.
+
+    **Example**
+
+    ```hot
+    vectors embed-batch(["Hello", "World", "Test"], "text-embedding-v4")
+    length(vectors) // => 3
+    ```
+    """
+}
+fn (texts: Vec<Str>): Vec<Vec<Dec>> {
+    embed-batch(texts, "text-embedding-v4")
+},
+(texts: Vec<Str>, model: Str): Vec<Vec<Dec>> {
+    response create(EmbeddingRequest({
+        input: texts,
+        model: model
+    }))
+
+    match response {
+        EmbeddingResponse => { map(response.data, %.embedding) }
+        => { [] }
+    }
+}
+
+// ============================================================================
+// Available Models
+// ============================================================================
+
+TEXT_EMBEDDING_V4 "text-embedding-v4"
+TEXT_EMBEDDING_V3 "text-embedding-v3"

@@ -1,0 +1,360 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="rounded-lg p-4 sm:p-6 backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <!-- Header: Task ID, Function, Status, Size, Backend -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Task ID</h3>
+            <div class="uuid-container inline-flex items-center gap-1">
+                <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</span>
+                <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ task.task_id }}" title="Copy {{ task.task_id }} to clipboard">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Function</h3>
+            <code class="language-hot text-sm">{{ task.function_name }}</code>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Status</h3>
+            {% if task.status == "completed" %}
+                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ task.status }}</span>
+            {% else if task.status == "running" %}
+                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">{{ task.status }}</span>
+            {% else if task.status == "failed" || task.status == "timed_out" %}
+                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ task.status }}</span>
+            {% else %}
+                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ task.status }}</span>
+            {% endif %}
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Size</h3>
+            <p class="text-sm">{{ task.size.as_deref().unwrap_or("-") }}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Backend</h3>
+            <p class="text-sm">{{ task.backend.as_deref().unwrap_or("-") }}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Stream</h3>
+            <div class="uuid-container inline-flex items-center gap-1">
+                <a href="/streams/{{ task.stream_id }}" class="uuid-display uuid-link font-mono text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300" data-full-uuid="{{ task.stream_id }}" title="{{ task.stream_id }}">{{ task.stream_id|shortuuid }}</a>
+                <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ task.stream_id }}" title="Copy {{ task.stream_id }} to clipboard">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        {% if let Some(origin_id) = task.origin_run_id %}
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Origin Run</h3>
+            <div class="uuid-container inline-flex items-center gap-1">
+                <a href="/runs/{{ origin_id }}" class="uuid-display uuid-link font-mono text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300" data-full-uuid="{{ origin_id }}" title="{{ origin_id }}">{{ origin_id|shortuuid }}</a>
+                <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ origin_id }}" title="Copy {{ origin_id }} to clipboard">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        {% endif %}
+        {% if let Some(fn_name) = task.origin_run_fn %}
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Origin FN</h3>
+            <code class="language-hot text-sm">{{ fn_name }}</code>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Timing breakdown bar (when container timing data available) -->
+    {% if task.slot_wait_ms.is_some() || task.image_pull_ms.is_some() || task.execution_ms.is_some() || task.logs_collect_ms.is_some() %}
+    {% let slot_wait = task.slot_wait_ms.unwrap_or(0) %}
+    {% let image_pull = task.image_pull_ms.unwrap_or(0) %}
+    {% let execution = task.execution_ms.unwrap_or(0) %}
+    {% let logs_collect = task.logs_collect_ms.unwrap_or(0) %}
+    {% let total = slot_wait + image_pull + execution + logs_collect %}
+    {% if total > 0 %}
+    <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+        <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Timing Breakdown</h3>
+        <div class="flex h-2 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700" title="slot wait: {{ slot_wait }}ms, image pull: {{ image_pull }}ms, execution: {{ execution }}ms, logs: {{ logs_collect }}ms">
+            {% if slot_wait > 0 %}
+            <div class="bg-amber-400 dark:bg-amber-600" style="width: {{ (slot_wait * 100 / total) }}%"></div>
+            {% endif %}
+            {% if image_pull > 0 %}
+            <div class="bg-blue-400 dark:bg-blue-600" style="width: {{ (image_pull * 100 / total) }}%"></div>
+            {% endif %}
+            {% if execution > 0 %}
+            <div class="bg-green-400 dark:bg-green-600" style="width: {{ (execution * 100 / total) }}%"></div>
+            {% endif %}
+            {% if logs_collect > 0 %}
+            <div class="bg-purple-400 dark:bg-purple-600" style="width: {{ (logs_collect * 100 / total) }}%"></div>
+            {% endif %}
+        </div>
+        <div class="flex gap-4 mt-2 text-xs text-gray-600 dark:text-gray-400">
+            {% if slot_wait > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-amber-400 dark:bg-amber-600 align-middle mr-1"></span>Slot wait: {{ slot_wait }}ms</span>{% endif %}
+            {% if image_pull > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-blue-400 dark:bg-blue-600 align-middle mr-1"></span>Image pull: {{ image_pull }}ms</span>{% endif %}
+            {% if execution > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-green-400 dark:bg-green-600 align-middle mr-1"></span>Execution: {{ execution }}ms</span>{% endif %}
+            {% if logs_collect > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-purple-400 dark:bg-purple-600 align-middle mr-1"></span>Logs: {{ logs_collect }}ms</span>{% endif %}
+        </div>
+    </div>
+    {% endif %}
+    {% endif %}
+
+    <!-- Container details: exit code, container ID, CUS, multiplier -->
+    <div class="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Exit Code</h3>
+            <p class="text-sm font-mono">{% match task.exit_code %}{% when Some with (ec) %}{{ ec }}{% when None %}-{% endmatch %}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Container ID</h3>
+            <p class="text-sm font-mono truncate" title="{% match task.container_id %}{% when Some with (cid) %}{{ cid }}{% when None %}{% endmatch %}">{% match task.container_id %}{% when Some with (cid) %}{{ cid }}{% when None %}-{% endmatch %}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">CUS</h3>
+            <p class="text-sm">{% match task.compute_units %}{% when Some with (cus) %}{{ cus }}{% when None %}-{% endmatch %}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">CUS Multiplier</h3>
+            <p class="text-sm">{% match task.cus_multiplier %}{% when Some with (m) %}{{ m }}{% when None %}-{% endmatch %}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Created</h3>
+            <p class="text-sm">{{ task.created_at_formatted }}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Duration</h3>
+            <p class="text-sm">{{ task.duration_formatted }}</p>
+        </div>
+    </div>
+    {% if task.infra_failure %}
+    <div class="mt-4 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+        <span class="text-amber-800 dark:text-amber-200 text-sm font-medium">Infrastructure failure — no CUS charged</span>
+    </div>
+    {% endif %}
+
+    <!-- Result (if present) -->
+    {% match task.result %}
+    {% when Some with (result) %}
+    <div class="mt-4">
+        <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Result</h3>
+        <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700" style="max-height: 9rem; overflow-y: auto;">
+            <button onclick="openTaskResultWithFormats()" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-gray-100 dark:bg-gray-800" title="View full result">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
+            </button>
+            <pre><code class="language-hot text-xs whitespace-pre-wrap">{{ result }}</code></pre>
+        </div>
+        <div id="task-result-file-attachments"></div>
+        <script type="application/json" id="task-result-data-hot">{{ result|escape }}</script>
+        {% match task.result_json %}
+        {% when Some with (result_json) %}
+        <script type="application/json" id="task-result-data-json">{{ result_json|escape }}</script>
+        {% when None %}
+        {% endmatch %}
+    </div>
+    {% when None %}
+    {% endmatch %}
+
+    <!-- Stdout (collapsible) -->
+    {% match task.stdout %}
+    {% when Some with (stdout) %}
+    <div class="mt-4" x-data="{ open: false }">
+        <div class="flex items-center gap-1.5">
+            <button @click="open = !open" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
+                <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-90': open }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                </svg>
+                Stdout
+            </button>
+            <button x-show="!open" onclick="openPlainTextModal('Stdout', document.getElementById('task-stdout-data').textContent)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded" title="View full stdout">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
+            </button>
+        </div>
+        <div x-show="open" class="mt-2">
+            <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-700 max-h-60 overflow-auto">
+                <button onclick="openPlainTextModal('Stdout', document.getElementById('task-stdout-data').textContent)" class="sticky top-0 float-right z-10 mr-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-gray-100 dark:bg-gray-800" title="View full stdout">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </button>
+                <pre class="text-xs font-mono whitespace-pre-wrap text-gray-800 dark:text-gray-200">{{ stdout }}</pre>
+            </div>
+        </div>
+        <script type="text/plain" id="task-stdout-data">{{ stdout|escape }}</script>
+    </div>
+    {% when None %}
+    {% endmatch %}
+
+    <!-- Stderr (collapsible) -->
+    {% match task.stderr %}
+    {% when Some with (stderr) %}
+    <div class="mt-4" x-data="{ open: false }">
+        <div class="flex items-center gap-1.5">
+            <button @click="open = !open" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
+                <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-90': open }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                </svg>
+                Stderr
+            </button>
+            <button x-show="!open" onclick="openPlainTextModal('Stderr', document.getElementById('task-stderr-data').textContent)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded" title="View full stderr">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
+            </button>
+        </div>
+        <div x-show="open" class="mt-2">
+            <div class="relative bg-red-50 dark:bg-red-900/20 rounded-lg p-3 border border-red-200 dark:border-red-800 max-h-60 overflow-auto">
+                <button onclick="openPlainTextModal('Stderr', document.getElementById('task-stderr-data').textContent)" class="sticky top-0 float-right z-10 mr-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-red-100 dark:bg-red-900/40" title="View full stderr">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </button>
+                <pre class="text-xs font-mono whitespace-pre-wrap text-red-800 dark:text-red-200">{{ stderr }}</pre>
+            </div>
+        </div>
+        <script type="text/plain" id="task-stderr-data">{{ stderr|escape }}</script>
+    </div>
+    {% when None %}
+    {% endmatch %}
+
+    <!-- Args (collapsible, if present) -->
+    {% if let Some(args) = task.args_json %}
+    <div class="mt-4" x-data="{ open: false }">
+        <div class="flex items-center gap-1.5">
+            <button @click="open = !open" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
+                <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-90': open }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                </svg>
+                Args
+            </button>
+            <button x-show="!open" onclick="openTaskArgsWithFormats()" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded" title="View full args">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
+            </button>
+        </div>
+        <div x-show="open" class="mt-2">
+            <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700" style="max-height: 12rem; overflow-y: auto;">
+                <button onclick="openTaskArgsWithFormats()" class="sticky top-0 float-right z-10 mr-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-gray-100 dark:bg-gray-800" title="View full args">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </button>
+                <pre><code class="language-hot text-xs whitespace-pre-wrap">{{ args }}</code></pre>
+            </div>
+        </div>
+        <script type="application/json" id="task-args-data-json">{{ args|escape }}</script>
+        {% match task.args_hot %}
+        {% when Some with (args_hot) %}
+        <script type="application/json" id="task-args-data-hot">{{ args_hot|escape }}</script>
+        {% when None %}
+        {% endmatch %}
+    </div>
+    {% endif %}
+
+    <!-- Container Cmd/Script (full, for container tasks) -->
+    {% if let Some(cmd_full) = task.container_cmd_full %}
+    <div class="mt-4" x-data="{ open: false }">
+        <div class="flex items-center gap-1.5">
+            <button @click="open = !open" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
+                <svg class="w-4 h-4 transition-transform" :class="{ 'rotate-90': open }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                </svg>
+                Cmd / Script
+            </button>
+            <button x-show="!open" onclick="openPlainTextModal('Cmd / Script', document.getElementById('task-cmd-data').textContent)" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded" title="View full cmd/script">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
+            </button>
+        </div>
+        <div x-show="open" class="mt-2">
+            <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-200 dark:border-gray-700" style="max-height: 12rem; overflow-y: auto;">
+                <button onclick="openPlainTextModal('Cmd / Script', document.getElementById('task-cmd-data').textContent)" class="sticky top-0 float-right z-10 mr-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 rounded bg-gray-100 dark:bg-gray-800" title="View full cmd/script">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                    </svg>
+                </button>
+                <pre class="text-xs font-mono whitespace-pre-wrap text-gray-800 dark:text-gray-200">{{ cmd_full }}</pre>
+            </div>
+        </div>
+        <script type="text/plain" id="task-cmd-data">{{ cmd_full|escape }}</script>
+    </div>
+    {% endif %}
+</div>
+
+{% if let Some(run_id) = task.run_id %}
+<!-- Call Trace Tabs (Timeline / Hierarchy) from the task's execution run -->
+<script>window.__observabilityRunId = '{{ run_id }}';</script>
+
+<!-- Hidden graph data for Stream Graph tab -->
+<div id="run-flow-graph-section" style="display: none;">
+    <div id="graph-container">
+        <div id="run-graph" style="width: 100%; height: 400px; min-height: 200px;"></div>
+    </div>
+</div>
+<script type="application/json" id="graph-data">{{ graph_data_json|safe }}</script>
+
+<div class="mt-4 w-full rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white flex flex-col">
+    {% include "components/run_detail_tabs.html" %}
+</div>
+{% endif %}
+
+<script>
+function openTaskResultWithFormats() {
+    const hotEl = document.getElementById('task-result-data-hot');
+    const jsonEl = document.getElementById('task-result-data-json');
+    const hotContent = hotEl ? hotEl.textContent : '';
+    const jsonContent = jsonEl ? jsonEl.textContent : hotContent;
+    openContentModalWithFormats('Result', hotContent, jsonContent);
+}
+
+function openTaskArgsWithFormats() {
+    const hotEl = document.getElementById('task-args-data-hot');
+    const jsonEl = document.getElementById('task-args-data-json');
+    const hotContent = hotEl ? hotEl.textContent : '';
+    const jsonContent = jsonEl ? jsonEl.textContent : hotContent;
+    openContentModalWithFormats('Args', hotContent, jsonContent);
+}
+
+function openPlainTextModal(title, content) {
+    var decoded = (function(text) {
+        var textarea = document.createElement('textarea');
+        textarea.innerHTML = text;
+        return textarea.value;
+    })(content);
+    openContentModal(title, decoded);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    if (typeof initializeUuidDisplays === 'function') initializeUuidDisplays();
+    if (typeof initializeCopyButtons === 'function') initializeCopyButtons();
+    if (typeof Prism !== 'undefined') {
+        document.querySelectorAll('code.language-hot').forEach(el => Prism.highlightElement(el));
+    }
+
+    const resultJsonEl = document.getElementById('task-result-data-json');
+    const resultAttachmentsContainer = document.getElementById('task-result-file-attachments');
+    if (resultJsonEl && resultAttachmentsContainer && typeof window.findDataUrls === 'function') {
+        try {
+            const resultJson = JSON.parse(resultJsonEl.textContent);
+            const dataUrls = window.findDataUrls(resultJson);
+            if (dataUrls.length > 0) {
+                resultAttachmentsContainer.innerHTML = window.renderFileAttachments(dataUrls, 'task-result');
+            }
+        } catch (e) {
+            // Not valid JSON, skip
+        }
+    }
+});
+</script>
+{% endblock %}

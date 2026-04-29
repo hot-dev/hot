@@ -1,0 +1,391 @@
+::pandoc ns
+meta {
+    doc: """
+    Pandoc document conversion via Hot Box containers.
+
+    Convert between Markdown, HTML, PDF, DOCX, and many other formats using
+    pandoc in isolated containers. Input can be a `hot://` file URL or inline
+    text; outputs are written to `hot://` storage.
+
+    **Quick Start**
+
+    ```hot
+    // Convert a stored Markdown file to HTML
+    out ::pandoc/convert("hot://docs/readme.md", {to: "html", from: "markdown"})
+    tap(out.url)
+
+    // Convert inline Markdown to HTML (nano box)
+    page ::pandoc/convert-text("# Title\\n\\nHello.", {to: "html", from: "markdown"})
+    tap(page.text)
+
+    // With explicit output path
+    out ::pandoc/convert("hot://docs/readme.md", {
+        to: "pdf",
+        from: "markdown",
+        output: "hot://docs/readme.pdf",
+    })
+
+    // Pandoc version
+    ver ::pandoc/version()
+    tap(ver.version)
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+DEFAULT_IMAGE "pandoc/core:3.8-alpine"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+ConvertOpts
+meta {
+    doc: """
+    Options for `pandoc` conversion.
+
+    **Fields**
+    - `from` — Input format, e.g. `"markdown"`, `"html"` (omit for auto-detect)
+    - `to` — Output format, e.g. `"html"`, `"pdf"`, `"docx"` (required)
+    - `standalone` — Emit full standalone document (default: `false`)
+    - `template` — Custom template file path inside the container
+    - `toc` — Include table of contents (default: `false` when omitted)
+    - `extra-args` — Additional pandoc CLI arguments
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Override Docker image (must have `pandoc` in PATH)
+    - `size` — Box size override (`convert` default `"small"`, `convert-text` default `"nano"`)
+    """
+}
+type {
+    from: Str?,
+    to: Str,
+    standalone: Bool?,
+    template: Str?,
+    toc: Bool?,
+    extra-args: Vec<Str>?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+// ============================================================================
+// Command Builders (internal, testable without Docker)
+// ============================================================================
+
+build-convert-args
+meta {
+    doc: "Build pandoc CLI arguments: input, format flags, optional features, -o output."
+}
+fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
+    from-args if(is-some(opts.from), ["-f", opts.from], [])
+    to-args ["-t", opts.to]
+    standalone-args if(and(is-some(opts.standalone), opts.standalone), ["--standalone"], [])
+    template-args if(is-some(opts.template), ["--template", opts.template], [])
+    toc-args if(and(is-some(opts.toc), opts.toc), ["--toc"], [])
+    extra or(opts.extra-args, [])
+
+    [input-path, ...from-args, ...to-args, ...standalone-args, ...template-args, ...toc-args, ...extra, "-o", output-path]
+}
+
+build-version-args
+meta {
+    doc: "Build pandoc `--version` arguments."
+}
+fn (): Vec<Str> {
+    ["--version"]
+}
+
+// ============================================================================
+// Output Parsers (internal, testable without Docker)
+// ============================================================================
+
+parse-version-output
+meta {
+    doc: "Parse pandoc version from `pandoc --version` stdout (first line: `pandoc X.Y.Z`)."
+}
+fn (stdout: Str?): Map {
+    raw or(stdout, "") |> trim()
+    first-line raw |> split("\n") |> first() |> trim()
+    parts split(first-line, " ")
+    version if(gt(length(parts), 1), parts[1], first-line)
+
+    {version, raw,}
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+format-output-ext fn (to-format: Str): Str {
+    cond {
+        eq(to-format, "markdown") => { "md" }
+        eq(to-format, "gfm") => { "md" }
+        eq(to-format, "commonmark") => { "md" }
+        eq(to-format, "latex") => { "tex" }
+        => { to-format }
+    }
+}
+
+is-text-output-format fn (to-format: Str): Bool {
+    in(to-format, ["html", "markdown", "gfm", "commonmark", "rst", "latex", "plain", "org", "asciidoc", "textile",])
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+run-pandoc-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    info ::box/start({
+        image: img,
+        script: script,
+        entrypoint: [""],
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+    ::task/await(info.id)
+}
+
+start-pandoc-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    ::box/start({
+        image: img,
+        script: script,
+        entrypoint: [""],
+        timeout: timeout,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+convert
+meta {
+    doc: """
+    Convert a document stored at a `hot://` URL using pandoc.
+
+    Returns `{url: Str, format: Str}` with the output file URL in Hot storage.
+
+    **Example**
+
+    ```hot
+    out ::pandoc/convert("hot://uploads/notes.md", {
+        from: "markdown",
+        to: "html",
+        standalone: true,
+        toc: true,
+    })
+    out.url
+    out.format   // "html"
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: ConvertOpts): Map {
+    out-ext format-output-ext(opts.to)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://pandoc/${uuid}/output.${out-ext}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${out-ext}`
+
+    pandoc-args join-args(build-convert-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && pandoc ${pandoc-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-pandoc-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "pandoc")
+
+    {url: hot-output, format: opts.to,}
+}
+
+convert-text
+meta {
+    doc: """
+    Convert inline document text (written to a temp file inside the box).
+
+    Returns `{url: Str, format: Str, text: Str}`. For text-oriented output
+    formats (`html`, `markdown`, `latex`, etc.), `text` contains the converted
+    document body; for binary outputs such as `pdf` or `docx`, `text` is empty.
+
+    **Example**
+
+    ```hot
+    page ::pandoc/convert-text("# Hi\\n\\nThere.", {from: "markdown", to: "html"})
+    page.text
+    page.url
+    ```
+    """,
+    box: {min-size: "nano"}
+}
+fn (text: Str, opts: ConvertOpts): Map {
+    out-ext format-output-ext(opts.to)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://pandoc/${uuid}/output.${out-ext}`)
+
+    in-path "/data/input.dat"
+    out-path `/data/output.${out-ext}`
+
+    enc ::hot::base64/encode(Bytes(text))
+    pandoc-args join-args(build-convert-args(in-path, out-path, opts))
+    cat-step if(is-text-output-format(opts.to), ` && cat ${out-path}`, "")
+    script `echo '${enc}' | base64 -d > ${in-path} && pandoc ${pandoc-args}${cat-step} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "nano")
+    result run-pandoc-box(script, box-size, opts.image, or(opts.timeout, 300))
+    checked check-box-result(result, "pandoc")
+
+    out-text if(is-text-output-format(opts.to), or(checked.stdout, ""), "")
+
+    {url: hot-output, format: opts.to, text: out-text,}
+}
+
+version
+meta {
+    doc: """
+    Return pandoc version information from `pandoc --version`.
+
+    **Example**
+
+    ```hot
+    ver ::pandoc/version()
+    ver.version
+    ```
+    """,
+    box: {min-size: "nano"}
+}
+fn (): Map {
+    version(null)
+},
+(image: Str?): Map {
+    ver-args join-args(build-version-args())
+    script `pandoc ${ver-args}`
+
+    result run-pandoc-box(script, "nano", image, 300)
+    checked check-box-result(result, "pandoc")
+
+    parse-version-output(or(checked.stdout, ""))
+}
+
+// ============================================================================
+// Async (start-*) API
+// ============================================================================
+
+start-convert
+meta {
+    doc: """
+    Start a pandoc document conversion in a container without waiting for completion.
+
+    Returns the box task info from `::box/start`. Use `::task/await` on the
+    returned id to wait for the result.
+
+    **Example**
+
+    ```hot
+    info ::pandoc/start-convert("hot://uploads/notes.md", {from: "markdown", to: "html"})
+    result ::task/await(info.id)
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: ConvertOpts): Map {
+    out-ext format-output-ext(opts.to)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://pandoc/${uuid}/output.${out-ext}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${out-ext}`
+
+    pandoc-args join-args(build-convert-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && pandoc ${pandoc-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-pandoc-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-convert-text
+meta {
+    doc: """
+    Start an inline-text pandoc conversion in a container without waiting for completion.
+
+    Returns the box task info from `::box/start`. Use `::task/await` on the
+    returned id to wait for the result.
+
+    **Example**
+
+    ```hot
+    info ::pandoc/start-convert-text("# Hi", {from: "markdown", to: "html"})
+    result ::task/await(info.id)
+    ```
+    """,
+    box: {min-size: "nano"}
+}
+fn (text: Str, opts: ConvertOpts): Map {
+    out-ext format-output-ext(opts.to)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://pandoc/${uuid}/output.${out-ext}`)
+
+    in-path "/data/input.dat"
+    out-path `/data/output.${out-ext}`
+
+    enc ::hot::base64/encode(Bytes(text))
+    pandoc-args join-args(build-convert-args(in-path, out-path, opts))
+    cat-step if(is-text-output-format(opts.to), ` && cat ${out-path}`, "")
+    script `echo '${enc}' | base64 -d > ${in-path} && pandoc ${pandoc-args}${cat-step} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "nano")
+    info start-pandoc-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}

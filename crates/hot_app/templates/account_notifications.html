@@ -1,0 +1,184 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-6xl mx-auto py-6">
+    <div class="pb-5 mb-6">
+        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
+        <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
+            Manage your account settings and preferences
+        </p>
+
+        <!-- Navigation Tabs -->
+        <div class="mt-4 border-b border-gray-200 dark:border-gray-700">
+            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                <a href="/account"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    Profile
+                </a>
+                <a href="/account/notifications"
+                   class="border-red-500 text-red-600 dark:text-red-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    Notifications
+                </a>
+                <a href="/account/billing"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    Billing
+                </a>
+            </nav>
+        </div>
+    </div>
+
+    <!-- Notification Preferences Content -->
+    <div class="space-y-6">
+        <form method="post" action="/account/notifications">
+            <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg mb-6">
+                <div class="px-4 py-5 sm:px-6 border-b border-gray-200 dark:border-gray-700">
+                    <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-gray-100">
+                        Notification Preferences
+                    </h3>
+                    <p class="mt-1 max-w-2xl text-sm text-gray-500 dark:text-gray-400">
+                        Choose what you'd like to hear about
+                    </p>
+                </div>
+                <div class="px-4 py-5 sm:p-6">
+                    <div class="space-y-4">
+                        <div class="flex items-start">
+                            <div class="flex items-center h-5">
+                                <input
+                                    type="checkbox"
+                                    id="newsletter"
+                                    name="newsletter"
+                                    class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    {% if notification_prefs.newsletter %}checked{% endif %}
+                                >
+                            </div>
+                            <div class="ml-3">
+                                <label for="newsletter" class="font-medium text-gray-700 dark:text-gray-300">
+                                    Newsletter
+                                </label>
+                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                    Receive occasional updates and news about hot.dev
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="flex items-start">
+                            <div class="flex items-center h-5">
+                                <input
+                                    type="checkbox"
+                                    id="product_updates"
+                                    name="product_updates"
+                                    class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    {% if notification_prefs.product_updates %}checked{% endif %}
+                                >
+                            </div>
+                            <div class="ml-3">
+                                <label for="product_updates" class="font-medium text-gray-700 dark:text-gray-300">
+                                    Product Updates
+                                </label>
+                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                    Get notified about new features and improvements
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
+                            <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-3">Alerts</h4>
+                        </div>
+
+                        <div class="flex items-start">
+                            <div class="flex items-center h-5">
+                                <input
+                                    type="checkbox"
+                                    id="alerts"
+                                    name="alerts"
+                                    class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    {% if notification_prefs.alerts %}checked{% endif %}
+                                >
+                            </div>
+                            <div class="ml-3">
+                                <label for="alerts" class="font-medium text-gray-700 dark:text-gray-300">
+                                    Alert Emails
+                                </label>
+                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                    Receive email alerts when org-wide, team, or individual alert destinations target you.
+                                    Disabling this will opt you out of all dynamic email alert destinations.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex justify-end items-center gap-3">
+                {% if saved %}
+                <style>
+                    @keyframes fade-out {
+                        0%, 70% { opacity: 1; }
+                        100% { opacity: 0; }
+                    }
+                    .animate-fade-out { animation: fade-out 3s ease forwards; }
+                </style>
+                <span class="text-sm text-green-600 dark:text-green-400 flex items-center gap-1 animate-fade-out">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd" />
+                    </svg>
+                    Saved!
+                </span>
+                {% endif %}
+                <button
+                    type="submit"
+                    class="px-4 py-2 bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors"
+                >
+                    Save Changes
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

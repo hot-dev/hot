@@ -1,0 +1,132 @@
+::xai::integration::responses ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for xAI Responses API (Chat)
+// =============================================================================
+// These tests require XAI_API_KEY to be set in context
+
+// -----------------------------------------------------------------------------
+// Basic Response Tests
+// -----------------------------------------------------------------------------
+
+test-responses-create-simple
+meta ["test"]
+fn () {
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say 'Hello, Hot!' and nothing else.",
+        max_output_tokens: 50
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(response.output, "Response should have output")
+    assert(gt(length(response.output), 0), "Should have at least one output item")
+}
+
+test-responses-with-instructions
+meta ["test"]
+fn () {
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "What is 2+2?",
+        instructions: "You are a helpful math assistant. Always respond with just the number.",
+        max_output_tokens: 50
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(response.output, "Response should have output")
+}
+
+// -----------------------------------------------------------------------------
+// Multi-turn Conversation Tests
+// -----------------------------------------------------------------------------
+
+test-responses-multi-turn
+meta ["test"]
+fn () {
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: [
+            {role: "user", content: "My name is Alice."},
+            {role: "assistant", content: "Nice to meet you, Alice!"},
+            {role: "user", content: "What is my name?"}
+        ],
+        max_output_tokens: 100
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(response.output, "Response should have output")
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Tests
+// -----------------------------------------------------------------------------
+
+test-responses-create-stream
+meta ["test"]
+fn () {
+    response ::xai::responses/create-stream(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Count from 1 to 3.",
+        max_output_tokens: 50
+    }))
+
+    assert-eq(200, response.status, "Should get 200 status")
+    assert(response.body, "Should have body iterator")
+
+    // Collect events and verify we got some
+    events collect(response.body)
+    assert(gt(length(events), 0), "Should receive streaming events")
+}
+
+// -----------------------------------------------------------------------------
+// Response Retrieval Tests
+// -----------------------------------------------------------------------------
+
+test-responses-create-and-get
+meta ["test"]
+fn () {
+    // Create a response with store: true
+    created ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say hello",
+        max_output_tokens: 50,
+        store: true
+    }))
+
+    assert(created.id, "Created response should have an id")
+
+    // Retrieve the response
+    retrieved ::xai::responses/get(created.id)
+
+    assert-eq(created.id, retrieved.id, "Retrieved id should match")
+}
+
+// -----------------------------------------------------------------------------
+// Helper Function Tests
+// -----------------------------------------------------------------------------
+
+test-user-message-helper
+meta ["test"]
+fn () {
+    msg ::xai::responses/user-message("Hello")
+
+    assert(msg.role, "Should have role")
+    assert-eq("Hello", msg.content, "Content should match")
+}
+
+test-extract-response-text
+meta ["test"]
+fn () {
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say 'test'",
+        max_output_tokens: 50
+    }))
+
+    text ::xai::responses/extract-response-text(response)
+
+    // Text should be extracted (may be empty if no content)
+    assert(is-str(text), "Extracted text should be a string")
+}

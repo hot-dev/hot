@@ -1,0 +1,105 @@
+::qwen::models ns
+
+// ============================================================================
+// Qwen Models API
+// https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview
+// ============================================================================
+
+api-request ::qwen::api/request
+HttpError ::qwen::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types
+// ============================================================================
+
+Model type {
+    id: Str,
+    object: Str,
+    created: Int?,
+    owned_by: Str?
+}
+
+ModelsListResponse type {
+    object: Str,
+    data: Vec<Model>
+}
+
+// ============================================================================
+// API Functions
+// ============================================================================
+
+list
+meta {
+    doc: """
+    List available models from the Qwen (DashScope) API.
+
+    Returns a ModelsListResponse containing a Vec of Model objects.
+
+    **Example**
+
+    ```hot
+    models list()
+    models.data // => [{id: "qwen3.6-plus", object: "model", ...}, ...]
+
+    first-model first(models.data)
+    first-model.id // => "qwen3.6-plus"
+    ```
+    """
+}
+fn (): ModelsListResponse | HttpError {
+    response api-request("GET", `${::qwen/BASE_URL}/models`)
+    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+}
+
+get
+meta {
+    doc: """
+    Retrieve details about a specific model by its ID.
+
+    Returns a Model with id, object, created, and owned_by fields.
+
+    **Example**
+
+    ```hot
+    model get("qwen3.6-plus")
+    model.id // => "qwen3.6-plus"
+    model.object // => "model"
+    ```
+    """
+}
+fn (model-id: Str): Model | HttpError {
+    response api-request("GET", `${::qwen/BASE_URL}/models/${model-id}`)
+    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Available Models (as of 2026)
+// ============================================================================
+
+// Qwen3.6 — latest flagship
+QWEN3_6_PLUS "qwen3.6-plus"
+
+// Qwen3.5 — fast / cost-effective family
+QWEN3_5_FLASH "qwen3.5-flash"
+QWEN3_5_PLUS "qwen3.5-plus"
+
+// Qwen3 open-weight series
+QWEN3_MAX "qwen3-max"
+
+// Legacy (but still supported) models
+QWEN_PLUS "qwen-plus"
+QWEN_FLASH "qwen-flash"
+QWEN_TURBO "qwen-turbo"
+QWEN_MAX "qwen-max"
+
+// Long-context / document model
+QWEN_LONG "qwen-long"
+
+// Vision-language
+QWEN_VL_PLUS "qwen-vl-plus"
+QWEN_VL_MAX "qwen-vl-max"
+
+// Embeddings
+TEXT_EMBEDDING_V4 "text-embedding-v4"
+TEXT_EMBEDDING_V3 "text-embedding-v3"

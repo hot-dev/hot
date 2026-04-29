@@ -1,0 +1,94 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2">
+    <div class="max-w-2xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <h2 class="text-lg font-medium text-gray-900 dark:text-white mb-6">Edit Alert Channel</h2>
+            
+            <form action="/settings/alerts/channels/{{ channel.alert_channel_id }}" method="POST" class="space-y-6">
+                <div>
+                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Channel Name
+                    </label>
+                    <input type="text" name="name" id="name" required
+                           value="{{ channel.name }}"
+                           class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-700 dark:text-white"
+                           placeholder="e.g., high-priority-failures">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                        A descriptive name for this channel.
+                    </p>
+                </div>
+
+                <div>
+                    <label for="pattern" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Pattern (Regex)
+                    </label>
+                    <input type="text" name="pattern" id="pattern" required
+                           value="{{ channel.pattern }}"
+                           class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-700 dark:text-white font-mono"
+                           placeholder="e.g., run:failed">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                        A regex pattern to match alert types. Examples:
+                    </p>
+                    <ul class="mt-2 text-sm text-gray-500 dark:text-gray-400 list-disc list-inside">
+                        <li><code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">run:.*</code> - Match all run events</li>
+                        <li><code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">.*:failed</code> - Match all failure events</li>
+                        <li><code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">deploy:(failed|succeeded)</code> - Match specific deploy events</li>
+                    </ul>
+                </div>
+
+                <div class="flex items-center">
+                    <input type="checkbox" name="env_specific" id="env_specific" value="true"
+                           {% if channel.env_id.is_some() %}checked{% endif %}
+                           class="h-4 w-4 text-hot-red-500 focus:ring-hot-red-500 border-gray-300 rounded">
+                    <label for="env_specific" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                        Environment-specific (only applies to current environment)
+                    </label>
+                </div>
+
+                <div class="flex items-center">
+                    <input type="checkbox" name="enabled" id="enabled" value="true"
+                           {% if channel.enabled %}checked{% endif %}
+                           class="h-4 w-4 text-hot-red-500 focus:ring-hot-red-500 border-gray-300 rounded">
+                    <label for="enabled" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                        Enabled
+                    </label>
+                </div>
+
+                <div class="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
+                    <button type="button" id="delete-btn"
+                        class="px-4 py-2 border border-red-300 dark:border-red-600 rounded-md text-sm font-medium 
+                               text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20">
+                        Delete
+                    </button>
+                    <div class="flex space-x-3">
+                        <a href="/settings/alerts/channels" 
+                           class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white">
+                            Cancel
+                        </a>
+                        <button type="submit" 
+                                class="px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500">
+                            Update Channel
+                        </button>
+                    </div>
+                </div>
+            </form>
+
+            <!-- Delete form placed outside the edit form to avoid invalid nested forms -->
+            <form id="delete-form" action="/settings/alerts/channels/{{ channel.alert_channel_id }}/delete" method="POST" class="hidden">
+            </form>
+            <script>
+                document.getElementById('delete-btn').addEventListener('click', function() {
+                    showConfirm(
+                        'Delete Channel',
+                        'Are you sure you want to delete this channel?',
+                        () => document.getElementById('delete-form').submit(),
+                        { confirmText: 'Delete', type: 'warning' }
+                    );
+                });
+            </script>
+        </div>
+    </div>
+</div>
+{% endblock %}

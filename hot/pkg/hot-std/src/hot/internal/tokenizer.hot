@@ -1,0 +1,42 @@
+::hot::internal::tokenizer ns
+meta {
+    doc: """
+    Hidden bindings for the host's BPE tokenizer (currently `tiktoken-rs`).
+    Not a public API: use `::ai::tokenizer/*` from the `hot.dev/hot-ai`
+    package instead. Function signatures may change between releases.
+
+    Two functions are exposed:
+
+    - `count(text, encoding)` — token count for `text` under the named
+      encoding. Errors when `encoding` is unknown.
+    - `encodings()` — the encoding names the host runtime can tokenize
+      with. Useful for advertising capability without hard-coding the
+      list in callers.
+    """,
+    no-doc: true
+}
+
+count
+meta {
+    doc: """
+    Count BPE tokens for `text` using `encoding` (e.g.
+    `"o200k_base"`, `"cl100k_base"`). Errors on unknown encoding.
+    """,
+    no-doc: true
+}
+fn (text: Str, encoding: Str): Int {
+    call-lib(::hot::internal::tokenizer/count, [text, encoding])
+}
+
+encodings
+meta {
+    doc: """
+    Return the BPE encoding names this runtime can tokenize with.
+    Wrappers should validate any model->encoding lookup against this
+    list before claiming support for a given model.
+    """,
+    no-doc: true
+}
+fn (): Vec<Str> {
+    call-lib(::hot::internal::tokenizer/encodings, [])
+}

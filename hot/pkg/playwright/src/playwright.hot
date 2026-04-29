@@ -1,0 +1,523 @@
+::playwright ns
+meta {
+    doc: """
+    Playwright headless browser via Hot Box containers.
+
+    Screenshots, PDF export, and page text extraction using Chromium inside
+    `mcr.microsoft.com/playwright` images. URLs are loaded with outbound
+    internet access on the box.
+
+    **Quick Start**
+
+    ```hot
+    shot ::playwright/screenshot("https://example.com")
+    tap(shot.url)
+
+    pdf ::playwright/pdf("https://example.com")
+    tap(pdf.url)
+
+    page ::playwright/scrape("https://example.com")
+    tap(page.title)
+    tap(page.text)
+
+    // With explicit output path
+    shot ::playwright/screenshot("https://example.com", {
+        output: "hot://screenshots/example.png",
+    })
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+DEFAULT_IMAGE "mcr.microsoft.com/playwright:v1.49.1-noble"
+PLAYWRIGHT_VERSION "1.49.1"
+INSTALL_CMD "cd /tmp && npm install --no-save playwright-core@1.49.1 > /dev/null 2>&1 && ICU=$(find /ms-playwright -name icudtl.dat 2>/dev/null | head -1) && [ -n \"$ICU\" ] && cp \"$ICU\" /dev/shm/icudtl.dat && rm -f \"$ICU\" && ln -s /dev/shm/icudtl.dat \"$ICU\" || true"
+CHROME_ARGS """["--no-sandbox","--disable-setuid-sandbox"]"""
+
+// ============================================================================
+// Types
+// ============================================================================
+
+ScreenshotOpts
+meta {
+    doc: """
+    Options for `screenshot`.
+
+    **Fields**
+    - `width` — Viewport width in pixels (default: `1280`)
+    - `height` — Viewport height in pixels (default: `720`)
+    - `full-page` — Capture full scrollable page (default: `false`)
+    - `format` — `"png"` or `"jpeg"` (default: `"png"`)
+    - `quality` — JPEG quality 0–100 (JPEG only)
+    - `wait-until` — Playwright `goto` waitUntil, e.g. `"load"`, `"networkidle"` (default: `"networkidle"`)
+    - `delay` — Extra milliseconds to wait after navigation (default: `0`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Override Playwright Docker image
+    - `size` — Box size preset override (default: `"medium"`)
+    """
+}
+type {
+    width: Int?,
+    height: Int?,
+    full-page: Bool?,
+    format: Str?,
+    quality: Int?,
+    wait-until: Str?,
+    delay: Int?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+PdfOpts
+meta {
+    doc: """
+    Options for `pdf`.
+
+    **Fields**
+    - `width` — Page width (CSS string, e.g. `"8.5in"`)
+    - `height` — Page height (CSS string)
+    - `format` — Paper format, e.g. `"A4"`, `"Letter"` (default: `"A4"` when width/height unset)
+    - `landscape` — Landscape orientation (default: `false`)
+    - `margin` — Uniform margin CSS string applied to all sides (e.g. `"1cm"`)
+    - `print-background` — Print background graphics (default: `false`)
+    - `wait-until` — Playwright `goto` waitUntil (default: `"networkidle"`)
+    - `delay` — Extra milliseconds after navigation (default: `0`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Override Playwright Docker image
+    - `size` — Box size preset override (default: `"medium"`)
+    """
+}
+type {
+    width: Str?,
+    height: Str?,
+    format: Str?,
+    landscape: Bool?,
+    margin: Str?,
+    print-background: Bool?,
+    wait-until: Str?,
+    delay: Int?,
+    output: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+ScrapeOpts
+meta {
+    doc: """
+    Options for `scrape`.
+
+    **Fields**
+    - `wait-until` — Playwright `goto` waitUntil (default: `"networkidle"`)
+    - `delay` — Extra milliseconds after navigation (default: `0`)
+    - `selector` — CSS selector; when set, inner text of the first match is returned instead of the body
+    - `image` — Override Playwright Docker image
+    - `size` — Box size preset override (default: `"medium"`)
+    """
+}
+type {
+    wait-until: Str?,
+    delay: Int?,
+    selector: Str?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?
+}
+
+// ============================================================================
+// Internal — escaping and script builders (testable without Docker)
+// ============================================================================
+
+escape-sh-double
+meta {
+    doc: "Escape a string for safe inclusion inside double quotes in `sh -c`."
+}
+fn (s: Str): Str {
+    s |> replace("\\", "\\\\")
+      |> replace("\"", "\\\"")
+      |> replace("$", "\\$")
+      |> replace("`", "\\`")
+}
+
+build-screenshot-script
+meta {
+    doc: "Build a one-line Node.js script that captures a screenshot with Playwright Chromium."
+}
+fn (url: Str, output-path: Str, width: Int, height: Int, full-page: Bool, format: Str, quality: Int?, wait-until: Str, delay: Int): Str {
+    fp if(full-page, "true", "false")
+    delay-js if(gt(delay, 0), `await new Promise(function(r){setTimeout(r,${Str(delay)});});`, "")
+
+    shot-js cond {
+        eq(format, "jpeg") => {
+            q or(quality, 80)
+            `await page.screenshot({path:${to-json(output-path)},fullPage:${fp},type:"jpeg",quality:${Str(q)}});`
+        }
+        => {
+            `await page.screenshot({path:${to-json(output-path)},fullPage:${fp},type:"png"});`
+        }
+    }
+
+    launch-js `const browser = await chromium.launch({args:${CHROME_ARGS}});`
+    viewport-js `const page = await browser.newPage(); await page.setViewportSize({width:${Str(width)},height:${Str(height)}});`
+    nav-js `await page.goto(${to-json(url)},{waitUntil:${to-json(wait-until)}});`
+
+    concat(
+        `const { chromium } = require("playwright-core");`,
+        `(async () => { ${launch-js} ${viewport-js} ${nav-js}`,
+        `${delay-js}${shot-js}`,
+        `await browser.close(); })();`,
+    )
+}
+
+build-pdf-script
+meta {
+    doc: "Build a one-line Node.js script that prints the page to PDF with Playwright Chromium."
+}
+fn (url: Str, output-path: Str, width: Str?, height: Str?, format: Str?, landscape: Bool, print-background: Bool, margin: Str?, wait-until: Str, delay: Int): Str {
+    delay-js if(gt(delay, 0), `await new Promise(function(r){setTimeout(r,${Str(delay)});});`, "")
+    land if(landscape, "true", "false")
+    pb if(print-background, "true", "false")
+    margin-js if(is-some(margin), `margin:{top:${to-json(margin)},right:${to-json(margin)},bottom:${to-json(margin)},left:${to-json(margin)}},`, "")
+
+    size-js cond {
+        and(is-some(width), is-some(height)) => {
+            `width:${to-json(width)},height:${to-json(height)},`
+        }
+        => {
+            fmt or(format, "A4")
+            `format:${to-json(fmt)},`
+        }
+    }
+
+    launch-js `const browser = await chromium.launch({args:${CHROME_ARGS}});`
+    nav-js `await page.goto(${to-json(url)},{waitUntil:${to-json(wait-until)}});`
+    pdf-js `await page.pdf({path:${to-json(output-path)},${size-js}${margin-js}landscape:${land},printBackground:${pb}});`
+
+    concat(
+        `const { chromium } = require("playwright-core");`,
+        `(async () => { ${launch-js} const page = await browser.newPage(); ${nav-js}`,
+        `${delay-js}${pdf-js}`,
+        `await browser.close(); })();`,
+    )
+}
+
+build-scrape-script
+meta {
+    doc: "Build a one-line Node.js script that prints `{title, text}` as JSON to stdout."
+}
+fn (url: Str, wait-until: Str, delay: Int, selector: Str?): Str {
+    delay-js if(gt(delay, 0), `await new Promise(function(r){setTimeout(r,${Str(delay)});});`, "")
+
+    text-js if(
+        is-some(selector),
+        `const text = await page.$eval(${to-json(selector)}, function (el) { return el.innerText; });`,
+        `const text = await page.evaluate(function () { return document.body ? document.body.innerText : ""; });`,
+    )
+
+    launch-js `const browser = await chromium.launch({args:${CHROME_ARGS}});`
+    nav-js `await page.goto(${to-json(url)},{waitUntil:${to-json(wait-until)}});`
+    output-js `const title = await page.title();${text-js}console.log(JSON.stringify({title:title,text:text}));`
+
+    concat(
+        `const { chromium } = require("playwright-core");`,
+        `(async () => { ${launch-js} const page = await browser.newPage(); ${nav-js}`,
+        `${delay-js}${output-js}`,
+        `await browser.close(); })();`,
+    )
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+run-playwright-box
+meta {
+    doc: "Run a one-line Node script in the Playwright image with internet access, then run optional shell suffix (e.g. hotbox copy)."
+}
+fn (js: Str, box-size: Str, image: Str?, sh-suffix: Str, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    escaped escape-sh-double(js)
+    full `${INSTALL_CMD} && NODE_PATH=/tmp/node_modules node -e "${escaped}"${sh-suffix}`
+    info ::box/start({
+        image: img,
+        script: full,
+        timeout: timeout,
+        size: box-size,
+    })
+    ::task/await(info.id)
+}
+
+start-playwright-box
+meta {
+    doc: "Start a one-line Node script in the Playwright image with internet access, returning TaskInfo without awaiting."
+}
+fn (js: Str, box-size: Str, image: Str?, sh-suffix: Str, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    escaped escape-sh-double(js)
+    full `${INSTALL_CMD} && NODE_PATH=/tmp/node_modules node -e "${escaped}"${sh-suffix}`
+    ::box/start({
+        image: img,
+        script: full,
+        timeout: timeout,
+        size: box-size,
+    })
+}
+
+check-box-result
+meta {
+    doc: "Fail when the box task did not complete successfully."
+}
+fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+screenshot
+meta {
+    doc: """
+    Capture a viewport or full-page screenshot of a URL.
+
+    Returns `{url: Str, format: Str}` with the image stored under `hot://playwright/...`.
+
+    **Example**
+
+    ```hot
+    out ::playwright/screenshot("https://example.com")
+    out ::playwright/screenshot("https://example.com", {
+        format: "jpeg",
+        quality: 85,
+        full-page: true,
+        wait-until: "load",
+    })
+    ```
+    """,
+    box: {min-size: "large", network: true}
+}
+fn (url: Str): Map {
+    screenshot(url, ScreenshotOpts({
+        width: null, height: null, full-page: null, format: null,
+        quality: null, wait-until: null, delay: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(url: Str, opts: ScreenshotOpts): Map {
+    width or(opts.width, 1280)
+    height or(opts.height, 720)
+    format or(opts.format, "png")
+    full-p if(is-some(opts.full-page), opts.full-page, false)
+    wait-u or(opts.wait-until, "networkidle")
+    delay or(opts.delay, 0)
+    uuid Uuid()
+    ext if(eq(format, "jpeg"), "jpg", "png")
+    hot-output resolve-output(opts.output, `hot://playwright/${uuid}/screenshot.${ext}`)
+    out-path `/data/screenshot.${ext}`
+    js build-screenshot-script(url, out-path, width, height, full-p, format, opts.quality, wait-u, delay)
+    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    box-size or(opts.size, "large")
+    result run-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
+    check-box-result(result, "playwright")
+    {url: hot-output, format,}
+}
+
+pdf
+meta {
+    doc: """
+    Render a URL to a PDF file.
+
+    Returns `{url: Str}` with the PDF in Hot storage.
+
+    **Example**
+
+    ```hot
+    out ::playwright/pdf("https://example.com")
+    out ::playwright/pdf("https://example.com", {format: "Letter", landscape: true})
+    ```
+    """,
+    box: {min-size: "large", network: true}
+}
+fn (url: Str): Map {
+    pdf(url, PdfOpts({
+        width: null, height: null, format: null, landscape: null,
+        margin: null, print-background: null, wait-until: null,
+        delay: null, output: null, image: null, size: null, timeout: null,
+    }))
+},
+(url: Str, opts: PdfOpts): Map {
+    wait-u or(opts.wait-until, "networkidle")
+    delay or(opts.delay, 0)
+    land if(is-some(opts.landscape), opts.landscape, false)
+    pb if(is-some(opts.print-background), opts.print-background, false)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://playwright/${uuid}/page.pdf`)
+    out-path "/data/page.pdf"
+    js build-pdf-script(url, out-path, opts.width, opts.height, opts.format, land, pb, opts.margin, wait-u, delay)
+    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    box-size or(opts.size, "large")
+    result run-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
+    check-box-result(result, "playwright")
+    {url: hot-output, format: "pdf",}
+}
+
+scrape
+meta {
+    doc: """
+    Load a URL and return visible text plus document title.
+
+    Returns `{text: Str, title: Str}`. With `selector`, `text` is the inner text
+    of the first matching element.
+
+    **Example**
+
+    ```hot
+    page ::playwright/scrape("https://example.com")
+    page ::playwright/scrape("https://example.com", {selector: "h1"})
+    ```
+    """,
+    box: {min-size: "large", network: true}
+}
+fn (url: Str): Map {
+    scrape(url, ScrapeOpts({
+        wait-until: null, delay: null, selector: null, image: null, size: null,
+        timeout: null,
+    }))
+},
+(url: Str, opts: ScrapeOpts): Map {
+    wait-u or(opts.wait-until, "networkidle")
+    delay or(opts.delay, 0)
+    js build-scrape-script(url, wait-u, delay, opts.selector)
+    box-size or(opts.size, "large")
+    result run-playwright-box(js, box-size, opts.image, "", or(opts.timeout, 300))
+    checked check-box-result(result, "playwright")
+    parsed or(checked.stdout, "") |> trim() |> from-json()
+    {text: parsed.text, title: parsed.title,}
+}
+
+// ============================================================================
+// Async (start-*) API — return TaskInfo without awaiting
+// ============================================================================
+
+start-screenshot
+meta {
+    doc: """
+    Start a screenshot task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "large", network: true}
+}
+fn (url: Str): Map {
+    start-screenshot(url, ScreenshotOpts({
+        width: null, height: null, full-page: null, format: null,
+        quality: null, wait-until: null, delay: null, output: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(url: Str, opts: ScreenshotOpts): Map {
+    width or(opts.width, 1280)
+    height or(opts.height, 720)
+    format or(opts.format, "png")
+    full-p if(is-some(opts.full-page), opts.full-page, false)
+    wait-u or(opts.wait-until, "networkidle")
+    delay or(opts.delay, 0)
+    uuid Uuid()
+    ext if(eq(format, "jpeg"), "jpg", "png")
+    hot-output resolve-output(opts.output, `hot://playwright/${uuid}/screenshot.${ext}`)
+    out-path `/data/screenshot.${ext}`
+    js build-screenshot-script(url, out-path, width, height, full-p, format, opts.quality, wait-u, delay)
+    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    box-size or(opts.size, "large")
+    info start-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-pdf
+meta {
+    doc: """
+    Start a PDF-rendering task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "large", network: true}
+}
+fn (url: Str): Map {
+    start-pdf(url, PdfOpts({
+        width: null, height: null, format: null, landscape: null,
+        margin: null, print-background: null, wait-until: null,
+        delay: null, output: null, image: null, size: null, timeout: null,
+    }))
+},
+(url: Str, opts: PdfOpts): Map {
+    wait-u or(opts.wait-until, "networkidle")
+    delay or(opts.delay, 0)
+    land if(is-some(opts.landscape), opts.landscape, false)
+    pb if(is-some(opts.print-background), opts.print-background, false)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://playwright/${uuid}/page.pdf`)
+    out-path "/data/page.pdf"
+    js build-pdf-script(url, out-path, opts.width, opts.height, opts.format, land, pb, opts.margin, wait-u, delay)
+    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    box-size or(opts.size, "large")
+    info start-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-scrape
+meta {
+    doc: """
+    Start a scrape task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "large", network: true}
+}
+fn (url: Str): Map {
+    start-scrape(url, ScrapeOpts({
+        wait-until: null, delay: null, selector: null, image: null, size: null,
+        timeout: null,
+    }))
+},
+(url: Str, opts: ScrapeOpts): Map {
+    wait-u or(opts.wait-until, "networkidle")
+    delay or(opts.delay, 0)
+    js build-scrape-script(url, wait-u, delay, opts.selector)
+    box-size or(opts.size, "large")
+    start-playwright-box(js, box-size, opts.image, "", or(opts.timeout, 300))
+}

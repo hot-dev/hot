@@ -1,0 +1,14 @@
+::demo::files ns
+
+generate-report
+meta {on-event: "report:generate"}
+fn (event) {
+    orders event.data.orders
+    header "id,customer,amount,status"
+    rows orders |> map((o) { `${o.id},${o.customer},${o.amount},${o.status}` })
+    csv join([header, ...rows], "\n")
+
+    path `hot://reports/orders-${::hot::time/format(::hot::time/now(), "yyyy-MM-dd")}.csv`
+    write-file(path, csv)
+    {file: path, rows: length(orders)}
+}

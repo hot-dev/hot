@@ -1,0 +1,162 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            Organization overview and settings
+        </p>
+        {% include "org_tabs.html" %}
+    </div>
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+                {% if error_message != "" %}
+                <div class="mb-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
+                    {{ error_message }}
+                </div>
+                {% endif %}
+
+                <form action="/@{{ org.slug }}/edit" method="post">
+                    <div class="mb-6">
+                        <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Organization Name <span class="text-red-500">*</span>
+                        </label>
+                        <input type="text" id="name" name="name" value="{{ org.name }}"
+                               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white"
+                               placeholder="Enter organization name" required>
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            The display name for your organization.
+                        </p>
+                    </div>
+
+                    <div class="mb-6">
+                        <label for="slug" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Handle <span class="text-red-500">*</span>
+                        </label>
+                        <div class="flex items-center">
+                            <span class="text-sm text-gray-500 dark:text-gray-400 mr-1 font-mono">@</span>
+                            <input type="text" id="slug" name="slug" value="{{ org.slug }}"
+                                   class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white font-mono"
+                                   placeholder="your-handle"
+                                   pattern="[a-z0-9\-]+"
+                                   title="Only lowercase letters, numbers, and hyphens are allowed"
+                                   required>
+                        </div>
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Lowercase letters, numbers, and hyphens only.
+                        </p>
+                        {% if org.slug != "" %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                            </svg>
+                            Warning: Changing the slug will affect URLs and references to this organization.
+                        </p>
+                        {% endif %}
+                    </div>
+
+                    <!-- Default Time Zone -->
+                    <div class="mb-6">
+                        <label for="display_timezone" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Default Time Zone
+                        </label>
+                        <select id="display_timezone" name="display_timezone"
+                               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white">
+                            <option value="UTC" {% if org_timezone == "UTC" %}selected{% endif %}>UTC (Coordinated Universal Time)</option>
+                            <option value="America/New_York" {% if org_timezone == "America/New_York" %}selected{% endif %}>America/New_York (Eastern Time)</option>
+                            <option value="America/Chicago" {% if org_timezone == "America/Chicago" %}selected{% endif %}>America/Chicago (Central Time)</option>
+                            <option value="America/Denver" {% if org_timezone == "America/Denver" %}selected{% endif %}>America/Denver (Mountain Time)</option>
+                            <option value="America/Los_Angeles" {% if org_timezone == "America/Los_Angeles" %}selected{% endif %}>America/Los_Angeles (Pacific Time)</option>
+                            <option value="America/Anchorage" {% if org_timezone == "America/Anchorage" %}selected{% endif %}>America/Anchorage (Alaska Time)</option>
+                            <option value="Pacific/Honolulu" {% if org_timezone == "Pacific/Honolulu" %}selected{% endif %}>Pacific/Honolulu (Hawaii Time)</option>
+                            <option value="America/Toronto" {% if org_timezone == "America/Toronto" %}selected{% endif %}>America/Toronto (Eastern Time - Canada)</option>
+                            <option value="America/Vancouver" {% if org_timezone == "America/Vancouver" %}selected{% endif %}>America/Vancouver (Pacific Time - Canada)</option>
+                            <option value="Europe/London" {% if org_timezone == "Europe/London" %}selected{% endif %}>Europe/London (British Time)</option>
+                            <option value="Europe/Paris" {% if org_timezone == "Europe/Paris" %}selected{% endif %}>Europe/Paris (Central European Time)</option>
+                            <option value="Europe/Berlin" {% if org_timezone == "Europe/Berlin" %}selected{% endif %}>Europe/Berlin (Central European Time)</option>
+                            <option value="Europe/Amsterdam" {% if org_timezone == "Europe/Amsterdam" %}selected{% endif %}>Europe/Amsterdam (Central European Time)</option>
+                            <option value="Europe/Zurich" {% if org_timezone == "Europe/Zurich" %}selected{% endif %}>Europe/Zurich (Central European Time)</option>
+                            <option value="Asia/Tokyo" {% if org_timezone == "Asia/Tokyo" %}selected{% endif %}>Asia/Tokyo (Japan Time)</option>
+                            <option value="Asia/Shanghai" {% if org_timezone == "Asia/Shanghai" %}selected{% endif %}>Asia/Shanghai (China Time)</option>
+                            <option value="Asia/Hong_Kong" {% if org_timezone == "Asia/Hong_Kong" %}selected{% endif %}>Asia/Hong_Kong (Hong Kong Time)</option>
+                            <option value="Asia/Singapore" {% if org_timezone == "Asia/Singapore" %}selected{% endif %}>Asia/Singapore (Singapore Time)</option>
+                            <option value="Asia/Kolkata" {% if org_timezone == "Asia/Kolkata" %}selected{% endif %}>Asia/Kolkata (India Time)</option>
+                            <option value="Asia/Dubai" {% if org_timezone == "Asia/Dubai" %}selected{% endif %}>Asia/Dubai (Gulf Time)</option>
+                            <option value="Australia/Sydney" {% if org_timezone == "Australia/Sydney" %}selected{% endif %}>Australia/Sydney (Australian Eastern Time)</option>
+                            <option value="Australia/Melbourne" {% if org_timezone == "Australia/Melbourne" %}selected{% endif %}>Australia/Melbourne (Australian Eastern Time)</option>
+                            <option value="Australia/Brisbane" {% if org_timezone == "Australia/Brisbane" %}selected{% endif %}>Australia/Brisbane (Australian Eastern Time - No DST)</option>
+                            <option value="Australia/Perth" {% if org_timezone == "Australia/Perth" %}selected{% endif %}>Australia/Perth (Australian Western Time)</option>
+                            <option value="Pacific/Auckland" {% if org_timezone == "Pacific/Auckland" %}selected{% endif %}>Pacific/Auckland (New Zealand Time)</option>
+                        </select>
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            The default time zone for all users in this organization. Individual users can override this in their account settings.
+                        </p>
+                    </div>
+
+                    <!-- Organization Info (Read-only) -->
+                    <div class="mb-6 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+                        <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Organization Information</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Organization ID</dt>
+                                <dd class="mt-1 text-xs text-gray-900 dark:text-white">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ org.org_id }}" title="{{ org.org_id }}">{{ org.org_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ org.org_id }}" title="Copy {{ org.org_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </dd>
+                            </div>
+                            <div>
+                                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400">Created</dt>
+                                <dd class="mt-1 text-xs text-gray-900 dark:text-white">{{ org.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between">
+                        <a href="/@{{ org.slug }}" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-200">
+                            Cancel
+                        </a>
+                        <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                            </svg>
+                            Update Organization
+                        </button>
+                    </div>
+                </form>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const nameInput = document.getElementById('name');
+    const slugInput = document.getElementById('slug');
+    const originalSlug = slugInput.value;
+
+    // Auto-generate slug from name only if the slug hasn't been manually set
+    nameInput.addEventListener('input', function() {
+        if (slugInput.value === originalSlug && !slugInput.dataset.manuallyEdited) {
+            const slug = this.value
+                .toLowerCase()
+                .replace(/[^a-z0-9\s\-]/g, '') // Remove invalid characters
+                .replace(/\s+/g, '-') // Replace spaces with hyphens
+                .replace(/-+/g, '-') // Replace multiple hyphens with single
+                .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+
+            slugInput.value = slug;
+        }
+    });
+
+    // Mark slug as manually edited when user types in it
+    slugInput.addEventListener('input', function() {
+        this.dataset.manuallyEdited = 'true';
+    });
+});
+</script>
+{% endblock %}

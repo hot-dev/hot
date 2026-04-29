@@ -1,0 +1,40 @@
+::openai::integration::models ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for OpenAI Models API
+// =============================================================================
+// These tests require OPENAI_API_KEY to be set in context
+
+test-models-list
+meta ["test"]
+fn () {
+    models ::openai::models/list()
+
+    assert(is-vec(models.data), "Response should have data array")
+    assert(gt(length(models.data), 0), "Should have at least one model")
+
+    // Check first model has expected fields
+    first-model first(models.data)
+    assert(first-model.id, "Model should have id")
+    assert(first-model.owned_by, "Model should have owned_by")
+}
+
+test-models-get
+meta ["test"]
+fn () {
+    model ::openai::models/get("gpt-4o-mini")
+
+    assert-eq("gpt-4o-mini", model.id, "Model id should match")
+    assert(model.owned_by, "Model should have owned_by")
+    assert(model.created, "Model should have created timestamp")
+}
+
+test-models-get-gpt4o
+meta ["test"]
+fn () {
+    model ::openai::models/get("gpt-4o")
+
+    assert-eq("gpt-4o", model.id, "Model id should match")
+    assert(model.owned_by, "Model should have owned_by")
+}

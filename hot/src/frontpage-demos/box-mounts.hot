@@ -1,0 +1,45 @@
+::demo::box-mounts ns
+
+::box ::hot::box
+
+// Smoke test for `::hot::box/start` resource mounts.
+//
+// Configure this resource root before running the offline demo:
+//   ./hot/src-offline/frontpage-demos/resources/box-demos
+// Then the file at `node-hello/server.js` becomes the bundle-relative
+// resource `node-hello/server.js`.
+//
+// `mounts: {"/app": "node-hello"}` tells the worker to bind that subtree
+// into a stock `node:22-alpine` container at `/app` (read-only by default).
+// The Node script itself ships in the bundle — no image needs to be
+// pre-baked, and a content edit to server.js produces a new bundle hash.
+//
+// Wire up:
+//   send("demo:box-mounts", {})
+// or just:
+//   hot run hot/src/frontpage-demos/box-mounts.hot
+//
+// Requires Docker. Kata is not yet supported for resource mounts (the
+// worker fails the task with a clear message rather than dropping mounts
+// silently).
+
+run-node-hello
+meta {on-event: "demo:box-mounts"}
+fn (event) {
+    name or(event.data.name, "mounts")
+    info ::box/start({
+        image: "node:22-alpine",
+        cmd: ["node", "/app/server.js"],
+        env: {HOT_NAME: name},
+        mounts: {"/app": "node-hello"},
+        timeout: 30,
+        size: "small",
+    })
+    task ::hot::task/await(info.id)
+    parsed from-json(trim(or(task.stdout, "{}")))
+    {
+        ok: eq(parsed.message, `hello, ${name}`),
+        result: parsed,
+        stderr: task.stderr,
+    }
+}

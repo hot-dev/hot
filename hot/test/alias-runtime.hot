@@ -1,0 +1,58 @@
+::test::alias-runtime ns
+
+// Verify that meta-bearing aliases are callable at runtime, not just
+// recognized at compile time. The wrapper-pattern relies on this:
+// the bus dispatches to `tg-record-voice` (an alias) and expects the
+// underlying library function to actually run.
+
+// ----------------------------------------------------------------------------
+// Local-namespace aliases (Ref::Var)
+// ----------------------------------------------------------------------------
+
+base-greet fn (name: Str): Str { `Hello, ${name}` }
+
+aliased-greet base-greet
+
+aliased-greet-with-meta
+meta { doc: "A meta-bearing alias" }
+base-greet
+
+test-aliased-call meta ["test"] fn () {
+    result aliased-greet("World")
+    assert(eq(result, "Hello, World"), `expected 'Hello, World' but got '${result}'`)
+}
+
+test-aliased-call-with-meta meta ["test"] fn () {
+    result aliased-greet-with-meta("World")
+    assert(eq(result, "Hello, World"), `expected 'Hello, World' but got '${result}'`)
+}
+
+// ----------------------------------------------------------------------------
+// Cross-namespace aliases (Ref::Ns)
+// ----------------------------------------------------------------------------
+
+::lib ::test::alias-runtime::lib
+
+xns-aliased-add ::lib/add
+
+xns-aliased-add-with-meta
+meta { doc: "Aliased adder with meta" }
+::lib/add
+
+test-cross-namespace-alias meta ["test"] fn () {
+    result xns-aliased-add(2, 3)
+    assert(eq(result, 5), `expected 5 but got ${result}`)
+}
+
+test-cross-namespace-alias-with-meta meta ["test"] fn () {
+    result xns-aliased-add-with-meta(2, 3)
+    assert(eq(result, 5), `expected 5 but got ${result}`)
+}
+
+// ----------------------------------------------------------------------------
+// Helper namespace
+// ----------------------------------------------------------------------------
+
+::test::alias-runtime::lib ns
+
+add fn (a: Int, b: Int): Int { ::hot::math/add(a, b) }

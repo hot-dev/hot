@@ -1,0 +1,126 @@
+::qwen::integration::chat ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Qwen Chat Completions API
+// =============================================================================
+// These tests require qwen.api.key (your DASHSCOPE_API_KEY) to be set in context.
+
+// -----------------------------------------------------------------------------
+// Basic completion tests
+// -----------------------------------------------------------------------------
+
+test-chat-complete-simple
+meta ["test"]
+fn () {
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}],
+        max_tokens: 50
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(is-vec(response.choices), "Response should have choices")
+    assert(gt(length(response.choices), 0), "Should have at least one choice")
+}
+
+test-chat-complete-with-system
+meta ["test"]
+fn () {
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [
+            {role: "system", content: "You are a helpful math assistant. Always respond with just the number."},
+            {role: "user", content: "What is 2+2?"}
+        ],
+        max_tokens: 50
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(gt(length(response.choices), 0), "Should have at least one choice")
+}
+
+// -----------------------------------------------------------------------------
+// Multi-turn conversation
+// -----------------------------------------------------------------------------
+
+test-chat-multi-turn
+meta ["test"]
+fn () {
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [
+            {role: "user", content: "My name is Alice."},
+            {role: "assistant", content: "Nice to meet you, Alice!"},
+            {role: "user", content: "What is my name?"}
+        ],
+        max_tokens: 100
+    }))
+
+    assert(response.id, "Response should have an id")
+    assert(gt(length(response.choices), 0), "Should have at least one choice")
+}
+
+// -----------------------------------------------------------------------------
+// Streaming
+// -----------------------------------------------------------------------------
+
+test-chat-complete-stream
+meta ["test"]
+fn () {
+    response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Count from 1 to 3."}],
+        max_tokens: 50
+    }))
+
+    assert-eq(200, response.status, "Should get 200 status")
+    assert(response.body, "Should have body iterator")
+
+    events collect(response.body)
+    assert(gt(length(events), 0), "Should receive streaming events")
+}
+
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+test-user-message-helper
+meta ["test"]
+fn () {
+    msg ::qwen::chat/user-message("Hello")
+
+    assert-eq("user", msg.role, "Should have user role")
+    assert-eq("Hello", msg.content, "Content should match")
+}
+
+test-system-message-helper
+meta ["test"]
+fn () {
+    msg ::qwen::chat/system-message("You are a helpful assistant.")
+
+    assert-eq("system", msg.role, "Should have system role")
+    assert-eq("You are a helpful assistant.", msg.content, "Content should match")
+}
+
+test-extract-response-text
+meta ["test"]
+fn () {
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.6-plus",
+        messages: [{role: "user", content: "Say 'test'"}],
+        max_tokens: 50
+    }))
+
+    text ::qwen::chat/extract-response-text(response)
+
+    assert(is-str(text), "Extracted text should be a string")
+}
+
+test-chat-convenience
+meta ["test"]
+fn () {
+    answer ::qwen::chat/chat("qwen3.6-plus", "Respond with only the word 'ok'.", "You are a terse assistant.")
+
+    assert(is-str(answer), "chat() should return a string")
+}

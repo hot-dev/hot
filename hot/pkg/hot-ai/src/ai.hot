@@ -1,0 +1,52 @@
+::ai ns
+meta {
+    doc: """
+    AI types and utilities for Hot. Dependency-free building blocks for AI agents.
+
+    # Namespaces
+
+    ## Foundations
+    - `::ai::session` — `Session` and `Identity` handle types + scope-key helpers.
+      Sessions are conversation containers (Slack channel, Telegram group, DM thread).
+      Identities are participants within them.
+
+    - `::ai::message` — Normalized message formats:
+      - `Role` enum (User/Assistant/System)
+      - `ChatMessage` — simple role+content pair for AI API calls
+      - `Message` — inbound user messages with `sender` + `session`
+      - `AgentMessage` — inter-agent envelopes with `to-agent` / `from-agent`
+
+    ## AI Dispatch
+    - `::ai::chat` — Provider-agnostic model dispatch:
+      - `Provider` enum (Anthropic, OpenAi, XAi, Gemini)
+      - `detect-provider(model)` — map a model name to its provider
+      - `ChatOptions` — carries `chat-fn`, `model`, and `system`; pass this to
+        `::ai::rag` functions so the library never depends on AI packages.
+
+    ## Memory
+    - `::ai::memory` — Three-level scoped memory:
+      - **Session** — shared conversation history (embedded for semantic search)
+      - **User** — per-identity persistent data (profile, preferences)
+      - **KB** — shared knowledge base (embedded)
+      Plus per-user `Thread` for multi-turn conversation state.
+
+    ## Retrieval
+    - `::ai::rag` — Retrieve-Augment-Generate helpers that compose memory
+      search with a caller-provided `chat-fn`:
+      - `build-context`, `ask`, `ask-with-thread`, `summarize`
+      - Pure helpers (testable): `format-session-results`, `format-kb-results`,
+        `format-thread-lines`, `build-rag-prompt`
+
+    ## Context Management
+    - `::ai::context` — Token budgeting and message sampling:
+      - `estimate-tokens`, `sample`, `fit`, `truncate`
+
+    ## Inter-Agent Communication
+    - `::ai::bus` — Typed event-bus patterns for agent-to-agent messaging:
+      - `tell`, `broadcast`, `collaborate`, `respond`
+      - `BroadcastMessage`, `CollaborationRequest`
+
+    ## Media
+    - `::ai::media` — Media-handling utilities for multi-modal agents.
+  """,
+}

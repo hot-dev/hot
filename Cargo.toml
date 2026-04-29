@@ -1,0 +1,165 @@
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/hot-dev/hot"
+homepage = "https://hot.dev"
+
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/hot","crates/hot_cli"]
+resolver = "3"
+exclude = ["target", "docs/book"]
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+# Test builds are run far less often than dev edits, so incremental cache
+# space spent here pays back rarely. Disabling keeps target/ smaller without
+# slowing the inner edit loop.
+[profile.test]
+incremental = false
+
+[profile.dev.package.sqlx-macros]
+opt-level = 3
+
+[profile.dev.package.aws-lc-rs]
+opt-level = 3
+
+[profile.dev.package.ring]
+opt-level = 3
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[workspace.lints.clippy]
+uninlined_format_args = "allow"
+
+[workspace.dependencies]
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "net", "fs", "io-util", "io-std", "time", "process", "macros", "sync", "signal"] }
+tracing = { version = "0.1.44" }
+tracing-subscriber = { version = "0.3.23", features = [
+    "time",
+    "chrono",
+    "env-filter",
+] }
+tracing-appender = { version = "0.2" }
+ariadne = "0.6"
+axum = { version = "0.8.9", features = ["multipart"] }
+http-body-util = "0.1"
+fastnum = { version = "0.7", features = ["serde", "sqlx", "tokio-postgres"] }
+clap = "4.6"
+hot = { path = "crates/hot" }
+hot_docs = { path = "crates/hot_docs" }
+hot_app = { path = "crates/hot_app" }
+hot_worker = { path = "crates/hot_worker" }
+hot_task_worker = { path = "crates/hot_task_worker" }
+hot_scheduler = { path = "crates/hot_scheduler" }
+hot_api = { path = "crates/hot_api" }
+rustyline = "18.0"
+serde_json = "1.0.149"
+serde = { version = "1.0", features = ["derive", "rc"] }
+uuid = "1.23.1"
+async-trait = "0.1.89"
+redis = { version = "1.2.0", features = ["tokio-comp", "cluster-async", "tokio-rustls-comp"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+chrono = "0.4.44"
+chrono-tz = "0.10"
+futures = "0.3.32"
+once_cell = "1.21.4"
+async-channel = "2.5"
+zstd = "0.13.3"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "sqlite", "chrono", "uuid", "json", "migrate", "macros"] }
+thiserror = "1.0.69"
+indexmap = "2.14.0"
+askama = "0.15.6"
+tower = "0.5"
+tower-http = "0.6.8"
+tower-lsp = "0.20"
+regex = "1.12.3"
+num-traits = "0.2"
+walkdir = "2.5.0"
+ignore = "0.4"
+rand = "0.8"
+rayon = "1.12"
+base64 = "0.22"
+blake3 = "1.8"
+hex = "0.4"
+is-terminal = "0.4"
+tempfile = "3.27"
+url = "2.5"
+percent-encoding = "2.3"
+zip = "4.6"
+aws-lc-rs = "1.16.3"
+axum-extra = "0.12.6"
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
+time = "0.3.47"
+croner = "3.0"
+english-to-cron = "0.1.7"
+humantime = "2.3"
+smallvec = "1.15"
+ahash = { version = "0.8", features = ["serde"] }
+temporal_rs = { version = "0.2.3", features = ["compiled_data", "sys"] }
+anyhow = "1.0"
+clap_complete = "4.6"
+hot_lsp = { path = "crates/hot_lsp" }
+notify = "8"
+yaml-rust2 = "0.11"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+bytes = "1.11"
+aws-config = "1.8"
+aws-runtime = "1.7"
+aws-sdk-s3 = "1.131"
+oauth2 = "5.0"
+md5 = "0.8"
+pulldown-cmark = "0.13"
+async-stream = "0.3"
+winres = "0.1"
+bollard = "0.20"
+crc32fast = "1.5"
+dotenvy = "0.15"
+mime_guess = "2.0"
+urlencoding = "2.1.3"
+# Blocking HTTP client for package downloads (no async runtime)
+ureq = { version = "3.3", features = ["rustls"] }
+# Gzip decompression for tarballs
+flate2 = "1.1"
+# Tarball extraction
+tar = "0.4"
+fd-lock = "4.0"
+libc = "0.2"
+open = "5"
+# XML parsing for ::hot::xml functions
+quick-xml = "0.39"
+containerd-client = "0.9"
+hickory-resolver = { version = "0.26", features = ["tokio"] }
+dirs = "6.0.0"
+prost-types = "0.14"
+tonic = "0.14"
+tokio-vsock = "0.7"
+# WebSocket client for ::hot::ws functions
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+fastembed = { version = "4", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries"] }
+cranelift-codegen = "0.131.0"
+cranelift-frontend = "0.131.0"
+cranelift-jit = "0.131.0"
+cranelift-module = "0.131.0"
+cranelift-native = "0.131.0"
+# Non-poisoning Mutex/RwLock for shared state held across user-code execution.
+# Avoids std::sync poisoning if user code panics while a lock is held.
+parking_lot = "0.12"
+# Tokenizer for OpenAI BPE encodings (cl100k_base, o200k_base, etc.).
+# Used by `::hot::internal::tokenizer` and wrapped by `::ai::tokenizer`.
+tiktoken-rs = "0.11"

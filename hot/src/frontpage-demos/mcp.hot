@@ -1,0 +1,38 @@
+::demo::mcp ns
+
+::store ::hot::store
+
+orders ::store/Map({name: "demo:orders"})
+
+seed-orders
+meta {on-event: "demo:seed-orders"}
+fn (event) {
+    seed [
+        {id: "ORD-001", status: "shipped", items: [{name: "Widget", qty: 2}], total: 59.97, tracking-url: "https://track.example.com/ABC123"},
+        {id: "ORD-002", status: "processing", items: [{name: "Gadget", qty: 5}], total: 149.95, tracking-url: null},
+        {id: "ORD-003", status: "pending", items: [{name: "Doohickey", qty: 1}], total: 24.99, tracking-url: null},
+    ]
+    map(seed, (o) { ::store/put(orders, o.id, o) })
+    {seeded: length(seed)}
+}
+
+lookup-order
+meta {
+    mcp: {service: "support"},
+    doc: "Look up order by ID"
+}
+fn (order-id: Str): Map {
+    ::store/get(orders, order-id)
+}
+
+cancel-order
+meta {
+    mcp: {service: "support"},
+    doc: "Cancel an order if not yet shipped"
+}
+fn (order-id: Str): Map {
+    order ::store/get(orders, order-id)
+    if(eq(order.status, "shipped"), fail("Cannot cancel shipped order"))
+    ::store/put(orders, order-id, {...order, status: "cancelled"})
+    {id: order-id, status: "cancelled"}
+}

@@ -1,0 +1,361 @@
+::discord::interactions ns
+
+api-request ::discord::api/request
+HttpError ::discord::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Interaction Responses
+// ============================================================================
+// When Discord sends an interaction (slash command, button, etc.), your
+// endpoint must respond within 3 seconds. These functions send that response.
+//
+// Response types:
+//   1 = PONG (for ping)
+//   4 = CHANNEL_MESSAGE_WITH_SOURCE (send a message)
+//   5 = DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE (ack, edit later)
+//   6 = DEFERRED_UPDATE_MESSAGE (for components, ack, edit later)
+//   7 = UPDATE_MESSAGE (for components, edit the original)
+//   8 = APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
+//   9 = MODAL
+
+CreateInteractionResponseRequest type {
+  interaction_id: Str,
+  interaction_token: Str,
+  type: Int,
+  data: Map?
+}
+
+create-interaction-response
+meta {
+    doc: """
+POST /interactions/{interaction_id}/{interaction_token}/callback - Respond to an interaction. Must be called within 3 seconds. `type` determines the response behavior (4=message, 5=deferred, 7=update).
+
+**Example**
+
+```hot
+::interactions ::discord::interactions
+
+// Reply to a slash command
+::interactions/create-interaction-response(::interactions/CreateInteractionResponseRequest({
+  interaction_id: event.id,
+  interaction_token: event.token,
+  type: 4,
+  data: {content: "Hello from Hot!"}
+}))
+
+// Defer a response (show "thinking..." indicator, edit later)
+::interactions/create-interaction-response(::interactions/CreateInteractionResponseRequest({
+  interaction_id: event.id,
+  interaction_token: event.token,
+  type: 5
+}))
+```
+"""
+}
+fn (request: CreateInteractionResponseRequest): Bool {
+  body {
+    type: request.type,
+    data: request.data
+  }
+
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method: "POST",
+    url: `${::discord::core/BASE_URL}/interactions/${request.interaction_id}/${request.interaction_token}/callback`,
+    headers: {Content-Type: "application/json"},
+    body: to-json(untype(body))
+  }))
+  if(is-ok-response(response), true, err(HttpError(response)))
+}
+
+// ============================================================================
+// Followup Messages (via webhook-style endpoints with application_id)
+// ============================================================================
+
+GetOriginalInteractionResponseRequest type {
+  application_id: Str,
+  interaction_token: Str
+}
+
+get-original-interaction-response
+meta {
+    doc: """GET /webhooks/{application_id}/{interaction_token}/messages/@original - Get the original interaction response message."""
+}
+fn (request: GetOriginalInteractionResponseRequest): Map {
+  response api-request("GET", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/@original`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+EditOriginalInteractionResponseRequest type {
+  application_id: Str,
+  interaction_token: Str,
+  content: Str?,
+  embeds: Vec<Map>?,
+  allowed_mentions: Map?,
+  components: Vec<Map>?
+}
+
+edit-original-interaction-response
+meta {
+    doc: """
+PATCH /webhooks/{application_id}/{interaction_token}/messages/@original - Edit the original interaction response. Use this after sending a deferred response (type 5) to provide the actual content.
+
+**Example**
+
+```hot
+::interactions ::discord::interactions
+
+// After deferring, edit with the actual response
+::interactions/edit-original-interaction-response(::interactions/EditOriginalInteractionResponseRequest({
+  application_id: "123456789",
+  interaction_token: event.token,
+  content: "Here's your result after processing!"
+}))
+```
+"""
+}
+fn (request: EditOriginalInteractionResponseRequest): Map {
+  body merge({}, {
+    content: request.content,
+    embeds: request.embeds,
+    allowed_mentions: request.allowed_mentions,
+    components: request.components
+  })
+  response api-request("PATCH", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/@original`, {}, body)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+DeleteOriginalInteractionResponseRequest type {
+  application_id: Str,
+  interaction_token: Str
+}
+
+delete-original-interaction-response
+meta {
+    doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/@original - Delete the original interaction response."""
+}
+fn (request: DeleteOriginalInteractionResponseRequest): Bool {
+  response api-request("DELETE", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/@original`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}
+
+CreateFollowupMessageRequest type {
+  application_id: Str,
+  interaction_token: Str,
+  content: Str?,
+  tts: Bool?,
+  embeds: Vec<Map>?,
+  allowed_mentions: Map?,
+  components: Vec<Map>?,
+  flags: Int?
+}
+
+create-followup-message
+meta {
+    doc: """POST /webhooks/{application_id}/{interaction_token} - Create a followup message for an interaction. Set `flags: 64` for an ephemeral message (only visible to the user)."""
+}
+fn (request: CreateFollowupMessageRequest): Map {
+  body merge({}, {
+    content: request.content,
+    tts: request.tts,
+    embeds: request.embeds,
+    allowed_mentions: request.allowed_mentions,
+    components: request.components,
+    flags: request.flags
+  })
+  response api-request("POST", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}`, {}, body)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+EditFollowupMessageRequest type {
+  application_id: Str,
+  interaction_token: Str,
+  message_id: Str,
+  content: Str?,
+  embeds: Vec<Map>?,
+  allowed_mentions: Map?,
+  components: Vec<Map>?
+}
+
+edit-followup-message
+meta {
+    doc: """PATCH /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Edit a followup message."""
+}
+fn (request: EditFollowupMessageRequest): Map {
+  body merge({}, {
+    content: request.content,
+    embeds: request.embeds,
+    allowed_mentions: request.allowed_mentions,
+    components: request.components
+  })
+  response api-request("PATCH", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/${request.message_id}`, {}, body)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+DeleteFollowupMessageRequest type {
+  application_id: Str,
+  interaction_token: Str,
+  message_id: Str
+}
+
+delete-followup-message
+meta {
+    doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Delete a followup message."""
+}
+fn (request: DeleteFollowupMessageRequest): Bool {
+  response api-request("DELETE", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/${request.message_id}`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}
+
+// ============================================================================
+// Application Commands (Slash Commands)
+// ============================================================================
+
+GetGlobalCommandsRequest type {
+  application_id: Str,
+  with_localizations: Bool?
+}
+
+get-global-commands
+meta {
+    doc: """GET /applications/{application_id}/commands - List all global application commands. These are available in every guild the app is installed in."""
+}
+fn (request: GetGlobalCommandsRequest): Vec<Map> {
+  response api-request("GET", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands?with_localizations=${or(request.with_localizations, "")}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+CreateGlobalCommandRequest type {
+  application_id: Str,
+  name: Str,
+  description: Str?,
+  options: Vec<Map>?,
+  type: Int?,
+  dm_permission: Bool?,
+  default_member_permissions: Str?,
+  nsfw: Bool?
+}
+
+create-global-command
+meta {
+    doc: """
+POST /applications/{application_id}/commands - Create a global slash command. Takes up to 1 hour to propagate. `type`: 1=CHAT_INPUT (slash), 2=USER (context menu), 3=MESSAGE (context menu).
+
+**Example**
+
+```hot
+::interactions ::discord::interactions
+
+::interactions/create-global-command(::interactions/CreateGlobalCommandRequest({
+  application_id: "123456789",
+  name: "hello",
+  description: "Say hello from Hot!",
+  options: [{
+    name: "name",
+    description: "Who to greet",
+    type: 3,
+    required: false
+  }]
+}))
+```
+"""
+}
+fn (request: CreateGlobalCommandRequest): Map {
+  body merge({}, {
+    name: request.name,
+    description: request.description,
+    options: request.options,
+    type: request.type,
+    dm_permission: request.dm_permission,
+    default_member_permissions: request.default_member_permissions,
+    nsfw: request.nsfw
+  })
+  response api-request("POST", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands`, {}, body)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+BulkOverwriteGlobalCommandsRequest type {
+  application_id: Str,
+  commands: Vec<Map>
+}
+
+bulk-overwrite-global-commands
+meta {
+    doc: """PUT /applications/{application_id}/commands - Overwrite all global commands. This replaces the entire set. Useful for syncing commands on deploy."""
+}
+fn (request: BulkOverwriteGlobalCommandsRequest): Vec<Map> {
+  response api-request("PUT", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands`, {}, request.commands)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+DeleteGlobalCommandRequest type {
+  application_id: Str,
+  command_id: Str
+}
+
+delete-global-command
+meta {
+    doc: """DELETE /applications/{application_id}/commands/{command_id} - Delete a global command."""
+}
+fn (request: DeleteGlobalCommandRequest): Bool {
+  response api-request("DELETE", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands/${request.command_id}`)
+  if(is-ok-response(response), true, err(HttpError(response)))
+}
+
+GetGuildCommandsRequest type {
+  application_id: Str,
+  guild_id: Str,
+  with_localizations: Bool?
+}
+
+get-guild-commands
+meta {
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands - List application commands for a specific guild. Guild commands are available immediately (no propagation delay)."""
+}
+fn (request: GetGuildCommandsRequest): Vec<Map> {
+  response api-request("GET", `${::discord::core/BASE_URL}/applications/${request.application_id}/guilds/${request.guild_id}/commands?with_localizations=${or(request.with_localizations, "")}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+CreateGuildCommandRequest type {
+  application_id: Str,
+  guild_id: Str,
+  name: Str,
+  description: Str?,
+  options: Vec<Map>?,
+  type: Int?,
+  default_member_permissions: Str?,
+  nsfw: Bool?
+}
+
+create-guild-command
+meta {
+    doc: """POST /applications/{application_id}/guilds/{guild_id}/commands - Create a guild-specific command. Guild commands are available immediately (no 1-hour delay like globals)."""
+}
+fn (request: CreateGuildCommandRequest): Map {
+  body merge({}, {
+    name: request.name,
+    description: request.description,
+    options: request.options,
+    type: request.type,
+    default_member_permissions: request.default_member_permissions,
+    nsfw: request.nsfw
+  })
+  response api-request("POST", `${::discord::core/BASE_URL}/applications/${request.application_id}/guilds/${request.guild_id}/commands`, {}, body)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+BulkOverwriteGuildCommandsRequest type {
+  application_id: Str,
+  guild_id: Str,
+  commands: Vec<Map>
+}
+
+bulk-overwrite-guild-commands
+meta {
+    doc: """PUT /applications/{application_id}/guilds/{guild_id}/commands - Overwrite all guild commands. This replaces the entire set for the specified guild."""
+}
+fn (request: BulkOverwriteGuildCommandsRequest): Vec<Map> {
+  response api-request("PUT", `${::discord::core/BASE_URL}/applications/${request.application_id}/guilds/${request.guild_id}/commands`, {}, request.commands)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

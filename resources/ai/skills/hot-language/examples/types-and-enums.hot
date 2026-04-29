@@ -1,0 +1,374 @@
+// Types and enums examples
+::examples::types ns
+
+// ============================================
+// STRUCT TYPES
+// ============================================
+
+// Basic struct
+User type {
+    id: Str,
+    email: Str,
+    name: Str,
+    active: Bool
+}
+
+// Create instance (type name IS the constructor)
+alice User({
+    "id": "user-1",
+    "email": "alice@example.com",
+    "name": "Alice",
+    "active": true
+})
+
+// Access fields
+user-email alice.email
+user-name alice.name
+
+// ============================================
+// CUSTOM CONSTRUCTORS
+// ============================================
+
+// Type with custom constructor
+Point type fn (x: Int, y: Int): Point {
+    Point({"x": x, "y": y})
+}
+
+// Now use positional args
+origin Point(0, 0)
+p1 Point(10, 20)
+
+// Access fields
+x-coord p1.x
+y-coord p1.y
+
+// Constructor with validation
+PositiveInt type fn (n: Int): PositiveInt {
+    if(gt(n, 0),
+        ok(PositiveInt({"value": n})),
+        err("Must be positive"))
+}
+
+// ============================================
+// NESTED TYPES
+// ============================================
+
+Address type {
+    street: Str,
+    city: Str,
+    country: Str,
+    zip: Str
+}
+
+Company type {
+    name: Str,
+    address: Address,
+    employees: Vec<User>
+}
+
+acme Company({
+    "name": "Acme Corp",
+    "address": Address({
+        "street": "123 Main St",
+        "city": "Springfield",
+        "country": "USA",
+        "zip": "12345"
+    }),
+    "employees": [alice]
+})
+
+// Nested access
+company-city acme.address.city
+first-employee acme.employees[0]
+
+// ============================================
+// ENUM TYPES (SIMPLE)
+// ============================================
+
+// Simple enum without data
+Status enum {
+    Pending,
+    Active,
+    Suspended,
+    Deleted
+}
+
+// Create enum value
+user-status Status.Active
+
+// Compare
+is-active eq(user-status, Status.Active)
+
+// Match on enum
+describe-status fn match (s: Status): Str {
+    Status.Pending => { "Waiting for approval" }
+    Status.Active => { "Currently active" }
+    Status.Suspended => { "Temporarily suspended" }
+    Status.Deleted => { "Permanently removed" }
+}
+
+// ============================================
+// ENUM TYPES (WITH DATA)
+// ============================================
+
+// Define types for variants
+Circle type {
+    radius: Dec
+}
+
+Rectangle type {
+    width: Dec,
+    height: Dec
+}
+
+Triangle type {
+    base: Dec,
+    height: Dec
+}
+
+// Enum with typed variants
+Shape enum {
+    Circle(Circle),
+    Rectangle(Rectangle),
+    Triangle(Triangle),
+    Point  // Variant without data
+}
+
+// Create shapes
+circle Shape.Circle({radius: 5.0})
+rect Shape.Rectangle({width: 10.0, height: 20.0})
+tri Shape.Triangle({base: 6.0, height: 8.0})
+point Shape.Point
+
+// Access inner data (dot notation skips $val)
+circle-radius circle.radius  // 5.0
+rect-width rect.width        // 10.0
+
+// Calculate area using match (first matching arm wins)
+area fn match (shape: Shape): Dec {
+    Shape.Circle => { mul(3.14159, mul(shape.radius, shape.radius)) }
+    Shape.Rectangle => { mul(shape.width, shape.height) }
+    Shape.Triangle => { div(mul(shape.base, shape.height), 2.0) }
+    Shape.Point => { 0.0 }
+}
+
+// match-all: ALL matching arms execute, returns Map
+// The variant pattern becomes the key in the returned Map
+Trait enum { Flying, Swimming, Walking }
+
+describe-traits fn match-all (creature: Trait): Str {
+    Trait.Flying => { "can fly" }
+    Trait.Swimming => { "can swim" }
+    Trait.Walking => { "can walk" }
+}
+// describe-traits(Trait.Flying) returns {"Trait.Flying": "can fly"}
+
+// ============================================
+// EXHAUSTIVE MATCHING
+// ============================================
+
+// `match` on a closed enum must be exhaustive: every variant either has
+// its own arm or a `_` default catches the rest.
+//   - Missing variants → non-exhaustive-match
+//   - This is enforced at compile time, before the program ever runs.
+
+partial-status fn match (s: Status): Str {
+    Status.Active => { "active" }
+    _ => { "inactive" }   // covers Pending / Suspended / Deleted
+}
+
+// ============================================
+// OPEN ENUMS (EXTENSIBLE VARIANT UNIONS)
+// ============================================
+
+// `enum open` declares an extensible enum — any module can register a new
+// variant later via a `Source -> Enum.Variant` arrow. Useful for plugin
+// surfaces, extension points, or domains where the variant set genuinely
+// can't be enumerated up front.
+
+// Pure extension point — starts with no variants.
+Plugin enum open { }
+
+// Open enum with seed variants.
+Critter enum open { Hound, Tabby }
+
+// Bodyless arrow enrolls `Falcon` as the `Critter.Falcon` variant AND
+// synthesizes the constructor — no fn body needed because the payload
+// type IS the source type. This is the recommended form.
+Falcon type { species: Str, wingspan: Dec }
+Falcon -> Critter.Falcon
+
+// Role-shaped variant: the variant name (Scaly) need not match the
+// source type name (Gecko). Use this when you want a domain-specific
+// label that doesn't match the data type.
+Gecko type { length-cm: Dec }
+Gecko -> Critter.Scaly
+
+// Construct enrolled variants like any other.
+eagle Critter.Falcon({species: "Eagle", wingspan: 2.1})
+gecko Critter.Scaly({length-cm: 12.0})
+hound Critter.Hound                    // bare variant, no payload
+
+// Dot access transparently skips the variant `$val` wrapper.
+eagle-species eagle.species            // "Eagle"
+
+// `match` on an open enum REQUIRES a `_` default arm — the variant set
+// is unbounded, so the compiler can't enumerate it for you.
+//   - Missing default → open-enum-match-missing-default
+label-critter fn match (c: Critter): Str {
+    Critter.Hound => { "hound" }
+    Critter.Tabby => { "tabby" }
+    Critter.Falcon => { "falcon" }
+    Critter.Scaly => { "scaly" }
+    _ => { "unknown" }                  // required for open enums
+}
+
+// Declaring the same `(Source, Enum.Variant)` arrow twice in different
+// locations raises ambiguous-type-implementation citing both spans.
+//   Falcon -> Critter.Falcon          // (1) above
+//   Falcon -> Critter.Falcon          // would be ambiguous-type-implementation here
+
+// ============================================
+// LITERAL UNIONS
+// ============================================
+
+// A literal union is a type made up of specific literal values.
+// Members are values of their underlying primitive (Str, Int, Dec, Bool, Null).
+Fruit type "apple" | "banana" | "orange"
+Priority type 1 | 2 | 3
+
+// Closed literal unions cannot be extended.
+fav: Fruit "apple"
+high: Priority 3
+
+// ============================================
+// OPEN LITERAL UNIONS
+// ============================================
+
+// An `open` literal union may be extended by re-declaring it at top level.
+// The accumulated member set is what the type checker uses for compatibility.
+HttpMethod type open "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
+
+// Single-member extension: leading `|` makes the extension obvious.
+HttpMethod type open | "CONNECT"
+
+// Multi-member extension reads naturally without the leading pipe.
+HttpMethod type open "TRACE" | "OPTIONS"
+
+// Re-declaring with an existing member is a silent no-op (deduped),
+// not an error — "include this member" should be safe to repeat.
+HttpMethod type open | "GET"
+
+connect-method: HttpMethod "CONNECT"
+trace-method: HttpMethod "TRACE"
+
+// Rules:
+//   - Open ⇄ closed mismatch → open-literal-union-mismatch
+//   - Extensions must live at top level
+//   - `open` only applies to literal unions (`open` on a non-literal alias → open-literal-union-mismatch)
+//   - Cross-namespace short-name collisions are independent types
+
+// ============================================
+// RESULT TYPE (BUILT-IN ENUM)
+// ============================================
+
+// Result is a built-in enum: Ok(value) | Err(message)
+
+// Create results
+success ok(42)
+failure err("Something went wrong")
+
+// Check type
+check-ok is-ok(success)    // true
+check-err is-err(failure)  // true
+
+// Match on result
+handle-result fn match (r: Result): Str {
+    Result.Ok => { `Success: ${r}` }
+    Result.Err => { `Error: ${r}` }
+}
+
+// Chain results (return type is the Ok value type)
+divide fn (a: Int, b: Int): Int {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+
+divide-and-double fn (a: Int, b: Int): Int {
+    result divide(a, b)
+
+    match result {
+        Result.Ok => { ok(mul(result, 2)) }
+        Result.Err => { err(result) }
+        _ => { err("unexpected result shape") }
+    }
+}
+
+// ============================================
+// TYPE COERCION
+// ============================================
+
+// Define Date type
+Date type {
+    year: Int,
+    month: Int,
+    day: Int
+}
+
+// Define how Date converts to Str
+Date -> Str fn (d: Date): Str {
+    year-str Str(d.year)
+    month-str pad-left(Str(d.month), 2, "0")
+    day-str pad-left(Str(d.day), 2, "0")
+    `${year-str}-${month-str}-${day-str}`
+}
+
+// Define how Date converts to Int (YYYYMMDD format)
+Date -> Int fn (dt: Date): Int {
+    // Simplified: year * 10000 + month * 100 + day
+    year-part: Int mul(dt.year, 10000)
+    month-part: Int mul(dt.month, 100)
+    day-part: Int dt.day
+    result: Int add(month-part, day-part)
+    add(year-part, result)
+}
+
+// Now Date auto-converts where needed
+today Date({year: 2024, month: 1, day: 15})
+date-string `Today is ${today}`  // Uses Date -> Str
+date-int Int(today)              // Uses Date -> Int
+
+// ============================================
+// WORKING WITH ANY TYPE
+// ============================================
+
+// Identity function using Any
+identity fn (x: Any): Any { x }
+
+// Pair type with concrete types
+StringPair type {
+    first: Str,
+    second: Str
+}
+
+make-string-pair fn (a: Str, b: Str): StringPair {
+    StringPair({"first": a, "second": b})
+}
+
+// Result transformation
+map-result fn (r: Result, f: Fn): Any {
+    match r {
+        Result.Ok => { ok(f(r)) }
+        Result.Err => { err(r) }
+        _ => { err("unexpected result shape") }
+    }
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+pad-left fn (s: Str, len: Int, char: Str): Str {
+    if(gte(length(s), len),
+        s,
+        pad-left(concat(char, s), len, char))
+}

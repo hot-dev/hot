@@ -1,0 +1,17 @@
+::demo::screenshot ns
+
+capture
+meta {on-event: "page:capture"}
+fn (event) {
+    url or(event.data.url, "https://hot.dev/docs")
+    results parallel {
+        shot ::playwright/screenshot(url, {output: "hot://demo/page-screenshot.png"})
+        page ::playwright/scrape(url)
+    }
+    {
+        url: url,
+        screenshot: results.shot.url,
+        title: results.page.title,
+        text: slice(results.page.text, 0, 500),
+    }
+}

@@ -1,0 +1,89 @@
+::mcp::integration::prompts ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for MCP Prompts
+// =============================================================================
+// These tests require an MCP server.
+// Set MCP_TEST_SERVER_URL in .env (e.g. http://localhost:4681/mcp/local/my-service)
+
+::mcp ::mcp::client
+::prompts ::mcp::prompts
+::types ::mcp::types
+
+MCP_TEST_SERVER_URL ::hot::env/get("MCP_TEST_SERVER_URL", "")
+
+// Helper: initialize a session for each test
+init-session fn (): ::types/Session {
+  ::mcp/initialize(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    null
+  )
+}
+
+// -----------------------------------------------------------------------------
+// Prompt Listing
+// -----------------------------------------------------------------------------
+
+test-list-prompts
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  prompts ::prompts/list(session)
+
+  assert(gte(length(prompts), 0), "prompts/list should return a Vec (even if empty)")
+}
+
+test-list-prompts-page
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  page ::prompts/list-page(session, null)
+
+  assert(page.prompts, "list-page should return a map with prompts")
+  assert(gte(length(page.prompts), 0), "prompts should be a Vec")
+}
+
+test-list-all-prompts
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  all-prompts ::prompts/list-all(session)
+
+  assert(gte(length(all-prompts), 0), "list-all should return all prompts")
+}
+
+// -----------------------------------------------------------------------------
+// Prompt Retrieval
+// -----------------------------------------------------------------------------
+
+test-get-prompt
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session init-session()
+  prompts ::prompts/list(session)
+
+  if(gt(length(prompts), 0), {
+    prompt first(prompts)
+    println(`Getting prompt: ${prompt.name}`)
+
+    messages ::prompts/get-prompt(session, prompt.name, {})
+
+    assert(gt(length(messages), 0), "get-prompt should return at least one message")
+
+    message first(messages)
+    assert(message.role, "message should have a role")
+    assert(message.content, "message should have content")
+  }, {
+    println("No prompts available, skipping get-prompt test")
+  })
+}

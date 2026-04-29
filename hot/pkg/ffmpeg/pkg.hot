@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.ffmpeg {
+  name: "hot.dev/ffmpeg",
+  version: "1.1.0",
+  hot-min-version: "1.2.4",
+  description: "FFmpeg video/audio processing via Hot Box containers. Thumbnail extraction, transcoding, audio extraction, and media probing.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["media"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

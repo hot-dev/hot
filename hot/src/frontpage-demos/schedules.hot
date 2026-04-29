@@ -1,0 +1,18 @@
+::demo::schedules ns
+
+daily-report
+meta {
+    schedule: "every 2 minutes",
+    on-event: "demo:daily-report"
+}
+fn (event) {
+    stats {
+        users: {total: add(1000, rand-int(500)), new_today: add(10, rand-int(40))},
+        revenue: {today: add(5000, rand-int(3000)), mrr: add(42000, rand-int(8000))},
+    }
+
+    send("slack:post", {
+        channel: "#metrics",
+        text: `Users: ${stats.users.total} (+${stats.users.new_today} new) | Revenue: $${stats.revenue.today} | MRR: $${stats.revenue.mrr}`,
+    })
+}

@@ -1,0 +1,47 @@
+::postmark::activate ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+BounceInfoResponse type {
+    ID: Str?,
+    Type: Str?,
+    TypeCode: Int?,
+    Name: Str?,
+    Tag: Str?,
+    MessageID: Str?,
+    Description: Str?,
+    Details: Str?,
+    Email: Str?,
+    BouncedAt: Str?,
+    DumpAvailable: Bool?,
+    Inactive: Bool?,
+    CanActivate: Bool?,
+    Subject: Str?,
+    Content: Str?
+}
+
+BounceActivationResponse type {
+    Message: Str?,
+    Bounce: BounceInfoResponse?
+}
+
+ActivateBounceRequest type {
+  bounceid: Str
+}
+
+ActivateBounceResponse type {
+    Message: Str?,
+    Bounce: BounceInfoResponse?
+}
+
+
+activate-bounce
+meta {
+    doc: """Reactivate an email address that was deactivated due to a bounce, allowing future sends to that address."""
+}
+fn (request: ActivateBounceRequest): ActivateBounceResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/bounces/${request.bounceid}/activate`)
+  if(is-ok-response(response), ActivateBounceResponse(response.body), err(HttpError(response)))
+}

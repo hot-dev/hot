@@ -1,0 +1,122 @@
+<!-- Shared partial: Individual/Organization toggle + @ handle + auto-slug JS -->
+<!-- Expected variables: account_type (default "individual"), org_name, org_slug -->
+<!-- Used in: signup.html, claim_handle.html, orgs_new.html -->
+
+<div class="mb-6 p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+    <h3 class="text-sm font-semibold mb-3 text-gray-700 dark:text-gray-300">Account type</h3>
+
+    <!-- Individual / Organization toggle -->
+    <div class="flex gap-2 mb-4">
+        <label class="flex-1 relative">
+            <input type="radio" name="account_type" value="individual" class="peer sr-only" id="account_type_individual"
+                   {% if account_type != "organization" %}checked{% endif %}>
+            <div class="cursor-pointer text-center py-3 px-3 rounded-md border border-gray-300 dark:border-gray-700
+                        peer-checked:border-red-500 peer-checked:bg-red-50 dark:peer-checked:bg-red-900/20
+                        text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors">
+                Individual
+            </div>
+        </label>
+        <label class="flex-1 relative">
+            <input type="radio" name="account_type" value="organization" class="peer sr-only" id="account_type_organization"
+                   {% if account_type == "organization" %}checked{% endif %}>
+            <div class="cursor-pointer text-center py-3 px-3 rounded-md border border-gray-300 dark:border-gray-700
+                        peer-checked:border-red-500 peer-checked:bg-red-50 dark:peer-checked:bg-red-900/20
+                        text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors">
+                Organization
+            </div>
+        </label>
+    </div>
+
+    <!-- Organization name (only shown for organization type) -->
+    <div class="mb-4" id="org_name_field" style="{% if account_type != "organization" %}display:none{% endif %}">
+        <label for="org_name" class="block text-sm font-medium mb-2">Organization name</label>
+        <div class="relative">
+            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h8a2 2 0 012 2v12a1 1 0 110 2h-3a1 1 0 01-1-1v-2a1 1 0 00-1-1H9a1 1 0 00-1 1v2a1 1 0 01-1 1H4a1 1 0 110-2V4zm3 1h2v2H7V5zm2 4H7v2h2V9zm2-4h2v2h-2V5zm2 4h-2v2h2V9z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <input type="text" id="org_name" name="org_name" value="{{ org_name }}"
+                   class="font-mono w-full pl-10 pr-4 py-2 bg-white/50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 backdrop-blur-sm"
+                   placeholder="Acme Inc">
+        </div>
+    </div>
+
+    <!-- Handle / slug field (always shown) -->
+    <div>
+        <label for="org_slug" class="block text-sm font-medium mb-2">
+            <span id="handle_label">Handle</span>
+        </label>
+        <div class="flex items-center">
+            <span class="text-sm text-gray-500 dark:text-gray-400 mr-1 font-mono">@</span>
+            <input type="text" id="org_slug" name="org_slug" value="{{ org_slug }}"
+                   class="font-mono flex-1 px-3 py-2 bg-white/50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 backdrop-blur-sm"
+                   placeholder="your-handle" required pattern="[a-z0-9-]+"
+                   title="Lowercase letters, numbers, and hyphens only">
+        </div>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Lowercase letters, numbers, and hyphens only</p>
+    </div>
+</div>
+
+<script>
+(function() {
+    var individualRadio = document.getElementById('account_type_individual');
+    var orgRadio = document.getElementById('account_type_organization');
+    var orgNameField = document.getElementById('org_name_field');
+    var orgNameInput = document.getElementById('org_name');
+    var orgSlugInput = document.getElementById('org_slug');
+    var nameInput = document.getElementById('name');
+    var handleLabel = document.getElementById('handle_label');
+
+    function updateVisibility() {
+        var isOrg = orgRadio && orgRadio.checked;
+        if (orgNameField) {
+            orgNameField.style.display = isOrg ? '' : 'none';
+        }
+        if (orgNameInput) {
+            if (isOrg) {
+                orgNameInput.setAttribute('required', '');
+            } else {
+                orgNameInput.removeAttribute('required');
+            }
+        }
+        if (handleLabel) {
+            handleLabel.textContent = isOrg ? 'Organization handle' : 'Handle';
+        }
+    }
+
+    function slugify(text) {
+        return text.toLowerCase()
+            .replace(/[^a-z0-9\s\-]/g, '')
+            .replace(/\s+/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+    }
+
+    if (individualRadio) individualRadio.addEventListener('change', updateVisibility);
+    if (orgRadio) orgRadio.addEventListener('change', updateVisibility);
+
+    // Auto-generate slug from name input (for individual) or org_name input (for organization)
+    function autoSlug(sourceInput) {
+        if (sourceInput) {
+            sourceInput.addEventListener('input', function() {
+                if (!orgSlugInput.value || orgSlugInput.dataset.autoGenerated === 'true') {
+                    orgSlugInput.value = slugify(this.value);
+                    orgSlugInput.dataset.autoGenerated = 'true';
+                }
+            });
+        }
+    }
+
+    if (nameInput) autoSlug(nameInput);
+    if (orgNameInput) autoSlug(orgNameInput);
+
+    if (orgSlugInput) {
+        orgSlugInput.addEventListener('input', function() {
+            this.dataset.autoGenerated = 'false';
+        });
+    }
+
+    updateVisibility();
+})();
+</script>

@@ -1,0 +1,61 @@
+::ai::test::chat ns
+meta ["test"]
+
+::chat    ::ai::chat
+Provider  ::chat/Provider
+
+test-detect-anthropic
+meta ["test"] fn () {
+    assert-eq(Provider.Anthropic, ::chat/detect-provider("claude-sonnet-4-5"))
+    assert-eq(Provider.Anthropic, ::chat/detect-provider("claude-3-haiku"))
+    assert-eq(Provider.Anthropic, ::chat/detect-provider("claude-opus-4"))
+}
+
+test-detect-openai
+meta ["test"] fn () {
+    assert-eq(Provider.OpenAi, ::chat/detect-provider("gpt-4o"))
+    assert-eq(Provider.OpenAi, ::chat/detect-provider("gpt-4o-mini"))
+    assert-eq(Provider.OpenAi, ::chat/detect-provider("o3-mini"))
+    assert-eq(Provider.OpenAi, ::chat/detect-provider("o4-mini"))
+}
+
+test-detect-xai
+meta ["test"] fn () {
+    assert-eq(Provider.Xai, ::chat/detect-provider("grok-3"))
+    assert-eq(Provider.Xai, ::chat/detect-provider("grok-2"))
+}
+
+test-detect-gemini
+meta ["test"] fn () {
+    assert-eq(Provider.Gemini, ::chat/detect-provider("gemini-2.5-pro"))
+    assert-eq(Provider.Gemini, ::chat/detect-provider("gemini-2.0-flash"))
+}
+
+test-detect-case-insensitive
+meta ["test"] fn () {
+    assert-eq(Provider.Anthropic, ::chat/detect-provider("Claude-Sonnet-4-5"))
+    assert-eq(Provider.OpenAi, ::chat/detect-provider("GPT-4o"))
+}
+
+test-detect-unknown
+meta ["test"] fn () {
+    result ::chat/detect-provider("llama-3")
+    assert(is-err(result), "Unknown model should return Err")
+}
+
+test-provider-name
+meta ["test"] fn () {
+    assert-eq("Anthropic", ::chat/provider-name(Provider.Anthropic))
+    assert-eq("OpenAI", ::chat/provider-name(Provider.OpenAi))
+    assert-eq("xAI", ::chat/provider-name(Provider.Xai))
+    assert-eq("Google Gemini", ::chat/provider-name(Provider.Gemini))
+}
+
+test-chat-options
+meta ["test"] fn () {
+    dummy-fn fn (model: Str, msg: Str, sys: Str): Str { "mock response" }
+    opts ::chat/ChatOptions({chat-fn: dummy-fn, model: "claude-sonnet-4-5", system: "Be helpful."})
+    assert-eq("claude-sonnet-4-5", opts.model)
+    assert-eq("Be helpful.", opts.system)
+    assert-eq("mock response", opts.chat-fn("x", "y", "z"))
+}

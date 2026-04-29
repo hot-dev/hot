@@ -1,0 +1,43 @@
+::openai::upload ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+UploadCertificateRequest type {
+    name: Str?,
+    content: Str
+}
+
+Certificate type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+UploadCertificateRequest type {
+    name: Str?,
+    content: Str
+}
+
+UploadCertificateResponse type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+
+upload-certificate
+meta {
+    doc: """POST /organization/certificates - Upload a TLS certificate for the organization."""
+}
+fn (request: UploadCertificateRequest): UploadCertificateResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/certificates`, {}, request)
+  if(is-ok-response(response), UploadCertificateResponse(response.body), err(HttpError(response)))
+}

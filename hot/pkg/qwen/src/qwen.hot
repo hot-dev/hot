@@ -1,0 +1,16 @@
+::qwen ns
+
+// Qwen is hosted on Alibaba Cloud Model Studio (DashScope). The OpenAI-compatible
+// endpoint exposes Chat Completions, Models, Embeddings, Files, and Batches.
+//
+// See: https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview
+
+// Default (international / Singapore) OpenAI-compatible base URL.
+BASE_URL "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+// Mainland China base URL (alternative). Swap into context via the `qwen.base.url`
+// ctx var if you want to target the Beijing endpoint instead of Singapore.
+BASE_URL_CN "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+// Base URL for the (non-OpenAI-compatible subset of the) Responses / Conversations API.
+RESPONSES_BASE_URL "https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1"

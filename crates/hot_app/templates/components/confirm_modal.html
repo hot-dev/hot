@@ -1,0 +1,227 @@
+<!-- Reusable Confirm/Alert Modal Component -->
+<!-- Usage: showConfirm(title, message, onConfirm) or showAlert(title, message, type) -->
+<div id="confirmModal" class="fixed inset-0 z-50 hidden overflow-y-auto" aria-labelledby="confirm-modal-title" role="dialog" aria-modal="true">
+    <!-- Background backdrop -->
+    <div class="fixed inset-0 bg-gray-900/75 backdrop-blur-sm transition-opacity" aria-hidden="true" onclick="closeConfirmModal()"></div>
+
+    <!-- Modal panel -->
+    <div class="flex min-h-full items-center justify-center p-4">
+        <div class="relative transform overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-left shadow-xl transition-all w-full max-w-md">
+            <!-- Header -->
+            <div id="confirm-modal-header" class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                <div class="flex items-center">
+                    <!-- Icon container - changes based on modal type -->
+                    <div id="confirm-modal-icon" class="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center">
+                        <!-- Warning icon (default for confirm) -->
+                        <svg class="confirm-icon h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <!-- Error icon -->
+                        <svg class="error-icon h-6 w-6 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <!-- Success icon -->
+                        <svg class="success-icon h-6 w-6 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <!-- Info icon -->
+                        <svg class="info-icon h-6 w-6 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                    </div>
+                    <h3 class="ml-3 text-lg font-semibold text-gray-900 dark:text-white" id="confirm-modal-title">
+                        Confirm Action
+                    </h3>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div class="px-6 py-5">
+                <p id="confirm-modal-message" class="text-gray-700 dark:text-gray-300">
+                    Are you sure you want to proceed?
+                </p>
+            </div>
+
+            <!-- Footer / Actions -->
+            <div class="bg-gray-50 dark:bg-gray-900 px-6 py-4 flex items-center justify-end gap-3">
+                <button type="button" id="confirm-modal-cancel" onclick="closeConfirmModal(false)" class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-100 dark:hover:bg-[#222] transition-colors">
+                    Cancel
+                </button>
+                <button type="button" id="confirm-modal-confirm" onclick="closeConfirmModal(true)" class="px-4 py-2 text-sm font-medium text-white bg-hot-red-500 hover:bg-hot-red-600 rounded-md transition-colors">
+                    Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Modal state
+    let confirmModalCallback = null;
+    let confirmModalIsAlert = false;
+
+    /**
+     * Show a confirmation dialog
+     * @param {string} title - Modal title
+     * @param {string} message - Modal message
+     * @param {function} onConfirm - Callback when confirmed (optional, can also use returned Promise)
+     * @param {object} options - Optional settings { confirmText, cancelText, type }
+     * @returns {Promise<boolean>} - Resolves to true if confirmed, false if cancelled
+     */
+    function showConfirm(title, message, onConfirm = null, options = {}) {
+        return new Promise((resolve) => {
+            const modal = document.getElementById('confirmModal');
+            const titleEl = document.getElementById('confirm-modal-title');
+            const messageEl = document.getElementById('confirm-modal-message');
+            const confirmBtn = document.getElementById('confirm-modal-confirm');
+            const cancelBtn = document.getElementById('confirm-modal-cancel');
+            const iconContainer = document.getElementById('confirm-modal-icon');
+
+            if (!modal) return resolve(false);
+
+            // Set content
+            titleEl.textContent = title;
+            messageEl.textContent = message;
+
+            // Configure buttons
+            confirmBtn.textContent = options.confirmText || 'Confirm';
+            cancelBtn.textContent = options.cancelText || 'Cancel';
+            confirmBtn.classList.remove('hidden');
+            cancelBtn.classList.remove('hidden');
+
+            // Set icon style based on type
+            const type = options.type || 'warning';
+            setModalType(type);
+
+            // Store callback
+            confirmModalCallback = (confirmed) => {
+                if (confirmed && onConfirm) onConfirm();
+                resolve(confirmed);
+            };
+            confirmModalIsAlert = false;
+
+            // Show modal
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+
+            // Focus confirm button
+            setTimeout(() => confirmBtn.focus(), 50);
+        });
+    }
+
+    /**
+     * Show an alert dialog (single OK button)
+     * @param {string} title - Modal title
+     * @param {string} message - Modal message
+     * @param {string} type - Alert type: 'error', 'success', 'info', 'warning'
+     * @returns {Promise<void>}
+     */
+    function showAlert(title, message, type = 'info') {
+        return new Promise((resolve) => {
+            const modal = document.getElementById('confirmModal');
+            const titleEl = document.getElementById('confirm-modal-title');
+            const messageEl = document.getElementById('confirm-modal-message');
+            const confirmBtn = document.getElementById('confirm-modal-confirm');
+            const cancelBtn = document.getElementById('confirm-modal-cancel');
+
+            if (!modal) return resolve();
+
+            // Set content
+            titleEl.textContent = title;
+            messageEl.textContent = message;
+
+            // Configure as alert (single button)
+            confirmBtn.textContent = 'OK';
+            confirmBtn.classList.remove('hidden');
+            cancelBtn.classList.add('hidden');
+
+            // Set icon style based on type
+            setModalType(type);
+
+            // Store callback
+            confirmModalCallback = () => resolve();
+            confirmModalIsAlert = true;
+
+            // Show modal
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+
+            // Focus OK button
+            setTimeout(() => confirmBtn.focus(), 50);
+        });
+    }
+
+    /**
+     * Set the modal icon and colors based on type
+     */
+    function setModalType(type) {
+        const iconContainer = document.getElementById('confirm-modal-icon');
+        const confirmBtn = document.getElementById('confirm-modal-confirm');
+
+        // Hide all icons first
+        iconContainer.querySelectorAll('svg').forEach(svg => svg.classList.add('hidden'));
+
+        // Reset icon container classes
+        iconContainer.className = 'flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center';
+
+        // Reset button classes
+        confirmBtn.className = 'px-4 py-2 text-sm font-medium text-white rounded-md transition-colors';
+
+        switch (type) {
+            case 'error':
+                iconContainer.classList.add('bg-red-100', 'dark:bg-red-900/30');
+                iconContainer.querySelector('.error-icon').classList.remove('hidden');
+                iconContainer.querySelector('.error-icon').classList.add('text-red-600', 'dark:text-red-400');
+                confirmBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+                break;
+            case 'success':
+                iconContainer.classList.add('bg-green-100', 'dark:bg-green-900/30');
+                iconContainer.querySelector('.success-icon').classList.remove('hidden');
+                iconContainer.querySelector('.success-icon').classList.add('text-green-600', 'dark:text-green-400');
+                confirmBtn.classList.add('bg-green-600', 'hover:bg-green-700');
+                break;
+            case 'info':
+                iconContainer.classList.add('bg-blue-100', 'dark:bg-blue-900/30');
+                iconContainer.querySelector('.info-icon').classList.remove('hidden');
+                iconContainer.querySelector('.info-icon').classList.add('text-blue-600', 'dark:text-blue-400');
+                confirmBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+                break;
+            case 'warning':
+            default:
+                iconContainer.classList.add('bg-red-100', 'dark:bg-red-900/30');
+                iconContainer.querySelector('.confirm-icon').classList.remove('hidden');
+                iconContainer.querySelector('.confirm-icon').classList.add('text-red-600', 'dark:text-red-400');
+                confirmBtn.classList.add('bg-hot-red-500', 'hover:bg-hot-red-600');
+                break;
+        }
+    }
+
+    /**
+     * Close the confirm modal
+     * @param {boolean} confirmed - Whether the action was confirmed
+     */
+    function closeConfirmModal(confirmed = false) {
+        const modal = document.getElementById('confirmModal');
+        if (modal) {
+            modal.classList.add('hidden');
+            document.body.style.overflow = '';
+
+            if (confirmModalCallback) {
+                confirmModalCallback(confirmed);
+                confirmModalCallback = null;
+            }
+        }
+    }
+
+    // Handle keyboard events
+    document.addEventListener('keydown', function(event) {
+        const modal = document.getElementById('confirmModal');
+        if (modal && !modal.classList.contains('hidden')) {
+            if (event.key === 'Escape') {
+                closeConfirmModal(false);
+            } else if (event.key === 'Enter') {
+                closeConfirmModal(true);
+            }
+        }
+    });
+</script>

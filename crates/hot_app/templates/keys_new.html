@@ -1,0 +1,400 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2 sm:py-4 px-2 sm:px-0">
+    <div class="max-w-3xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 sm:p-6">
+            {% if error_message != "" %}
+            <div class="mb-4 sm:mb-6 p-3 bg-red-100 dark:bg-red-900/20 border border-red-500 dark:border-red-700 text-xs sm:text-sm text-red-700 dark:text-red-300 rounded-md">
+                {{ error_message }}
+            </div>
+            {% endif %}
+
+            <!-- Generated API Key Display -->
+            <div class="mb-6 sm:mb-8 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg p-4 sm:p-6">
+                <div class="flex items-start">
+                    <div class="flex-shrink-0">
+                        <svg class="h-6 w-6 text-blue-500 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m0 0a2 2 0 012 2v6a2 2 0 01-2 2H7a2 2 0 01-2-2V9a2 2 0 012-2m0 0V7a2 2 0 012-2h4zm-6 6h6m-6 4h6"></path>
+                        </svg>
+                    </div>
+                    <div class="ml-3 flex-1">
+                        <h3 class="text-base sm:text-lg font-medium text-blue-900 dark:text-blue-100 mb-2">Your New API Key</h3>
+                        <p class="text-xs sm:text-sm text-blue-700 dark:text-blue-300 mb-3 sm:mb-4">
+                            Copy this key now. For security reasons, you won't be able to see it again after you create it.
+                        </p>
+                        <div class="bg-white dark:bg-gray-900 border border-blue-300 dark:border-blue-600 rounded-md p-2 sm:p-3">
+                            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                <div class="flex-1 min-w-0 overflow-x-auto">
+                                    <code class="text-xs sm:text-sm font-mono text-gray-900 dark:text-gray-100 break-all">{{ generated_key }}</code>
+                                </div>
+                                <button onclick="copyApiKey()" class="flex-shrink-0 self-start sm:self-auto bg-blue-100 dark:bg-blue-800 hover:bg-blue-200 dark:hover:bg-blue-700 text-blue-800 dark:text-blue-200 px-3 py-1 rounded text-xs font-medium transition-colors duration-200">
+                                    <span id="copy-text">Copy</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- API Key Form -->
+            <form method="POST" action="/keys/new">
+                <!-- Hidden field to pass the generated API key ID -->
+                <input type="hidden" name="api_key_id" value="{{ api_key_id }}">
+
+                <div class="space-y-4 sm:space-y-6">
+                    <div>
+                        <label for="description" class="block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Description <span class="text-red-500">*</span>
+                        </label>
+                        <input
+                            type="text"
+                            name="description"
+                            id="description"
+                            value="{{ description }}"
+                            required
+                            class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm text-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white"
+                            placeholder="e.g., Production CI/CD Pipeline"
+                        >
+                        <p class="mt-1 text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+                            Give your API key a descriptive name to help you identify its purpose.
+                        </p>
+                    </div>
+
+                    <!-- Access Level -->
+                    <div x-data="permissionBuilder()">
+                        <fieldset>
+                            <legend class="text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Access Level</legend>
+                            <div class="space-y-3">
+                                <div class="flex items-center">
+                                    <input id="access-full" name="access_level" type="radio" value="full"
+                                        x-model="accessLevel"
+                                        class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
+                                    <label for="access-full" class="ml-3 block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        Full Access
+                                        <span class="block text-xs text-gray-500 dark:text-gray-400">Unrestricted access to all API endpoints</span>
+                                    </label>
+                                </div>
+                                <div class="flex items-center">
+                                    <input id="access-restricted" name="access_level" type="radio" value="restricted"
+                                        x-model="accessLevel"
+                                        class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
+                                    <label for="access-restricted" class="ml-3 block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        Restricted
+                                        <span class="block text-xs text-gray-500 dark:text-gray-400">Limit access to specific resources and actions</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </fieldset>
+
+                        <!-- Permissions Builder (shown when restricted) -->
+                        <div x-show="accessLevel === 'restricted'" x-cloak class="mt-4 ml-7">
+                            <input type="hidden" name="permissions" :value="permissionsToJSON()">
+
+                            <!-- Presets -->
+                            <div class="mb-3">
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <label class="block text-xs font-medium text-gray-500 dark:text-gray-400">Quick Presets</label>
+                                    <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
+                                </div>
+                                <div class="flex flex-wrap gap-1.5">
+                                    <button type="button" @click="applyPreset('read-only')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Read Only</button>
+                                    <button type="button" @click="applyPreset('mcp')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">MCP Tools</button>
+                                    <button type="button" @click="applyPreset('webhooks')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Webhooks</button>
+                                    <button type="button" @click="applyPreset('streams')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Streams</button>
+                                    <button type="button" @click="applyPreset('events')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Events</button>
+                                    <button type="button" @click="applyPreset('runs')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Runs</button>
+                                    <button type="button" @click="applyPreset('build-deploy')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Build/Deploy</button>
+                                </div>
+                            </div>
+
+                            <!-- Rule Builder -->
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400">Permission Rules</label>
+                                <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-600 dark:text-hot-red-400 hover:text-hot-red-700 dark:hover:text-hot-red-300 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+                                    </svg>
+                                    Add Rule
+                                </button>
+                            </div>
+
+                            <template x-if="rules.length === 0">
+                                <div class="text-sm text-gray-500 dark:text-gray-400 italic border border-dashed border-gray-300 dark:border-gray-600 rounded-md px-4 py-6 text-center">
+                                    No permission rules. Click "Add Rule" or use a preset above.
+                                </div>
+                            </template>
+
+                            <template x-if="rules.length > 0">
+                                <div class="border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden">
+                                    <template x-for="(rule, idx) in rules" :key="idx">
+                                        <div class="flex flex-col sm:flex-row sm:items-start gap-2 px-3 py-2.5 bg-white dark:bg-gray-900" :class="idx > 0 && 'border-t border-gray-200 dark:border-gray-700'">
+                                            <div class="sm:w-36 shrink-0">
+                                                <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Resource</label>
+                                                <select x-model="rule.type" @change="onTypeChange(rule)" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
+                                                    <option value="*">All (*)</option>
+                                                    <option value="mcp">mcp</option>
+                                                    <option value="webhook">webhook</option>
+                                                    <option value="stream">stream</option>
+                                                    <option value="event">event</option>
+                                                    <option value="run">run</option>
+                                                    <option value="project">project</option>
+                                                    <option value="build">build</option>
+                                                    <option value="context">context</option>
+                                                    <option value="key">key</option>
+                                                    <option value="session">session</option>
+                                                    <option value="env">env</option>
+                                                </select>
+                                            </div>
+                                            <div class="sm:w-48 shrink-0">
+                                                <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Path</label>
+                                                <template x-if="pathOptions(rule.type)">
+                                                    <select x-model="rule.path" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
+                                                        <option value="*">* (all)</option>
+                                                        <template x-for="group in pathOptions(rule.type)" :key="group.service">
+                                                            <optgroup :label="group.service">
+                                                                <option :value="group.service + '/*'" x-text="group.service + '/*'"></option>
+                                                                <template x-for="item in group.items" :key="item">
+                                                                    <option :value="group.service + '/' + item" x-text="group.service + '/' + item"></option>
+                                                                </template>
+                                                            </optgroup>
+                                                        </template>
+                                                    </select>
+                                                </template>
+                                                <template x-if="!pathOptions(rule.type)">
+                                                    <input type="text" x-model="rule.path" placeholder="*" :disabled="rule.type === '*'" :class="rule.type === '*' && 'opacity-50 cursor-not-allowed'" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
+                                                </template>
+                                            </div>
+                                            <div class="flex-1 min-w-0">
+                                                <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Actions</label>
+                                                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
+                                                    <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                                        <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-500 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                        <span class="text-xs font-medium">All</span>
+                                                    </label>
+                                                    <template x-for="action in validActions(rule.type)" :key="action">
+                                                        <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                                                            <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-500 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                            <span class="text-xs" x-text="action"></span>
+                                                        </label>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <div class="shrink-0 flex items-start">
+                                                <label x-show="idx === 0" class="block text-xs font-medium text-transparent mb-1 select-none">&nbsp;</label>
+                                                <button type="button" @click="rules.splice(idx, 1)" class="p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors" title="Remove rule">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                            <template x-if="rules.some(r => r.actions.length === 0)">
+                                <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                                    Rules with no actions selected will be ignored.
+                                </p>
+                            </template>
+
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                Empty means no access. Use <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">*</code> in path for wildcard matching.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3 sm:p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                                </svg>
+                            </div>
+                            <div class="ml-3">
+                                <h3 class="text-xs sm:text-sm font-medium text-yellow-800 dark:text-yellow-200">Security Notice</h3>
+                                <div class="mt-2 text-xs sm:text-sm text-yellow-700 dark:text-yellow-300">
+                                    <ul class="list-disc pl-4 sm:pl-5 space-y-1">
+                                        <li>Store API keys securely and never commit them to version control</li>
+                                        <li>Use environment variables or secure secret management systems</li>
+                                        <li>Restrict key access to only the permissions needed</li>
+                                        <li>Disable or delete keys that are no longer needed</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                        <a href="/keys" class="inline-flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-xs sm:text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-200">
+                            Cancel
+                        </a>
+                        <button type="submit" class="inline-flex items-center justify-center px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                            </svg>
+                            Create API Key
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <!-- API Key Usage Documentation -->
+        <div class="mt-6 sm:mt-8 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 sm:p-6">
+            <h3 class="text-base sm:text-lg font-medium text-gray-900 dark:text-white mb-3 sm:mb-4">Using Your API Key</h3>
+            <div class="prose prose-sm text-gray-600 dark:text-gray-300">
+                <p class="text-xs sm:text-sm">Include your API key in the Authorization header of HTTP requests:</p>
+                <pre class="bg-gray-100 dark:bg-gray-900 p-2 sm:p-3 rounded text-xs font-mono mt-2 overflow-x-auto text-gray-800 dark:text-gray-200">curl -H "Authorization: Bearer YOUR_API_KEY" \
+     -H "Content-Type: application/json" \
+     {{ page_context.api_url }}/v1/runs</pre>
+
+                <h4 class="text-sm sm:text-base font-medium text-gray-900 dark:text-white mt-4 sm:mt-6 mb-2">Authentication</h4>
+                <p class="text-xs sm:text-sm">All API requests must include a valid API key. Without proper authentication, requests will return a 401 Unauthorized error.</p>
+
+                <h4 class="text-sm sm:text-base font-medium text-gray-900 dark:text-white mt-4 sm:mt-6 mb-2">Rate Limits</h4>
+                <p class="text-xs sm:text-sm">API keys are subject to rate limiting. If you exceed the limits, you'll receive a 429 Too Many Requests response.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function copyApiKey() {
+    const apiKey = "{{ generated_key }}";
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(apiKey).then(() => {
+            const copyText = document.getElementById('copy-text');
+            copyText.textContent = 'Copied!';
+            setTimeout(() => {
+                copyText.textContent = 'Copy';
+            }, 2000);
+        }).catch(err => {
+            console.error('Failed to copy: ', err);
+            fallbackCopy(apiKey);
+        });
+    } else {
+        fallbackCopy(apiKey);
+    }
+}
+
+function fallbackCopy(text) {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+
+    try {
+        document.execCommand('copy');
+        const copyText = document.getElementById('copy-text');
+        copyText.textContent = 'Copied!';
+        setTimeout(() => {
+            copyText.textContent = 'Copy';
+        }, 2000);
+    } catch (err) {
+        console.error('Fallback copy failed: ', err);
+    }
+
+    document.body.removeChild(textArea);
+}
+
+function permissionBuilder() {
+    const VALID_ACTIONS = {
+        '*':       ['create', 'read', 'update', 'delete', 'execute'],
+        'mcp':     ['execute'],
+        'webhook': ['execute'],
+        'stream':  ['read'],
+        'event':   ['create', 'read'],
+        'run':     ['read'],
+        'project': ['create', 'read', 'update', 'delete'],
+        'build':   ['create', 'read', 'execute'],
+        'context': ['create', 'read', 'update', 'delete'],
+        'key':     ['create', 'read', 'update', 'delete'],
+        'session': ['create', 'read', 'delete'],
+        'env':     ['read'],
+    };
+
+    const PRESETS = {
+        'read-only': [{ type: '*', path: '*', actions: ['read'] }],
+        'mcp': [{ type: 'mcp', path: '*', actions: ['execute'] }],
+        'events': [{ type: 'event', path: '*', actions: ['create', 'read'] }],
+        'streams': [{ type: 'stream', path: '*', actions: ['read'] }],
+        'runs': [{ type: 'run', path: '*', actions: ['read'] }],
+        'build-deploy': [{ type: 'build', path: '*', actions: ['create', 'read', 'execute'] }],
+        'webhooks': [{ type: 'webhook', path: '*', actions: ['execute'] }],
+    };
+
+    const PATH_OPTIONS = {
+        'mcp': {{ mcp_tools_json|safe }},
+        'webhook': {{ webhooks_json|safe }},
+    };
+
+    return {
+        accessLevel: '{{ access_level }}',
+        rules: [],
+        validActions(type) {
+            return VALID_ACTIONS[type] || VALID_ACTIONS['*'];
+        },
+        pathOptions(type) {
+            return PATH_OPTIONS[type] || null;
+        },
+        addRule() {
+            this.rules.push({ type: 'mcp', path: '*', actions: ['execute'] });
+        },
+        applyPreset(name) {
+            const preset = PRESETS[name];
+            if (!preset) return;
+            for (const pr of preset) {
+                const path = pr.type === '*' ? '*' : (pr.path || '*');
+                const existing = this.rules.find(r => r.type === pr.type && r.path === path);
+                if (existing) {
+                    for (const action of pr.actions) {
+                        if (!existing.actions.includes(action) && !existing.actions.includes('*')) {
+                            existing.actions.push(action);
+                        }
+                    }
+                } else {
+                    this.rules.push({ type: pr.type, path: path, actions: [...pr.actions] });
+                }
+            }
+        },
+        onTypeChange(rule) {
+            const valid = this.validActions(rule.type);
+            rule.actions = [...valid];
+            rule.path = '*';
+        },
+        toggleAllActions(rule, checked) {
+            if (checked) {
+                rule.actions = ['*'];
+            } else {
+                rule.actions = [];
+            }
+        },
+        toggleAction(rule, action, checked) {
+            rule.actions = rule.actions.filter(a => a !== '*');
+            if (checked) {
+                if (!rule.actions.includes(action)) rule.actions.push(action);
+            } else {
+                rule.actions = rule.actions.filter(a => a !== action);
+            }
+        },
+        permissionsToJSON() {
+            if (this.accessLevel !== 'restricted') return '';
+            const obj = {};
+            for (const rule of this.rules) {
+                if (rule.actions.length === 0) continue;
+                const path = rule.type === '*' ? '*' : (rule.path.trim() || '*');
+                const key = rule.type + ':' + path;
+                obj[key] = [...rule.actions];
+            }
+            return Object.keys(obj).length > 0 ? JSON.stringify(obj) : '';
+        },
+    };
+}
+</script>
+{% endblock %}

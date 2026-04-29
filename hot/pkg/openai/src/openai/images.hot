@@ -1,0 +1,412 @@
+::openai::images ns
+
+// ============================================================================
+// OpenAI Image Generation API (DALL-E)
+// https://platform.openai.com/docs/api-reference/images
+// ============================================================================
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+FileMeta ::hot::file/FileMeta
+write-file-bytes ::hot::file/write-file-bytes
+
+// Import media types
+Image ::hot::media/Image
+
+// Import AI media types (wraps pure media with AI generation metadata)
+AIMedia ::ai::media/AIMedia
+AIImage ::ai::media/AIImage
+AIMediaBatch ::ai::media/AIMediaBatch
+AIMediaError ::ai::media/AIMediaError
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Literal union for response formats
+ResponseFormat type "url" | "b64_json"
+
+// Literal union for image quality
+Quality type "standard" | "hd" | "low" | "medium" | "high" | "auto"
+
+// Literal union for image style
+Style type "vivid" | "natural"
+
+// Literal union for image sizes
+Size type "auto" | "1024x1024" | "1536x1024" | "1024x1536" | "256x256" | "512x512" | "1792x1024" | "1024x1792"
+
+// Image generation request
+CreateImageRequest type {
+    prompt: Str,
+    model: Str?,
+    n: Int?,
+    quality: Quality?,
+    response_format: ResponseFormat?,
+    size: Size?,
+    style: Style?,
+    user: Str?
+}
+
+// Image edit request
+EditImageRequest type {
+    image: Str,
+    prompt: Str,
+    mask: Str?,
+    model: Str?,
+    n: Int?,
+    size: Str?,
+    response_format: ResponseFormat?,
+    user: Str?
+}
+
+// Image variation request
+VariationImageRequest type {
+    image: Str,
+    model: Str?,
+    n: Int?,
+    size: Str?,
+    response_format: ResponseFormat?,
+    user: Str?
+}
+
+// Generated image data from API
+ApiImageData type {
+    url: Str?,
+    b64_json: Str?,
+    revised_prompt: Str?
+}
+
+// Image generation response from API
+CreateImageResponse type {
+    created: Int,
+    data: Vec<ApiImageData>
+}
+
+// ============================================================================
+// API Functions
+// ============================================================================
+
+generate
+meta {
+    doc: """
+    Generate images from a text prompt using DALL-E.
+
+    Returns a CreateImageResponse with a `data` array containing either URLs or base64 data. Defaults to DALL-E 3 if no model is specified.
+
+    **Example - URL response (default)**
+
+    ```hot
+    response ::openai::images/generate(CreateImageRequest({
+        prompt: "A simple red circle on a white background",
+        model: "dall-e-2",
+        size: "256x256",
+        n: 1
+    }))
+
+    image response.data[0]
+    image.url // => "https://oaidalleapi..."
+    ```
+
+    **Example - Base64 response**
+
+    ```hot
+    response ::openai::images/generate(CreateImageRequest({
+        prompt: "A cat wearing a spacesuit",
+        model: "dall-e-3",
+        response_format: "b64_json"
+    }))
+
+    base64-data response.data[0].b64_json
+    ```
+    """
+}
+fn (request: CreateImageRequest): CreateImageResponse | HttpError {
+    // Default to dall-e-3 model if not specified
+    final-request cond {
+        is-null(request.model) => { {...untype(request), model: "dall-e-3"} }
+        => { request }
+    }
+
+    response api-request("POST", `${::openai/BASE_URL}/images/generations`, {}, final-request)
+    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+}
+
+edit
+meta {
+    doc: """
+    Edit an image with a prompt (inpainting).
+
+    **Example**
+    ```hot
+    response edit({
+        image: "path/to/image.png",
+        prompt: "Add a red hat to the person",
+        mask: "path/to/mask.png"
+    })
+    ```
+    """
+}
+fn (request: EditImageRequest): CreateImageResponse | HttpError {
+    response api-request("POST", `${::openai/BASE_URL}/images/edits`, {}, request)
+    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+}
+
+variation
+meta {
+    doc: """
+    Create variations of an image.
+
+    **Example**
+    ```hot
+    response variation({
+        image: "path/to/image.png",
+        n: 3
+    })
+    ```
+    """
+}
+fn (request: VariationImageRequest): CreateImageResponse | HttpError {
+    response api-request("POST", `${::openai/BASE_URL}/images/variations`, {}, request)
+    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// File Integration - Returns Media enum
+// ============================================================================
+
+generate-to-file
+meta {
+    doc: """
+    Generate an image and save it to a file.
+
+    Returns an AIMedia.Image with file metadata and AI generation details.
+
+    **Example**
+    ```hot
+    result generate-to-file("uploads/city.png", "A futuristic city at sunset")
+
+    match result {
+        AIMedia.Image => {
+            result.media.file.path  // => "uploads/city.png"
+            result.media.file.size  // => 123456
+            result.prompt           // => "A futuristic city at sunset"
+            result.revised_prompt   // => "A detailed futuristic city..."
+            result.provider         // => "openai"
+        }
+    }
+    ```
+
+    **With options**
+    ```hot
+    result generate-to-file("output/cat.png", {
+        prompt: "A cat wearing a spacesuit",
+        model: "dall-e-3",
+        quality: "hd",
+        style: "vivid"
+    })
+    ```
+    """
+}
+fn
+(path: Str, prompt: Str): AIMedia | HttpError {
+    generate-to-file(path, CreateImageRequest({prompt: prompt}))
+},
+(path: Str, request: CreateImageRequest): AIMedia | HttpError {
+    // Force base64 response format for file writing
+    final-request {...untype(request), response_format: "b64_json"}
+
+    response generate(CreateImageRequest(final-request))
+
+    match response {
+        HttpError => { response }
+        CreateImageResponse => {
+            data response.data
+            cond {
+                or(is-null(data), is-zero(length(data))) => {
+                    HttpError({status: 500, headers: {}, body: {error: "No image data returned"}})
+                }
+                => {
+                    first-image data[0]
+                    base64-data first-image.b64_json
+
+                    cond {
+                        is-null(base64-data) => {
+                            HttpError({status: 500, headers: {}, body: {error: "No base64 data in response"}})
+                        }
+                        => {
+                            // Decode base64 to bytes and write to file
+                            image-bytes base64-decode(base64-data)
+                            file-meta write-file-bytes(path, image-bytes)
+
+                            // Parse dimensions from size if available
+                            dims parse-size(request.size)
+
+                            // Return unified AIMedia.Image
+                            AIMedia.Image(AIImage({
+                                media: Image({
+                                    file: file-meta,
+                                    width: dims.width,
+                                    height: dims.height,
+                                    format: detect-format(path)
+                                }),
+                                provider: "openai",
+                                model: or(request.model, "dall-e-3"),
+                                prompt: request.prompt,
+                                revised_prompt: first-image.revised_prompt,
+                                style: request.style,
+                                quality: request.quality
+                            }))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+generate-batch-to-files
+meta {
+    doc: """
+    Generate multiple images and save them to files.
+
+    Returns an AIMediaBatch with all generated AIMedia.Image items.
+
+    The path should include a `{n}` placeholder that will be replaced with the image index.
+
+    **Example**
+    ```hot
+    batch generate-batch-to-files("uploads/image-{n}.png", "A beautiful landscape", 3)
+    // Generates: uploads/image-0.png, uploads/image-1.png, uploads/image-2.png
+
+    batch.succeeded // => 3
+    batch.failed    // => 0
+    first(batch.items).media.file.path // => "uploads/image-0.png"
+    ```
+
+    Note: DALL-E 3 only supports n=1, so this will make multiple API calls.
+    """
+}
+fn (path-template: Str, prompt: Str, count: Int): AIMediaBatch {
+    // DALL-E 3 only supports n=1, so we need multiple requests
+    // For DALL-E 2, we could use n>1 in a single request
+    results map(range(0, count), (i) {
+        file-path ::hot::str/replace(path-template, "{n}", Str(i))
+
+        result generate-to-file(file-path, prompt)
+
+        match result {
+            AIMedia.Image => { {success: true, media: result} }
+            HttpError => { {success: false, error: AIMediaError({index: i, message: Str(result.body)})} }
+        }
+    })
+
+    // Separate successes and failures
+    successes filter(results, %.success)
+    failures filter(results, not(%.success))
+
+    AIMediaBatch({
+        items: map(successes, %.media),
+        succeeded: length(successes),
+        failed: length(failures),
+        errors: cond {
+            is-zero(length(failures)) => { null }
+            => { map(failures, %.error) }
+        }
+    })
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+create-image
+meta {
+    doc: """
+    Simple image generation - returns the URL of the generated image.
+
+    **Example**
+    ```hot
+    url create-image("A sunset over mountains")
+    // "https://..."
+    ```
+    """
+}
+fn (prompt: Str): Str | HttpError {
+    create-image(prompt, null)
+},
+(prompt: Str, size: Str): Str | HttpError {
+    request {
+        prompt: prompt,
+        response_format: "url"
+    }
+
+    final-request cond {
+        is-null(size) => { request }
+        => { {...request, size: size} }
+    }
+
+    response generate(CreateImageRequest(final-request))
+
+    match response {
+        HttpError => { response }
+        CreateImageResponse => {
+            data response.data
+            cond {
+                or(is-null(data), is-zero(length(data))) => { "" }
+                => { or(data[0].url, "") }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+parse-size
+meta {doc: """Parse size string like '1024x1024' into width/height."""}
+fn (size: Str?): Map {
+    cond {
+        is-null(size) => { {width: null, height: null} }
+        => {
+            parts ::hot::str/split(size, "x")
+            cond {
+                lt(length(parts), 2) => { {width: null, height: null} }
+                => {
+                    {
+                        width: Int(parts[0]),
+                        height: Int(parts[1])
+                    }
+                }
+            }
+        }
+    }
+}
+
+detect-format
+meta {doc: """Detect image format from file path extension."""}
+fn (path: Str): Str? {
+    // Use ::hot::mime to get the minor type (e.g., "png" from "image/png")
+    mime ::hot::mime/from-path(path)
+    if(is-null(mime), null, ::hot::mime/minor-type(mime))
+}
+
+// ============================================================================
+// Available Models & Sizes
+// ============================================================================
+
+// DALL-E 3 - Latest model
+DALL_E_3 "dall-e-3"
+
+// DALL-E 2 - Previous generation
+DALL_E_2 "dall-e-2"
+
+// Common image sizes (DALL-E 3)
+SIZE_1024 "1024x1024"
+SIZE_1792_1024 "1792x1024"
+SIZE_1024_1792 "1024x1792"
+
+// DALL-E 2 sizes
+SIZE_512 "512x512"
+SIZE_256 "256x256"

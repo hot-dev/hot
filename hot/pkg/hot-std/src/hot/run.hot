@@ -1,0 +1,151 @@
+::hot::run ns
+meta {doc: """Run context, info, and exit control."""}
+
+Failure
+meta {
+    core: true,
+    doc: """
+    Represents a failed run execution. Produced by `fail()` when called in a run context.
+
+    **Fields**
+
+    - `$msg` — Human-readable error message
+    - `$err` — Structured error data (any type)
+
+    **Example**
+
+    ```hot
+    f fail("Connection failed", {"host": "api.example.com"})
+    f.$msg   // "Connection failed"
+    f.$err   // {"host": "api.example.com"}
+    ```
+    """
+}
+type {
+    $msg: Str,
+    $err: Any
+}
+
+Cancellation
+meta {
+    core: true,
+    doc: """
+    Represents a cancelled run execution. Produced by `cancel()` when called in a run context.
+
+    **Fields**
+
+    - `$msg` — Human-readable cancellation message
+    - `$data` — Optional structured data
+
+    **Example**
+
+    ```hot
+    c cancel("User cancelled", {"reason": "timeout"})
+    c.$msg    // "User cancelled"
+    c.$data   // {"reason": "timeout"}
+    ```
+    """
+}
+type {
+    $msg: Str,
+    $data: Any
+}
+
+Run type {
+    id: Uuid,
+    type: Str,
+    status: Str,
+    start-time: ::hot::time/Instant,
+    retry-attempt: Int,
+    max-retries: Int,
+    retry-delay: Int,
+    origin-run-id: Uuid?
+}
+
+Stream ::hot::stream/Stream
+Build ::hot::info/Build
+Project ::hot::info/Project
+Env ::hot::info/Env
+User ::hot::info/User
+Org ::hot::info/Org
+
+RunInfo type {
+    run: Run,
+    stream: Stream,
+    build: Build,
+    project: Project,
+    env: Env,
+    user: User,
+    org: Org
+}
+
+info
+meta {
+    core: true,
+    doc: """
+    Return information about the current run execution context.
+
+    Returns a `RunInfo` containing details about the run, stream, build, project, env, user, and org.
+    Optional fields return `null` when not available.
+
+    **Example**
+
+    ```hot
+    i info()
+    i.run.id              // UUID of the current run
+    i.run.type            // "call", "event", "schedule", "run", "eval", or "repl"
+    i.run.status          // "running"
+    i.run.start-time      // Instant when the run started
+    i.run.retry-attempt   // Current retry attempt (0 = first try, 1 = first retry, etc.)
+    i.run.max-retries     // Maximum retries from function meta (0 = no retries)
+    i.run.retry-delay     // Delay between retries in milliseconds
+    i.run.origin-run-id   // UUID of original run if this is a retry (null otherwise)
+    i.build.hash          // Build hash (null if not available)
+    i.project.name        // Project name (null if not available)
+    i.env.id              // Environment UUID (null if not available)
+    i.env.name            // Environment name (e.g. "development", "production")
+    i.org.id              // Organization UUID (null if not available)
+    i.org.slug            // Organization slug (e.g. "local", "acme-inc")
+    ```
+    """
+}
+fn (): RunInfo {
+    call-lib(::hot::run/info, [])
+}
+
+is-inline-run
+meta {
+    core: true,
+    doc: """Is the run type a direct run type (vs. scheduled or event triggered)"""
+}
+fn () {
+    r info()
+    or(eq(r.type, "run"),
+       eq(r.type, "eval"),
+       eq(r.type, "repl"),
+       eq(r.type, "test"))
+}
+
+is-local-dev
+meta {
+    core: true,
+    doc: """
+    Check if running in local development mode.
+
+    Returns `true` when the org slug is `"local"` and the environment name is `"development"`,
+    which is the default configuration for `hot dev` and `hot run`.
+
+    Useful for switching behavior between local development and production deployments.
+
+    **Example**
+
+    ```hot
+    // Use polling in local dev, webhooks in production
+    if(is-local-dev(), start-polling(), use-webhooks())
+    ```
+    """
+}
+fn (): Bool {
+    i info()
+    and(eq(i.org.slug, "local"), eq(i.env.name, "development"))
+}

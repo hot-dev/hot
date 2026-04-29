@@ -1,0 +1,61 @@
+<!-- Recent Activity Tabs Component -->
+<div x-data="{ activeTab: 'runs' }" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6">
+    <h2 class="text-xl font-semibold mb-4 text-gray-900 dark:text-white">Recent Activity</h2>
+
+    <!-- Tabs -->
+    <div class="border-b border-gray-200 dark:border-gray-700 mb-4">
+        <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+            <button @click="activeTab = 'runs'; $nextTick(() => { if (typeof Prism !== 'undefined') { document.querySelectorAll('#recent-runs-table code.language-hot').forEach(el => Prism.highlightElement(el)); } })"
+                    :class="activeTab === 'runs' ? 'border-blue-500 text-blue-600 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
+                    class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+                Runs
+            </button>
+            <button @click="activeTab = 'tasks'"
+                    :class="activeTab === 'tasks' ? 'border-amber-500 text-amber-600 dark:text-amber-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
+                    class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+                Tasks
+            </button>
+            <button @click="activeTab = 'events'"
+                    :class="activeTab === 'events' ? 'border-blue-500 text-blue-600 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
+                    class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+                Events
+            </button>
+            <button @click="activeTab = 'streams'"
+                    :class="activeTab === 'streams' ? 'border-blue-500 text-blue-600 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'"
+                    class="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+                Streams
+            </button>
+        </nav>
+    </div>
+
+    <!-- Tab Content -->
+    <div>
+        <!-- Runs Tab -->
+        <div x-show="activeTab === 'runs'" x-transition x-init="$nextTick(() => { if (typeof Prism !== 'undefined') { setTimeout(() => { document.querySelectorAll('#recent-runs-table code.language-hot').forEach(el => Prism.highlightElement(el)); }, 50); } })">
+            <div id="recent-runs-container">
+                {% include "components/dashboard_recent_runs_table.html" %}
+            </div>
+        </div>
+
+        <!-- Tasks Tab -->
+        <div x-show="activeTab === 'tasks'" x-transition>
+            <div id="recent-tasks-container">
+                {% include "components/dashboard_recent_tasks_table.html" %}
+            </div>
+        </div>
+
+        <!-- Events Tab -->
+        <div x-show="activeTab === 'events'" x-transition>
+            <div id="recent-events-container">
+                {% include "components/dashboard_recent_events_table.html" %}
+            </div>
+        </div>
+
+        <!-- Streams Tab -->
+        <div x-show="activeTab === 'streams'" x-transition>
+            <div id="recent-streams-container">
+                {% include "components/dashboard_recent_streams_table.html" %}
+            </div>
+        </div>
+    </div>
+</div>

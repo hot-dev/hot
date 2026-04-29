@@ -1,0 +1,53 @@
+::playwright::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::playwright
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-playwright
+// ============================================================================
+
+
+TEST_URL "https://example.com"
+
+test-screenshot-example-com
+meta ["test"] fn () {
+    result ::playwright/screenshot(TEST_URL)
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("png", result.format, "default format should be png")
+    assert(starts-with(result.url, "hot://playwright/"), "URL should use playwright namespace")
+}
+
+test-screenshot-jpeg-options
+meta ["test"] fn () {
+    result ::playwright/screenshot(TEST_URL, {
+        format: "jpeg",
+        quality: 80,
+        width: 1024,
+        height: 768,
+        wait-until: "load",
+    })
+    assert-eq("jpeg", result.format)
+    assert(contains(result.url, ".jpg"), "URL should use jpg extension")
+}
+
+test-pdf-example-com
+meta ["test"] fn () {
+    result ::playwright/pdf(TEST_URL)
+    assert(is-some(result.url), "should return pdf URL")
+    assert(ends-with(result.url, ".pdf"), "should be pdf path")
+}
+
+test-scrape-example-com
+meta ["test"] fn () {
+    page ::playwright/scrape(TEST_URL, {wait-until: "load"})
+    assert(is-some(page.text), "should return text content")
+    assert(contains(page.text, "Example"), "body should mention Example")
+    assert-eq("Example Domain", page.title)
+}
+
+test-scrape-with-selector
+meta ["test"] fn () {
+    page ::playwright/scrape(TEST_URL, {selector: "p", wait-until: "load"})
+    assert(gt(length(trim(page.text)), 0), "paragraph text should be non-empty")
+}

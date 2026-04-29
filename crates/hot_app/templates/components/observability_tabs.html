@@ -1,0 +1,1634 @@
+<!-- Observability Tabs Component -->
+<style>
+/* Tab Navigation */
+.observability-tabs {
+    display: flex;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: white;
+    padding: 0 0 0 16px;
+}
+
+.dark .observability-tabs {
+    background: #111111;
+    border-bottom-color: rgba(64, 64, 64, 1);
+}
+
+.tab-button {
+    padding: 12px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(107, 114, 128, 1);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.dark .tab-button {
+    color: rgba(156, 163, 175, 1);
+}
+
+.tab-button:hover {
+    color: rgba(239, 68, 68, 1);
+    background: rgba(254, 242, 242, 1);
+}
+
+.dark .tab-button:hover {
+    color: rgba(252, 165, 165, 1);
+    background: rgba(55, 65, 81, 0.5);
+}
+
+.tab-button.active {
+    color: rgba(239, 68, 68, 1);
+    border-bottom-color: rgba(239, 68, 68, 1);
+}
+
+.dark .tab-button.active {
+    color: rgba(252, 165, 165, 1);
+    border-bottom-color: rgba(239, 68, 68, 1);
+}
+
+.tab-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* Tab Content */
+.tab-content {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.tab-content.active {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Timeline View */
+.timeline-view {
+    padding: 16px 20px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* Run Summary */
+.run-summary {
+    padding: 0 0 8px 0;
+    margin-bottom: 8px;
+}
+
+.run-summary-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(55, 65, 81, 1);
+    margin-bottom: 8px;
+}
+
+.dark .run-summary-title {
+    color: rgba(229, 231, 235, 1);
+}
+
+.run-summary-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 6px;
+}
+
+.run-summary-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+
+.run-summary-legend-box {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.run-summary-legend-compilation {
+    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+}
+
+.run-summary-legend-execution {
+    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+}
+
+.run-summary-legend-label {
+    color: rgba(107, 114, 128, 1);
+    white-space: nowrap;
+}
+
+.dark .run-summary-legend-label {
+    color: rgba(156, 163, 175, 1);
+}
+
+.run-summary-legend-value {
+    font-weight: 600;
+    color: rgba(55, 65, 81, 1);
+}
+
+.dark .run-summary-legend-value {
+    color: rgba(229, 231, 235, 1);
+}
+
+.run-summary-percent {
+    font-size: 11px;
+    font-weight: 400;
+    color: rgba(107, 114, 128, 1);
+}
+
+.dark .run-summary-percent {
+    color: rgba(156, 163, 175, 1);
+}
+
+.run-summary-combined-bar {
+    height: 8px;
+    background: rgba(229, 231, 235, 1);
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+}
+
+.dark .run-summary-combined-bar {
+    background: rgba(64, 64, 64, 1);
+}
+
+.run-summary-bar-segment {
+    height: 100%;
+    min-width: 1px;
+    transition: width 0.3s ease;
+}
+
+.run-summary-bar-compilation {
+    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+}
+
+.run-summary-bar-execution {
+    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+}
+
+.timeline-axis {
+    position: relative;
+    height: 30px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    margin-bottom: 16px;
+}
+
+.dark .timeline-axis {
+    border-bottom-color: rgba(55, 65, 81, 1);
+}
+
+.timeline-axis-label {
+    position: absolute;
+    font-size: 11px;
+    color: rgba(107, 114, 128, 1);
+    transform: translateX(-50%);
+    bottom: 4px;
+}
+
+.dark .timeline-axis-label {
+    color: rgba(156, 163, 175, 1);
+}
+
+.timeline-bar {
+    background: white;
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 3px;
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.dark .timeline-bar {
+    background: #0a0a0a;
+    border-color: rgba(64, 64, 64, 1);
+}
+
+.timeline-bar:hover {
+    border-color: rgba(239, 68, 68, 1);
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);
+}
+
+.timeline-bar.selected {
+    border-color: rgba(220, 38, 38, 1);
+    background: rgba(249, 250, 251, 1);
+}
+
+.dark .timeline-bar.selected {
+    border-color: rgba(239, 68, 68, 1);
+    background: rgba(64, 64, 64, 1);
+}
+
+.timeline-bar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.timeline-bar-title {
+    display: flex;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+}
+
+.timeline-bar-duration {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(243, 244, 246, 1);
+    color: rgba(75, 85, 99, 1);
+}
+
+.dark .timeline-bar-duration {
+    background: rgba(64, 64, 64, 1);
+    color: rgba(209, 213, 219, 1);
+}
+
+.timeline-bar-visual-container {
+    position: relative;
+    height: 12px;
+    margin-top: 4px;
+    background: rgba(229, 231, 235, 0.3);
+    border-radius: 4px;
+}
+
+.dark .timeline-bar-visual-container {
+    background: rgba(64, 64, 64, 0.3);
+}
+
+.timeline-bar-visual {
+    position: absolute;
+    height: 100%;
+    background: linear-gradient(90deg, rgba(239, 68, 68, 0.2) 0%, rgba(239, 68, 68, 0.5) 100%);
+    border-radius: 4px;
+    transition: all 0.15s ease;
+}
+
+.timeline-bar-visual.fast {
+    background: linear-gradient(90deg, rgba(34, 197, 94, 0.2) 0%, rgba(34, 197, 94, 0.5) 100%);
+}
+
+.timeline-bar-visual.slow {
+    background: linear-gradient(90deg, rgba(239, 68, 68, 0.3) 0%, rgba(239, 68, 68, 0.7) 100%);
+}
+
+/* Call Hierarchy in Tab */
+.hierarchy-tab-view {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.hierarchy-controls-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    background: rgba(249, 250, 251, 1);
+    min-height: 48px;
+}
+
+.dark .hierarchy-controls-tab {
+    border-bottom-color: rgba(64, 64, 64, 1);
+    background: #111111;
+}
+
+.hierarchy-tree-tab {
+    padding: 12px 16px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+/* Shared Value Inspector Panel */
+.value-inspector-panel {
+    width: 0;
+    min-width: 0;
+    background: white;
+    border-left: 1px solid rgba(229, 231, 235, 1);
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+    transition: width 0.25s ease, min-width 0.25s ease;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.dark .value-inspector-panel {
+    background: #111111;
+    border-left-color: rgba(64, 64, 64, 1);
+}
+
+.value-inspector-panel.open {
+    width: 400px;
+    min-width: 300px;
+}
+
+/* Sticky inner wrapper for inspector content */
+.value-inspector-panel .inspector-sticky-wrapper {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 120px);
+    background: inherit;
+}
+
+.inspector-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(229, 231, 235, 1);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(249, 250, 251, 1);
+    min-height: 48px;
+}
+
+.dark .inspector-header {
+    border-bottom-color: rgba(64, 64, 64, 1);
+    background: #0a0a0a;
+}
+
+.inspector-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgba(107, 114, 128, 1);
+}
+
+.dark .inspector-title {
+    color: rgba(156, 163, 175, 1);
+}
+
+
+.inspector-content {
+    padding: 16px;
+    overflow-y: auto;
+    flex: 1;
+    font-size: 13px;
+}
+
+.inspector-section {
+    margin-bottom: 16px;
+}
+
+.inspector-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: rgba(107, 114, 128, 1);
+    margin-bottom: 8px;
+}
+
+.dark .inspector-section-title {
+    color: rgba(156, 163, 175, 1);
+}
+
+.inspector-value {
+    background: rgba(249, 250, 251, 1);
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 4px;
+    padding: 12px;
+    font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+    font-size: 12px;
+    color: rgba(31, 41, 55, 1);
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.dark .inspector-value {
+    background: #0a0a0a;
+    border-color: rgba(64, 64, 64, 1);
+    color: rgba(229, 231, 235, 1);
+}
+
+/* Resize Handle */
+.tab-resize-handle {
+    width: 4px;
+    background: transparent;
+    cursor: col-resize;
+    position: relative;
+    flex-shrink: 0;
+    transition: background-color 0.2s ease;
+    display: none;
+}
+
+.tab-resize-handle.visible {
+    display: block;
+}
+
+.tab-resize-handle:hover {
+    background: rgba(239, 68, 68, 0.5);
+}
+
+.tab-resize-handle:active {
+    background: rgba(239, 68, 68, 0.8);
+}
+
+/* Tree styles for hierarchy tab */
+.tree-node-tab {
+    padding: 6px 12px;
+    margin: 2px 0;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.1s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.tree-node-tab:hover {
+    background-color: rgba(243, 244, 246, 1);
+}
+
+.dark .tree-node-tab:hover {
+    background-color: rgba(64, 64, 64, 1);
+}
+
+.tree-node-tab.selected {
+    background-color: rgba(249, 250, 251, 1);
+    border: 2px solid rgba(220, 38, 38, 1);
+    border-radius: 4px;
+}
+
+.dark .tree-node-tab.selected {
+    background-color: rgba(64, 64, 64, 1);
+    border: 2px solid rgba(239, 68, 68, 1);
+}
+
+.tree-indent-tab {
+    margin-left: 16px;
+    border-left: 1px solid rgba(229, 231, 235, 1);
+    padding-left: 12px;
+}
+
+.dark .tree-indent-tab {
+    border-left-color: rgba(82, 82, 82, 1);
+}
+
+.node-name {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+}
+
+.hierarchy-ctrl-btn-tab {
+    padding: 6px 12px;
+    font-size: 11px;
+    border-radius: 4px;
+    border: 1px solid rgba(209, 213, 219, 1);
+    background: white;
+    color: rgba(55, 65, 81, 1);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-weight: 500;
+}
+
+.dark .hierarchy-ctrl-btn-tab {
+    border-color: rgba(82, 82, 82, 1);
+    background: rgba(64, 64, 64, 1);
+    color: rgba(229, 231, 235, 1);
+}
+
+.hierarchy-ctrl-btn-tab:hover {
+    background: rgba(243, 244, 246, 1);
+    border-color: rgba(156, 163, 175, 1);
+}
+
+.dark .hierarchy-ctrl-btn-tab:hover {
+    background: rgba(82, 82, 82, 1);
+}
+</style>
+
+<!-- Tab Navigation -->
+<div class="observability-tabs">
+    <button class="tab-button active" data-tab="timeline">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+        </svg>
+        <span>Timeline</span>
+    </button>
+    <button class="tab-button" data-tab="hierarchy">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 6v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path>
+        </svg>
+        <span>Hierarchy</span>
+    </button>
+    <button class="tab-button" data-tab="stream-graph">
+        <svg class="tab-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path>
+        </svg>
+        <span>Stream Graph</span>
+    </button>
+
+    <!-- Inspector Toggle (aligned right) -->
+    <button id="inspector-toggle-btn" class="tab-button ml-auto" title="Value Inspector ON/OFF" style="margin-left: auto; margin-right: 0;">
+        <!-- OFF state: just outline with dividing line -->
+        <svg id="inspector-icon-off" class="tab-icon hidden" fill="none" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <rect x="1" y="1" width="14" height="14" stroke-width="1.5" rx="1"></rect>
+            <line x1="10" y1="1" x2="10" y2="15" stroke-width="1.5"></line>
+        </svg>
+        <!-- ON state: filled right panel -->
+        <svg id="inspector-icon-on" class="tab-icon" fill="currentColor" stroke="currentColor" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <rect x="1" y="1" width="14" height="14" fill="none" stroke-width="1.5" rx="1"></rect>
+            <rect x="10" y="1" width="5" height="14" fill="currentColor" rx="1"></rect>
+        </svg>
+    </button>
+</div>
+
+<!-- Tab Content Container -->
+<div class="flex-1 flex flex-row min-h-0">
+    <!-- Timeline Tab Content (Default) -->
+    <div id="tab-timeline" class="tab-content active" data-tab-content="timeline">
+        <div class="timeline-view" id="timeline-view-container">
+            <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                Loading timeline...
+            </div>
+        </div>
+    </div>
+
+    <!-- Call Hierarchy Tab Content -->
+    <div id="tab-hierarchy" class="tab-content" data-tab-content="hierarchy">
+        <div class="hierarchy-tab-view">
+            <!-- Controls -->
+            <div class="hierarchy-controls-tab">
+                <button id="expand-all-tab-btn" class="hierarchy-ctrl-btn-tab">Expand All</button>
+                <button id="collapse-all-tab-btn" class="hierarchy-ctrl-btn-tab">Collapse All</button>
+            </div>
+
+            <!-- Tree -->
+            <div id="hierarchy-tree-tab" class="hierarchy-tree-tab">
+                <div class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">Loading hierarchy...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flow Graph Tab Content -->
+    <div id="tab-stream-graph" class="tab-content" data-tab-content="stream-graph">
+        <div id="flow-graph-view-container" class="flex-1 p-6 overflow-auto">
+            <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                Loading stream graph...
+            </div>
+        </div>
+    </div>
+
+    <!-- Resize Handle -->
+    <div id="tab-resize-handle" class="tab-resize-handle"></div>
+
+    <!-- Shared Value Inspector Panel -->
+    <div id="value-inspector-panel" class="value-inspector-panel">
+        <!-- Sticky inner wrapper that stays in view -->
+        <div class="inspector-sticky-wrapper">
+            <!-- Header -->
+            <div class="inspector-header">
+                <span class="inspector-title">Inspector</span>
+            </div>
+
+            <!-- Content -->
+            <div id="inspector-content" class="inspector-content">
+                <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    Select an item to view details
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Observability Tabs Manager - only define if not already defined (for htmx swaps)
+if (typeof window.ObservabilityTabs === 'undefined') {
+window.ObservabilityTabs = class ObservabilityTabs {
+    constructor(runId) {
+        this.runId = runId;
+        this.runDurationUs = null; // Will be loaded from run details
+        // Read tab from URL, default to 'timeline'
+        const urlParams = new URLSearchParams(window.location.search);
+        this.currentTab = urlParams.get('tab') || 'timeline';
+        // Read inspector state from URL
+        this.inspectorOpen = urlParams.get('inspector') === '1';
+        this.isResizing = false;
+        this.hierarchyData = null;
+        this.timelineData = null;
+        this.callDataStatus = null;
+        this.callRetentionDays = null;
+        this.expandedNodes = new Set();
+        this.selectedNode = null;
+
+        // State tracking for each tab
+        this.tabState = {
+            timeline: { selectedItemId: null, selectedItemType: null },
+            hierarchy: { selectedNodeId: null, selectedNodeType: null },
+            'stream-graph': { selectedNodeId: null, selectedNodeType: null }
+        };
+
+        this.initializeElements();
+        this.initializeEventListeners();
+        this.switchTab(this.currentTab); // Activate the correct tab on init
+
+        // Apply initial inspector state
+        this.applyInspectorState();
+
+        this.loadAllData();
+    }
+
+    initializeElements() {
+        this.tabButtons = document.querySelectorAll('.tab-button');
+        this.tabContents = document.querySelectorAll('.tab-content');
+        this.tabsContainer = document.querySelector('.observability-tabs');
+        this.inspector = document.getElementById('value-inspector-panel');
+        this.inspectorContent = document.getElementById('inspector-content');
+        this.inspectorToggleBtn = document.getElementById('inspector-toggle-btn');
+        this.resizeHandle = document.getElementById('tab-resize-handle');
+        this.hierarchyTree = document.getElementById('hierarchy-tree-tab');
+        this.timelineView = document.getElementById('timeline-view-container');
+        this.flowGraphView = document.getElementById('flow-graph-view-container');
+    }
+
+    initializeEventListeners() {
+        // Tab switching
+        this.tabButtons.forEach(btn => {
+            // Skip the inspector toggle button
+            if (btn.id === 'inspector-toggle-btn') return;
+            btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
+        });
+
+        // Inspector toggle
+        this.inspectorToggleBtn.addEventListener('click', () => this.toggleInspector());
+
+        // Hierarchy controls
+        document.getElementById('expand-all-tab-btn')?.addEventListener('click', () => this.expandAllHierarchy());
+        document.getElementById('collapse-all-tab-btn')?.addEventListener('click', () => this.collapseAllHierarchy());
+
+        // Resize
+        this.resizeHandle.addEventListener('mousedown', (e) => this.startResize(e));
+        document.addEventListener('mousemove', (e) => this.resize(e));
+        document.addEventListener('mouseup', () => this.stopResize());
+    }
+
+    switchTab(tabName) {
+        // Update active tab button
+        this.tabButtons.forEach(btn => {
+            if (btn.dataset.tab === tabName) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+
+        // Update active tab content
+        this.tabContents.forEach(content => {
+            if (content.dataset.tabContent === tabName) {
+                content.classList.add('active');
+            } else {
+                content.classList.remove('active');
+            }
+        });
+
+        this.currentTab = tabName;
+
+        // Update URL with tab parameter (without page reload)
+        const url = new URL(window.location);
+        url.searchParams.set('tab', tabName);
+        window.history.replaceState({}, '', url);
+
+        // Handle inspector state for the new tab
+        this.restoreOrClearInspector(tabName);
+    }
+
+    openInspector(content) {
+        this.inspector.classList.add('open');
+        this.resizeHandle.classList.add('visible');
+        this.inspectorContent.innerHTML = content;
+        this.inspectorOpen = true;
+        this.updateInspectorState();
+
+        // Removed scrollIntoView - content area now scrolls independently
+    }
+
+    closeInspector() {
+        this.inspector.classList.remove('open');
+        this.resizeHandle.classList.remove('visible');
+        this.inspectorOpen = false;
+        this.updateInspectorState();
+    }
+
+    toggleInspector() {
+        if (this.inspectorOpen) {
+            this.closeInspector();
+        } else {
+            // Open inspector with current tab's state
+            this.restoreOrClearInspector(this.currentTab);
+            this.inspector.classList.add('open');
+            this.resizeHandle.classList.add('visible');
+            this.inspectorOpen = true;
+            this.updateInspectorState();
+        }
+    }
+
+    applyInspectorState() {
+        // Apply the initial state from URL
+        if (this.inspectorOpen) {
+            this.inspector.classList.add('open');
+            this.resizeHandle.classList.add('visible');
+            this.restoreOrClearInspector(this.currentTab);
+        } else {
+            this.inspector.classList.remove('open');
+            this.resizeHandle.classList.remove('visible');
+        }
+        this.updateToggleButtonAppearance();
+    }
+
+    updateInspectorState() {
+        // Update URL with inspector state
+        const url = new URL(window.location);
+        if (this.inspectorOpen) {
+            url.searchParams.set('inspector', '1');
+        } else {
+            url.searchParams.delete('inspector');
+        }
+        window.history.replaceState({}, '', url);
+        this.updateToggleButtonAppearance();
+    }
+
+    updateToggleButtonAppearance() {
+        // Update toggle button to show active/inactive state
+        const iconOn = document.getElementById('inspector-icon-on');
+        const iconOff = document.getElementById('inspector-icon-off');
+
+        if (this.inspectorOpen) {
+            this.inspectorToggleBtn.classList.add('active');
+            // Show ON icon (filled panel)
+            if (iconOn) iconOn.classList.remove('hidden');
+            if (iconOff) iconOff.classList.add('hidden');
+        } else {
+            this.inspectorToggleBtn.classList.remove('active');
+            // Show OFF icon (just line)
+            if (iconOn) iconOn.classList.add('hidden');
+            if (iconOff) iconOff.classList.remove('hidden');
+        }
+    }
+
+    restoreOrClearInspector(tabName) {
+        const state = this.tabState[tabName];
+
+        if (!state) {
+            this.showInspectorPrompt(tabName);
+            return;
+        }
+
+        // Restore state based on tab type
+        switch (tabName) {
+            case 'timeline':
+                if (state.selectedItemId) {
+                    // Re-fetch and display the selected timeline item
+                    this.restoreTimelineSelection(state.selectedItemId, state.selectedItemType);
+                } else {
+                    this.showInspectorPrompt(tabName);
+                }
+                break;
+
+            case 'hierarchy':
+                if (state.selectedNodeId) {
+                    // Re-display the selected hierarchy node
+                    this.restoreHierarchySelection(state.selectedNodeId, state.selectedNodeType);
+                } else {
+                    this.showInspectorPrompt(tabName);
+                }
+                break;
+
+            case 'stream-graph':
+                if (state.selectedNodeId) {
+                    // Restore run graph selection (if we stored it)
+                    this.restoreFlowSelection(state.selectedNodeId, state.selectedNodeType);
+                } else {
+                    this.showInspectorPrompt(tabName);
+                }
+                break;
+
+            default:
+                this.showInspectorPrompt(tabName);
+        }
+    }
+
+    showInspectorPrompt(tabName) {
+        const prompts = {
+            timeline: 'Click on a timeline item to view details',
+            hierarchy: 'Click on a call or flow to view details',
+            table: 'Click on a variable row to view details',
+            flow: 'Click on a run or event to view details'
+        };
+
+        const prompt = prompts[tabName] || 'Select an item to view details';
+
+        if (this.inspectorOpen) {
+            // Inspector is open, show prompt inside it
+            this.inspectorContent.innerHTML = `
+                <div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    ${prompt}
+                </div>
+            `;
+        }
+        // If inspector is closed, do nothing - the default prompt will show when it opens
+    }
+
+    restoreTimelineSelection(itemId, itemType) {
+        // For now, just show a prompt since we don't have the item data cached
+        // In a full implementation, we could cache the item data
+        this.showInspectorPrompt('timeline');
+    }
+
+    restoreHierarchySelection(nodeId, nodeType) {
+        // For hierarchy, we can try to find the node in our cached data
+        if (!this.hierarchyData) {
+            this.showInspectorPrompt('hierarchy');
+            return;
+        }
+
+        // Search for the node in hierarchy data
+        const node = this.findNodeById(this.hierarchyData.tree, nodeId);
+        if (node) {
+            this.showNodeInInspector(node);
+        } else {
+            this.showInspectorPrompt('hierarchy');
+        }
+    }
+
+    async restoreFlowSelection(nodeId, nodeType) {
+        // Call the appropriate function from run_detail.html
+        if (nodeType === 'run') {
+            const runId = nodeId.replace('run-', '');
+            if (window.showRunInInspector) {
+                await window.showRunInInspector(runId);
+            } else {
+                this.showInspectorPrompt('flow');
+            }
+        } else if (nodeType === 'event') {
+            const eventId = nodeId.replace('event-', '');
+            if (window.showEventInInspector) {
+                await window.showEventInInspector(eventId);
+            } else {
+                this.showInspectorPrompt('flow');
+            }
+        } else {
+            this.showInspectorPrompt('flow');
+        }
+    }
+
+    findNodeById(nodes, targetId) {
+        for (const node of nodes) {
+            if (node.id === targetId) {
+                return node;
+            }
+            if (node.children && node.children.length > 0) {
+                const found = this.findNodeById(node.children, targetId);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    scrollInspectorIntoView() {
+        // Use setTimeout to ensure DOM has fully updated and rendered
+        setTimeout(() => {
+            // Scroll to the tabs container at the top of the component
+            // This ensures the whole observability UI (tabs + inspector) is visible
+            if (this.tabsContainer) {
+                const tabsRect = this.tabsContainer.getBoundingClientRect();
+                const viewportTop = 0;
+
+                // If tabs are not at the top of viewport, scroll them into view
+                if (tabsRect.top < viewportTop) {
+                    this.tabsContainer.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start',  // Align tabs to top of viewport
+                        inline: 'nearest'
+                    });
+                }
+            }
+        }, 100);  // Small delay to ensure content is rendered
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    toggleSection(sectionName) {
+        const content = document.getElementById(`${sectionName}-content`);
+        const chevron = document.getElementById(`${sectionName}-chevron`);
+
+        if (content && chevron) {
+            if (content.classList.contains('hidden')) {
+                // Expand
+                content.classList.remove('hidden');
+                chevron.classList.remove('-rotate-90');
+            } else {
+                // Collapse
+                content.classList.add('hidden');
+                chevron.classList.add('-rotate-90');
+            }
+        }
+    }
+
+    async loadAllData() {
+        await Promise.all([
+            this.loadHierarchyData(),
+            this.loadTimelineData(),
+            this.loadFlowGraphData()
+        ]);
+    }
+
+    /**
+     * Generate a user-facing message for call data availability status.
+     * Returns an HTML string, or null if call data is available normally.
+     */
+    getCallDataStatusMessage(status, retentionDays, size) {
+        const py = size === 'sm' ? 'py-4' : 'py-8';
+        const textSize = size === 'sm' ? 'text-sm' : 'text-sm';
+        switch (status) {
+            case 'expired':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Call data is no longer available</p>
+                    <p class="text-xs mt-2">Your plan retains call data for ${retentionDays} day${retentionDays !== 1 ? 's' : ''}</p>
+                </div>`;
+            case 'not_included':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Call data is not included in your current plan</p>
+                    <p class="text-xs mt-2">Upgrade your plan to access call-level execution data</p>
+                </div>`;
+            case 'collecting':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>Collecting call data&hellip;</p>
+                    <p class="text-xs mt-2">Call data will appear as the run executes</p>
+                </div>`;
+            case 'empty':
+                return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
+                    <p>No calls recorded</p>
+                    <p class="text-xs mt-2">This run completed without any tracked function calls</p>
+                </div>`;
+            default:
+                return null;
+        }
+    }
+
+    async loadHierarchyData() {
+        try {
+            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+
+            if (!response.ok) {
+                console.error('Hierarchy API error:', response.status, response.statusText);
+                this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">API Error: ${response.status}</div>`;
+                return;
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Store retention metadata
+                this.callDataStatus = result.call_data_status;
+                this.callRetentionDays = result.call_retention_days;
+
+                // Check if call data is unavailable for a known reason
+                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'sm');
+                if (statusMsg) {
+                    this.hierarchyTree.innerHTML = statusMsg;
+                    return;
+                }
+
+                this.hierarchyData = result.data;
+                // Auto-expand all nodes on initial load
+                this.expandAllRecursive(this.hierarchyData.tree);
+                this.renderHierarchy();
+            } else {
+                const errorMsg = result.error || 'Unknown error';
+                console.error('Hierarchy load failed:', errorMsg);
+                this.hierarchyTree.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
+                    <p>No call hierarchy available</p>
+                    <p class="text-xs mt-2">This run may not have function call tracking enabled</p>
+                </div>`;
+            }
+        } catch (error) {
+            console.error('Error loading hierarchy:', error);
+            this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">
+                <p>Failed to load hierarchy</p>
+                <p class="text-xs mt-2">${error.message}</p>
+            </div>`;
+        }
+    }
+
+    async loadTimelineData() {
+        try {
+            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+
+            if (!response.ok) {
+                console.error('Timeline API error:', response.status, response.statusText);
+                this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`;
+                return;
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Store retention metadata (may already be set by hierarchy loader)
+                this.callDataStatus = result.call_data_status;
+                this.callRetentionDays = result.call_retention_days;
+
+                // Check if call data is unavailable for a known reason
+                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'lg');
+                if (statusMsg) {
+                    this.timelineView.innerHTML = statusMsg;
+                    return;
+                }
+
+                this.timelineData = result.data;
+                this.renderTimeline();
+            } else {
+                const errorMsg = result.error || 'Unknown error';
+                console.error('Timeline load failed:', errorMsg);
+                this.timelineView.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                    <p>No execution timeline available</p>
+                    <p class="text-xs mt-2">This run may not have function call tracking enabled</p>
+                </div>`;
+            }
+        } catch (error) {
+            console.error('Error loading timeline:', error);
+            this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
+                <p>Failed to load timeline</p>
+                <p class="text-xs mt-2">${error.message}</p>
+            </div>`;
+        }
+    }
+
+    async loadFlowGraphData() {
+        // Flow graph is already embedded in the page, just need to move it
+        const flowGraphSection = document.getElementById('run-flow-graph-section');
+        const flowGraphView = document.getElementById('flow-graph-view-container');
+
+        if (flowGraphSection && flowGraphView) {
+            const graphContainer = flowGraphSection.querySelector('#run-graph');
+            if (graphContainer) {
+                // Clone the graph container
+                const clonedGraph = document.createElement('div');
+                clonedGraph.id = 'run-graph-cloned';
+                clonedGraph.style.width = '100%';
+                clonedGraph.style.minHeight = '200px';
+
+                flowGraphView.innerHTML = '';
+                flowGraphView.appendChild(clonedGraph);
+
+                // Re-render the graph in the cloned container using shared rendering
+                const graphDataScript = document.getElementById('graph-data');
+                if (graphDataScript && typeof window.renderStreamGraph === 'function') {
+                    const graphDataJson = graphDataScript.textContent.trim();
+                    window.renderStreamGraph(clonedGraph.id, graphDataJson);
+                } else {
+                    clonedGraph.innerHTML = '<div class="text-center text-gray-500 dark:text-gray-400 py-8">Graph data not available</div>';
+                }
+            }
+        }
+    }
+
+    renderTimeline() {
+        if (!this.timelineData || !this.timelineData.tree || this.timelineData.tree.length === 0) {
+            this.timelineView.innerHTML = '<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">No execution data found</div>';
+            return;
+        }
+
+        // Flatten the hierarchy into a timeline view
+        const items = this.flattenForTimeline(this.timelineData.tree);
+
+        // Calculate time bounds
+        const startTimes = items.map(i => new Date(i.start_time).getTime()).filter(t => !isNaN(t));
+        const minTime = Math.min(...startTimes);
+        const maxTime = Math.max(...items.map(i => {
+            if (!i.start_time || !i.duration_us) return minTime;
+            return new Date(i.start_time).getTime() + (i.duration_us / 1000); // Convert μs to ms
+        }));
+        const totalDuration = maxTime - minTime;
+
+        // Calculate execution time (from hierarchy data)
+        const executionTimeUs = this.timelineData.total_duration_us || 0;
+
+        // Get run duration from page header (start/stop times)
+        const runDurationUs = this.getRunDurationUs();
+
+        // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
+        const compilationTimeUs = Math.max(0, runDurationUs - executionTimeUs);
+
+        let html = '<div class="timeline-view">';
+
+        // Add run summary at the top
+        if (runDurationUs > 0) {
+            const compilationPercent = (compilationTimeUs / runDurationUs) * 100;
+            const executionPercent = (executionTimeUs / runDurationUs) * 100;
+
+            html += '<div class="run-summary">';
+            html += '<div class="run-summary-title">Run Duration: <span class="font-semibold">' + this.formatDuration(runDurationUs) + '</span></div>';
+            html += '<div class="run-summary-legend">';
+            html += '  <div class="run-summary-legend-item">';
+            html += '    <div class="run-summary-legend-box run-summary-legend-compilation"></div>';
+            html += '    <span class="run-summary-legend-label">Compilation & Loading:</span>';
+            html += '    <span class="run-summary-legend-value">' + this.formatDuration(compilationTimeUs) + ' <span class="run-summary-percent">(' + compilationPercent.toFixed(1) + '%)</span></span>';
+            html += '  </div>';
+            html += '  <div class="run-summary-legend-item">';
+            html += '    <div class="run-summary-legend-box run-summary-legend-execution"></div>';
+            html += '    <span class="run-summary-legend-label">Execution:</span>';
+            html += '    <span class="run-summary-legend-value">' + this.formatDuration(executionTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span>';
+            html += '  </div>';
+            html += '</div>';
+            html += '<div class="run-summary-combined-bar">';
+            // Ensure minimum 1px width for each section
+            const compilationWidth = Math.max(1, compilationPercent);
+            const executionWidth = Math.max(1, executionPercent);
+            // Normalize if both are minimum (edge case)
+            const total = compilationWidth + executionWidth;
+            const normalizedCompilation = (compilationWidth / total) * 100;
+            const normalizedExecution = (executionWidth / total) * 100;
+            html += '  <div class="run-summary-bar-segment run-summary-bar-compilation" style="width: ' + normalizedCompilation.toFixed(2) + '%"></div>';
+            html += '  <div class="run-summary-bar-segment run-summary-bar-execution" style="width: ' + normalizedExecution.toFixed(2) + '%"></div>';
+            html += '</div>';
+            html += '</div>';
+        }
+
+        // Add time axis header
+        html += `<div class="timeline-axis">
+            <div class="timeline-axis-label">0μs</div>
+            <div class="timeline-axis-label" style="left: 25%">${this.formatDuration(totalDuration * 250)}</div>
+            <div class="timeline-axis-label" style="left: 50%">${this.formatDuration(totalDuration * 500)}</div>
+            <div class="timeline-axis-label" style="left: 75%">${this.formatDuration(totalDuration * 750)}</div>
+            <div class="timeline-axis-label" style="left: 100%">${this.formatDuration(totalDuration * 1000)}</div>
+        </div>`;
+
+        items.forEach(item => {
+            const itemStartTime = new Date(item.start_time).getTime();
+            const offset = itemStartTime - minTime;
+            const leftPercent = totalDuration > 0 ? (offset / totalDuration) * 100 : 0;
+            const widthPercent = totalDuration > 0 ? ((item.duration_us / 1000) / totalDuration) * 100 : 1;
+            const durationClass = item.duration_us > 100000 ? 'slow' : item.duration_us < 1000 ? 'fast' : '';
+
+            // Calculate indentation based on depth
+            const indentPx = item.depth * 20;
+            const indentStyle = item.depth > 0 ? `margin-left: ${indentPx}px; border-left: 2px solid rgba(239, 68, 68, 0.3);` : '';
+
+            html += `
+                <div class="timeline-bar ${this.selectedNode === item.id ? 'selected' : ''}"
+                     data-item-id="${item.id}" data-item-type="${item.type}"
+                     style="${indentStyle}">
+                    <div class="timeline-bar-header">
+                        <div class="timeline-bar-title">
+                            <span>${item.name}</span>
+                        </div>
+                        <div class="timeline-bar-duration ${durationClass}">${this.formatDuration(item.duration_us)}</div>
+                    </div>
+                    <div class="timeline-bar-visual-container">
+                        <div class="timeline-bar-visual ${durationClass}"
+                             style="left: ${leftPercent.toFixed(2)}%; width: ${Math.max(widthPercent, 0.5).toFixed(2)}%"></div>
+                    </div>
+                </div>
+            `;
+        });
+        html += '</div>';
+
+        this.timelineView.innerHTML = html;
+        this.attachTimelineListeners();
+    }
+
+    flattenForTimeline(nodes, items = [], depth = 0) {
+        for (const node of nodes) {
+            items.push({
+                id: node.id,
+                type: node.type,
+                name: node.name || node.function_name || 'Unknown',
+                duration_us: node.duration_us || 0,
+                start_time: node.start_time,
+                depth: depth,  // Add depth for indentation
+                node: node
+            });
+
+            if (node.children && node.children.length > 0) {
+                this.flattenForTimeline(node.children, items, depth + 1);
+            }
+        }
+        return items;
+    }
+
+    getTimelineIcon(type) {
+        const icons = {
+            'call': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path></svg>',
+            'var': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path></svg>',
+            'flow': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>'
+        };
+        return icons[type] || icons['call'];
+    }
+
+    // Format a value as a Hot language literal (uses global function from app.js)
+    formatAsHotLiteral(value, indent = 0) {
+        return window.formatAsHotLiteral(value, indent);
+    }
+
+    formatDuration(us) {
+        if (!us || us === 0) return '0μs';
+
+        const totalMicros = Math.round(us);
+
+        // < 1000μs: show as microseconds
+        if (totalMicros < 1000) {
+            return `${totalMicros}μs`;
+        }
+
+        // < 1,000,000μs (1 second): show as milliseconds with one decimal
+        if (totalMicros < 1_000_000) {
+            const ms = Math.floor(totalMicros / 1000);
+            const usRemainder = totalMicros % 1000;
+            const decimal = Math.floor(usRemainder / 100);
+            return `${ms}.${decimal}ms`;
+        }
+
+        const totalSeconds = Math.floor(totalMicros / 1_000_000);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        // Has hours: "1h 30m 45s"
+        if (hours > 0) {
+            return `${hours}h ${minutes}m ${seconds}s`;
+        }
+
+        // Has minutes: "30m 45s"
+        if (minutes > 0) {
+            return `${minutes}m ${seconds}s`;
+        }
+
+        // >= 1s: show seconds with one decimal
+        return `${(totalMicros / 1_000_000).toFixed(1)}s`;
+    }
+
+    getRunDurationUs() {
+        // Try to get precise duration from data attribute first
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const durationUs = durationContainer.dataset.durationUs;
+            if (durationUs) {
+                return parseInt(durationUs, 10);
+            }
+        }
+
+        // Fallback: parse from displayed text (less precise)
+        const headers = document.querySelectorAll('.grid > div > h3');
+        for (let h3 of headers) {
+            if (h3.textContent.trim().toLowerCase() === 'duration') {
+                const durationText = h3.nextElementSibling?.textContent.trim();
+                if (durationText) {
+                    return this.parseDurationToUs(durationText);
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    parseDurationToUs(durationStr) {
+        if (!durationStr) return 0;
+
+        // Remove any whitespace
+        durationStr = durationStr.trim();
+
+        // Try to match "1h 30m 45s" format
+        const hourMinSecMatch = durationStr.match(/^(\d+)h\s+(\d+)m\s+(\d+)s$/);
+        if (hourMinSecMatch) {
+            const hours = parseInt(hourMinSecMatch[1], 10);
+            const minutes = parseInt(hourMinSecMatch[2], 10);
+            const seconds = parseInt(hourMinSecMatch[3], 10);
+            return (hours * 3600 + minutes * 60 + seconds) * 1_000_000;
+        }
+
+        // Try to match "30m 45s" format
+        const minSecMatch = durationStr.match(/^(\d+)m\s+(\d+)s$/);
+        if (minSecMatch) {
+            const minutes = parseInt(minSecMatch[1], 10);
+            const seconds = parseInt(minSecMatch[2], 10);
+            return (minutes * 60 + seconds) * 1_000_000;
+        }
+
+        // Try to match "1h 30m" format (running time without seconds)
+        const hourMinMatch = durationStr.match(/^(\d+)h\s+(\d+)m$/);
+        if (hourMinMatch) {
+            const hours = parseInt(hourMinMatch[1], 10);
+            const minutes = parseInt(hourMinMatch[2], 10);
+            return (hours * 3600 + minutes * 60) * 1_000_000;
+        }
+
+        // Match simple patterns like "1.6s", "1.4ms", "426μs"
+        const simpleMatch = durationStr.match(/^([\d.]+)(s|ms|μs|us)$/);
+        if (!simpleMatch) return 0;
+
+        const value = parseFloat(simpleMatch[1]);
+        const unit = simpleMatch[2];
+
+        switch (unit) {
+            case 's':
+                return value * 1_000_000; // seconds to microseconds
+            case 'ms':
+                return value * 1000; // milliseconds to microseconds
+            case 'μs':
+            case 'us':
+                return value; // already microseconds
+            default:
+                return 0;
+        }
+    }
+
+    attachTimelineListeners() {
+        this.timelineView.querySelectorAll('.timeline-bar').forEach(bar => {
+            bar.addEventListener('click', (e) => {
+                const itemId = e.currentTarget.dataset.itemId;
+                const itemType = e.currentTarget.dataset.itemType;
+                this.selectTimelineItem(itemId, itemType);
+            });
+        });
+    }
+
+    selectTimelineItem(itemId, itemType) {
+        this.selectedNode = itemId;
+        this.renderTimeline();
+
+        // Find the node in the data
+        const node = this.findNodeInTimeline(itemId);
+        if (node) {
+            this.showNodeInInspector(node);
+        }
+    }
+
+    findNodeInTimeline(itemId) {
+        if (!this.timelineData || !this.timelineData.tree) return null;
+        return this.findNode(this.timelineData.tree, itemId);
+    }
+
+    renderHierarchy() {
+        if (!this.hierarchyData || !this.hierarchyData.tree || this.hierarchyData.tree.length === 0) {
+            this.hierarchyTree.innerHTML = '<div class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">No calls found</div>';
+            return;
+        }
+
+        const html = this.renderHierarchyNodes(this.hierarchyData.tree, 0);
+        this.hierarchyTree.innerHTML = html;
+        this.attachHierarchyListeners();
+    }
+
+    renderHierarchyNodes(nodes, depth) {
+        return nodes.map(node => this.renderHierarchyNode(node, depth)).join('');
+    }
+
+    renderHierarchyNode(node, depth) {
+        const hasChildren = node.children && node.children.length > 0;
+        const isExpanded = this.expandedNodes.has(node.id);
+        const isSelected = this.selectedNode === node.id;
+        const toggleIcon = hasChildren ? (isExpanded ? '▼' : '▶') : ' ';
+
+        const name = node.name || node.function_name || 'Unknown';
+        const durationMs = node.duration_us || 0;
+        const durationBadge = durationMs > 0 ? `<span class="duration-badge">${this.formatDuration(durationMs)}</span>` : '';
+
+        return `
+            <div class="tree-node-wrapper">
+                <div class="tree-node-tab ${depth > 0 ? 'tree-indent-tab' : ''} ${isSelected ? 'selected' : ''}"
+                     data-node-id="${node.id}"
+                     data-node-type="${node.type}">
+                    <span class="tree-toggle" data-node-id="${node.id}" style="width: 14px; cursor: ${hasChildren ? 'pointer' : 'default'}">${toggleIcon}</span>
+                    <span class="node-name" style="flex: 1" title="${name}">${name}</span>
+                    ${durationBadge}
+                </div>
+                ${hasChildren && isExpanded ? `
+                    <div class="tree-children">
+                        ${this.renderHierarchyNodes(node.children, depth + 1)}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    getHierarchyIcon(type) {
+        const icons = {
+            'call': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path></svg>',
+            'var': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path></svg>',
+            'flow': '<svg class="inline w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>'
+        };
+        return icons[type] || icons['call'];
+    }
+
+    attachHierarchyListeners() {
+        // Toggle nodes
+        this.hierarchyTree.querySelectorAll('.tree-toggle').forEach(toggle => {
+            const nodeId = toggle.dataset.nodeId;
+            const node = this.findNode(this.hierarchyData.tree, nodeId);
+            if (node && node.children && node.children.length > 0) {
+                toggle.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.toggleHierarchyNode(nodeId);
+                });
+            }
+        });
+
+        // Select nodes
+        this.hierarchyTree.querySelectorAll('.tree-node-tab').forEach(node => {
+            node.addEventListener('click', (e) => {
+                const nodeId = e.currentTarget.dataset.nodeId;
+                this.selectHierarchyNode(nodeId);
+            });
+        });
+    }
+
+    findNode(nodes, nodeId) {
+        for (const node of nodes) {
+            if (node.id === nodeId) return node;
+            if (node.children) {
+                const found = this.findNode(node.children, nodeId);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    toggleHierarchyNode(nodeId) {
+        if (this.expandedNodes.has(nodeId)) {
+            this.expandedNodes.delete(nodeId);
+        } else {
+            this.expandedNodes.add(nodeId);
+        }
+        this.renderHierarchy();
+    }
+
+    selectHierarchyNode(nodeId) {
+        this.selectedNode = nodeId;
+        this.renderHierarchy();
+
+        const node = this.findNode(this.hierarchyData.tree, nodeId);
+        if (node) {
+            this.showNodeInInspector(node);
+        }
+    }
+
+    showNodeInInspector(node) {
+        // Save state based on current tab
+        if (this.currentTab === 'hierarchy') {
+            this.tabState.hierarchy.selectedNodeId = node.id;
+            this.tabState.hierarchy.selectedNodeType = node.type;
+        } else if (this.currentTab === 'timeline') {
+            this.tabState.timeline.selectedItemId = node.id;
+            this.tabState.timeline.selectedItemType = node.type;
+        }
+
+        const escapedFunctionName = this.escapeHtml(node.function_name || node.name);
+        let content = `
+            <div class="inspector-section">
+                <div class="inspector-section-title">Function</div>
+                <div class="inspector-value font-mono text-xs">
+                    <code class="language-hot">${escapedFunctionName}</code>
+                </div>
+            </div>
+        `;
+
+        if (node.args !== undefined && node.args !== null) {
+            const argsStr = this.formatAsHotLiteral(node.args);
+            const argsId = 'args-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            const escapedArgs = this.escapeHtml(argsStr);
+
+            // Detect file attachments in args
+            let argsAttachmentsHtml = '';
+            if (typeof window.findDataUrls === 'function') {
+                const argsDataUrls = window.findDataUrls(node.args);
+                if (argsDataUrls.length > 0) {
+                    argsAttachmentsHtml = window.renderFileAttachments(argsDataUrls, argsId);
+                }
+            }
+
+            content += `
+                <div class="inspector-section relative">
+                    <div class="inspector-section-title">Args</div>
+                    <div id="${argsId}" style="display: none;">${escapedArgs}</div>
+                    <button onclick="openContentModalFromElement(document.getElementById('${argsId}'), 'Args')" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full args">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <div class="inspector-value font-mono text-xs">
+                        <pre class="whitespace-pre-wrap max-h-60 overflow-auto"><code class="language-hot">${escapedArgs}</code></pre>
+                    </div>
+                    ${argsAttachmentsHtml}
+                </div>
+            `;
+        }
+
+        if (node.return_value !== undefined && node.return_value !== null) {
+            const returnValueStr = this.formatAsHotLiteral(node.return_value);
+            const returnValueId = 'return-value-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            const escapedReturnValue = this.escapeHtml(returnValueStr);
+
+            // Detect file attachments in return value
+            let returnValueAttachmentsHtml = '';
+            if (typeof window.findDataUrls === 'function') {
+                const returnValueDataUrls = window.findDataUrls(node.return_value);
+                if (returnValueDataUrls.length > 0) {
+                    returnValueAttachmentsHtml = window.renderFileAttachments(returnValueDataUrls, returnValueId);
+                }
+            }
+
+            content += `
+                <div class="inspector-section relative">
+                    <div class="inspector-section-title">Return Value</div>
+                    <div id="${returnValueId}" style="display: none;">${escapedReturnValue}</div>
+                    <button onclick="openContentModalFromElement(document.getElementById('${returnValueId}'), 'Return Value')" class="sticky top-0 float-right z-10 mr-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 bg-gray-100 dark:bg-gray-800 rounded" title="View full return value">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                        </svg>
+                    </button>
+                    <div class="inspector-value font-mono text-xs">
+                        <pre class="whitespace-pre-wrap max-h-60 overflow-auto"><code class="language-hot">${escapedReturnValue}</code></pre>
+                    </div>
+                    ${returnValueAttachmentsHtml}
+                </div>
+            `;
+        }
+
+        if (node.duration_us) {
+            content += `
+                <div class="inspector-section">
+                    <div class="inspector-section-title">Duration</div>
+                    <div class="inspector-value">${this.formatDuration(node.duration_us)}</div>
+                </div>
+            `;
+        }
+
+        this.openInspector(content);
+    }
+
+    expandAllHierarchy() {
+        this.expandAllRecursive(this.hierarchyData.tree);
+        this.renderHierarchy();
+    }
+
+    expandAllRecursive(nodes) {
+        for (const node of nodes) {
+            if (node.children && node.children.length > 0) {
+                this.expandedNodes.add(node.id);
+                this.expandAllRecursive(node.children);
+            }
+        }
+    }
+
+    collapseAllHierarchy() {
+        this.expandedNodes.clear();
+        this.renderHierarchy();
+    }
+
+    startResize(e) {
+        this.isResizing = true;
+        e.preventDefault();
+    }
+
+    resize(e) {
+        if (!this.isResizing) return;
+
+        const containerWidth = this.inspector.parentElement.offsetWidth;
+        const inspectorLeft = this.inspector.getBoundingClientRect().left;
+        const newWidth = (this.inspector.parentElement.getBoundingClientRect().right - inspectorLeft) - (e.clientX - inspectorLeft);
+
+        const maxWidth = containerWidth * 0.6;
+        if (newWidth >= 250 && newWidth <= maxWidth) {
+            this.inspector.style.width = `${newWidth}px`;
+        }
+    }
+
+    stopResize() {
+        this.isResizing = false;
+    }
+}
+} // End of if (typeof ObservabilityTabs === 'undefined')
+
+// Initialize - only create new instance if not already exists
+document.addEventListener('DOMContentLoaded', () => {
+    const runId = window.__observabilityRunId || window.location.pathname.split('/')[2];
+    if (!window.observabilityTabs) {
+        window.observabilityTabs = new window.ObservabilityTabs(runId);
+    }
+});
+</script>

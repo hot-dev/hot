@@ -1,0 +1,86 @@
+::anthropic::integration::prompt::caching ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Anthropic Prompt Caching API (Beta)
+// =============================================================================
+// These tests require ANTHROPIC_API_KEY to be set in context (via ctx.hot or conf)
+// Prompt caching allows you to cache portions of your prompt for reuse across requests
+
+test-prompt-caching-basic
+meta ["test"]
+fn () {
+    // Basic prompt caching request with a system prompt that uses cache_control
+    request ::anthropic::prompt::caching/PromptCachingBetaMessagesPostRequest({
+        model: "claude-3-haiku-20240307",
+        max_tokens: 100,
+        system: [
+            {
+                type: "text",
+                text: "You are a helpful assistant that responds concisely.",
+                cache_control: {type: "ephemeral"}
+            }
+        ],
+        messages: [{role: "user", content: "Say hello!"}]
+    })
+
+    response ::anthropic::prompt::caching/beta-messages-post(request)
+
+    assert(response.id, "Response should have an id")
+    assert(response.content, "Response should have content")
+    assert(response.usage, "Response should have usage info")
+    // Usage should include cache-related fields
+    assert(response.usage.input_tokens, "Usage should have input_tokens")
+}
+
+test-prompt-caching-with-long-system
+meta ["test"]
+fn () {
+    // Test caching with a longer system prompt (caching is more beneficial for longer prompts)
+    long-system "You are an expert assistant specialized in helping users with technical questions. You have deep knowledge of programming languages, software architecture, cloud computing, databases, and system design. When answering questions, you should provide clear, concise explanations with practical examples where appropriate. Always consider best practices and modern development patterns in your responses."
+
+    request ::anthropic::prompt::caching/PromptCachingBetaMessagesPostRequest({
+        model: "claude-3-haiku-20240307",
+        max_tokens: 100,
+        system: [
+            {
+                type: "text",
+                text: long-system,
+                cache_control: {type: "ephemeral"}
+            }
+        ],
+        messages: [{role: "user", content: "What is dependency injection?"}]
+    })
+
+    response ::anthropic::prompt::caching/beta-messages-post(request)
+
+    assert(response.id, "Response should have an id")
+    assert(response.content, "Response should have content")
+}
+
+test-prompt-caching-multi-turn
+meta ["test"]
+fn () {
+    // Test prompt caching with multi-turn conversation
+    request ::anthropic::prompt::caching/PromptCachingBetaMessagesPostRequest({
+        model: "claude-3-haiku-20240307",
+        max_tokens: 100,
+        system: [
+            {
+                type: "text",
+                text: "You are a math tutor. Be concise.",
+                cache_control: {type: "ephemeral"}
+            }
+        ],
+        messages: [
+            {role: "user", content: "What is 2+2?"},
+            {role: "assistant", content: "4"},
+            {role: "user", content: "And 3+3?"}
+        ]
+    })
+
+    response ::anthropic::prompt::caching/beta-messages-post(request)
+
+    assert(response.id, "Response should have an id")
+    assert(response.content, "Response should have content")
+}

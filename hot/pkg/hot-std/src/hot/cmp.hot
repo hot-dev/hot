@@ -1,0 +1,164 @@
+::hot::cmp ns
+meta {doc: """Comparison functions for equality and ordering."""}
+
+eq
+meta {
+    core: true,
+    doc: """
+    Return true if `a` is equal to `b`.
+
+    **Example**
+
+    ```hot
+    eq(1, 1)           // true
+    eq(1, 2)           // false
+    eq("hi", "hi") // true
+    eq([1, 2], [1, 2]) // true
+    ```
+    """
+}
+fn (a: Any, b: Any) {
+    call-lib(::hot::cmp/eq, [a, b])
+}
+
+ne
+meta {
+    core: true,
+    doc: """
+    Return true if `a` is not equal to `b`.
+
+    **Example**
+
+    ```hot
+    ne(1, 2)           // true
+    ne(1, 1)           // false
+    ne("a", "b")   // true
+    ```
+    """
+}
+fn (a: Any, b: Any) {
+    not(eq(a, b))
+}
+
+gt
+meta {
+    core: true,
+    doc: """
+    Return true if `a` is greater than `b`.
+
+    **Example**
+
+    ```hot
+    gt(5, 3)     // true
+    gt(3, 5)     // false
+    gt(3, 3)     // false
+    gt(2.5, 2)   // true
+    ```
+    """
+}
+fn (a: Int | Dec, b: Int | Dec) {
+    call-lib(::hot::cmp/gt, [a, b])
+}
+
+
+gte
+meta {
+    core: true,
+    doc: """
+    Return true if `a` is greater than or equal to `b`.
+
+    **Example**
+
+    ```hot
+    gte(5, 3)   // true
+    gte(3, 3)   // true
+    gte(2, 5)   // false
+    ```
+    """
+}
+fn (a: Int | Dec, b: Int | Dec) {
+    call-lib(::hot::cmp/gte, [a, b])
+}
+
+
+lt
+meta {
+    core: true,
+    doc: """
+    Return true if `a` is less than `b`.
+
+    **Example**
+
+    ```hot
+    lt(3, 5)   // true
+    lt(5, 3)   // false
+    lt(3, 3)   // false
+    ```
+    """
+}
+fn (a: Int | Dec, b: Int | Dec) {
+    call-lib(::hot::cmp/lt, [a, b])
+}
+
+
+lte
+meta {
+    core: true,
+    doc: """
+    Return true if `a` is less than or equal to `b`.
+
+    **Example**
+
+    ```hot
+    lte(3, 5)   // true
+    lte(3, 3)   // true
+    lte(5, 3)   // false
+    ```
+    """
+}
+fn (a: Int | Dec, b: Int | Dec) {
+    call-lib(::hot::cmp/lte, [a, b])
+}
+
+
+between
+meta {
+    core: true,
+    doc: """
+    Return true if `x` is between `low` and `high` (inclusive).
+
+    **Example**
+
+    ```hot
+    between(5, 1, 10)    // true
+    between(1, 1, 10)    // true (inclusive)
+    between(10, 1, 10)   // true (inclusive)
+    between(0, 1, 10)    // false
+    between(3.14, 3.0, 4.0)  // true
+    ```
+    """
+}
+fn (x: Int | Dec, low: Int | Dec, high: Int | Dec): Bool {
+    and(gte(x, low), lte(x, high))
+}
+
+
+in
+meta {
+    core: true,
+    doc: """
+    Return true if `value` is an element of `coll`.
+
+    **Example**
+
+    ```hot
+    in(2, [1, 2, 3])       // true
+    in(4, [1, 2, 3])       // false
+    in("a", ["a", "b"])    // true
+    in(1, [])              // false
+    ```
+    """
+}
+fn (value: Any, coll: Vec): Bool {
+    some(coll, eq(%, value))
+}

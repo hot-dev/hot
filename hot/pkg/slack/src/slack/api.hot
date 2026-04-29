@@ -1,0 +1,89 @@
+::slack::api ns
+
+// Namespace alias for ctx module
+::ctx ::hot::ctx
+::regex ::hot::regex
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+sanitize-url
+meta {
+    doc: """Remove legacy token query params and normalize URL separators. Strips any `token=` query parameters to ensure authentication is only sent via the Authorization header."""
+}
+fn (url: Str): Str {
+  // Slack bearer auth is sent in Authorization header. Some endpoints still
+  // include token= in query builders; strip it to avoid invalid_auth responses.
+  removed-middle ::regex/replace-all(url, "([?&])token=[^&]*&", "$1")
+  removed-tail ::regex/replace-all(removed-middle, "[?&]token=[^&]*$", "")
+  fixed-empty-param ::regex/replace-all(removed-tail, "\\?&", "?")
+  ::regex/replace-all(fixed-empty-param, "[?&]$", "")
+}
+
+request
+meta {
+    ctx: {"slack.api.key": {required: true}},
+    doc: """
+    Make an authenticated HTTP request to the Slack API. Automatically adds the Bearer token from the `slack.api.key` context variable and sets Content-Type for JSON bodies. Additional headers can be provided to merge/override defaults.
+
+    **Example**
+
+    ```hot
+    ::api ::slack::api
+
+    // Simple GET request
+    response ::api/request("GET", "https://slack.com/api/auth.test")
+
+    // POST with JSON body
+    response ::api/request("POST", "https://slack.com/api/chat.postMessage", {}, {channel: "C1234", text: "Hello"})
+
+    // With explicit API key override
+    response ::api/request("POST", url, {}, body, "SLACK_API_KEY_PLACEHOLDER")
+    ```
+    """
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default) — delegates to 5-arity
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("slack.api.key"))
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  final-url sanitize-url(url)
+  default-headers {
+    Authorization: `Bearer ${api-key}`
+  }
+
+  headers if(eq(body, ""), default-headers, merge(default-headers, {Content-Type: "application/json; charset=utf-8"}))
+  final-headers merge(headers, additional-headers)
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  ::hot::http/request(HttpRequest({
+    method: method,
+    url: final-url,
+    headers: final-headers,
+    body: encoded-body
+  }))
+}

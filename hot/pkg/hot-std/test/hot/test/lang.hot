@@ -1,0 +1,1014 @@
+::hot::test::lang ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+
+test-namespaces
+meta ["test"] fn () {
+
+
+    // Test namespaces function returns a vector
+    namespaces_result namespaces()
+    namespaces_not_null if(namespaces_result, true, false)
+    assert(namespaces_not_null, "namespaces() returns non-null value")
+
+    // Test functions-in-namespace for hot.sys
+    sys_functions functions-in-namespace(::hot::io)
+    sys_functions_not_null if(sys_functions, true, false)
+    assert(sys_functions_not_null, "functions-in-namespace(::hot::io) returns non-null value")
+
+    // Test functions-in-namespace for hot.lang
+    lang_functions functions-in-namespace(::hot::lang)
+    lang_functions_not_null if(lang_functions, true, false)
+    assert(lang_functions_not_null, "functions-in-namespace(::hot::lang) returns non-null value")
+}
+
+test-empty-map-literal
+meta ["test"] fn () {
+    // Test that {} is parsed as an empty map, not a block expression
+    empty-map {}
+    also-empty {   }
+    with-newlines {
+    }
+
+    // All should be empty maps
+    assert-eq(empty-map, {}, "empty {} should be an empty map")
+    assert-eq(also-empty, {}, "{ } with spaces should be an empty map")
+    assert-eq(with-newlines, {}, "{ \\n } with newlines should be an empty map")
+
+    // They should have length 0
+    assert-eq(length(empty-map), 0, "length of empty map should be 0")
+    assert-eq(length(also-empty), 0, "length of also-empty should be 0")
+    assert-eq(length(with-newlines), 0, "length of with-newlines should be 0")
+
+    // They should equal each other
+    assert-eq(empty-map, also-empty, "empty maps should be equal")
+    assert-eq(also-empty, with-newlines, "empty maps should be equal regardless of whitespace")
+
+    // Empty map should NOT equal null
+    assert(not(eq(empty-map, null)), "empty map should not equal null")
+}
+
+test-cond-flows
+meta ["test"] fn () {
+    a "a"
+    b "b"
+    c "c"
+    d "d"
+
+    // Test regular conditional flows with simple branches
+
+    // map-result => {m: "b"}
+    map-result cond|map {
+        true => m { x0 a x1 b }
+        true => n { y0 c y1 d }
+    }
+
+    assert-eq(map-result, {m: "b"}, "cond|map")
+
+    // vec-result => ["b"]
+    vec-result cond|vec {
+        true => m { x0 a x1 b }
+        true => n { y0 c y1 d }
+    }
+
+    assert-eq(vec-result, ["b"], "cond|vec")
+
+    // one-result => "b"
+    one-result cond|one {
+        true => m { x0 a x1 b }
+        true => n { y0 c y1 d }
+    }
+
+    assert-eq(one-result, "b", "cond|one")
+
+    // Test conditional all flows with simple branches
+
+    // all-map-result => {m: "b", n: "d"}
+    all-map-result cond-all|map {
+        true => m { x0 a x1 b }
+        true => n { y0 c y1 d }
+    }
+
+    assert-eq(all-map-result, {m: "b", n: "d"}, "cond-all|map")
+
+    // all-vec-result => ["b", "d"]
+    all-vec-result cond-all|vec {
+        true => m { x0 a x1 b }
+        true => n { y0 c y1 d }
+    }
+
+    assert-eq(all-vec-result, ["b", "d"], "cond-all|vec")
+
+    // all-one-result => "d" (returns last truthy branch result, consistent with parallel|one)
+    all-one-result cond-all|one {
+        true => m { x0 a x1 b }
+        true => n { y0 c y1 d }
+    }
+
+    assert-eq(all-one-result, "d", "cond-all|one")
+
+    // Test regular conditional flows with explicit flow branches
+
+    // map-flow-map-result => {m: {x0: "a", x1: "b"}}
+    map-flow-map-result cond|map {
+        true => m serial|map { x0 a x1 b }
+        false => n serial|map { y0 c y1 d }
+    }
+
+    assert-eq(map-flow-map-result, {m: {x0: "a", x1: "b"}}, "cond|map w/ serial|map")
+
+    // vec-flow-map-result => [{x0: "a", x1: "b"}]
+    vec-flow-map-result cond|vec {
+        true => m serial|map { x0 a x1 b }
+        false => n serial|map { y0 c y1 d }
+    }
+
+    assert-eq(vec-flow-map-result, [{x0: "a", x1: "b"}], "cond|vec w/ serial|map")
+
+    // one-flow-map-result => {x0: "a", x1: "b"}
+    one-flow-map-result cond|one {
+        true => m serial|map { x0 a x1 b }
+        true => n serial|map { y0 c y1 d }
+    }
+
+    assert-eq(one-flow-map-result, {x0: "a", x1: "b"}, "cond|one w/ serial|map")
+
+    // Test conditional all flows with explicit flow branches
+
+    // all-map-flow-map-result => {m: {x0: "a", x1: "b"}, n: {y0: "c", y1: "d"}}
+    all-map-flow-map-result cond-all|map {
+        true => m serial|map { x0 a x1 b }
+        true => n serial|map { y0 c y1 d }
+    }
+
+    assert-eq(all-map-flow-map-result, {m: {x0: "a", x1: "b"}, n: {y0: "c", y1: "d"}}, "cond-all|map w/ serial|map")
+
+    // all-vec-flow-map-result => [{x0: "a", x1: "b"}, {y0: "c", y1: "d"}]
+    all-vec-flow-map-result cond-all|vec {
+        true => m serial|map { x0 a x1 b }
+        true => n serial|map { y0 c y1 d }
+    }
+
+    assert-eq(all-vec-flow-map-result, [{x0: "a", x1: "b"}, {y0: "c", y1: "d"}], "cond-all|vec w/ serial|map")
+
+    // all-one-flow-map-result => {y0: "c", y1: "d"} (returns last truthy branch result)
+    all-one-flow-map-result cond-all|one {
+        true => m serial|map { x0 a x1 b }
+        true => n serial|map { y0 c y1 d }
+    }
+
+    assert-eq(all-one-flow-map-result, {y0: "c", y1: "d"}, "cond-all|one w/ serial|map")
+}
+
+test-pipe-flows
+meta ["test"] fn () {
+    add ::hot::math/add
+    mul ::hot::math/mul
+
+    // Test basic pipe flow (should return final result)
+    basic-pipe 5 |> add(2) |> mul(3)
+    assert-eq(21, basic-pipe, "Basic pipe: 5 |> add(2) |> mul(3) = 21")
+
+    // Test pipe flow with |one modifier (should be same as basic)
+    pipe-one 5 |> add(2) |> mul(3) |one
+    assert-eq(21, pipe-one, "Pipe |one: should return final result")
+
+    // Test pipe flow with |vec modifier (should return all step results)
+    pipe-vec 5 |> add(2) |> mul(3) |vec
+    assert-eq([5, 7, 21], pipe-vec, "Pipe |vec: should return [5, 7, 21]")
+
+    // Test pipe flow with |map modifier (should return step results as map)
+    pipe-map 5 |> add(2) |> mul(3) |map
+    assert-eq({"$pipe_0": 5, "$pipe_1": 7, "$pipe_2": 21}, pipe-map, "Pipe |map: should return step map")
+}
+
+test-pipe-with-collections
+meta ["test"] fn () {
+    // Test pipe with collection functions - piped value becomes first arg
+
+    // Pipe with map: [1,2,3] |> map(fn) = map([1,2,3], fn)
+    mapped [1, 2, 3] |> map((x) { mul(x, 2) })
+    assert-eq([2, 4, 6], mapped, "Pipe with map: [1,2,3] |> map(double)")
+
+    // Pipe with filter: [1,2,3,4,5] |> filter(fn) = filter([1,2,3,4,5], fn)
+    filtered [1, 2, 3, 4, 5] |> filter((x) { gt(x, 2) })
+    assert-eq([3, 4, 5], filtered, "Pipe with filter: keep elements > 2")
+
+    // Pipe with reduce: [1,2,3,4,5] |> reduce(fn, init) = reduce([1,2,3,4,5], fn, init)
+    summed [1, 2, 3, 4, 5] |> reduce((acc, x) { add(acc, x) }, 0)
+    assert-eq(15, summed, "Pipe with reduce: sum = 15")
+
+    // Chained collection operations
+    chained [1, 2, 3, 4, 5]
+        |> map((x) { mul(x, 2) })
+        |> filter((x) { gt(x, 5) })
+    assert-eq([6, 8, 10], chained, "Chained pipe: double then filter > 5")
+}
+
+test-pipe-with-lambdas
+meta ["test"] fn () {
+    // Test pipe with lambda expressions (value passed as arg to lambda)
+
+    // Simple lambda
+    result1 10 |> (x) { mul(x, 2) }
+    assert-eq(20, result1, "Pipe to lambda: 10 |> (x) { mul(x, 2) } = 20")
+
+    // Lambda with multiple operations
+    result2 5 |> (x) { add(mul(x, 2), 3) }
+    assert-eq(13, result2, "Pipe to lambda: 5 |> (x) { x*2+3 } = 13")
+
+    // Chained lambdas
+    result3 2 |> (x) { mul(x, 3) } |> (x) { add(x, 1) }
+    assert-eq(7, result3, "Chained lambdas: 2 -> *3 -> +1 = 7")
+}
+
+test-pipe-multiline
+meta ["test"] fn () {
+    // Test multiline pipe syntax
+
+    result [1, 2, 3, 4, 5]
+        |> map((x) { mul(x, 10) })
+        |> filter((x) { gt(x, 25) })
+        |> reduce((acc, x) { add(acc, x) }, 0)
+
+    // [1,2,3,4,5] -> [10,20,30,40,50] -> [30,40,50] -> 120
+    assert-eq(120, result, "Multiline pipe chain: map->filter->reduce = 120")
+}
+
+test-parallel-flows
+meta ["test"] fn () {
+    add ::hot::math/add
+    mul ::hot::math/mul
+    sub ::hot::math/sub
+    div ::hot::math/div
+
+    // Test basic parallel flow with |map modifier
+    // Variables a and b should execute in parallel (Level 0)
+    // Variables c and d should execute in parallel (Level 1) after Level 0
+    parallel-map-basic parallel|map {
+        a 10
+        b 20
+        c add(a, 5)
+        d add(b, 10)
+    }
+
+    assert-eq(parallel-map-basic, {a: 10, b: 20, c: 15, d: 30}, "parallel|map basic")
+
+    // Test parallel flow with |vec modifier
+    parallel-vec-basic parallel|vec {
+        a 10
+        b 20
+        c add(a, 5)
+        d add(b, 10)
+    }
+
+    assert-eq(parallel-vec-basic, [10, 20, 15, 30], "parallel|vec basic")
+
+    // Test parallel flow with |one modifier (returns last value)
+    parallel-one-basic parallel|one {
+        a 10
+        b 20
+        c add(a, 5)
+        d add(b, 10)
+    }
+
+    assert-eq(parallel-one-basic, 30, "parallel|one basic")
+
+    // Test parallel flow with chain dependencies
+    // Should execute in levels: [a] -> [b] -> [c] -> [d]
+    parallel-chain parallel|map {
+        a 5
+        b mul(a, 2)
+        c mul(b, 2)
+        d mul(c, 2)
+    }
+
+    assert-eq(parallel-chain, {a: 5, b: 10, c: 20, d: 40}, "parallel chain dependencies")
+
+    // Test parallel flow with complex dependencies
+    // Level 0: [a, b]
+    // Level 1: [c, d, e] (c depends on a, d depends on b, e is independent)
+    // Level 2: [f] (depends on c and d)
+    parallel-complex parallel|map {
+        a 10
+        b 20
+        c add(a, 5)
+        d add(b, 10)
+        e 100
+        f add(c, d)
+    }
+
+    assert-eq(parallel-complex, {a: 10, b: 20, c: 15, d: 30, e: 100, f: 45}, "parallel complex dependencies")
+
+    // Test parallel flow with only independent variables
+    // All should execute in parallel (Level 0)
+    parallel-all-independent parallel|vec {
+        a 1
+        b 2
+        c 3
+        d 4
+        e 5
+    }
+
+    assert-eq(parallel-all-independent, [1, 2, 3, 4, 5], "parallel all independent")
+
+    // Test parallel flow with mathematical operations
+    parallel-math parallel|map {
+        x 10
+        y 20
+        sum add(x, y)
+        product mul(x, y)
+        diff sub(y, x)
+        result add(sum, product)
+    }
+
+    assert-eq(parallel-math, {x: 10, y: 20, sum: 30, product: 200, diff: 10, result: 230}, "parallel math operations")
+
+    // Test nested operations in parallel flow
+    parallel-nested parallel|vec {
+        a 5
+        b 3
+        c add(mul(a, 2), b)
+        d sub(mul(b, 3), a)
+    }
+
+    assert-eq(parallel-nested, [5, 3, 13, 4], "parallel nested operations")
+}
+
+test-condall-flows
+meta ["test"] fn () {
+    // Test CondAll with multiple truthy branches
+    // Note: Execution is sequential, but all truthy branches run
+    condall-basic cond-all|vec {
+        true => a { 10 }
+        true => b { 20 }
+        false => c { 30 }
+        true => d { 40 }
+    }
+
+    assert-eq(condall-basic, [10, 20, 40], "cond-all|vec with multiple truthy branches")
+
+    // Test CondAll with map result modifier
+    condall-map cond-all|map {
+        true => x { 1 }
+        false => y { 2 }
+        true => z { 3 }
+    }
+
+    assert-eq(condall-map, {x: 1, z: 3}, "cond-all|map collects all truthy results")
+
+    // Test CondAll with one result modifier (takes last truthy)
+    condall-one cond-all|one {
+        true => first { 100 }
+        true => second { 200 }
+        true => third { 300 }
+    }
+
+    assert-eq(condall-one, 300, "cond-all|one returns last truthy result")
+
+    // Test CondAll with all false conditions
+    condall-all-false cond-all|vec {
+        false => a { 1 }
+        false => b { 2 }
+        false => c { 3 }
+    }
+
+    assert-eq(condall-all-false, [], "cond-all|vec with all false returns empty")
+
+    // Test CondAll with truthy/falsy values
+    val1 true
+    val2 false
+    val3 true
+    val4 false
+    condall-conditions cond-all|vec {
+        val1 => a { "first" }
+        val2 => b { "second" }
+        val3 => c { "third" }
+        val4 => d { "fourth" }
+    }
+
+    assert-eq(condall-conditions, ["first", "third"], "cond-all|vec evaluates all conditions")
+
+    // Test CondAll with nested flows in branches
+    condall-nested cond-all|vec {
+        true => result1 {
+            a 1
+            b 2
+            add(a, b)
+        }
+
+        true => result2 {
+            x 10
+            y 20
+            add(x, y)
+        }
+    }
+
+    assert-eq(condall-nested, [3, 30], "cond-all|vec with nested flows")
+}
+
+// ============================================================================
+// Lambda and Closure Tests
+// ============================================================================
+
+test-lambda-basic
+meta ["test"] fn () {
+    // Test 1: Simple lambda with no capture
+    double fn (x) { mul(x, 2) }
+    result double(5)
+    assert-eq(10, result, "Simple lambda: double(5) = 10")
+
+    // Test 2: Lambda stored in variable and called
+    triple fn (x) { mul(x, 3) }
+    result2 triple(4)
+    assert-eq(12, result2, "Lambda variable: triple(4) = 12")
+
+    // Test 3: Lambda passed to map
+    numbers [1, 2, 3, 4, 5]
+    doubled map(numbers, (x) { mul(x, 2) })
+    assert-eq([2, 4, 6, 8, 10], doubled, "Lambda in map")
+
+    // Test 4: Lambda passed to filter
+    evens filter(numbers, (x) { eq(mod(x, 2), 0) })
+    assert-eq([2, 4], evens, "Lambda in filter")
+
+    // Test 5: Lambda passed to reduce
+    sum reduce(numbers, (acc, x) { add(acc, x) }, 0)
+    assert-eq(15, sum, "Lambda in reduce")
+}
+
+test-lambda-type-annotations
+meta ["test"] fn () {
+    // Test inline lambda with type annotations on parameters
+    items [1, 2, 3]
+    doubled map(items, (x: Int): Int { mul(x, 2) })
+    assert-eq([2, 4, 6], doubled, "Typed inline lambda in map")
+
+    // Test inline lambda with multiple typed parameters
+    summed reduce(items, (acc: Int, x: Int): Int { add(acc, x) }, 0)
+    assert-eq(6, summed, "Typed inline lambda in reduce")
+
+    // Test lambda with return type only (no param types)
+    stringified map(items, (x): Str { Str(x) })
+    assert-eq(["1", "2", "3"], stringified, "Lambda with return type only")
+}
+
+test-lambda-capture-local
+meta ["test"] fn () {
+    // Test capturing local variables defined in the same function scope
+
+    // Test 1: Lambda captures a local variable
+    multiplier 10
+    scale fn (x) { mul(x, multiplier) }
+    result scale(5)
+    assert-eq(50, result, "Lambda captures local variable: 10 * 5 = 50")
+
+    // Test 2: Lambda captures multiple local variables
+    base 100
+    offset 7
+    compute fn (x) { add(mul(x, base), offset) }
+    result2 compute(3)
+    assert-eq(307, result2, "Lambda captures multiple locals: 3*100+7 = 307")
+}
+
+test-lambda-capture-param
+meta ["test"] fn () {
+    // Test capturing function parameters in nested lambdas
+
+    // Helper that creates a lambda using the parameter
+    makeMultiplier fn (factor: Int): Fn {
+        fn (x) { mul(x, factor) }
+    }
+
+    // Create multipliers with different factors
+    times2 makeMultiplier(2)
+    times5 makeMultiplier(5)
+
+    // Use the returned lambdas
+    result1 times2(10)
+    result2 times5(10)
+
+    assert-eq(20, result1, "Closure captures param: times2(10) = 20")
+    assert-eq(50, result2, "Closure captures param: times5(10) = 50")
+}
+
+test-lambda-nested
+meta ["test"] fn () {
+    // Test nested lambda definitions
+
+    // Outer lambda that returns inner lambda
+    makeAdder fn (x: Int): Fn {
+        fn (y: Int) { add(x, y) }
+    }
+
+    add10 makeAdder(10)
+    add100 makeAdder(100)
+
+    result1 add10(5)
+    result2 add100(5)
+
+    assert-eq(15, result1, "Nested closure: add10(5) = 15")
+    assert-eq(105, result2, "Nested closure: add100(5) = 105")
+}
+
+test-lambda-in-map-value
+meta ["test"] fn () {
+    // Test lambdas stored in maps/objects
+
+    // Define lambdas first
+    addFn fn (a, b) { add(a, b) }
+    mulFn fn (a, b) { mul(a, b) }
+
+    // Store in a map
+    ops {add: addFn, mul: mulFn}
+
+    // Extract and call
+    extractedAdd ops.add
+    extractedMul ops.mul
+
+    result1 extractedAdd(3, 4)
+    result2 extractedMul(3, 4)
+
+    assert-eq(7, result1, "Lambda from map: add(3,4) = 7")
+    assert-eq(12, result2, "Lambda from map: mul(3,4) = 12")
+}
+
+// ============================================================================
+// Core Function Capture in Lambdas
+// ============================================================================
+
+// Test that core functions (like concat, add, map) are properly captured
+// when used inside lambdas. This is critical for lambda closure capture.
+test-core-function-capture-in-lambda
+meta ["test"] fn () {
+    // Test concat inside a lambda passed to map
+    items ["a", "b", "c"]
+    prefixed map(items, (x) { concat("prefix-", x) })
+    assert-eq(["prefix-a", "prefix-b", "prefix-c"], prefixed,
+        "concat should work inside lambda passed to map")
+
+    // Test concat inside a lambda passed to reduce
+    words ["hello", "-", "world"]
+    joined reduce(words, (acc, word) { concat(acc, word) }, "start:")
+    assert-eq("start:hello-world", joined,
+        "concat should work inside lambda passed to reduce")
+
+    // Test core function inside nested lambdas
+    make-prefixer fn (prefix) {
+        (x) { concat(prefix, x) }
+    }
+
+    add-hello make-prefixer("hello-")
+    result add-hello("world")
+    assert-eq("hello-world", result,
+        "concat should work in nested closure")
+
+    // Test multiple core functions in same lambda
+    numbers [1, 2, 3]
+    doubled-and-stringed map(numbers, (n) {
+        doubled mul(n, 2)
+        concat("value: ", Str(doubled))
+    })
+    assert-eq(["value: 2", "value: 4", "value: 6"], doubled-and-stringed,
+        "multiple core functions (mul, concat) should work in lambda")
+
+    // Test core function inside filter predicate inside map
+    data [[1, 2, 3], [4, 5], [6]]
+    result2 map(data, (arr) {
+        concat(arr, [99])
+    })
+    assert-eq([[1, 2, 3, 99], [4, 5, 99], [6, 99]], result2,
+        "concat should work inside lambda in map")
+}
+
+// ============================================================================
+// Clojure-style and/or Tests
+// ============================================================================
+
+test-and-or-clojure-style
+meta ["test"] fn () {
+    // Note: These tests verify Clojure-style and/or behavior where:
+    // - `and` returns the first falsy value or the last truthy value
+    // - `or` returns the first truthy value or the last falsy value
+    // - Both short-circuit evaluation
+
+    // Test and with all truthy values - should return last value (2-arg only for now)
+    assert-eq(2, and(1, 2), "and(1, 2) should return 2 (last truthy)")
+    assert-eq("world", and("hello", "world"), "and with strings returns last")
+
+    // Test and with falsy value - should return first falsy
+    assert-eq(false, and(false, 2), "and(false, 2) should return false (first falsy)")
+    assert-eq(null, and(null, 2), "and(null, 2) should return null (first falsy)")
+
+    // Test or with falsy then truthy - should return first truthy
+    assert-eq(2, or(null, 2), "or(null, 2) should return 2 (first truthy)")
+    assert-eq(1, or(1, 2), "or(1, 2) should return 1 (first truthy)")
+    assert-eq("hello", or("hello", "world"), "or returns first truthy")
+
+    // Test or with all falsy - should return last value
+    assert-eq(false, or(null, false), "or(null, false) should return false (last falsy)")
+}
+
+// ============================================================================
+// Cond/Match Short-Circuiting Tests
+// ============================================================================
+
+// cond should short-circuit: once a branch matches, later condition expressions
+// must NOT be evaluated (they may error on values that are only valid if no
+// earlier branch matched).
+test-cond-short-circuits-conditions
+meta ["test"] fn () {
+    items []
+    first-item first(items) // null
+
+    result cond {
+        is-empty(items) => { "empty" }
+        // get() on null would throw if this condition were evaluated
+        eq(get(first-item, "name"), "Alice") => { "found alice" }
+        => { "default" }
+    }
+
+    assert-eq("empty", result, "cond should short-circuit: later conditions must not be evaluated")
+}
+
+test-cond-first-match-wins
+meta ["test"] fn () {
+    x 10
+
+    result cond {
+        gt(x, 5) => { "big" }
+        gt(x, 3) => { "medium" }
+        => { "small" }
+    }
+
+    assert-eq("big", result, "cond returns the first matching branch")
+}
+
+test-cond-skips-multiple-error-conditions
+meta ["test"] fn () {
+    data make-null-data()
+
+    result cond {
+        is-null(data) => { "null data" }
+        eq(get(data, "key"), "value") => { "has key" }
+        gt(length(data), 0) => { "has length" }
+        => { "default" }
+    }
+
+    assert-eq("null data", result, "cond should not evaluate conditions after the first match")
+}
+
+make-null-data fn (): Any { null }
+
+test-cond-short-circuits-with-nested-flow
+meta ["test"] fn () {
+    items []
+    first-item first(items) // null
+
+    result cond {
+        is-empty(items) => {
+            inner serial {
+                a "nested"
+            }
+
+            inner
+        }
+
+        eq(get(first-item, "name"), "Bob") => { "found bob" }
+        => { "default" }
+    }
+
+    assert-eq("nested", result, "cond short-circuits even with nested flows in the matching branch")
+}
+
+// cond-all must NOT short-circuit — all matching branches execute.
+test-cond-all-no-short-circuit
+meta ["test"] fn () {
+    x 10
+
+    result cond-all|map {
+        gt(x, 5) => a { "big" }
+        gt(x, 3) => b { "medium" }
+        gt(x, 1) => c { "small" }
+    }
+
+    assert-eq("big", result.a, "cond-all branch a")
+    assert-eq("medium", result.b, "cond-all branch b")
+    assert-eq("small", result.c, "cond-all branch c")
+}
+
+
+// Trailing commas should be accepted in all list contexts
+test-trailing-commas
+meta ["test"] fn () {
+    // Vec with trailing comma
+    v [1, 2, 3,]
+    assert-eq(3, length(v), "vec trailing comma")
+
+    // Map with trailing comma
+    m {a: 1, b: 2,}
+    assert-eq(2, length(m), "map trailing comma")
+
+    // Function call with trailing comma
+    assert-eq(3, add(1, 2,), "fn call trailing comma")
+
+    // Lambda with trailing comma in callback arg
+    result map([1, 2, 3,], (x,) { mul(x, 2) })
+    assert-eq([2, 4, 6], result, "lambda trailing comma in callback")
+}
+
+
+// Map field punning: {name, email} desugars to {name: name, email: email}
+test-map-punning
+meta ["test"] fn () {
+    name "Alice"
+    email "alice@example.com"
+
+    // Punned map
+    user {name, email}
+    assert-eq("Alice", user.name, "punned map: name")
+    assert-eq("alice@example.com", user.email, "punned map: email")
+
+    // Mixed punned and explicit
+    age 30
+    mixed {name, age, role: "admin"}
+    assert-eq("Alice", mixed.name, "mixed: punned name")
+    assert-eq(30, mixed.age, "mixed: punned age")
+    assert-eq("admin", mixed.role, "mixed: explicit role")
+
+    // Single punned entry with trailing comma
+    x 42
+    single {x,}
+    assert-eq(42, single.x, "single punned with trailing comma")
+}
+
+
+// Map spread syntax: {...base, key: val}
+test-map-spread
+meta ["test"] fn () {
+    base {a: 1, b: 2}
+
+    // Spread with overrides
+    extended {...base, c: 3}
+    assert-eq(1, extended.a, "spread preserves base a")
+    assert-eq(2, extended.b, "spread preserves base b")
+    assert-eq(3, extended.c, "spread adds new c")
+
+    // Spread with override
+    overridden {...base, b: 99}
+    assert-eq(1, overridden.a, "override preserves a")
+    assert-eq(99, overridden.b, "override replaces b")
+
+    // Multiple spreads
+    extra {c: 3, d: 4}
+    merged {...base, ...extra}
+    assert-eq(1, merged.a, "multi-spread a")
+    assert-eq(2, merged.b, "multi-spread b")
+    assert-eq(3, merged.c, "multi-spread c")
+    assert-eq(4, merged.d, "multi-spread d")
+}
+
+
+test-vec-concat-patterns
+meta ["test"] fn () {
+    a [1, 2, 3]
+    b [4, 5]
+
+    combined concat(a, b)
+    assert-eq([1, 2, 3, 4, 5], combined, "concat combines two vecs")
+
+    // Triple concat
+    c [6]
+    all concat(a, b, c)
+    assert-eq([1, 2, 3, 4, 5, 6], all, "concat combines three vecs")
+
+    // Concat with empty
+    empty []
+    with-empty concat(empty, a)
+    assert-eq([1, 2, 3], with-empty, "concat with empty vec is identity")
+
+    // Flatten nested vecs
+    nested [[1, 2], [3, 4]]
+    flat flatten(nested)
+    assert-eq([1, 2, 3, 4], flat, "flatten nested vecs")
+}
+
+// % placeholder lambdas: desugars to implicit lambda
+// bare % = %1, %2 = second arg, etc.
+test-placeholder-lambda
+meta ["test"] fn () {
+    // Basic % in function call
+    result map([1, 2, 3], mul(%, 2))
+    assert-eq([2, 4, 6], result, "placeholder: mul(%, 2)")
+
+    // Filter with %
+    big filter([1, 2, 3, 4, 5], gt(%, 3))
+    assert-eq([4, 5], big, "placeholder: filter gt(%, 3)")
+
+    // %.field access
+    users [{name: "Alice"}, {name: "Bob"}]
+    names map(users, %.name)
+    assert-eq(["Alice", "Bob"], names, "placeholder: %.name field access")
+
+    // % used twice references same parameter
+    doubled map([1, 2, 3], add(%, %))
+    assert-eq([2, 4, 6], doubled, "placeholder: % used twice same subject")
+
+    // Nested function with %
+    processed map([1, 2, 3], add(mul(%, 2), 1))
+    assert-eq([3, 5, 7], processed, "placeholder: nested fn with %")
+
+    // %1 is same as bare %
+    result2 map([1, 2, 3], mul(%1, 2))
+    assert-eq([2, 4, 6], result2, "placeholder: %1 same as bare %")
+
+    // Multi-param: %1 and %2
+    sum reduce([1, 2, 3], add(%1, %2), 0)
+    assert-eq(6, sum, "placeholder: reduce with %1 %2")
+
+    // Multi-param: bare % with %2
+    sum2 reduce([10, 20, 30], add(%, %2), 0)
+    assert-eq(60, sum2, "placeholder: reduce with bare % and %2")
+
+    // % inside bracket indexing: data[%]
+    headers {"x-api": "key1", "x-auth": "key2"}
+    vals map(["x-api", "x-auth"], headers[%])
+    assert-eq(["key1", "key2"], vals, "placeholder: headers[%] bracket indexing")
+
+    // % in template string
+    greetings map(["Alice", "Bob"], `Hello, ${%}!`)
+    assert-eq(["Hello, Alice!", "Hello, Bob!"], greetings, "placeholder: % in template string")
+
+    // % in map spread
+    defaults {color: "red", size: 10}
+    items [{color: "blue"}, {size: 20}]
+    merged map(items, {...defaults, ...%})
+    assert-eq("blue", first(merged).color, "placeholder: spread % overrides defaults")
+    assert-eq(10, first(merged).size, "placeholder: spread % keeps defaults")
+    assert-eq(20, last(merged).size, "placeholder: spread % second item overrides")
+
+    // %.field then pass result to another function (two-step)
+    data [{value: 3}, {value: 7}, {value: 1}]
+    extracted map(data, %.value)
+    sorted sort(extracted)
+    assert-eq([1, 3, 7], sorted, "placeholder: map(%.value) then sort")
+
+    // % as a map value
+    wrapped map([1, 2, 3], { value: % })
+    assert-eq(1, first(wrapped).value, "placeholder: { value: % } first")
+    assert-eq(3, last(wrapped).value, "placeholder: { value: % } last")
+
+    // % in nested map values
+    items ["a", "b"]
+    nested map(items, { outer: { inner: % } })
+    assert-eq("a", first(nested).outer.inner, "placeholder: nested map { outer: { inner: % } }")
+
+    // % in template string combined with bracket access
+    lookup {x: 10, y: 20}
+    labels map(["x", "y"], `key=${%},val=${lookup[%]}`)
+    assert-eq("key=x,val=10", first(labels), "placeholder: template + bracket access")
+}
+
+// %(expr) explicit lambda boundary
+test-percent-boundary
+meta ["test"] fn () {
+    data [1, 2, 3, 4, 5]
+
+    // %(expr) equivalent to implicit for simple cases
+    doubled map(data, %(mul(%, 2)))
+    assert-eq([2, 4, 6, 8, 10], doubled, "%(expr): simple mul")
+
+    big filter(data, %(gt(%, 3)))
+    assert-eq([4, 5], big, "%(expr): simple filter")
+
+    // %(expr) for nested calls — lambda wraps at the inner boundary
+    nested-data [{value: 3}, {value: 1}, {value: 2}]
+    sorted sort(map(nested-data, %(%.value)))
+    assert-eq([1, 2, 3], sorted, "%(expr): sort(map(data, %(%.value)))")
+
+    // %(expr) nested with filter+length
+    count length(filter(data, %(gt(%, 3))))
+    assert-eq(2, count, "%(expr): length(filter(data, %(gt(%, 3))))")
+
+    // %(%) creates an identity lambda
+    identity map(data, %(%))
+    assert-eq(data, identity, "%(expr): %(%) identity lambda")
+}
+
+// Placeholder wrapping at the nearest enclosing `Fn`-typed parameter slot:
+// `%` is bound by the innermost call whose corresponding parameter is
+// declared `Fn` (or any union/lazy variant containing `Fn`), regardless
+// of how many non-HOF calls (`length`, `not`, `is-empty`, `sort`, …) sit
+// between that slot and the placeholder.
+test-placeholder-hof-wrapping
+meta ["test"] fn () {
+    data [1, 2, 3, 4, 5]
+
+    // length(filter(...)) — without HOF awareness, % would bubble to
+    // length, turning the whole filter call into a lambda body and
+    // making length(<lambda>) error / produce nonsense.
+    count length(filter(data, gt(%, 3)))
+    assert-eq(2, count, "HOF: length(filter(data, gt(%, 3)))")
+
+    // sort(map(...)) — same shape with %.field access.
+    nested-data [{value: 3}, {value: 1}, {value: 2}]
+    sorted sort(map(nested-data, %.value))
+    assert-eq([1, 2, 3], sorted, "HOF: sort(map(data, %.value))")
+
+    // not(is-empty(filter(...))) — the original Team Brain bug. Three
+    // levels of non-HOF wrapping (`not`, `is-empty`) above `filter`.
+    has-needle not(is-empty(filter(["a", "needle", "b"], eq(%, "needle"))))
+    assert-eq(true, has-needle, "HOF: not(is-empty(filter(xs, eq(%, x))))")
+
+    no-needle not(is-empty(filter(["a", "b", "c"], eq(%, "needle"))))
+    assert-eq(false, no-needle, "HOF: filter no-match path")
+
+    // Deep composition — every level is a HOF.
+    biggest first(reverse(sort(map(filter(data, gt(%, 1)), mul(%, 10)))))
+    assert-eq(50, biggest, "HOF: deep filter+map+sort+reverse+first")
+
+    // Closed-over free variable inside the placeholder body works
+    // (this is what broke in agent.hot's skill-matches-transport).
+    contains-x fn (xs: Vec, needle: Str): Bool {
+        not(is-empty(filter(xs, eq(%, needle))))
+    }
+    assert-eq(true,  contains-x(["a", "needle"], "needle"), "HOF: closed-over var match")
+    assert-eq(false, contains-x(["a", "b"],      "needle"), "HOF: closed-over var miss")
+
+    // Explicit %(expr) still works alongside HOF auto-wrap.
+    count2 length(filter(data, %(gt(%, 3))))
+    assert-eq(2, count2, "HOF: explicit %(expr) still honored")
+}
+
+// User-defined higher-order functions get the same placeholder treatment
+// as built-ins. The wrapping is driven entirely by the `Fn` annotation on
+// the parameter -- there is no hardcoded list of HOF names.
+apply-twice fn (x: Int, f: Fn): Int {
+    f(f(x))
+}
+
+when-bigger fn (x: Int, threshold: Int, f: Fn): Int {
+    cond {
+        gt(x, threshold) => { f(x) }
+        _ => { x }
+    }
+}
+
+maybe-apply fn (x: Int, f: Fn | Null): Int {
+    cond {
+        is-null(f) => { x }
+        _ => { f(x) }
+    }
+}
+
+invoke-fn fn (x: Int, f: Fn): Int { f(x) }
+
+test-placeholder-user-hof
+meta ["test"] fn () {
+    assert-eq(7, apply-twice(3, add(%, 2)), "user HOF: apply-twice add(%, 2)")
+    assert-eq(12, apply-twice(3, mul(%, 2)), "user HOF: apply-twice mul(%, 2)")
+
+    // User HOF wrapped inside a non-HOF outer call (cond/match-shaped).
+    assert-eq(20, when-bigger(10, 5, mul(%, 2)), "user HOF in cond body")
+    assert-eq(3, when-bigger(3, 5, mul(%, 2)), "user HOF threshold not crossed")
+
+    // `Fn | Null` and similar union annotations also count as Fn slots.
+    assert-eq(11, maybe-apply(10, add(%, 1)), "Fn | Null slot accepts placeholder")
+}
+
+// Bare % outside any Fn-typed slot needs an explicit `%(expr)` boundary
+// to produce a first-class lambda value (Option B semantics).
+test-placeholder-explicit-boundary-required
+meta ["test"] fn () {
+    sq %(mul(%, %))
+    assert-eq(16, invoke-fn(4, sq), "%(expr) creates a Fn value usable anywhere")
+}
+
+
+// _ => as default arm in cond/match
+test-underscore-default-arm
+meta ["test"] fn () {
+    // cond with _ => default
+    classify fn cond (x: Int): Str {
+        lt(x, 0) => { "negative" }
+        eq(x, 0) => { "zero" }
+        _ => { "positive" }
+    }
+
+    assert-eq("positive", classify(5), "_ => default arm in cond")
+    assert-eq("negative", classify(-3), "_ => non-default arm")
+    assert-eq("zero", classify(0), "_ => middle arm")
+
+    // match with _ => default
+    describe fn match (status: Int): Str {
+        200 => { "ok" }
+        404 => { "not found" }
+        _ => { "unknown" }
+    }
+
+    assert-eq("ok", describe(200), "_ => match literal 200")
+    assert-eq("not found", describe(404), "_ => match literal 404")
+    assert-eq("unknown", describe(500), "_ => match default")
+}

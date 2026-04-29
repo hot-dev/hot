@@ -1,0 +1,177 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="max-w-6xl mx-auto py-6">
+    <div class="pb-5 mb-6">
+        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
+        <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
+            Manage your account settings and preferences
+        </p>
+
+        <!-- Navigation Tabs -->
+        <div class="mt-4 border-b border-gray-200 dark:border-gray-700">
+            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                <a href="/account"
+                   class="border-red-500 text-red-600 dark:text-red-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    Profile
+                </a>
+                {% if billing_enabled && !page_context.is_local_dev %}
+                <a href="/account/notifications"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    Notifications
+                </a>
+                {% endif %}
+                {% if billing_enabled %}
+                <a href="/account/billing"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    Billing
+                </a>
+                {% endif %}
+            </nav>
+        </div>
+    </div>
+
+    <!-- Profile Tab Content -->
+    <div class="space-y-6">
+        <form method="post" action="/account">
+            <!-- Profile Information Card -->
+            <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg mb-6">
+                <div class="px-4 py-5 sm:px-6 border-b border-gray-200 dark:border-gray-700">
+                    <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-gray-100">
+                        Profile Information
+                    </h3>
+                    <p class="mt-1 max-w-2xl text-sm text-gray-500 dark:text-gray-400">
+                        Your basic account information
+                    </p>
+                </div>
+                <div class="px-4 py-5 sm:p-6">
+                    <div class="grid grid-cols-1 gap-6">
+                        <div>
+                            <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                Email
+                            </label>
+                            <input
+                                type="email"
+                                id="email"
+                                class="mt-1 block w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-gray-500 dark:text-gray-400 cursor-not-allowed"
+                                value="{{ user.email }}"
+                                disabled
+                            >
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Your email cannot be changed</p>
+                        </div>
+
+                        <div>
+                            <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                Name
+                            </label>
+                            <input
+                                type="text"
+                                id="name"
+                                name="name"
+                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-gray-100"
+                                value="{% if let Some(name) = &user.name %}{{ name }}{% endif %}"
+                                placeholder="Your name"
+                            >
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Display Preferences Card -->
+            <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg mb-6">
+                <div class="px-4 py-5 sm:px-6 border-b border-gray-200 dark:border-gray-700">
+                    <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-gray-100">
+                        Display Preferences
+                    </h3>
+                    <p class="mt-1 max-w-2xl text-sm text-gray-500 dark:text-gray-400">
+                        Customize how data is displayed in the application
+                    </p>
+                </div>
+                <div class="px-4 py-5 sm:p-6">
+                    <div class="grid grid-cols-1 gap-6">
+                        <div>
+                            <label for="display_timezone" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                Time Zone
+                            </label>
+                            <select
+                                id="display_timezone"
+                                name="display_timezone"
+                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-gray-100"
+                            >
+                                <option value="UTC" {% if user_timezone == "UTC" %}selected{% endif %}>UTC (Coordinated Universal Time)</option>
+                                <option value="America/New_York" {% if user_timezone == "America/New_York" %}selected{% endif %}>America/New_York (Eastern Time)</option>
+                                <option value="America/Chicago" {% if user_timezone == "America/Chicago" %}selected{% endif %}>America/Chicago (Central Time)</option>
+                                <option value="America/Denver" {% if user_timezone == "America/Denver" %}selected{% endif %}>America/Denver (Mountain Time)</option>
+                                <option value="America/Los_Angeles" {% if user_timezone == "America/Los_Angeles" %}selected{% endif %}>America/Los_Angeles (Pacific Time)</option>
+                                <option value="America/Anchorage" {% if user_timezone == "America/Anchorage" %}selected{% endif %}>America/Anchorage (Alaska Time)</option>
+                                <option value="Pacific/Honolulu" {% if user_timezone == "Pacific/Honolulu" %}selected{% endif %}>Pacific/Honolulu (Hawaii Time)</option>
+                                <option value="America/Toronto" {% if user_timezone == "America/Toronto" %}selected{% endif %}>America/Toronto (Eastern Time - Canada)</option>
+                                <option value="America/Vancouver" {% if user_timezone == "America/Vancouver" %}selected{% endif %}>America/Vancouver (Pacific Time - Canada)</option>
+                                <option value="Europe/London" {% if user_timezone == "Europe/London" %}selected{% endif %}>Europe/London (British Time)</option>
+                                <option value="Europe/Paris" {% if user_timezone == "Europe/Paris" %}selected{% endif %}>Europe/Paris (Central European Time)</option>
+                                <option value="Europe/Berlin" {% if user_timezone == "Europe/Berlin" %}selected{% endif %}>Europe/Berlin (Central European Time)</option>
+                                <option value="Europe/Amsterdam" {% if user_timezone == "Europe/Amsterdam" %}selected{% endif %}>Europe/Amsterdam (Central European Time)</option>
+                                <option value="Europe/Zurich" {% if user_timezone == "Europe/Zurich" %}selected{% endif %}>Europe/Zurich (Central European Time)</option>
+                                <option value="Asia/Tokyo" {% if user_timezone == "Asia/Tokyo" %}selected{% endif %}>Asia/Tokyo (Japan Time)</option>
+                                <option value="Asia/Shanghai" {% if user_timezone == "Asia/Shanghai" %}selected{% endif %}>Asia/Shanghai (China Time)</option>
+                                <option value="Asia/Hong_Kong" {% if user_timezone == "Asia/Hong_Kong" %}selected{% endif %}>Asia/Hong_Kong (Hong Kong Time)</option>
+                                <option value="Asia/Singapore" {% if user_timezone == "Asia/Singapore" %}selected{% endif %}>Asia/Singapore (Singapore Time)</option>
+                                <option value="Asia/Kolkata" {% if user_timezone == "Asia/Kolkata" %}selected{% endif %}>Asia/Kolkata (India Time)</option>
+                                <option value="Asia/Dubai" {% if user_timezone == "Asia/Dubai" %}selected{% endif %}>Asia/Dubai (Gulf Time)</option>
+                                <option value="Australia/Sydney" {% if user_timezone == "Australia/Sydney" %}selected{% endif %}>Australia/Sydney (Australian Eastern Time)</option>
+                                <option value="Australia/Melbourne" {% if user_timezone == "Australia/Melbourne" %}selected{% endif %}>Australia/Melbourne (Australian Eastern Time)</option>
+                                <option value="Australia/Brisbane" {% if user_timezone == "Australia/Brisbane" %}selected{% endif %}>Australia/Brisbane (Australian Eastern Time - No DST)</option>
+                                <option value="Australia/Perth" {% if user_timezone == "Australia/Perth" %}selected{% endif %}>Australia/Perth (Australian Western Time)</option>
+                                <option value="Pacific/Auckland" {% if user_timezone == "Pacific/Auckland" %}selected{% endif %}>Pacific/Auckland (New Zealand Time)</option>
+                            </select>
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                All times in the application will be displayed in this time zone. This overrides any organization-level setting.
+                            </p>
+                        </div>
+
+                        <div>
+                            <label for="value_format" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                Value Display Format
+                            </label>
+                            <select
+                                id="value_format"
+                                name="value_format"
+                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-gray-100"
+                            >
+                                <option value="hot" {% if value_format == "hot" %}selected{% endif %}>Hot (unquoted keys, typed values)</option>
+                                <option value="json" {% if value_format == "json" %}selected{% endif %}>JSON (quoted keys, $type/$val fields)</option>
+                            </select>
+                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                Choose how values are displayed in result panels and inspectors. Hot format shows types as <code class="font-mono text-xs bg-gray-100 dark:bg-gray-700 px-1 rounded">::ns/Type({...})</code>, JSON shows raw structure.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex justify-end items-center gap-3">
+                {% if saved %}
+                <style>
+                    @keyframes fade-out {
+                        0%, 70% { opacity: 1; }
+                        100% { opacity: 0; }
+                    }
+                    .animate-fade-out { animation: fade-out 3s ease forwards; }
+                </style>
+                <span class="text-sm text-green-600 dark:text-green-400 flex items-center gap-1 animate-fade-out">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd" />
+                    </svg>
+                    Saved!
+                </span>
+                {% endif %}
+                <button
+                    type="submit"
+                    class="px-4 py-2 bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors"
+                >
+                    Save Changes
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

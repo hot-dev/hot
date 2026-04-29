@@ -1,0 +1,133 @@
+::whatsapp::templates ns
+
+::api ::whatsapp::api
+
+// ============================================================================
+// Message Templates
+// ============================================================================
+
+ListTemplatesRequest type {
+  waba_id: Str,
+  limit: Int?,
+  status: Str?,
+  name: Str?
+}
+
+list-templates
+meta {
+    doc: """
+List message templates for a WhatsApp Business Account. Filter by `status` ("APPROVED", "PENDING", "REJECTED") or `name`.
+
+**Example**
+
+```hot
+::templates ::whatsapp::templates
+
+response ::templates/list-templates(::templates/ListTemplatesRequest({
+  waba_id: "102938475610"
+}))
+response.data  // => [{name: "hello_world", status: "APPROVED", ...}, ...]
+```
+"""
+}
+fn (request: ListTemplatesRequest): Map {
+  params []
+  params if(is-some(request.limit), concat(params, [`limit=${request.limit}`]), params)
+  params if(is-some(request.status), concat(params, [`status=${request.status}`]), params)
+  params if(is-some(request.name), concat(params, [`name=${request.name}`]), params)
+
+  query-string if(is-empty(params), "", `?${join(params, "&")}`)
+  ::api/request("GET", ::api/url(`${request.waba_id}/message_templates${query-string}`))
+}
+
+GetTemplateRequest type {
+  template_id: Str
+}
+
+get-template
+meta {
+    doc: """Get a specific message template by its ID."""
+}
+fn (request: GetTemplateRequest): Map {
+  ::api/request("GET", ::api/url(request.template_id))
+}
+
+CreateTemplateRequest type {
+  waba_id: Str,
+  name: Str,
+  language: Str,
+  category: Str,
+  components: Vec<Map>,
+  allow_category_change: Bool?
+}
+
+create-template
+meta {
+    doc: """
+Create a new message template. Templates must be approved by Meta before they can be sent. `category` must be "UTILITY", "MARKETING", or "AUTHENTICATION".
+
+**Example**
+
+```hot
+::templates ::whatsapp::templates
+
+response ::templates/create-template(::templates/CreateTemplateRequest({
+  waba_id: "102938475610",
+  name: "order_update",
+  language: "en_US",
+  category: "UTILITY",
+  components: [
+    {type: "BODY", text: "Your order {{1}} has been shipped. Track: {{2}}"}
+  ]
+}))
+response.id     // => "template-id-123"
+response.status // => "PENDING"
+```
+"""
+}
+fn (request: CreateTemplateRequest): Map {
+  body {
+    name: request.name,
+    language: request.language,
+    category: request.category,
+    components: request.components
+  } |> assoc-some("allow_category_change", request.allow_category_change)
+
+  ::api/request("POST", ::api/url(`${request.waba_id}/message_templates`), {}, body)
+}
+
+EditTemplateRequest type {
+  template_id: Str,
+  components: Vec<Map>?,
+  category: Str?
+}
+
+edit-template
+meta {
+    doc: """Edit an existing message template. Only approved or rejected templates can be edited. Editing resubmits for approval."""
+}
+fn (request: EditTemplateRequest): Map {
+  body {}
+    |> assoc-some("components", request.components)
+    |> assoc-some("category", request.category)
+
+  ::api/request("POST", ::api/url(request.template_id), {}, body)
+}
+
+DeleteTemplateRequest type {
+  waba_id: Str,
+  name: Str,
+  hsm_id: Str?
+}
+
+delete-template
+meta {
+    doc: """Delete a message template by name. If `hsm_id` is provided, only that specific template is deleted; otherwise all templates with that name (across languages) are deleted."""
+}
+fn (request: DeleteTemplateRequest): Map {
+  params [`name=${request.name}`]
+  params if(is-some(request.hsm_id), concat(params, [`hsm_id=${request.hsm_id}`]), params)
+
+  query-string `?${join(params, "&")}`
+  ::api/request("DELETE", ::api/url(`${request.waba_id}/message_templates${query-string}`))
+}

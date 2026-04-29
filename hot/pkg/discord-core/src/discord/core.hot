@@ -1,0 +1,9 @@
+::discord::core ns
+
+// discord Core Configuration
+BASE_URL "https://discord.com/api/v10"
+
+Error type {
+  code: Int,
+  message: Str,
+}

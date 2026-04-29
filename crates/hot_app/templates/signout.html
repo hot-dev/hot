@@ -1,0 +1,23 @@
+{% extends "public_layout.html" %}
+{% block content %}
+<div class="flex justify-center items-center mt-10">
+    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
+        <div class="mb-8 text-center">
+            <h1 class="text-xl font-bold flex items-center justify-center">
+                Sign Out
+            </h1>
+            <p class="text-gray-600 dark:text-gray-400 mt-2">Are you sure you want to sign out?</p>
+        </div>
+
+        <form action="/signout" method="post">
+            <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50">
+                Sign Out
+            </button>
+        </form>
+
+        <div class="mt-4 text-center">
+            <a href="/" class="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200">Cancel</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,540 @@
+::hot::conf ns
+
+// Namespace alias for env module
+::env ::hot::env
+
+hot.set.profile "local-dev"
+hot.set.project "hot-dev"
+hot.set.remote "hot-dev"
+
+hot.profile.local-dev.user.email "local@hot.dev"
+hot.profile.local-dev.org.slug "local"
+hot.profile.local-dev.env.name "development"
+
+hot.remote.hot-dev.url ::env/get("HOT_API_URL", "https://api.hot.dev")
+hot.remote.hot-dev.key ::env/get("HOT_API_KEY", "")
+
+hot.project.hot-dev.src.paths ["./hot/src"]
+//hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/pkg/aws-eventstream/test"]
+hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/telegram-agent/test"]
+hot.project.hot-dev.test.capture true
+hot.project.hot-dev.resources.paths [
+    "./hot/src/telegram-agent/resources",
+    "./hot/pkg/hot-std/test/fixtures/resources",
+]
+// The default hot-dev project compiles the Team Brain agent, so it owns
+// the agent's Markdown-authored skills too. Keep codegen scoped to the
+// agent resources so test-only resource fixtures remain data fixtures.
+hot.project.hot-dev.skills.codegen.enabled true
+hot.project.hot-dev.skills.codegen.paths ["./hot/src/telegram-agent/resources"]
+hot.project.hot-dev.deps {
+    // AI types package
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+
+    // AI packages — enabled because hot/src/telegram-agent/agent.hot
+    // depends on ::anthropic::messages and ::openai::chat for live LLM
+    // dispatch. Keep these enabled (not commented) so hot-dev compiles
+    // the demo agent.
+    "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
+    "hot.dev/openai":    { "local": "./hot/pkg/openai" },
+    // "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    // "hot.dev/xai": { "local": "./hot/pkg/xai" },
+    // "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
+
+    // AWS packages
+    // "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
+    // "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
+    // "hot.dev/aws-eventstream": { "local": "./hot/pkg/aws-eventstream" },
+    // "hot.dev/aws-dynamodb": { "local": "./hot/pkg/aws-dynamodb" },
+    // "hot.dev/aws-lambda": { "local": "./hot/pkg/aws-lambda" },
+    // "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
+    // "hot.dev/aws-secrets-manager": { "local": "./hot/pkg/aws-secrets-manager" },
+    // "hot.dev/aws-ses": { "local": "./hot/pkg/aws-ses" },
+    // "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
+
+    // Discord packages
+    // "hot.dev/discord-core": { "local": "./hot/pkg/discord-core" },
+    // "hot.dev/discord-guilds": { "local": "./hot/pkg/discord-guilds" },
+    // "hot.dev/discord-interactions": { "local": "./hot/pkg/discord-interactions" },
+    // "hot.dev/discord-messages": { "local": "./hot/pkg/discord-messages" },
+    // "hot.dev/discord-misc": { "local": "./hot/pkg/discord-misc" },
+    // "hot.dev/discord-oauth": { "local": "./hot/pkg/discord-oauth" },
+    // "hot.dev/discord-users": { "local": "./hot/pkg/discord-users" },
+    // "hot.dev/discord-voice": { "local": "./hot/pkg/discord-voice" },
+    // "hot.dev/discord-webhooks": { "local": "./hot/pkg/discord-webhooks" },
+
+    // Email packages
+    // "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
+    // "hot.dev/resend": { "local": "./hot/pkg/resend" },
+
+    // Slack packages
+    // "hot.dev/slack": { "local": "./hot/pkg/slack" },
+    // "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
+
+    // Communication packages
+    "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
+    "hot.dev/slack":    { "local": "./hot/pkg/slack" },
+
+    // Stripe packages
+    // "hot.dev/stripe-billing": { "local": "./hot/pkg/stripe-billing" },
+    // "hot.dev/stripe-checkout": { "local": "./hot/pkg/stripe-checkout" },
+    // "hot.dev/stripe-climate": { "local": "./hot/pkg/stripe-climate" },
+    // "hot.dev/stripe-connect": { "local": "./hot/pkg/stripe-connect" },
+    // "hot.dev/stripe-core": { "local": "./hot/pkg/stripe-core" },
+    // "hot.dev/stripe-customers": { "local": "./hot/pkg/stripe-customers" },
+    // "hot.dev/stripe-entitlements": { "local": "./hot/pkg/stripe-entitlements" },
+    // "hot.dev/stripe-files": { "local": "./hot/pkg/stripe-files" },
+    // "hot.dev/stripe-identity": { "local": "./hot/pkg/stripe-identity" },
+    // "hot.dev/stripe-issuing": { "local": "./hot/pkg/stripe-issuing" },
+    // "hot.dev/stripe-misc": { "local": "./hot/pkg/stripe-misc" },
+    // "hot.dev/stripe-payments": { "local": "./hot/pkg/stripe-payments" },
+    // "hot.dev/stripe-products": { "local": "./hot/pkg/stripe-products" },
+    // "hot.dev/stripe-radar": { "local": "./hot/pkg/stripe-radar" },
+    // "hot.dev/stripe-reporting": { "local": "./hot/pkg/stripe-reporting" },
+    // "hot.dev/stripe-subscriptions": { "local": "./hot/pkg/stripe-subscriptions" },
+    // "hot.dev/stripe-tax": { "local": "./hot/pkg/stripe-tax" },
+    // "hot.dev/stripe-terminal": { "local": "./hot/pkg/stripe-terminal" },
+    // "hot.dev/stripe-treasury": { "local": "./hot/pkg/stripe-treasury" },
+    // "hot.dev/stripe-webhooks": { "local": "./hot/pkg/stripe-webhooks" },
+
+    // Twilio package
+    // "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
+
+    // Backend-as-a-Service
+    // "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
+
+    // Box tool packages (container-based CLI tools)
+    "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
+    "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
+    "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
+    "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
+    "hot.dev/sox": { "local": "./hot/pkg/sox" },
+    "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
+    "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
+    "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" }
+}
+
+hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
+//hot.db.uri "postgres://postgres:password@localhost:5432/hot"
+hot.db.schema "hot"
+
+hot.file.mode ::env/get("HOT_FILE_MODE", "service")
+hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "local")
+hot.file.storage.path ::env/get("HOT_FILE_STORAGE_PATH", "./.hot/file")
+
+hot.log.level "info"
+hot.log.target "stdout"
+hot.log.dir ".hot/log"
+hot.log.rotation "daily"
+hot.log.retention 7
+
+hot.redis.uri ::env/get("HOT_REDIS_URI", "redis://localhost:6379")
+hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
+
+hot.api.host Str(::env/get("HOT_API_HOST", "localhost"))
+hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
+
+hot.app.host Str(::env/get("HOT_APP_HOST", "localhost"))
+hot.app.port Int(::env/get("HOT_APP_PORT", "4680"))
+hot.app.session.timeout Int(::env/get("HOT_APP_SESSION_TIMEOUT", "24"))
+hot.app.session.secret ::env/get("HOT_APP_SESSION_SECRET", "")
+
+hot.product.experience ::env/get("HOT_PRODUCT_EXPERIENCE", "local-dev")
+hot.product.web-url ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev")
+hot.product.pricing-url ::env/get("HOT_PRODUCT_PRICING_URL", "https://hot.dev/pricing")
+hot.product.support-email ::env/get("HOT_PRODUCT_SUPPORT_EMAIL", "support@hot.dev")
+hot.billing.enabled Bool(::env/get("HOT_BILLING_ENABLED", "false"))
+
+hot.email.app-url ::env/get("HOT_APP_URL", "http://localhost:4680")
+hot.email.web-url ::env/get("HOT_EMAIL_WEB_URL", ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev"))
+hot.email.docs-url ::env/get("HOT_EMAIL_DOCS_URL", "https://hot.dev/docs")
+hot.email.logo-url ::env/get("HOT_EMAIL_LOGO_URL", "https://assets.hot.dev/email/hot_logo_email.png")
+hot.email.from ::env/get("HOT_EMAIL_FROM", "hi@notifications.hot.dev")
+hot.email.from-name ::env/get("HOT_EMAIL_FROM_NAME", "Hot Dev")
+hot.email.alerts.from ::env/get("HOT_EMAIL_ALERTS_FROM", "alerts@notifications.hot.dev")
+hot.email.alerts.from-name ::env/get("HOT_EMAIL_ALERTS_FROM_NAME", "Hot Alerts")
+
+hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
+hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "")
+hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "")
+hot.build.aws.access-key-id ::env/get("HOT_BUILD_AWS_ACCESS_KEY_ID", "")
+hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
+
+hot.file.mode ::env/get("HOT_FILE_MODE", "service")
+hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "local")
+hot.file.storage.path ::env/get("HOT_FILE_STORAGE_PATH", "./.hot/file")
+hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
+hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
+hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
+hot.file.aws.access-key-id ::env/get("HOT_FILE_AWS_ACCESS_KEY_ID", "")
+hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
+
+// Custom Domain Configuration
+// Mode: "none" (disabled) or a deployment-provided domain provider.
+hot.domain.mode ::env/get("HOT_DOMAIN_MODE", "none")
+
+hot.cache.enabled false
+hot.cache.format "zstdjson"
+
+hot.check.format "pretty"
+hot.check.raw false
+hot.check.include-tests false
+
+hot.emitter.type "db"
+
+hot.engine.isolation Bool(::env/get("HOT_ENGINE_ISOLATION", "false"))
+hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
+
+hot.queue.type "memory"
+//hot.queue.type "redis"
+
+hot.scheduler.backfill Bool(::env/get("HOT_SCHEDULER_BACKFILL", "false"))
+hot.scheduler.sync-interval-seconds Int(::env/get("HOT_SCHEDULER_SYNC_INTERVAL_SECONDS", "10"))
+
+hot.serialization.type "zstdjson"
+
+hot.lsp.transport "stdio"
+
+hot.watch.debounce 200
+hot.watch.include-tests false
+
+// Worker Configuration
+hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
+hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
+hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "4"))
+
+// =============================================================================
+// Task Configuration (long-running tasks via ::hot::task/start)
+// =============================================================================
+hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4")) // Max concurrent tasks in the task worker
+
+// Box Configuration (container execution via ::hot::box/start)
+// =============================================================================
+// Box support is still evolving; keep the default backend explicit.
+hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "true"))
+hot.box.backend ::env/get("HOT_BOX_BACKEND", "docker") // "docker" (default) or "firecracker"
+
+hot.daemon false
+
+hot.deploy.auto true
+
+// =============================================================================
+// Additional Test, Demo, and Integration Projects
+// =============================================================================
+// These project definitions are kept at the end so core runtime configuration
+// remains easy to scan near the top of the file.
+
+// =============================================================================
+// Package Unit Test Projects
+// =============================================================================
+
+// hot-ai unit tests
+hot.project.pkg-test-hot-ai.src.paths ["./hot/pkg/hot-ai/src"]
+hot.project.pkg-test-hot-ai.test.paths ["./hot/pkg/hot-ai/test"]
+hot.project.pkg-test-hot-ai.test.capture true
+hot.project.pkg-test-hot-ai.deps {
+    "hot.dev/hot-std": { "local": "./hot/pkg/hot-std" }
+}
+
+// mcp unit tests (pure-Hot, no network required)
+hot.project.pkg-test-mcp.src.paths ["./hot/pkg/mcp/src"]
+hot.project.pkg-test-mcp.test.paths ["./hot/pkg/mcp/test"]
+hot.project.pkg-test-mcp.test.capture true
+hot.project.pkg-test-mcp.deps {
+    "hot.dev/hot-ai":   { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" }
+}
+
+// =============================================================================
+// Telegram AI Agent Demo ("Team Brain")
+// =============================================================================
+// Narrow project for deploying or testing only the Team Brain agent.
+// Local development uses the default hot-dev project.
+// Run with: hot dev
+// Deploy:   hot deploy --project demo-team-brain
+//
+// Despite the directory name (`hot/src/telegram-agent/`), this project
+// now hosts a *multi-transport* agent — Telegram and Slack adapters
+// share the same agent core, transport abstraction, and skill resolver.
+// The directory and `::telegram-agent::*` namespace are kept for history;
+// rename in a follow-up if churn is acceptable.
+//
+// Source layout:
+//   hot/src/telegram-agent/        — agent.hot, transport.hot,
+//                                    telegram_adapter.hot, slack_adapter.hot,
+//                                    skills.hot, researcher.hot, seed.hot
+//   hot/src/telegram-agent/resources/ — *.skill.md sources
+//   hot/src/_skills/telegram-agent/   — codegen output (mirror of resources)
+//
+// We compile both the hand-authored sources and the codegen output, but
+// not the rest of `hot/src/` (frontpage-demos, so-fire, etc.) so the
+// demo stays self-contained.
+hot.project.demo-team-brain.src.paths [
+    "./hot/src/telegram-agent",
+    "./hot/src/_skills/telegram-agent",
+]
+hot.project.demo-team-brain.test.paths ["./hot/src/telegram-agent/test"]
+hot.project.demo-team-brain.test.capture true
+hot.project.demo-team-brain.resources.paths [
+    "./hot/src/telegram-agent/resources",
+]
+// Codegen owns hot/src/_skills/telegram-agent/ — re-runs of `hot dev`
+// regenerate the stubs from `*.skill.md` sources whenever the source
+// changes, and prune stubs whose source disappeared.
+hot.project.demo-team-brain.skills.codegen.enabled true
+hot.project.demo-team-brain.deps {
+    "hot.dev/hot-ai":    { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/telegram":  { "local": "./hot/pkg/telegram" },
+    "hot.dev/slack":     { "local": "./hot/pkg/slack" },
+    "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
+    "hot.dev/openai":    { "local": "./hot/pkg/openai" },
+    "hot.dev/whisper":   { "local": "./hot/pkg/whisper" },
+}
+
+// =============================================================================
+// Package Integration Test Projects
+// =============================================================================
+// Run with: hot test --project pkg-integration-<name>
+// Example:  hot test --project pkg-integration-anthropic
+
+// Anthropic integration tests
+hot.project.pkg-integration-anthropic.src.paths ["./hot/pkg/anthropic/src"]
+hot.project.pkg-integration-anthropic.test.paths ["./hot/pkg/anthropic/integration-test"]
+hot.project.pkg-integration-anthropic.test.capture true
+hot.project.pkg-integration-anthropic.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// Gemini integration tests
+hot.project.pkg-integration-gemini.src.paths ["./hot/pkg/gemini/src"]
+hot.project.pkg-integration-gemini.test.paths ["./hot/pkg/gemini/integration-test"]
+hot.project.pkg-integration-gemini.test.capture true
+hot.project.pkg-integration-gemini.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// xAI integration tests
+hot.project.pkg-integration-xai.src.paths ["./hot/pkg/xai/src"]
+hot.project.pkg-integration-xai.test.paths ["./hot/pkg/xai/integration-test"]
+hot.project.pkg-integration-xai.test.capture true
+hot.project.pkg-integration-xai.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// AWS S3 integration tests
+hot.project.pkg-integration-aws-s3.src.paths ["./hot/pkg/aws-s3/src"]
+hot.project.pkg-integration-aws-s3.test.paths ["./hot/pkg/aws-s3/integration-test"]
+hot.project.pkg-integration-aws-s3.test.capture false
+hot.project.pkg-integration-aws-s3.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS DynamoDB integration tests
+hot.project.pkg-integration-aws-dynamodb.src.paths ["./hot/pkg/aws-dynamodb/src"]
+hot.project.pkg-integration-aws-dynamodb.test.paths ["./hot/pkg/aws-dynamodb/integration-test"]
+hot.project.pkg-integration-aws-dynamodb.test.capture false
+hot.project.pkg-integration-aws-dynamodb.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS SES integration tests
+hot.project.pkg-integration-aws-ses.src.paths ["./hot/pkg/aws-ses/src"]
+hot.project.pkg-integration-aws-ses.test.paths ["./hot/pkg/aws-ses/integration-test"]
+hot.project.pkg-integration-aws-ses.test.capture false
+hot.project.pkg-integration-aws-ses.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS SQS integration tests
+hot.project.pkg-integration-aws-sqs.src.paths ["./hot/pkg/aws-sqs/src"]
+hot.project.pkg-integration-aws-sqs.test.paths ["./hot/pkg/aws-sqs/integration-test"]
+hot.project.pkg-integration-aws-sqs.test.capture false
+hot.project.pkg-integration-aws-sqs.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS Lambda integration tests
+hot.project.pkg-integration-aws-lambda.src.paths ["./hot/pkg/aws-lambda/src"]
+hot.project.pkg-integration-aws-lambda.test.paths ["./hot/pkg/aws-lambda/integration-test"]
+hot.project.pkg-integration-aws-lambda.test.capture false
+hot.project.pkg-integration-aws-lambda.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS Secrets Manager integration tests
+hot.project.pkg-integration-aws-secrets-manager.src.paths ["./hot/pkg/aws-secrets-manager/src"]
+hot.project.pkg-integration-aws-secrets-manager.test.paths ["./hot/pkg/aws-secrets-manager/integration-test"]
+hot.project.pkg-integration-aws-secrets-manager.test.capture false
+hot.project.pkg-integration-aws-secrets-manager.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS Bedrock integration tests
+hot.project.pkg-integration-aws-bedrock.src.paths ["./hot/pkg/aws-bedrock/src"]
+hot.project.pkg-integration-aws-bedrock.test.paths ["./hot/pkg/aws-bedrock/integration-test"]
+hot.project.pkg-integration-aws-bedrock.test.capture false
+hot.project.pkg-integration-aws-bedrock.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// AWS SNS integration tests
+hot.project.pkg-integration-aws-sns.src.paths ["./hot/pkg/aws-sns/src"]
+hot.project.pkg-integration-aws-sns.test.paths ["./hot/pkg/aws-sns/integration-test"]
+hot.project.pkg-integration-aws-sns.test.capture false
+hot.project.pkg-integration-aws-sns.deps {
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
+}
+
+// Stripe Core integration tests
+hot.project.pkg-integration-stripe-core.src.paths ["./hot/pkg/stripe-core/src"]
+hot.project.pkg-integration-stripe-core.test.paths ["./hot/pkg/stripe-core/integration-test"]
+hot.project.pkg-integration-stripe-core.test.capture true
+hot.project.pkg-integration-stripe-core.deps {}
+
+// OpenAI integration tests
+hot.project.pkg-integration-openai.src.paths ["./hot/pkg/openai/src"]
+hot.project.pkg-integration-openai.test.paths ["./hot/pkg/openai/integration-test"]
+hot.project.pkg-integration-openai.test.capture true
+hot.project.pkg-integration-openai.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// Resend integration tests
+hot.project.pkg-integration-resend.src.paths ["./hot/pkg/resend/src"]
+hot.project.pkg-integration-resend.test.paths ["./hot/pkg/resend/integration-test"]
+hot.project.pkg-integration-resend.test.capture true
+hot.project.pkg-integration-resend.deps {}
+
+// Postmark integration tests
+hot.project.pkg-integration-postmark.src.paths ["./hot/pkg/postmark/src"]
+hot.project.pkg-integration-postmark.test.paths ["./hot/pkg/postmark/integration-test"]
+hot.project.pkg-integration-postmark.test.capture true
+hot.project.pkg-integration-postmark.deps {}
+
+// Slack integration tests
+hot.project.pkg-integration-slack.src.paths ["./hot/pkg/slack/src"]
+hot.project.pkg-integration-slack.test.paths ["./hot/pkg/slack/integration-test"]
+hot.project.pkg-integration-slack.test.capture true
+hot.project.pkg-integration-slack.deps {}
+
+// WhatsApp integration tests
+hot.project.pkg-integration-whatsapp.src.paths ["./hot/pkg/whatsapp/src"]
+hot.project.pkg-integration-whatsapp.test.paths ["./hot/pkg/whatsapp/integration-test"]
+hot.project.pkg-integration-whatsapp.test.capture true
+hot.project.pkg-integration-whatsapp.deps {}
+
+// Telegram integration tests
+hot.project.pkg-integration-telegram.src.paths ["./hot/pkg/telegram/src"]
+hot.project.pkg-integration-telegram.test.paths ["./hot/pkg/telegram/integration-test"]
+hot.project.pkg-integration-telegram.test.capture true
+hot.project.pkg-integration-telegram.deps {}
+
+// JSON-RPC integration tests
+hot.project.pkg-integration-json-rpc.src.paths ["./hot/pkg/json-rpc/src"]
+hot.project.pkg-integration-json-rpc.test.paths ["./hot/pkg/json-rpc/integration-test"]
+hot.project.pkg-integration-json-rpc.test.capture true
+hot.project.pkg-integration-json-rpc.deps {}
+
+// MCP integration tests
+hot.project.pkg-integration-mcp.src.paths ["./hot/pkg/mcp/src"]
+hot.project.pkg-integration-mcp.test.paths ["./hot/pkg/mcp/integration-test"]
+hot.project.pkg-integration-mcp.test.capture true
+hot.project.pkg-integration-mcp.deps {
+    "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" }
+}
+
+// FFmpeg unit tests (no Docker required)
+hot.project.pkg-ffmpeg.src.paths ["./hot/pkg/ffmpeg/src"]
+hot.project.pkg-ffmpeg.test.paths ["./hot/pkg/ffmpeg/test"]
+hot.project.pkg-ffmpeg.test.capture true
+hot.project.pkg-ffmpeg.deps {}
+
+// FFmpeg integration tests (requires Docker + task worker)
+hot.project.pkg-integration-ffmpeg.src.paths ["./hot/pkg/ffmpeg/src"]
+hot.project.pkg-integration-ffmpeg.test.paths ["./hot/pkg/ffmpeg/integration-test"]
+hot.project.pkg-integration-ffmpeg.test.capture true
+hot.project.pkg-integration-ffmpeg.deps {}
+
+// LibreOffice unit tests (no Docker required)
+hot.project.pkg-libreoffice.src.paths ["./hot/pkg/libreoffice/src"]
+hot.project.pkg-libreoffice.test.paths ["./hot/pkg/libreoffice/test"]
+hot.project.pkg-libreoffice.test.capture true
+hot.project.pkg-libreoffice.deps {}
+
+// LibreOffice integration tests (requires Docker + task worker)
+hot.project.pkg-integration-libreoffice.src.paths ["./hot/pkg/libreoffice/src"]
+hot.project.pkg-integration-libreoffice.test.paths ["./hot/pkg/libreoffice/integration-test"]
+hot.project.pkg-integration-libreoffice.test.capture true
+hot.project.pkg-integration-libreoffice.deps {}
+
+// Whisper unit tests (no Docker required)
+hot.project.pkg-whisper.src.paths ["./hot/pkg/whisper/src"]
+hot.project.pkg-whisper.test.paths ["./hot/pkg/whisper/test"]
+hot.project.pkg-whisper.test.capture true
+hot.project.pkg-whisper.deps {}
+
+// Whisper integration tests (requires Docker + task worker; model download may be slow)
+hot.project.pkg-integration-whisper.src.paths ["./hot/pkg/whisper/src"]
+hot.project.pkg-integration-whisper.test.paths ["./hot/pkg/whisper/integration-test"]
+hot.project.pkg-integration-whisper.test.capture true
+hot.project.pkg-integration-whisper.deps {}
+
+// SoX unit tests (no Docker required)
+hot.project.pkg-sox.src.paths ["./hot/pkg/sox/src"]
+hot.project.pkg-sox.test.paths ["./hot/pkg/sox/test"]
+hot.project.pkg-sox.test.capture true
+hot.project.pkg-sox.deps {}
+
+// SoX integration tests (requires Docker + task worker)
+hot.project.pkg-integration-sox.src.paths ["./hot/pkg/sox/src"]
+hot.project.pkg-integration-sox.test.paths ["./hot/pkg/sox/integration-test"]
+hot.project.pkg-integration-sox.test.capture true
+hot.project.pkg-integration-sox.deps {}
+
+// Playwright unit tests (no Docker required)
+hot.project.pkg-playwright.src.paths ["./hot/pkg/playwright/src"]
+hot.project.pkg-playwright.test.paths ["./hot/pkg/playwright/test"]
+hot.project.pkg-playwright.test.capture true
+hot.project.pkg-playwright.deps {}
+
+// Playwright integration tests (requires Docker + task worker)
+hot.project.pkg-integration-playwright.src.paths ["./hot/pkg/playwright/src"]
+hot.project.pkg-integration-playwright.test.paths ["./hot/pkg/playwright/integration-test"]
+hot.project.pkg-integration-playwright.test.capture true
+hot.project.pkg-integration-playwright.deps {}
+
+// ImageMagick unit tests (no Docker required)
+hot.project.pkg-imagemagick.src.paths ["./hot/pkg/imagemagick/src"]
+hot.project.pkg-imagemagick.test.paths ["./hot/pkg/imagemagick/test"]
+hot.project.pkg-imagemagick.test.capture true
+hot.project.pkg-imagemagick.deps {}
+
+// ImageMagick integration tests (requires Docker + task worker)
+hot.project.pkg-integration-imagemagick.src.paths ["./hot/pkg/imagemagick/src"]
+hot.project.pkg-integration-imagemagick.test.paths ["./hot/pkg/imagemagick/integration-test"]
+hot.project.pkg-integration-imagemagick.test.capture true
+hot.project.pkg-integration-imagemagick.deps {}
+
+// Pandoc unit tests (no Docker required)
+hot.project.pkg-pandoc.src.paths ["./hot/pkg/pandoc/src"]
+hot.project.pkg-pandoc.test.paths ["./hot/pkg/pandoc/test"]
+hot.project.pkg-pandoc.test.capture true
+hot.project.pkg-pandoc.deps {}
+
+// Pandoc integration tests (requires Docker + task worker)
+hot.project.pkg-integration-pandoc.src.paths ["./hot/pkg/pandoc/src"]
+hot.project.pkg-integration-pandoc.test.paths ["./hot/pkg/pandoc/integration-test"]
+hot.project.pkg-integration-pandoc.test.capture true
+hot.project.pkg-integration-pandoc.deps {}
+
+// Tesseract OCR unit tests (no Docker required)
+hot.project.pkg-tesseract.src.paths ["./hot/pkg/tesseract/src"]
+hot.project.pkg-tesseract.test.paths ["./hot/pkg/tesseract/test"]
+hot.project.pkg-tesseract.test.capture true
+hot.project.pkg-tesseract.deps {}
+
+// Tesseract integration tests (requires Docker + task worker)
+hot.project.pkg-integration-tesseract.src.paths ["./hot/pkg/tesseract/src"]
+hot.project.pkg-integration-tesseract.test.paths ["./hot/pkg/tesseract/integration-test"]
+hot.project.pkg-integration-tesseract.test.capture true
+hot.project.pkg-integration-tesseract.deps {}

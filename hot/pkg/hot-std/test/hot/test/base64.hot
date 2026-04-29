@@ -1,0 +1,65 @@
+::hot::test::base64 ns
+meta ["test"]
+
+
+// Note: assert, assert-eq, not, println, Bytes are all core functions - no aliasing needed
+test-base64-encode-decode
+meta ["test"] fn () {
+    // Test encode
+    assert-eq(
+        "SGVsbG8sIFdvcmxkIQ==",
+        ::hot::base64/encode(Bytes("Hello, World!")),
+        "encode should return a valid base64 string"
+    )
+    // Test decode
+    assert-eq(
+        Bytes("Hello, World!"),
+        ::hot::base64/decode("SGVsbG8sIFdvcmxkIQ=="),
+        "decode should return the original bytes"
+    )
+    // Test is-valid
+    assert(::hot::base64/is-valid("SGVsbG8sIFdvcmxkIQ=="))
+    // Test is-valid with invalid input
+    assert(not(::hot::base64/is-valid("not-a-base64-string")))
+}
+
+// Test URL-safe base64 encode
+test-base64-url-encode
+meta ["test"] fn () {
+    // URL-safe base64 uses - and _ instead of + and /
+    // And has no padding (no = at end)
+    result ::hot::base64/encode-url("Hello")
+    assert-eq("SGVsbG8", result, "encode-url should produce no-padding URL-safe base64")
+
+    // Test with data that would normally have + or / in standard base64
+    test-data Bytes([251, 255, 254])  // Would be "+//+" in standard base64
+    url-result ::hot::base64/encode-url(test-data)
+    // Should not contain + or /
+    assert(not(::hot::str/contains(url-result, "+")), "URL-safe should not contain +")
+    assert(not(::hot::str/contains(url-result, "/")), "URL-safe should not contain /")
+}
+
+// Test URL-safe base64 decode
+test-base64-url-decode
+meta ["test"] fn () {
+    result ::hot::base64/decode-url("SGVsbG8")
+    assert-eq(Bytes("Hello"), result, "decode-url should decode URL-safe base64")
+}
+
+// Test URL-safe base64 roundtrip
+test-base64-url-roundtrip
+meta ["test"] fn () {
+    original "The quick brown fox jumps over the lazy dog"
+    encoded ::hot::base64/encode-url(original)
+    decoded ::hot::base64/decode-url(encoded)
+    assert-eq(Bytes(original), decoded, "URL-safe base64 roundtrip should preserve data")
+}
+
+// Test standard base64 roundtrip
+test-base64-roundtrip
+meta ["test"] fn () {
+    original Bytes("Binary data: \x00\x01\x02\xff")
+    encoded ::hot::base64/encode(original)
+    decoded ::hot::base64/decode(encoded)
+    assert-eq(original, decoded, "base64 roundtrip should preserve binary data")
+}

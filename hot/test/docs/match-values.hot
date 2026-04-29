@@ -1,0 +1,412 @@
+// Tests for match value equality — matching on literal values (Int, Dec, Str, Bool, Null, Vec, Map)
+// Verifies both `match` (first match wins) and `match-all` (all matches fire)
+::hot::test::docs::match-values ns
+meta ["test"]
+
+// =============================================================================
+// match on Int literals
+// =============================================================================
+
+test-match-int-literal
+meta ["test"] fn () {
+  status 200
+  message match status {
+    200 => { "ok" }
+    404 => { "not found" }
+    500 => { "server error" }
+    => { "unknown" }
+  }
+
+  assert-eq("ok", message, "match should match Int literal 200")
+}
+
+test-match-int-literal-fallthrough
+meta ["test"] fn () {
+  status 418
+  message match status {
+    200 => { "ok" }
+    404 => { "not found" }
+    500 => { "server error" }
+    => { "unknown" }
+  }
+
+  assert-eq("unknown", message, "match should fall through to default for unmatched Int")
+}
+
+test-match-int-zero
+meta ["test"] fn () {
+  n 0
+  result match n {
+    0 => { "zero" }
+    1 => { "one" }
+    => { "other" }
+  }
+
+  assert-eq("zero", result, "match should match Int literal 0")
+}
+
+// =============================================================================
+// match on Str literals
+// =============================================================================
+
+test-match-str-literal
+meta ["test"] fn () {
+  method "GET"
+  result match method {
+    "GET" => { "reading" }
+    "POST" => { "creating" }
+    "PUT" => { "updating" }
+    "DELETE" => { "deleting" }
+    => { "unknown method" }
+  }
+
+  assert-eq("reading", result, "match should match Str literal GET")
+}
+
+test-match-str-empty
+meta ["test"] fn () {
+  s ""
+  result match s {
+    "" => { "empty" }
+    => { "non-empty" }
+  }
+
+  assert-eq("empty", result, "match should match empty Str literal")
+}
+
+// =============================================================================
+// match on Bool literals
+// =============================================================================
+
+test-match-bool-true
+meta ["test"] fn () {
+  flag true
+  result match flag {
+    true => { "yes" }
+    false => { "no" }
+  }
+
+  assert-eq("yes", result, "match should match Bool literal true")
+}
+
+test-match-bool-false
+meta ["test"] fn () {
+  flag false
+  result match flag {
+    true => { "yes" }
+    false => { "no" }
+  }
+
+  assert-eq("no", result, "match should match Bool literal false")
+}
+
+// =============================================================================
+// match on Null literal
+// =============================================================================
+
+test-match-null
+meta ["test"] fn () {
+  val null
+  result match val {
+    null => { "nothing" }
+    => { "something" }
+  }
+
+  assert-eq("nothing", result, "match should match Null literal")
+}
+
+test-match-not-null
+meta ["test"] fn () {
+  val 42
+  result match val {
+    null => { "nothing" }
+    => { "something" }
+  }
+
+  assert-eq("something", result, "match should not match Null when value is non-null")
+}
+
+// =============================================================================
+// match on Dec literals
+// =============================================================================
+
+test-match-dec-literal
+meta ["test"] fn () {
+  price 9.99
+  result match price {
+    9.99 => { "standard" }
+    19.99 => { "premium" }
+    => { "custom" }
+  }
+
+  assert-eq("standard", result, "match should match Dec literal 9.99")
+}
+
+// =============================================================================
+// match on Vec literals
+// =============================================================================
+
+test-match-vec-literal
+meta ["test"] fn () {
+  coords [0, 0]
+  result match coords {
+    [0, 0] => { "origin" }
+    [1, 0] => { "unit x" }
+    [0, 1] => { "unit y" }
+    => { "other" }
+  }
+
+  assert-eq("origin", result, "match should match Vec literal [0, 0]")
+}
+
+test-match-vec-no-match
+meta ["test"] fn () {
+  coords [5, 5]
+  result match coords {
+    [0, 0] => { "origin" }
+    [1, 0] => { "unit x" }
+    => { "other" }
+  }
+
+  assert-eq("other", result, "match should fall through to default for unmatched Vec")
+}
+
+// =============================================================================
+// match on Map literals
+// =============================================================================
+
+test-match-map-literal
+meta ["test"] fn () {
+  pair {a: 1, b: 2}
+  result match pair {
+    {a: 1, b: 2} => { "matched" }
+    => { "no match" }
+  }
+
+  assert-eq("matched", result, "match should match Map literal with exact equality")
+}
+
+test-match-map-no-partial
+meta ["test"] fn () {
+  data {a: 1, b: 2, c: 3}
+  result match data {
+    {a: 1, b: 2} => { "partial" }
+    => { "no match" }
+  }
+
+  assert-eq("no match", result, "match should NOT partial-match Map (full equality only)")
+}
+
+// =============================================================================
+// Mixed: type arms and value arms together
+// =============================================================================
+
+test-match-mixed-value-before-type
+meta ["test"] fn () {
+  x 42
+  result match x {
+    42 => { "the answer" }
+    Int => { "some integer" }
+    => { "other" }
+  }
+
+  assert-eq("the answer", result, "value arm 42 should match before type arm Int")
+}
+
+test-match-mixed-type-catches-rest
+meta ["test"] fn () {
+  x 99
+  result match x {
+    42 => { "the answer" }
+    Int => { "some integer" }
+    => { "other" }
+  }
+
+  assert-eq("some integer", result, "type arm Int should catch non-42 integers")
+}
+
+test-match-mixed-different-types
+meta ["test"] fn () {
+  a "hello"
+  result-a match a {
+    42 => { "the answer" }
+    "hello" => { "greeting" }
+    Int => { "integer" }
+    Str => { "string" }
+    => { "other" }
+  }
+
+  assert-eq("greeting", result-a, "Str value should match before Str type arm")
+}
+
+// =============================================================================
+// fn match with value literals
+// =============================================================================
+
+status-message fn match (status: Int): Str {
+  200 => "ok"
+  201 => "created"
+  204 => "no content"
+  404 => "not found"
+  500 => "server error"
+  => "unknown"
+}
+
+test-fn-match-value-200
+meta ["test"] fn () {
+  assert-eq("ok", status-message(200), "fn match should match 200")
+}
+
+test-fn-match-value-404
+meta ["test"] fn () {
+  assert-eq("not found", status-message(404), "fn match should match 404")
+}
+
+test-fn-match-value-default
+meta ["test"] fn () {
+  assert-eq("unknown", status-message(999), "fn match should fall to default for 999")
+}
+
+// =============================================================================
+// fn match with mixed type and value arms
+// =============================================================================
+
+describe fn match (value: Any): Str {
+  null => "null"
+  true => "boolean true"
+  false => "boolean false"
+  0 => "zero"
+  "" => "empty string"
+  Int => "integer"
+  Str => "string"
+  Vec => "vector"
+  Map => "map"
+  => "other"
+}
+
+test-fn-match-mixed-null
+meta ["test"] fn () {
+  assert-eq("null", describe(null), "fn match mixed: null")
+}
+
+test-fn-match-mixed-true
+meta ["test"] fn () {
+  assert-eq("boolean true", describe(true), "fn match mixed: true")
+}
+
+test-fn-match-mixed-zero
+meta ["test"] fn () {
+  assert-eq("zero", describe(0), "fn match mixed: 0")
+}
+
+test-fn-match-mixed-empty-str
+meta ["test"] fn () {
+  assert-eq("empty string", describe(""), "fn match mixed: empty string")
+}
+
+test-fn-match-mixed-int
+meta ["test"] fn () {
+  assert-eq("integer", describe(42), "fn match mixed: non-zero Int falls to type arm")
+}
+
+test-fn-match-mixed-str
+meta ["test"] fn () {
+  assert-eq("string", describe("hello"), "fn match mixed: non-empty Str falls to type arm")
+}
+
+test-fn-match-mixed-vec
+meta ["test"] fn () {
+  assert-eq("vector", describe([1, 2, 3]), "fn match mixed: Vec")
+}
+
+test-fn-match-mixed-map
+meta ["test"] fn () {
+  assert-eq("map", describe({a: 1}), "fn match mixed: Map")
+}
+
+// =============================================================================
+// Expression subjects (match on computed values)
+// =============================================================================
+
+test-match-expression-subject
+meta ["test"] fn () {
+  name "hello"
+  result match length(name) {
+    0 => { "empty" }
+    1 => { "single" }
+    5 => { "five chars" }
+    => { "other length" }
+  }
+
+  assert-eq("five chars", result, "match on expression subject length(name)")
+}
+
+test-match-expression-subject-get
+meta ["test"] fn () {
+  response {status: 404, body: "not found"}
+  result match response.status {
+    200 => { "ok" }
+    404 => { "not found" }
+    => { "other" }
+  }
+
+  assert-eq("not found", result, "match on dot-access expression subject")
+}
+
+// =============================================================================
+// match-all with value literals
+// =============================================================================
+
+test-match-all-int-with-type
+meta ["test"] fn () {
+  x 200
+  results match-all x {
+    200 => { "is 200" }
+    Int => { "is integer" }
+  }
+
+  assert-eq("is 200", get(results, "200"), "match-all: value 200 fires")
+  assert-eq("is integer", get(results, "Int"), "match-all: Int type also fires")
+}
+
+test-match-all-str-value
+meta ["test"] fn () {
+  s "hello"
+  results match-all s {
+    "hello" => { "exact hello" }
+    Str => { "is string" }
+  }
+
+  assert-eq("exact hello", get(results, "\"hello\""), "match-all: Str value fires")
+  assert-eq("is string", get(results, "Str"), "match-all: Str type also fires")
+}
+
+// =============================================================================
+// Edge cases
+// =============================================================================
+
+test-match-first-wins
+meta ["test"] fn () {
+  x 42
+  result match x {
+    42 => { "first" }
+    42 => { "second" }
+    => { "default" }
+  }
+
+  assert-eq("first", result, "match should pick first matching arm (first wins)")
+}
+
+test-match-value-with-body-block
+meta ["test"] fn () {
+  code 200
+  result match code {
+    200 => {
+      prefix "Status"
+      `${prefix}: OK`
+    }
+    => { "error" }
+  }
+
+  assert-eq("Status: OK", result, "value arm bodies can be multi-expression blocks")
+}

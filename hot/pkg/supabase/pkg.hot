@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.supabase {
+  name: "hot.dev/supabase",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "Supabase client SDK for Hot. Database queries (PostgREST), authentication (GoTrue), file storage, and edge function invocation.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["database"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

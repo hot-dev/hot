@@ -1,0 +1,204 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2">
+    <div class="mb-6 border-b border-gray-200 dark:border-gray-700">
+        <div class="flex items-center justify-between">
+            <nav class="-mb-px flex space-x-4 sm:space-x-8" aria-label="Tabs">
+                <a href="/settings/alerts/destinations"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    Destinations
+                </a>
+                <a href="/settings/alerts/subscriptions"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    Subscriptions
+                </a>
+                <a href="/settings/alerts/channels"
+                   class="border-red-500 text-red-600 dark:text-red-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    Channels
+                </a>
+                <a href="/settings/alerts/history"
+                   class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                    History
+                </a>
+            </nav>
+            {% if is_admin %}
+            <a href="/settings/alerts/channels/new" class="inline-flex items-center mb-2 px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                New Channel
+            </a>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if !page_context.has_alerts() %}
+    <div class="text-center py-12 sm:py-16 bg-white dark:bg-gray-800 rounded-lg shadow-md">
+        <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+        </svg>
+        <h3 class="mt-4 text-base sm:text-lg font-medium text-gray-900 dark:text-white">Alerts</h3>
+        <p class="mt-2 text-xs sm:text-sm text-gray-500 dark:text-gray-400 max-w-md mx-auto px-4">
+            Set up alert destinations, subscriptions, and custom channels to get notified via email, Slack, PagerDuty, or webhooks when events occur in your environment.
+        </p>
+        <p class="mt-4 text-sm text-gray-600 dark:text-gray-400">
+            Available on <span class="font-medium text-hot-red-500">Starter</span> plans and above.
+        </p>
+        <div class="mt-6">
+            {% match page_context.current_org %}
+            {% when Some with (org) %}
+            <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                Upgrade Plan
+            </a>
+            {% when None %}
+            {% endmatch %}
+        </div>
+    </div>
+    {% else %}
+
+    {% if page_context.show_cloud_upsells %}
+    <div class="mb-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/30 px-4 py-3">
+        <div class="flex items-start">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-500 dark:text-blue-400 mt-0.5 mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div>
+                <p class="text-sm text-blue-800 dark:text-blue-200">
+                    <span class="font-medium">Alert delivery requires the Pro plan.</span>
+                    Custom channels define alert patterns locally. Delivery to destinations is available on Hot Cloud's <span class="font-medium">Pro</span> plan or above.
+                    <a href="{{ page_context.pricing_url }}" target="_blank" class="underline hover:text-blue-600 dark:hover:text-blue-300">Learn more</a>
+                </p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+        {% if channels.len() > 0 %}
+        <div class="overflow-x-auto">
+            <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-900">
+                    <tr>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Channel Name
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Pattern
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Type
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Status
+                        </th>
+                        {% if is_admin %}
+                        <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            Actions
+                        </th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for ch in channels %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-medium text-gray-900 dark:text-white">
+                                {{ ch.name }}
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <code class="text-sm text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">{{ ch.pattern }}</code>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if ch.org_id.is_none() %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                                System
+                            </span>
+                            {% else if ch.env_id.is_some() %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300">
+                                Environment
+                            </span>
+                            {% else %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                                Organization
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if ch.enabled %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
+                                <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                    <circle cx="4" cy="4" r="3" />
+                                </svg>
+                                Enabled
+                            </span>
+                            {% else %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+                                <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                    <circle cx="4" cy="4" r="3" />
+                                </svg>
+                                Disabled
+                            </span>
+                            {% endif %}
+                        </td>
+                        {% if is_admin %}
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                            {% if ch.org_id.is_some() %}
+                            <a href="/settings/alerts/channels/{{ ch.alert_channel_id }}/edit" class="text-hot-red-500 hover:text-hot-red-700 mr-4">Edit</a>
+                            <form id="delete-channel-{{ ch.alert_channel_id }}" action="/settings/alerts/channels/{{ ch.alert_channel_id }}/delete" method="POST" class="inline">
+                                <button type="button" onclick="showConfirm('Delete Channel', 'Are you sure you want to delete this channel?', () => document.getElementById('delete-channel-{{ ch.alert_channel_id }}').submit(), { confirmText: 'Delete', type: 'warning' })" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300">Delete</button>
+                            </form>
+                            {% else %}
+                            <span class="text-gray-400 dark:text-gray-500 text-xs">System channel</span>
+                            {% endif %}
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center py-12">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Alert Channels</h3>
+            <p class="text-gray-500 dark:text-gray-400">
+                System channels will appear here once the database is seeded.
+            </p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Channel Documentation -->
+    <div class="mt-8 bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">About Alert Channels</h3>
+        <div class="prose dark:prose-invert max-w-none text-sm text-gray-600 dark:text-gray-300">
+            <p>
+                Alert channels define patterns that match alert events. When an alert is triggered, 
+                the system checks which channels match the alert's channel name using regex patterns.
+            </p>
+            <h4 class="text-base font-medium text-gray-900 dark:text-white mt-4 mb-2">Built-in System Channels</h4>
+            <ul class="list-disc pl-5 space-y-1">
+                <li><code>run:failed</code> - Triggered when a run fails (after all retries exhausted)</li>
+                <li><code>run:cancelled</code> - Triggered when a run is cancelled</li>
+                <li><code>task:failed</code> - Triggered when a task fails or times out</li>
+                <li><code>task:cancelled</code> - Triggered when a task is cancelled</li>
+                <li><code>deploy:failed</code> - Triggered when a deployment fails</li>
+                <li><code>deploy:succeeded</code> - Triggered when a deployment succeeds</li>
+            </ul>
+            <h4 class="text-base font-medium text-gray-900 dark:text-white mt-4 mb-2">Custom Channels</h4>
+            <p>
+                You can create custom channels with regex patterns to match specific alert types.
+                For example, <code>run:.*</code> would match all run-related alerts.
+            </p>
+        </div>
+    </div>
+
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,30 @@
+[package]
+name = "hot_worker"
+version.workspace = true
+edition.workspace = true
+description = "Hot event and job worker"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+hot = { workspace = true }
+reqwest = { workspace = true }
+fd-lock = { workspace = true }
+zstd = { workspace = true }
+parking_lot = { workspace = true }
+
+# ONNX Runtime (used by fastembed) has no pre-built binaries for Windows ARM64
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+hot = { workspace = true, features = ["local-embeddings"] }

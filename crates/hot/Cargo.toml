@@ -1,0 +1,113 @@
+[package]
+name = "hot"
+version.workspace = true
+edition.workspace = true
+description = "Core Hot language, runtime, storage, and package support"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+s3-storage = ["aws-config", "aws-runtime", "aws-sdk-s3"]
+local-embeddings = ["dep:fastembed"]
+test-utils = []
+
+[dependencies]
+ahash = { workspace = true }
+fastnum = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
+serde = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+ariadne.workspace = true
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = { workspace = true }
+async-trait = { workspace = true }
+redis = { workspace = true }
+rustls = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+async-channel = { workspace = true }
+zstd = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "sqlite", "uuid", "json", "migrate", "macros", "time"] }
+thiserror = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+regex = { workspace = true }
+yaml-rust2 = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+url = { workspace = true }
+percent-encoding = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+md5 = { workspace = true }
+hex = { workspace = true }
+zip = { workspace = true, features = ["zstd"] }
+walkdir = { workspace = true }
+ignore = { workspace = true }
+aws-lc-rs = { workspace = true }
+croner = { workspace = true }
+english-to-cron = { workspace = true }
+humantime = { workspace = true }
+temporal_rs = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+bollard = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+# HTTP client for ::hot::http functions
+reqwest = { workspace = true }
+# CRC32 checksum for binary protocols
+crc32fast = { workspace = true }
+# File locking for cross-process cache coordination
+fd-lock = { workspace = true }
+# Markdown to HTML for docs rendering
+pulldown-cmark = { workspace = true }
+# MIME type detection from file extensions
+mime_guess = { workspace = true }
+# Blocking HTTP client for CDN package downloads (no async runtime)
+ureq = { workspace = true }
+# Gzip decompression for package tarballs
+flate2 = { workspace = true }
+# Tarball extraction for packages
+tar = { workspace = true }
+# XML parsing for ::hot::xml functions
+quick-xml = { workspace = true }
+# DNS resolution for custom domain verification
+hickory-resolver = { workspace = true }
+# WebSocket client for ::hot::ws functions
+tokio-tungstenite = { workspace = true }
+# Non-poisoning Mutex/RwLock for shared state held across user-code execution
+parking_lot = { workspace = true }
+# OpenAI BPE tokenizer used by ::hot::internal::tokenizer (wrapped by ::ai::tokenizer).
+tiktoken-rs = { workspace = true }
+
+# Local embedding generation via ONNX Runtime (optional)
+fastembed = { workspace = true, optional = true }
+
+# AWS SDK for S3 storage (optional)
+aws-config = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+
+aws-runtime = { workspace = true, optional = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-native = { workspace = true }
+
+# Direct write(2) syscall in the OOM logger so we don't allocate during an
+# allocation-failure path.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+axum = { workspace = true }

@@ -1,0 +1,225 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+    <div class="pb-5 mb-6">
+        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Edit Context Variable</h1>
+        <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
+            Editing <span class="font-mono font-medium">{{ context.key }}</span> for <span class="font-medium">{{ scope_display }}</span>
+        </p>
+    </div>
+
+    <div class="max-w-3xl mx-auto">
+        <!-- Error Message -->
+        {% match error %}
+        {% when Some with (msg) %}
+        <div class="mb-6 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-md p-4">
+            <div class="flex">
+                <div class="flex-shrink-0">
+                    <svg class="h-5 w-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+                    </svg>
+                </div>
+                <div class="ml-3">
+                    <p class="text-sm text-red-700 dark:text-red-200">
+                        {{ msg }}
+                    </p>
+                </div>
+            </div>
+        </div>
+        {% when None %}
+        {% endmatch %}
+
+        <!-- Scope Badge -->
+        <div class="mb-4">
+            {% if scope == "env" %}
+            <span class="inline-flex items-center rounded-full bg-blue-100 dark:bg-blue-900/30 px-3 py-1 text-sm font-medium text-blue-800 dark:text-blue-300">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M11.47 3.841a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.061l-8.689-8.69a2.25 2.25 0 0 0-3.182 0l-8.69 8.69a.75.75 0 1 0 1.061 1.06l8.69-8.689Z" />
+                    <path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z" />
+                </svg>
+                Environment Level
+            </span>
+            {% else %}
+            <span class="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-900/30 px-3 py-1 text-sm font-medium text-purple-800 dark:text-purple-300">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" viewBox="0 0 24 24" fill="currentColor">
+                    <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
+                </svg>
+                Project: {{ scope }}
+            </span>
+            {% endif %}
+        </div>
+
+        <!-- Form Card -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <form method="post" action="/contexts/{{ scope }}/{{ context.context_id }}/edit">
+                <!-- Key Field (Read-only) -->
+                <div class="mb-6">
+                    <label for="key" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Key
+                    </label>
+                    <input
+                        type="text"
+                        id="key"
+                        name="key"
+                        value="{{ context.key }}"
+                        readonly
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-100 dark:bg-gray-900 text-gray-600 dark:text-gray-400 cursor-not-allowed font-mono"
+                    />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        The key cannot be changed after creation
+                    </p>
+                </div>
+
+                <!-- Value Field with Show/Hide Toggle -->
+                <div class="mb-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <label for="value" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                            Value <span class="text-red-500">*</span>
+                        </label>
+                        <button
+                            type="button"
+                            id="toggle-value-visibility"
+                            class="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-all"
+                        >
+                            <span id="show-text" class="hidden">Show Value</span>
+                            <span id="hide-text">Hide Value</span>
+                        </button>
+                    </div>
+                    <textarea
+                        id="value"
+                        name="value"
+                        required
+                        rows="6"
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
+                    >{{ value }}</textarea>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        Must be valid Hot code. The current value is decrypted for editing.
+                    </p>
+                </div>
+
+                <!-- Description Field -->
+                <div class="mb-6">
+                    <label for="description" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Description
+                    </label>
+                    <textarea
+                        id="description"
+                        name="description"
+                        rows="3"
+                        placeholder="A brief description of what this context variable is used for"
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 dark:bg-gray-700 dark:text-white"
+                    >{{ description }}</textarea>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        Optional: Help your team understand the purpose of this variable
+                    </p>
+                </div>
+
+                <!-- Warning Box -->
+                <div class="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <p class="text-sm text-yellow-700 dark:text-yellow-200">
+                                <strong>Warning:</strong> Changing this value will affect all code using <code class="bg-yellow-100 dark:bg-yellow-800 px-1 rounded text-xs">::hot::ctx/get("{{ context.key }}")</code>{% if scope == "env" %} in this environment{% else %} in this project{% endif %}.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Buttons -->
+                <div class="flex items-center justify-between">
+                    <div>
+                        <a
+                            href="{% if scope == "env" %}/contexts?tab=env{% else %}/contexts?tab=project&project={{ scope }}{% endif %}"
+                            class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all"
+                        >
+                            Cancel
+                        </a>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <button
+                            type="submit"
+                            class="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all"
+                        >
+                            Update Context Variable
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <!-- Context Info -->
+        <div class="mt-6 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Context Variable Details</h3>
+            <div class="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                    <p class="text-gray-500 dark:text-gray-400">ID</p>
+                    <p class="text-gray-900 dark:text-white font-mono text-xs">{{ context.context_id }}</p>
+                </div>
+                <div>
+                    <p class="text-gray-500 dark:text-gray-400">Status</p>
+                    <p class="text-gray-900 dark:text-white">
+                        {% if context.active %}
+                        <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">
+                            Active
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">
+                            Inactive
+                        </span>
+                        {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <p class="text-gray-500 dark:text-gray-400">Created</p>
+                    <p class="text-gray-900 dark:text-white">{{ context.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</p>
+                </div>
+                <div>
+                    <p class="text-gray-500 dark:text-gray-400">Last Updated</p>
+                    <p class="text-gray-900 dark:text-white">{{ context.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Show/Hide toggle functionality
+    document.getElementById('toggle-value-visibility').addEventListener('click', function() {
+        const valueField = document.getElementById('value');
+        const showText = document.getElementById('show-text');
+        const hideText = document.getElementById('hide-text');
+
+        if (valueField.type === 'password' || valueField.classList.contains('hidden-value')) {
+            // Show value
+            valueField.classList.remove('hidden-value');
+            valueField.style.webkitTextSecurity = 'none';
+            valueField.style.textSecurity = 'none';
+            showText.classList.add('hidden');
+            hideText.classList.remove('hidden');
+        } else {
+            // Hide value
+            valueField.classList.add('hidden-value');
+            valueField.style.webkitTextSecurity = 'disc';
+            valueField.style.textSecurity = 'disc';
+            showText.classList.remove('hidden');
+            hideText.classList.add('hidden');
+        }
+    });
+
+    // Hide value by default on page load
+    window.addEventListener('DOMContentLoaded', function() {
+        const valueField = document.getElementById('value');
+        valueField.classList.add('hidden-value');
+        valueField.style.webkitTextSecurity = 'disc';
+        valueField.style.textSecurity = 'disc';
+        document.getElementById('show-text').classList.remove('hidden');
+        document.getElementById('hide-text').classList.add('hidden');
+    });
+</script>
+{% endblock %}

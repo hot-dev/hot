@@ -1,0 +1,322 @@
+::openai::delete ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+DeleteFineTuningCheckpointPermissionResponse type {
+    id: Str,
+    object: "checkpoint.permission",
+    deleted: Bool
+}
+
+DeleteAssistantResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "assistant.deleted"
+}
+
+DeleteVectorStoreFileResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "vector_store.file.deleted"
+}
+
+DeleteThreadResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "thread.deleted"
+}
+
+Error type {
+    code: Str,
+    message: Str,
+    param: Str,
+    type: Str
+}
+
+DeleteMessageResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "thread.message.deleted"
+}
+
+DeleteFileResponse type {
+    id: Str,
+    object: "file",
+    deleted: Bool
+}
+
+DeleteVectorStoreResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "vector_store.deleted"
+}
+
+ChatCompletionDeleted type {
+    object: "chat.completion.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+DeleteModelResponse type {
+    id: Str,
+    deleted: Bool,
+    object: Str
+}
+
+DeleteCertificateResponse type {
+    object: Any,
+    id: Str
+}
+
+DeleteAssistantRequest type {
+  assistant-id: Str
+}
+
+DeleteAssistantResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "assistant.deleted"
+}
+
+
+delete-assistant
+meta {doc: """DELETE /assistants/{assistant_id} - Permanently delete an assistant."""}
+fn (request: DeleteAssistantRequest): DeleteAssistantResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/assistants/${request.assistant-id}`)
+  if(is-ok-response(response), DeleteAssistantResponse(response.body), err(HttpError(response)))
+}
+
+DeleteChatCompletionRequest type {
+  completion-id: Str
+}
+
+DeleteChatCompletionResponse type {
+    object: "chat.completion.deleted",
+    id: Str,
+    deleted: Bool
+}
+
+
+delete-chat-completion
+meta {
+    doc: """DELETE /chat/completions/{completion_id} - Delete a stored chat completion."""
+}
+fn (request: DeleteChatCompletionRequest): DeleteChatCompletionResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/chat/completions/${request.completion-id}`)
+  if(is-ok-response(response), DeleteChatCompletionResponse(response.body), err(HttpError(response)))
+}
+
+DeleteEvalRequest type {
+  eval-id: Str
+}
+
+DeleteEvalResponse type {
+    object: Str,
+    deleted: Bool,
+    eval_id: Str
+}
+
+
+delete-eval
+meta {doc: """DELETE /evals/{eval_id} - Permanently delete an evaluation."""}
+fn (request: DeleteEvalRequest): DeleteEvalResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/evals/${request.eval-id}`)
+  if(is-ok-response(response), DeleteEvalResponse(response.body), err(HttpError(response)))
+}
+
+DeleteEvalRunRequest type {
+  eval-id: Str,
+  run-id: Str
+}
+
+DeleteEvalRunResponse type {
+    object: Str?,
+    deleted: Bool?,
+    run_id: Str?
+}
+
+
+delete-eval-run
+meta {doc: """DELETE /evals/{eval_id}/runs/{run_id} - Delete an evaluation run."""}
+fn (request: DeleteEvalRunRequest): DeleteEvalRunResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}`)
+  if(is-ok-response(response), DeleteEvalRunResponse(response.body), err(HttpError(response)))
+}
+
+DeleteFileRequest type {
+  file-id: Str
+}
+
+DeleteFileResponse type {
+    id: Str,
+    object: "file",
+    deleted: Bool
+}
+
+
+delete-file
+meta {doc: """DELETE /files/{file_id} - Delete an uploaded file."""}
+fn (request: DeleteFileRequest): DeleteFileResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/files/${request.file-id}`)
+  if(is-ok-response(response), DeleteFileResponse(response.body), err(HttpError(response)))
+}
+
+DeleteFineTuningCheckpointPermissionRequest type {
+  fine-tuned-model-checkpoint: Str,
+  permission-id: Str
+}
+
+DeleteFineTuningCheckpointPermissionResponse type {
+    id: Str,
+    object: "checkpoint.permission",
+    deleted: Bool
+}
+
+
+delete-checkpoint-permission
+meta {
+    doc: """DELETE /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions/{permission_id} - Delete checkpoint permission"""
+}
+fn (request: DeleteFineTuningCheckpointPermissionRequest): DeleteFineTuningCheckpointPermissionResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/fine_tuning/checkpoints/${request.fine-tuned-model-checkpoint}/permissions/${request.permission-id}`)
+  if(is-ok-response(response), DeleteFineTuningCheckpointPermissionResponse(response.body), err(HttpError(response)))
+}
+
+DeleteModelRequest type {
+  model: Str
+}
+
+DeleteModelResponse type {
+    id: Str,
+    deleted: Bool,
+    object: Str
+}
+
+
+delete-finetuned-model
+meta {
+    doc: """DELETE /models/{model} - Delete a fine-tuned model. Only the owner organization can delete a model."""
+}
+fn (request: DeleteModelRequest): DeleteModelResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/models/${request.model}`)
+  if(is-ok-response(response), DeleteModelResponse(response.body), err(HttpError(response)))
+}
+
+// No parameters required for this request
+DeleteCertificateRequest type Map
+
+DeleteCertificateResponse type {
+    object: Any,
+    id: Str
+}
+
+
+delete-certificate
+meta {
+    doc: """DELETE /organization/certificates/{certificate_id} - Delete an organization certificate."""
+}
+fn (request: DeleteCertificateRequest): DeleteCertificateResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/organization/certificates/{certificate_id}`)
+  if(is-ok-response(response), DeleteCertificateResponse(response.body), err(HttpError(response)))
+}
+
+DeleteResponseRequest type {
+  response-id: Str
+}
+
+DeleteResponseResponse type {
+    code: Str,
+    message: Str,
+    param: Str,
+    type: Str
+}
+
+
+delete-model-response
+meta {doc: """DELETE /responses/{response_id} - Delete a stored model response."""}
+fn (request: DeleteResponseRequest): DeleteResponseResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/responses/${request.response-id}`)
+  if(is-ok-response(response), DeleteResponseResponse(response.body), err(HttpError(response)))
+}
+
+DeleteThreadRequest type {
+  thread-id: Str
+}
+
+DeleteThreadResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "thread.deleted"
+}
+
+
+delete-thread
+meta {doc: """DELETE /threads/{thread_id} - Delete a thread and all its messages."""}
+fn (request: DeleteThreadRequest): DeleteThreadResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/threads/${request.thread-id}`)
+  if(is-ok-response(response), DeleteThreadResponse(response.body), err(HttpError(response)))
+}
+
+DeleteMessageRequest type {
+  thread-id: Str,
+  message-id: Str
+}
+
+DeleteMessageResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "thread.message.deleted"
+}
+
+
+delete-message
+meta {
+    doc: """DELETE /threads/{thread_id}/messages/{message_id} - Delete a message from a thread."""
+}
+fn (request: DeleteMessageRequest): DeleteMessageResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/threads/${request.thread-id}/messages/${request.message-id}`)
+  if(is-ok-response(response), DeleteMessageResponse(response.body), err(HttpError(response)))
+}
+
+DeleteVectorStoreRequest type {
+  vector-store-id: Str
+}
+
+DeleteVectorStoreResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "vector_store.deleted"
+}
+
+
+delete-vector-store
+meta {
+    doc: """DELETE /vector_stores/{vector_store_id} - Delete a vector store and all its files."""
+}
+fn (request: DeleteVectorStoreRequest): DeleteVectorStoreResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}`)
+  if(is-ok-response(response), DeleteVectorStoreResponse(response.body), err(HttpError(response)))
+}
+
+DeleteVectorStoreFileRequest type {
+  vector-store-id: Str,
+  file-id: Str
+}
+
+DeleteVectorStoreFileResponse type {
+    id: Str,
+    deleted: Bool,
+    object: "vector_store.file.deleted"
+}
+
+
+delete-vector-store-file
+meta {
+    doc: """DELETE /vector_stores/{vector_store_id}/files/{file_id} - Delete vector store file"""
+}
+fn (request: DeleteVectorStoreFileRequest): DeleteVectorStoreFileResponse {
+  response api-request("DELETE", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/files/${request.file-id}`)
+  if(is-ok-response(response), DeleteVectorStoreFileResponse(response.body), err(HttpError(response)))
+}

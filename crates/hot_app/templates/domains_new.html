@@ -1,0 +1,86 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-2 px-2 sm:px-0">
+    <div class="max-w-2xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-6">Add Custom Domain</h2>
+
+            {% if !error_message.is_empty() %}
+            <div class="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-md p-3">
+                <p class="text-sm text-red-700 dark:text-red-300">{{ error_message }}</p>
+            </div>
+            {% endif %}
+
+            <form method="POST" action="/domains/new" class="space-y-5">
+                <div>
+                    <label for="domain" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Domain</label>
+                    <input type="text" name="domain" id="domain" required placeholder="mcp.example.com"
+                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 sm:text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-white font-mono" />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        Enter a subdomain of a domain you own. We'll provision a TLS certificate and CDN distribution for it.
+                    </p>
+                </div>
+
+                <!-- Setup Steps Preview -->
+                <div class="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                    <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">What happens next</h3>
+                    <div class="flex items-start">
+                        <!-- Step 1 -->
+                        <div class="flex flex-col items-center flex-shrink-0" style="width: 5rem;">
+                            <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
+                                <span class="text-xs font-medium text-gray-400 dark:text-gray-500">1</span>
+                            </div>
+                            <span class="mt-1.5 text-xs text-center leading-tight font-medium text-gray-500 dark:text-gray-400">Request Certificate</span>
+                            <span class="text-[10px] text-center leading-tight text-gray-400 dark:text-gray-500 mt-0.5">Automatic</span>
+                        </div>
+
+                        <!-- Connector 1-2 -->
+                        <div class="flex-1 mt-4 mx-1">
+                            <div class="h-0.5 bg-gray-300 dark:bg-gray-600"></div>
+                        </div>
+
+                        <!-- Step 2 -->
+                        <div class="flex flex-col items-center flex-shrink-0" style="width: 5rem;">
+                            <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
+                                <span class="text-xs font-medium text-gray-400 dark:text-gray-500">2</span>
+                            </div>
+                            <span class="mt-1.5 text-xs text-center leading-tight font-medium text-gray-500 dark:text-gray-400">Validate &amp; Issue</span>
+                            <span class="text-[10px] text-center leading-tight text-gray-400 dark:text-gray-500 mt-0.5">Add DNS record</span>
+                        </div>
+
+                        <!-- Connector 2-3 -->
+                        <div class="flex-1 mt-4 mx-1">
+                            <div class="h-0.5 bg-gray-300 dark:bg-gray-600"></div>
+                        </div>
+
+                        <!-- Step 3 -->
+                        <div class="flex flex-col items-center flex-shrink-0" style="width: 5rem;">
+                            <div class="w-8 h-8 rounded-full border-2 border-gray-300 dark:border-gray-600 flex items-center justify-center">
+                                <span class="text-xs font-medium text-gray-400 dark:text-gray-500">3</span>
+                            </div>
+                            <span class="mt-1.5 text-xs text-center leading-tight font-medium text-gray-500 dark:text-gray-400">Domain CNAME</span>
+                            <span class="text-[10px] text-center leading-tight text-gray-400 dark:text-gray-500 mt-0.5">Point to target</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-3 pt-2">
+                    <a href="/domains" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                        Cancel
+                    </a>
+                    {% if page_context.is_local_dev %}
+                    <button type="button" data-local-dev-restricted class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-colors cursor-pointer">
+                        Add Domain
+                    </button>
+                    {% else %}
+                    <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-colors">
+                        Add Domain
+                    </button>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

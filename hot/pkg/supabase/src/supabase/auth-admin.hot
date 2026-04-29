@@ -1,0 +1,194 @@
+::supabase::auth-admin ns
+
+::api ::supabase::api
+
+// ============================================================================
+// User Management (Service Role Key)
+// ============================================================================
+
+ListUsersRequest type {
+  page: Int?,
+  per_page: Int?
+}
+
+list-users
+meta {
+    doc: """
+List all users (requires service role key). Supports pagination.
+
+**Example**
+
+```hot
+::admin ::supabase::auth-admin
+
+result ::admin/list-users(::admin/ListUsersRequest({page: 1, per_page: 50}))
+result.users  // => [{id: "...", email: "...", ...}, ...]
+```
+"""
+}
+fn (request: ListUsersRequest): Map {
+  page or(request.page, 1)
+  per-page or(request.per_page, 50)
+  ::api/request-service("GET", `/auth/v1/admin/users?page=${page}&per_page=${per-page}`)
+}
+
+get-user-by-id
+meta {
+    doc: """
+Get a user by their UUID (requires service role key).
+
+**Example**
+
+```hot
+::admin ::supabase::auth-admin
+
+user ::admin/get-user-by-id("uuid-123...")
+user.email  // => "alice@example.com"
+```
+"""
+}
+fn (user-id: Str): Map {
+  ::api/request-service("GET", `/auth/v1/admin/users/${user-id}`)
+}
+
+CreateUserRequest type {
+  email: Str?,
+  phone: Str?,
+  password: Str?,
+  email_confirm: Bool?,
+  phone_confirm: Bool?,
+  user_metadata: Map?,
+  app_metadata: Map?,
+  ban_duration: Str?
+}
+
+create-user
+meta {
+    doc: """
+Create a new user as admin (requires service role key). Set `email_confirm: true` to skip email verification.
+
+**Example**
+
+```hot
+::admin ::supabase::auth-admin
+
+user ::admin/create-user(::admin/CreateUserRequest({
+  email: "bob@example.com",
+  password: "tempPassword123",
+  email_confirm: true,
+  user_metadata: {name: "Bob"}
+}))
+user.id  // => "uuid-..."
+```
+"""
+}
+fn (request: CreateUserRequest): Map {
+  body {}
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+    |> assoc-some("password", request.password)
+    |> assoc-some("email_confirm", request.email_confirm)
+    |> assoc-some("phone_confirm", request.phone_confirm)
+    |> assoc-some("user_metadata", request.user_metadata)
+    |> assoc-some("app_metadata", request.app_metadata)
+    |> assoc-some("ban_duration", request.ban_duration)
+
+  ::api/request-service("POST", "/auth/v1/admin/users", {}, body)
+}
+
+UpdateUserByIdRequest type {
+  user_id: Str,
+  email: Str?,
+  phone: Str?,
+  password: Str?,
+  email_confirm: Bool?,
+  phone_confirm: Bool?,
+  user_metadata: Map?,
+  app_metadata: Map?,
+  ban_duration: Str?
+}
+
+update-user-by-id
+meta {
+    doc: """
+Update a user by their UUID (requires service role key).
+
+**Example**
+
+```hot
+::admin ::supabase::auth-admin
+
+updated ::admin/update-user-by-id(::admin/UpdateUserByIdRequest({
+  user_id: "uuid-123...",
+  user_metadata: {role: "admin"}
+}))
+```
+"""
+}
+fn (request: UpdateUserByIdRequest): Map {
+  body {}
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+    |> assoc-some("password", request.password)
+    |> assoc-some("email_confirm", request.email_confirm)
+    |> assoc-some("phone_confirm", request.phone_confirm)
+    |> assoc-some("user_metadata", request.user_metadata)
+    |> assoc-some("app_metadata", request.app_metadata)
+    |> assoc-some("ban_duration", request.ban_duration)
+
+  ::api/request-service("PUT", `/auth/v1/admin/users/${request.user_id}`, {}, body)
+}
+
+delete-user
+meta {
+    doc: """
+Delete a user by their UUID (requires service role key).
+
+**Example**
+
+```hot
+::admin ::supabase::auth-admin
+
+::admin/delete-user("uuid-123...")
+```
+"""
+}
+fn (user-id: Str): Any {
+  ::api/request-service("DELETE", `/auth/v1/admin/users/${user-id}`)
+}
+
+GenerateLinkRequest type {
+  type: Str,
+  email: Str,
+  password: Str?,
+  redirect_to: Str?,
+  data: Map?
+}
+
+generate-link
+meta {
+    doc: """
+Generate an email action link (requires service role key). `type` can be: "magiclink", "signup", "recovery", "invite", "email_change_current", "email_change_new".
+
+**Example**
+
+```hot
+::admin ::supabase::auth-admin
+
+result ::admin/generate-link(::admin/GenerateLinkRequest({
+  type: "invite",
+  email: "bob@example.com",
+  redirect_to: "https://myapp.com/welcome"
+}))
+result.action_link  // => "https://..."
+```
+"""
+}
+fn (request: GenerateLinkRequest): Map {
+  body {type: request.type, email: request.email}
+    |> assoc-some("password", request.password)
+    |> assoc-some("redirect_to", request.redirect_to)
+    |> assoc-some("data", request.data)
+
+  ::api/request-service("POST", "/auth/v1/admin/generate_link", {}, body)
+}

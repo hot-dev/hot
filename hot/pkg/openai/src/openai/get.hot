@@ -1,0 +1,741 @@
+::openai::get ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+RunCompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int
+}
+
+// Generic API response object
+Response type Map
+
+RunStepCompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int
+}
+
+VectorStoreExpirationAfter type {
+    anchor: "last_active_at",
+    days: Int
+}
+
+EvalRunOutputItem type {
+    object: "eval.run.output_item",
+    id: Str,
+    run_id: Str,
+    eval_id: Str,
+    created_at: Int,
+    status: Str,
+    datasource_item_id: Int,
+    datasource_item: Map,
+    results: Vec<Map>,
+    sample: Map
+}
+
+CompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int,
+    completion_tokens_details: Map?,
+    prompt_tokens_details: Map?
+}
+
+ThreadObject type {
+    id: Str,
+    object: "thread",
+    created_at: Int,
+    tool_resources: Map,
+    metadata: Metadata
+}
+
+EvalApiError type {
+    code: Str,
+    message: Str
+}
+
+VectorStoreFileObject type {
+    id: Str,
+    object: "vector_store.file",
+    usage_bytes: Int,
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    last_error: Map,
+    chunking_strategy: ChunkingStrategyResponse?,
+    attributes: VectorStoreFileAttributes?
+}
+
+CreateChatCompletionResponse type {
+    id: Str,
+    choices: Vec<Map>,
+    created: Int,
+    model: Str,
+    service_tier: ServiceTier?,
+    system_fingerprint: Str?,
+    object: "chat.completion",
+    usage: CompletionUsage?
+}
+
+// Tool definition for an assistant (code_interpreter, file_search, or function)
+AssistantTool type Map
+
+// Run status identifier (e.g. "queued", "in_progress", "completed", "failed", "cancelled", "expired")
+RunStatus type Str
+
+// Message content -- can be text or an array of content parts
+MessageContent type Any
+
+RunStepObject type {
+    id: Str,
+    object: "thread.run.step",
+    created_at: Int,
+    assistant_id: Str,
+    thread_id: Str,
+    run_id: Str,
+    type: "message_creation" | "tool_calls",
+    status: "in_progress" | "cancelled" | "failed" | "completed" | "expired",
+    step_details: Map,
+    last_error: Map,
+    expired_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    metadata: Metadata,
+    usage: RunStepCompletionUsage
+}
+
+MessageObject type {
+    id: Str,
+    object: "thread.message",
+    created_at: Int,
+    thread_id: Str,
+    status: "in_progress" | "incomplete" | "completed",
+    incomplete_details: Map,
+    completed_at: Int,
+    incomplete_at: Int,
+    role: "user" | "assistant",
+    content: Vec<MessageContent>,
+    assistant_id: Str,
+    run_id: Str,
+    attachments: Vec<Map>,
+    metadata: Metadata
+}
+
+// Response format: "auto", or {type: "json_object"}, or {type: "json_schema", json_schema: {...}}
+AssistantsApiResponseFormatOption type Any
+
+EvalRun type {
+    object: "eval.run",
+    id: Str,
+    eval_id: Str,
+    status: Str,
+    model: Str,
+    name: Str,
+    created_at: Int,
+    report_url: Str,
+    result_counts: Map,
+    per_model_usage: Vec<Map>,
+    per_testing_criteria_results: Vec<Map>,
+    data_source: Map,
+    metadata: Metadata,
+    error: EvalApiError
+}
+
+VectorStoreObject type {
+    id: Str,
+    object: "vector_store",
+    created_at: Int,
+    name: Str,
+    usage_bytes: Int,
+    file_counts: Map,
+    status: "expired" | "in_progress" | "completed",
+    expires_after: VectorStoreExpirationAfter?,
+    expires_at: Int?,
+    last_active_at: Int,
+    metadata: Metadata
+}
+
+// Service tier for the request (e.g. "auto", "default", "scale", "flex")
+ServiceTier type Str
+
+EvalRunList type {
+    object: "list",
+    data: Vec<EvalRun>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+EvalRunOutputItemList type {
+    object: "list",
+    data: Vec<EvalRunOutputItem>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+AssistantObject type {
+    id: Str,
+    object: "assistant",
+    created_at: Int,
+    name: Str,
+    description: Str,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    tool_resources: Map?,
+    metadata: Metadata,
+    temperature: Dec?,
+    top_p: Dec?,
+    response_format: AssistantsApiResponseFormatOption?
+}
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+RunObject type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+VectorStoreFileBatchObject type {
+    id: Str,
+    object: "vector_store.files_batch",
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    file_counts: Map
+}
+
+Certificate type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+// Whether to allow parallel function calls during tool use
+ParallelToolCalls type Bool
+
+ChatCompletionMessageList type {
+    object: "list",
+    data: Vec,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+Eval type {
+    object: "eval",
+    id: Str,
+    name: Str,
+    data_source_config: Map,
+    testing_criteria: Vec,
+    created_at: Int,
+    metadata: Metadata
+}
+
+// Chunking strategy used for a vector store file
+ChunkingStrategyResponse type Map
+
+// Custom key-value attributes for a vector store file (used for filtering)
+VectorStoreFileAttributes type Map
+
+GetAssistantRequest type {
+  assistant-id: Str
+}
+
+GetAssistantResponse type {
+    id: Str,
+    object: "assistant",
+    created_at: Int,
+    name: Str,
+    description: Str,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    tool_resources: Map?,
+    metadata: Metadata,
+    temperature: Dec?,
+    top_p: Dec?,
+    response_format: AssistantsApiResponseFormatOption?
+}
+
+
+retrieve-assistant
+meta {doc: """GET /assistants/{assistant_id} - Retrieve an assistant by its ID."""}
+fn (request: GetAssistantRequest): GetAssistantResponse {
+  response api-request("GET", `${::openai/BASE_URL}/assistants/${request.assistant-id}`)
+  if(is-ok-response(response), GetAssistantResponse(response.body), err(HttpError(response)))
+}
+
+GetChatCompletionRequest type {
+  completion-id: Str
+}
+
+GetChatCompletionResponse type {
+    id: Str,
+    choices: Vec<Map>,
+    created: Int,
+    model: Str,
+    service_tier: ServiceTier?,
+    system_fingerprint: Str?,
+    object: "chat.completion",
+    usage: CompletionUsage?
+}
+
+
+get-chat-completion
+meta {
+    doc: """GET /chat/completions/{completion_id} - Retrieve a stored chat completion by ID."""
+}
+fn (request: GetChatCompletionRequest): GetChatCompletionResponse {
+  response api-request("GET", `${::openai/BASE_URL}/chat/completions/${request.completion-id}`)
+  if(is-ok-response(response), GetChatCompletionResponse(response.body), err(HttpError(response)))
+}
+
+GetChatCompletionMessagesRequest type {
+  completion-id: Str,
+  after: Str,
+  limit: Str,
+  order: Str
+}
+
+GetChatCompletionMessagesResponse type {
+    object: "list",
+    data: Vec,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+get-chat-messages
+meta {
+    doc: """GET /chat/completions/{completion_id}/messages - Retrieve messages from a stored chat completion."""
+}
+fn (request: GetChatCompletionMessagesRequest): GetChatCompletionMessagesResponse {
+  response api-request("GET", `${::openai/BASE_URL}/chat/completions/${request.completion-id}/messages?after=${request.after}&limit=${request.limit}&order=${request.order}`)
+  if(is-ok-response(response), GetChatCompletionMessagesResponse(response.body), err(HttpError(response)))
+}
+
+GetEvalRequest type {
+  eval-id: Str
+}
+
+GetEvalResponse type {
+    object: "eval",
+    id: Str,
+    name: Str,
+    data_source_config: Map,
+    testing_criteria: Vec,
+    created_at: Int,
+    metadata: Metadata
+}
+
+
+get-eval
+meta {doc: """GET /evals/{eval_id} - Retrieve an evaluation by its ID."""}
+fn (request: GetEvalRequest): GetEvalResponse {
+  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}`)
+  if(is-ok-response(response), GetEvalResponse(response.body), err(HttpError(response)))
+}
+
+GetEvalRunsRequest type {
+  eval-id: Str,
+  after: Str,
+  limit: Str,
+  order: Str,
+  status: Str
+}
+
+GetEvalRunsResponse type {
+    object: "list",
+    data: Vec<EvalRun>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+get-eval-runs
+meta {doc: """GET /evals/{eval_id}/runs - List all runs for an evaluation."""}
+fn (request: GetEvalRunsRequest): GetEvalRunsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs?after=${request.after}&limit=${request.limit}&order=${request.order}&status=${request.status}`)
+  if(is-ok-response(response), GetEvalRunsResponse(response.body), err(HttpError(response)))
+}
+
+GetEvalRunRequest type {
+  eval-id: Str,
+  run-id: Str
+}
+
+GetEvalRunResponse type {
+    object: "eval.run",
+    id: Str,
+    eval_id: Str,
+    status: Str,
+    model: Str,
+    name: Str,
+    created_at: Int,
+    report_url: Str,
+    result_counts: Map,
+    per_model_usage: Vec<Map>,
+    per_testing_criteria_results: Vec<Map>,
+    data_source: Map,
+    metadata: Metadata,
+    error: EvalApiError
+}
+
+
+get-eval-run
+meta {
+    doc: """GET /evals/{eval_id}/runs/{run_id} - Retrieve a specific evaluation run."""
+}
+fn (request: GetEvalRunRequest): GetEvalRunResponse {
+  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}`)
+  if(is-ok-response(response), GetEvalRunResponse(response.body), err(HttpError(response)))
+}
+
+GetEvalRunOutputItemsRequest type {
+  eval-id: Str,
+  run-id: Str,
+  after: Str,
+  limit: Str,
+  status: Str,
+  order: Str
+}
+
+GetEvalRunOutputItemsResponse type {
+    object: "list",
+    data: Vec<EvalRunOutputItem>,
+    first_id: Str,
+    last_id: Str,
+    has_more: Bool
+}
+
+
+get-eval-run-output-items
+meta {
+    doc: """GET /evals/{eval_id}/runs/{run_id}/output_items - Get eval run output items"""
+}
+fn (request: GetEvalRunOutputItemsRequest): GetEvalRunOutputItemsResponse {
+  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}/output_items?after=${request.after}&limit=${request.limit}&status=${request.status}&order=${request.order}`)
+  if(is-ok-response(response), GetEvalRunOutputItemsResponse(response.body), err(HttpError(response)))
+}
+
+GetEvalRunOutputItemRequest type {
+  eval-id: Str,
+  run-id: Str,
+  output-item-id: Str
+}
+
+GetEvalRunOutputItemResponse type {
+    object: "eval.run.output_item",
+    id: Str,
+    run_id: Str,
+    eval_id: Str,
+    created_at: Int,
+    status: Str,
+    datasource_item_id: Int,
+    datasource_item: Map,
+    results: Vec<Map>,
+    sample: Map
+}
+
+
+get-output-item-eval-run
+meta {
+    doc: """GET /evals/{eval_id}/runs/{run_id}/output_items/{output_item_id} - Get an output item of an eval run"""
+}
+fn (request: GetEvalRunOutputItemRequest): GetEvalRunOutputItemResponse {
+  response api-request("GET", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}/output_items/${request.output-item-id}`)
+  if(is-ok-response(response), GetEvalRunOutputItemResponse(response.body), err(HttpError(response)))
+}
+
+GetCertificateRequest type {
+  certificate-id: Str,
+  include: Str
+}
+
+GetCertificateResponse type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+
+get-certificate
+meta {
+    doc: """GET /organization/certificates/{certificate_id} - Retrieve an organization certificate."""
+}
+fn (request: GetCertificateRequest): GetCertificateResponse {
+  response api-request("GET", `${::openai/BASE_URL}/organization/certificates/${request.certificate-id}?include=${request.include}`)
+  if(is-ok-response(response), GetCertificateResponse(response.body), err(HttpError(response)))
+}
+
+GetResponseRequest type {
+  response-id: Str,
+  include: Str,
+  stream: Str,
+  starting-after: Str,
+  include-obfuscation: Str
+}
+
+// Retrieved response object
+GetResponseResponse type Map
+
+
+get-model-response
+meta {doc: """GET /responses/{response_id} - Retrieve a model response by ID."""}
+fn (request: GetResponseRequest): GetResponseResponse {
+  response api-request("GET", `${::openai/BASE_URL}/responses/${request.response-id}?include=${request.include}&stream=${request.stream}&starting_after=${request.starting-after}&include_obfuscation=${request.include-obfuscation}`)
+  if(is-ok-response(response), GetResponseResponse(response.body), err(HttpError(response)))
+}
+
+GetThreadRequest type {
+  thread-id: Str
+}
+
+GetThreadResponse type {
+    id: Str,
+    object: "thread",
+    created_at: Int,
+    tool_resources: Map,
+    metadata: Metadata
+}
+
+
+retrieve-thread
+meta {doc: """GET /threads/{thread_id} - Retrieve a thread by its ID."""}
+fn (request: GetThreadRequest): GetThreadResponse {
+  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}`)
+  if(is-ok-response(response), GetThreadResponse(response.body), err(HttpError(response)))
+}
+
+GetMessageRequest type {
+  thread-id: Str,
+  message-id: Str
+}
+
+GetMessageResponse type {
+    id: Str,
+    object: "thread.message",
+    created_at: Int,
+    thread_id: Str,
+    status: "in_progress" | "incomplete" | "completed",
+    incomplete_details: Map,
+    completed_at: Int,
+    incomplete_at: Int,
+    role: "user" | "assistant",
+    content: Vec<MessageContent>,
+    assistant_id: Str,
+    run_id: Str,
+    attachments: Vec<Map>,
+    metadata: Metadata
+}
+
+
+retrieve-message
+meta {
+    doc: """GET /threads/{thread_id}/messages/{message_id} - Retrieve a specific message from a thread."""
+}
+fn (request: GetMessageRequest): GetMessageResponse {
+  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/messages/${request.message-id}`)
+  if(is-ok-response(response), GetMessageResponse(response.body), err(HttpError(response)))
+}
+
+GetRunRequest type {
+  thread-id: Str,
+  run-id: Str
+}
+
+GetRunResponse type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+
+retrieve-run
+meta {
+    doc: """GET /threads/{thread_id}/runs/{run_id} - Retrieve the status and details of a run."""
+}
+fn (request: GetRunRequest): GetRunResponse {
+  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/runs/${request.run-id}`)
+  if(is-ok-response(response), GetRunResponse(response.body), err(HttpError(response)))
+}
+
+GetRunStepRequest type {
+  thread-id: Str,
+  run-id: Str,
+  step-id: Str,
+  include: Str
+}
+
+GetRunStepResponse type {
+    id: Str,
+    object: "thread.run.step",
+    created_at: Int,
+    assistant_id: Str,
+    thread_id: Str,
+    run_id: Str,
+    type: "message_creation" | "tool_calls",
+    status: "in_progress" | "cancelled" | "failed" | "completed" | "expired",
+    step_details: Map,
+    last_error: Map,
+    expired_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    metadata: Metadata,
+    usage: RunStepCompletionUsage
+}
+
+
+retrieve-run-step
+meta {
+    doc: """GET /threads/{thread_id}/runs/{run_id}/steps/{step_id} - Retrieve run step"""
+}
+fn (request: GetRunStepRequest): GetRunStepResponse {
+  response api-request("GET", `${::openai/BASE_URL}/threads/${request.thread-id}/runs/${request.run-id}/steps/${request.step-id}?include[]=${request.include}`)
+  if(is-ok-response(response), GetRunStepResponse(response.body), err(HttpError(response)))
+}
+
+GetVectorStoreRequest type {
+  vector-store-id: Str
+}
+
+GetVectorStoreResponse type {
+    id: Str,
+    object: "vector_store",
+    created_at: Int,
+    name: Str,
+    usage_bytes: Int,
+    file_counts: Map,
+    status: "expired" | "in_progress" | "completed",
+    expires_after: VectorStoreExpirationAfter?,
+    expires_at: Int?,
+    last_active_at: Int,
+    metadata: Metadata
+}
+
+
+retrieve-vector-store
+meta {
+    doc: """GET /vector_stores/{vector_store_id} - Retrieve a vector store by its ID."""
+}
+fn (request: GetVectorStoreRequest): GetVectorStoreResponse {
+  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}`)
+  if(is-ok-response(response), GetVectorStoreResponse(response.body), err(HttpError(response)))
+}
+
+GetVectorStoreFileBatchRequest type {
+  vector-store-id: Str,
+  batch-id: Str
+}
+
+GetVectorStoreFileBatchResponse type {
+    id: Str,
+    object: "vector_store.files_batch",
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    file_counts: Map
+}
+
+
+retrieve-vector-store-file-batch
+meta {
+    doc: """GET /vector_stores/{vector_store_id}/file_batches/{batch_id} - Retrieve vector store file batch"""
+}
+fn (request: GetVectorStoreFileBatchRequest): GetVectorStoreFileBatchResponse {
+  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}`)
+  if(is-ok-response(response), GetVectorStoreFileBatchResponse(response.body), err(HttpError(response)))
+}
+
+GetVectorStoreFileRequest type {
+  vector-store-id: Str,
+  file-id: Str
+}
+
+GetVectorStoreFileResponse type {
+    id: Str,
+    object: "vector_store.file",
+    usage_bytes: Int,
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    last_error: Map,
+    chunking_strategy: ChunkingStrategyResponse?,
+    attributes: VectorStoreFileAttributes?
+}
+
+
+retrieve-vector-store-file
+meta {
+    doc: """GET /vector_stores/{vector_store_id}/files/{file_id} - Retrieve vector store file"""
+}
+fn (request: GetVectorStoreFileRequest): GetVectorStoreFileResponse {
+  response api-request("GET", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/files/${request.file-id}`)
+  if(is-ok-response(response), GetVectorStoreFileResponse(response.body), err(HttpError(response)))
+}

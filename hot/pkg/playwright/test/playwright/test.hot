@@ -1,0 +1,149 @@
+::playwright::test ns
+meta ["test"]
+
+build-screenshot-script ::playwright/build-screenshot-script
+build-pdf-script ::playwright/build-pdf-script
+build-scrape-script ::playwright/build-scrape-script
+escape-sh-double ::playwright/escape-sh-double
+ScreenshotOpts ::playwright/ScreenshotOpts
+PdfOpts ::playwright/PdfOpts
+ScrapeOpts ::playwright/ScrapeOpts
+
+TEST_URL "https://example.com"
+
+// ============================================================================
+// escape-sh-double
+// ============================================================================
+
+test-escape-sh-double-quotes
+meta ["test"] fn () {
+    assert-eq("foo\\\"bar", escape-sh-double("foo\"bar"))
+}
+
+test-escape-sh-double-backslash
+meta ["test"] fn () {
+    assert-eq("a\\\\b", escape-sh-double("a\\b"))
+}
+
+test-escape-sh-double-dollar
+meta ["test"] fn () {
+    assert-eq("\\$HOME", escape-sh-double("$HOME"))
+}
+
+// ============================================================================
+// build-screenshot-script
+// ============================================================================
+
+test-screenshot-script-contains-core
+meta ["test"] fn () {
+    js build-screenshot-script(TEST_URL, "/tmp/out.png", 1280, 720, false, "png", null, "networkidle", 0)
+    assert(contains(js, "require(\"playwright\")"), "should require playwright")
+    assert(contains(js, "chromium.launch"), "should launch chromium")
+    assert(contains(js, "example.com"), "should embed url")
+    assert(contains(js, "setViewportSize"), "should set viewport")
+    assert(contains(js, "1280"), "should embed width")
+    assert(contains(js, "720"), "should embed height")
+    assert(contains(js, "networkidle"), "should embed waitUntil")
+    assert(contains(js, "/tmp/out.png"), "should embed output path")
+    assert(contains(js, "fullPage:false"), "should set fullPage false")
+    assert(contains(js, "type:\"png\""), "should request png")
+}
+
+test-screenshot-script-full-page-and-delay
+meta ["test"] fn () {
+    js build-screenshot-script(TEST_URL, "/tmp/x.png", 800, 600, true, "png", null, "load", 250)
+    assert(contains(js, "fullPage:true"), "should set fullPage true")
+    assert(contains(js, "setTimeout(r,250)"), "should embed delay ms")
+    assert(contains(js, "\"load\""), "should embed load waitUntil")
+}
+
+test-screenshot-script-jpeg-quality
+meta ["test"] fn () {
+    js build-screenshot-script(TEST_URL, "/tmp/x.jpg", 100, 100, false, "jpeg", 92, "domcontentloaded", 0)
+    assert(contains(js, "type:\"jpeg\""), "should request jpeg")
+    assert(contains(js, "quality:92"), "should embed quality")
+}
+
+// ============================================================================
+// build-pdf-script
+// ============================================================================
+
+test-pdf-script-default-format
+meta ["test"] fn () {
+    js build-pdf-script(TEST_URL, "/tmp/out.pdf", null, null, null, false, false, null, "networkidle", 0)
+    assert(contains(js, "page.pdf"), "should call page.pdf")
+    assert(contains(js, "A4"), "should default to A4 format")
+    assert(contains(js, "landscape:false"), "should set landscape")
+    assert(contains(js, "printBackground:false"), "should set printBackground")
+}
+
+test-pdf-script-size-and-margin
+meta ["test"] fn () {
+    js build-pdf-script(TEST_URL, "/tmp/p.pdf", "8.5in", "11in", "Letter", true, true, "1cm", "load", 100)
+    assert(contains(js, "8.5in"), "should embed width")
+    assert(contains(js, "11in"), "should embed height")
+    assert(contains(js, "landscape:true"), "should set landscape true")
+    assert(contains(js, "printBackground:true"), "should set print background")
+    assert(contains(js, "1cm"), "should embed margin")
+    assert(contains(js, "setTimeout(r,100)"), "should embed delay")
+}
+
+// ============================================================================
+// build-scrape-script
+// ============================================================================
+
+test-scrape-script-body-mode
+meta ["test"] fn () {
+    js build-scrape-script(TEST_URL, "networkidle", 0, null)
+    assert(contains(js, "document.body"), "should read body text when no selector")
+    assert(contains(js, "JSON.stringify"), "should stringify output")
+    assert(contains(js, "page.title()"), "should read title")
+}
+
+test-scrape-script-selector-mode
+meta ["test"] fn () {
+    js build-scrape-script(TEST_URL, "load", 50, "main h1")
+    assert(contains(js, "$eval"), "should use $eval for selector")
+    assert(contains(js, "main h1"), "should embed selector")
+    assert(contains(js, "setTimeout(r,50)"), "should embed delay")
+}
+
+// ============================================================================
+// Type construction
+// ============================================================================
+
+test-screenshot-opts-construction
+meta ["test"] fn () {
+    opts ScreenshotOpts({
+        width: 1920, height: 1080, full-page: true, format: "jpeg",
+        quality: 70, wait-until: "domcontentloaded", delay: 10,
+        image: null, size: "medium",
+    })
+    assert-eq(1920, opts.width)
+    assert-eq(1080, opts.height)
+    assert-eq(true, opts.full-page)
+    assert-eq("jpeg", opts.format)
+    assert-eq(70, opts.quality)
+    assert-eq("medium", opts.size)
+}
+
+test-pdf-opts-construction
+meta ["test"] fn () {
+    opts PdfOpts({
+        width: null, height: null, format: "Letter", landscape: true,
+        margin: "0.5in", print-background: true, wait-until: "networkidle",
+        delay: 0, image: null, size: null,
+    })
+    assert-eq("Letter", opts.format)
+    assert-eq(true, opts.landscape)
+    assert-eq("0.5in", opts.margin)
+}
+
+test-scrape-opts-construction
+meta ["test"] fn () {
+    opts ScrapeOpts({
+        wait-until: "load", delay: 5, selector: "article", image: null, size: "small",
+    })
+    assert-eq("article", opts.selector)
+    assert-eq("small", opts.size)
+}

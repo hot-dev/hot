@@ -1,0 +1,184 @@
+::mcp::test::ai ns
+meta {
+    doc: """
+    Pure-Hot tests for the `::mcp::ai` bridge — exercising spec
+    resolution and HTTP-only validation. The network-side smoke
+    (initialize → list-tools → call) lives in
+    `mcp/integration-test/mcp/integration/` so unit runs stay
+    deterministic.
+    """
+}
+
+::ai-mcp ::mcp::ai
+
+// ============================================================================
+// resolve-spec
+// ============================================================================
+
+test-resolve-bare-config-map
+meta ["test"]
+fn () {
+    spec {url: "https://example.com/mcp"}
+    r ::ai-mcp/resolve-spec(spec)
+    assert-eq(null, r.name, "bare config has no label")
+    assert-eq("https://example.com/mcp", r.config.url, "config preserved")
+}
+
+test-resolve-named-entry
+meta ["test"]
+fn () {
+    spec {weather: {url: "https://weather.example.com/mcp"}}
+    r ::ai-mcp/resolve-spec(spec)
+    assert-eq("weather", r.name, "single-key map exposes label")
+    assert-eq("https://weather.example.com/mcp", r.config.url, "inner config resolved")
+}
+
+test-resolve-fn-spec
+meta ["test"]
+fn () {
+    spec fn (): Map {
+        {url: "https://fn.example.com/mcp", headers: {Authorization: "Bearer fixture"}}
+    }
+
+    r ::ai-mcp/resolve-spec(spec)
+    assert-eq("https://fn.example.com/mcp", r.config.url, "fn return resolved")
+    assert-eq("Bearer fixture", r.config.headers.Authorization, "headers preserved")
+}
+
+test-resolve-named-entry-with-fn
+meta ["test"]
+fn () {
+    inner fn (): Map { {url: "https://time.example.com/mcp"} }
+    spec {time: inner}
+    r ::ai-mcp/resolve-spec(spec)
+    assert-eq("time", r.name, "label kept when value is a fn")
+    assert-eq("https://time.example.com/mcp", r.config.url, "fn evaluated under named entry")
+}
+
+test-resolve-fn-returning-named-entry
+meta ["test"]
+fn () {
+    spec fn (): Map {
+        {weather: {url: "https://w.example.com/mcp"}}
+    }
+
+    r ::ai-mcp/resolve-spec(spec)
+    assert-eq("weather", r.name, "label from inner named entry preserved")
+    assert-eq("https://w.example.com/mcp", r.config.url, "config from inner named entry preserved")
+}
+
+test-resolve-named-entry-with-fn-returning-named
+meta ["test"]
+fn () {
+    inner fn (): Map { {weather: {url: "https://w.example.com/mcp"}} }
+    spec {provider: inner}
+    r ::ai-mcp/resolve-spec(spec)
+    assert-eq("provider", r.name, "outer label wins over inner label")
+    assert-eq("https://w.example.com/mcp", r.config.url, "inner config still surfaces")
+}
+
+// ============================================================================
+// validate-config (HTTP-only enforcement)
+// ============================================================================
+
+test-validate-passes-http-config
+meta ["test"]
+fn () {
+    resolved { name: "weather", config: {url: "https://w.example.com/mcp"} }
+    out ::ai-mcp/validate-config(resolved)
+    assert-eq("https://w.example.com/mcp", out.url, "url forwarded")
+    assert-eq({}, out.headers, "headers default to empty map")
+}
+
+test-validate-keeps-headers
+meta ["test"]
+fn () {
+    resolved {
+        name: "weather",
+        config: {
+            url: "https://w.example.com/mcp",
+            headers: {Authorization: "Bearer xyz"}
+        }
+    }
+
+    out ::ai-mcp/validate-config(resolved)
+    assert-eq("Bearer xyz", out.headers.Authorization, "auth header preserved")
+}
+
+test-validate-ignores-extra-fields
+meta ["test"]
+fn () {
+    resolved {
+        name: "weather",
+        config: {url: "https://w.example.com/mcp", command: "node", flavor: "x"}
+    }
+
+    out ::ai-mcp/validate-config(resolved)
+    assert-eq("https://w.example.com/mcp", out.url, "url forwarded")
+    assert-eq({}, out.headers, "headers default to empty map")
+}
+
+test-validate-rejects-missing-url
+meta ["test"]
+fn () {
+    resolved { name: "fs", config: {headers: {Authorization: "x"}} }
+    out ::ai-mcp/validate-config(resolved)
+    assert(is-err(out), "config without a url is rejected")
+}
+
+test-validate-rejects-empty-url
+meta ["test"]
+fn () {
+    resolved { name: "weather", config: {url: ""} }
+    out ::ai-mcp/validate-config(resolved)
+    assert(is-err(out), "empty url is rejected")
+}
+
+test-validate-rejects-non-str-url
+meta ["test"]
+fn () {
+    resolved { name: "weather", config: {url: 42} }
+    out ::ai-mcp/validate-config(resolved)
+    assert(is-err(out), "non-Str url is rejected")
+}
+
+// ============================================================================
+// options-with-mcp (no-network paths)
+// ============================================================================
+//
+// The dedup-against-remote and merge-tools-into-ChatOptions paths that
+// require an actual MCP handshake live in
+// `mcp/integration-test/mcp/integration/`. The unit tests below cover
+// the no-op shortcuts so a regression that breaks the empty-spec
+// fast path is caught without needing a server on hand.
+
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+
+local-tool fn (x: Int): Int { add(x, 1) }
+
+base-opts fn (): ::ai-chat/ChatOptions {
+    ::ai-chat/ChatOptions({
+        chat-fn: local-tool,
+        model: "test-model",
+        tools: [::ai-tool/from-fn(local-tool)]
+    })
+}
+
+test-options-with-mcp-null-specs-returns-input
+meta ["test"]
+fn () {
+    in base-opts()
+    out ::ai-mcp/options-with-mcp(in, null)
+    assert-eq(in.model, out.model, "model preserved")
+    assert-eq(length(in.tools), length(out.tools), "tools unchanged when specs is null")
+    assert-eq(first(in.tools).name, first(out.tools).name, "tool name preserved")
+}
+
+test-options-with-mcp-empty-specs-returns-input
+meta ["test"]
+fn () {
+    in base-opts()
+    out ::ai-mcp/options-with-mcp(in, [])
+    assert-eq(length(in.tools), length(out.tools), "tools unchanged when specs is empty")
+}

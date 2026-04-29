@@ -1,0 +1,4 @@
+::slack::core ns
+
+// slack Core Configuration
+BASE_URL "https://slack.com/api"

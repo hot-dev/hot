@@ -1,0 +1,44 @@
+::demo::box ns
+
+::box ::hot::box
+
+seed-csv
+meta {on-event: "demo:seed-csv"}
+fn (event) {
+    data """
+    id,customer,amount,status
+    1,Alice,29.99,shipped
+    2,Bob,149.50,pending
+    3,Carol,75.00,shipped
+    4,Dave,12.99,cancelled
+    5,Eve,299.00,shipped
+    """
+    write-file("hot://demo/orders.csv", data)
+}
+
+run-analysis
+meta {on-event: "data:analyze"}
+fn (event) {
+    csv-path or(event.data.file, "hot://demo/orders.csv")
+    escaped-csv-path replace(csv-path, "'", "'\\''")
+    script ```
+        hotbox cp '${escaped-csv-path}' /data/data.csv
+        python3 -c "
+        import csv, json, statistics
+        rows = list(csv.DictReader(open('/data/data.csv')))
+        a = [float(r['amount']) for r in rows]
+        print(json.dumps({k: round(v, 2) for k, v in {
+            'rows': len(rows), 'total': sum(a),
+            'mean': statistics.mean(a), 'median': statistics.median(a)
+        }.items()}))
+        "
+        ```
+    result ::box/start({
+        image: "python:3.12-alpine",
+        script,
+        timeout: 60,
+        size: "small",
+    })
+    ::hot::task/await(result.id)
+    from-json(trim(or(result.stdout, "{}")))
+}

@@ -1,0 +1,20 @@
+::gemini::integration::files ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Gemini Files API
+// =============================================================================
+// These tests require GEMINI_API_KEY to be set in context
+
+test-files-list
+meta ["test"]
+fn () {
+    files ::gemini::files/list(::gemini::files/FilesListRequest({
+        page-size: "10",
+        page-token: ""
+    }))
+
+    // Files list may be empty but should have the correct structure
+    // files.files could be null or an empty vector
+    assert(or(is-vec(files.files), is-null(files.files)), "Response should have files array or null")
+}

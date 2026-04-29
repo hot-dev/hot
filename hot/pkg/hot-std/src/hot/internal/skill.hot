@@ -1,0 +1,34 @@
+::hot::internal::skill ns
+meta {
+    doc: """
+    Internal helpers used by `::ai::skill` to introspect Hot functions
+    annotated with `meta {skill: {...}}`. Not a public API: function
+    signatures may change between releases.
+
+    Skill metas are populated at compile time from every Hot function
+    that carries a `meta {skill: {...}}` map and stored in a process-
+    global registry inside the engine. These wrappers give Hot code a
+    `call-lib` entry point into that registry.
+    """,
+    no-doc: true
+}
+
+meta-from-fn
+meta {
+    doc: """
+Return the raw `meta {skill: {...}}` map for a Hot function, merged
+with `{fn-name: <fully-qualified-name>}`. Returns an `Err` when `f`
+has no `meta {skill: ...}` annotation.
+"""
+}
+fn (f: Fn): Map { call-lib(::hot::internal::skill/meta-from-fn, [f]) }
+
+all-skill-metas
+meta {
+    doc: """
+Return a `Vec<Map>` of every registered skill meta across the
+compiled program. Each entry includes the `fn-name` of the Hot
+function it was harvested from.
+"""
+}
+fn (): Vec<Map> { call-lib(::hot::internal::skill/all-skill-metas, []) }

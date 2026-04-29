@@ -1,0 +1,356 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+    <!-- Tabs -->
+    <div class="mb-6 border-b border-gray-200 dark:border-gray-700">
+        <ul class="flex flex-wrap -mb-px text-sm font-medium text-center">
+            <li class="mr-2">
+                <a href="/contexts?tab=env"
+                   class="inline-flex items-center gap-2 p-4 border-b-2 rounded-t-lg {% if active_tab == "env" %}border-red-500 text-red-600 dark:text-red-400{% else %}border-transparent hover:text-gray-600 hover:border-gray-300 dark:hover:text-gray-300{% endif %}">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M11.47 3.841a.75.75 0 0 1 1.06 0l8.69 8.69a.75.75 0 1 0 1.06-1.061l-8.689-8.69a2.25 2.25 0 0 0-3.182 0l-8.69 8.69a.75.75 0 1 0 1.061 1.06l8.69-8.689Z" />
+                        <path d="m12 5.432 8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 0-.75-.75h-3a.75.75 0 0 0-.75.75V21a.75.75 0 0 1-.75.75H5.625a1.875 1.875 0 0 1-1.875-1.875v-6.198a2.29 2.29 0 0 0 .091-.086L12 5.432Z" />
+                    </svg>
+                    Environment
+                    <span class="ml-1 text-xs text-gray-400 dark:text-gray-500">({{ env_contexts.len() }})</span>
+                </a>
+            </li>
+            <li class="mr-2">
+                <a href="/contexts?tab=project{% if selected_project.is_some() %}&project={{ selected_project.as_ref().unwrap().name }}{% endif %}"
+                   class="inline-flex items-center gap-2 p-4 border-b-2 rounded-t-lg {% if active_tab == "project" %}border-red-500 text-red-600 dark:text-red-400{% else %}border-transparent hover:text-gray-600 hover:border-gray-300 dark:hover:text-gray-300{% endif %}">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
+                        <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
+                    </svg>
+                    Project
+                    {% if selected_project.is_some() %}
+                    <span class="ml-1 text-xs text-gray-400 dark:text-gray-500">({{ project_contexts.len() }})</span>
+                    {% endif %}
+                </a>
+            </li>
+        </ul>
+    </div>
+
+    {% if !is_admin %}
+    <div class="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-4">
+        <div class="flex">
+            <div class="flex-shrink-0">
+                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                </svg>
+            </div>
+            <div class="ml-3">
+                <p class="text-sm text-yellow-700 dark:text-yellow-200">
+                    You need admin permissions to create or modify context variables.
+                </p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Environment Tab Content -->
+    {% if active_tab == "env" %}
+    <div class="mb-4 flex justify-between items-center">
+        <div>
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+                Environment-level context variables are available to all projects in this environment.
+            </p>
+        </div>
+        {% if is_admin %}
+        <a href="/contexts/env/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            Add Context Variable
+        </a>
+        {% endif %}
+    </div>
+
+    {% if env_contexts.len() > 0 %}
+    <!-- Environment Context Variables List -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-50 dark:bg-gray-900">
+                    <tr>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Key</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Description</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Updated</th>
+                        {% if is_admin %}
+                        <th scope="col" class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for context in env_contexts %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-medium text-gray-900 dark:text-white font-mono">{{ context.key }}</div>
+                        </td>
+                        <td class="px-6 py-4">
+                            <div class="text-sm text-gray-500 dark:text-gray-400">
+                                {% match context.description %}
+                                {% when Some with (desc) %}{{ desc }}{% when None %}<span class="italic text-gray-400 dark:text-gray-500">No description</span>{% endmatch %}
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            {% if context.active %}
+                            <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">Active</span>
+                            {% else %}
+                            <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                            <div>{{ context.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M") }}</div>
+                        </td>
+                        {% if is_admin %}
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
+                            <a href="/contexts/env/{{ context.context_id }}/edit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-all mr-3">Edit</a>
+                            <form id="delete-env-context-{{ context.context_id }}" action="/contexts/env/{{ context.context_id }}/delete" method="post" class="inline">
+                                <button type="button" onclick="confirmDeleteContext('env', '{{ context.context_id }}')" class="text-red-600 hover:text-red-800 dark:text-red-500 dark:hover:text-red-300 transition-all">Delete</button>
+                            </form>
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <!-- Empty State for Environment -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+        <div class="text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No environment context variables</h3>
+            <p class="text-gray-500 dark:text-gray-400 mb-4">
+                Environment-level variables are shared across all projects in this environment.
+            </p>
+            {% if is_admin %}
+            <a href="/contexts/env/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                Add Context Variable
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+    {% endif %}
+
+    <!-- Project Tab Content -->
+    {% if active_tab == "project" %}
+    <!-- Project Selector -->
+    <div class="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div class="w-full sm:w-64">
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open" type="button"
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                        <div class="flex items-center space-x-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
+                                <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
+                            </svg>
+                            <span>{% if selected_project.is_some() %}{{ selected_project.as_ref().unwrap().name }}{% else %}Select a project{% endif %}</span>
+                        </div>
+                        <svg class="w-2.5 h-2.5 ml-2" :class="{'rotate-180': open}" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
+                        </svg>
+                    </button>
+
+                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600 max-h-60 overflow-y-auto">
+                        <div class="py-1">
+                            {% for project in projects %}
+                            <a href="/contexts?tab=project&project={{ project.name }}" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                                <div class="flex items-center justify-between">
+                                    <span>{{ project.name }}</span>
+                                    {% if selected_project.is_some() && selected_project.as_ref().unwrap().project_id == project.project_id %}
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    {% endif %}
+                                </div>
+                            </a>
+                            {% endfor %}
+                            {% if projects.is_empty() %}
+                            <div class="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">No projects found</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {% if selected_project.is_some() && is_admin %}
+            <div class="sm:self-end">
+                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    Add Context Variable
+                </a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if selected_project.is_none() %}
+    <!-- No project selected state -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+        <div class="text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
+                </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Select a project</h3>
+            <p class="text-gray-500 dark:text-gray-400">
+                Choose a project from the dropdown above to view and manage its project-specific context variables.
+            </p>
+        </div>
+    </div>
+    {% else %}
+        <!-- Required Ctx Vars Section (if any missing) -->
+        {% if has_missing_required_ctx_vars %}
+        <div class="mb-6 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg p-4">
+            <div class="flex items-start">
+                <div class="flex-shrink-0">
+                    <svg class="h-5 w-5 text-red-400" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                    </svg>
+                </div>
+                <div class="ml-3 flex-1">
+                    <h3 class="text-sm font-medium text-red-800 dark:text-red-200">Missing Required Context Variables</h3>
+                    <p class="mt-1 text-sm text-red-700 dark:text-red-300">
+                        The deployed build requires the following context variables that are not yet set:
+                    </p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        {% for req in required_ctx_vars %}
+                        {% if !req.is_set %}
+                        <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new?key={{ req.key }}"
+                           class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-red-100 dark:bg-red-800 text-red-800 dark:text-red-100 hover:bg-red-200 dark:hover:bg-red-700 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                            </svg>
+                            {{ req.key }}
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if project_contexts.len() > 0 %}
+        <!-- Project Context Variables List -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-900">
+                        <tr>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Key</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Description</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Updated</th>
+                            {% if is_admin %}
+                            <th scope="col" class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
+                            {% endif %}
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        {% for context in project_contexts %}
+                        <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <div class="text-sm font-medium text-gray-900 dark:text-white font-mono">{{ context.key }}</div>
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="text-sm text-gray-500 dark:text-gray-400">
+                                    {% match context.description %}
+                                    {% when Some with (desc) %}{{ desc }}{% when None %}<span class="italic text-gray-400 dark:text-gray-500">No description</span>{% endmatch %}
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                {% if context.active %}
+                                <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:text-green-300">Active</span>
+                                {% else %}
+                                <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2.5 py-0.5 text-xs font-medium text-red-800 dark:text-red-300">Inactive</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                                <div>{{ context.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M") }}</div>
+                            </td>
+                            {% if is_admin %}
+                            <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
+                                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/{{ context.context_id }}/edit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-all mr-3">Edit</a>
+                                <form id="delete-project-context-{{ context.context_id }}" action="/contexts/{{ selected_project.as_ref().unwrap().name }}/{{ context.context_id }}/delete" method="post" class="inline">
+                                    <button type="button" onclick="confirmDeleteContext('project', '{{ context.context_id }}')" class="text-red-600 hover:text-red-800 dark:text-red-500 dark:hover:text-red-300 transition-all">Delete</button>
+                                </form>
+                            </td>
+                            {% endif %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <!-- Empty State for Project -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+            <div class="text-center">
+                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"></path>
+                    </svg>
+                </div>
+                <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No project-specific context variables</h3>
+                <p class="text-gray-500 dark:text-gray-400 mb-4">
+                    Project-level variables override environment variables for this specific project.
+                </p>
+                {% if is_admin %}
+                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    Add Context Variable
+                </a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    {% endif %}
+    {% endif %}
+
+    <!-- Context Variables Documentation -->
+    <div class="mt-6 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">About Context Variables</h3>
+        <div class="prose prose-sm text-gray-600 dark:text-gray-300 space-y-3">
+            <p>Context variables provide secure, encrypted storage for configuration values that your Hot code can access at runtime using <code class="bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded text-xs">::hot::ctx/get</code>.</p>
+            <p><strong>Scope inheritance:</strong></p>
+            <ul class="list-disc list-inside pl-4 space-y-1">
+                <li><strong>Environment variables</strong> are available to all projects in this environment</li>
+                <li><strong>Project variables</strong> override environment variables with the same key</li>
+            </ul>
+            <p class="mt-4"><strong>Example usage in Hot code:</strong></p>
+            <pre class="bg-gray-100 dark:bg-gray-800 p-2 rounded text-xs font-mono mt-2 text-gray-900 dark:text-gray-100">api-key ::hot::ctx/get("API_KEY")</pre>
+        </div>
+    </div>
+</div>
+
+<script>
+function confirmDeleteContext(scope, contextId) {
+    showConfirm(
+        'Delete Context Variable',
+        'Are you sure you want to delete this context variable?',
+        () => document.getElementById('delete-' + scope + '-context-' + contextId).submit(),
+        { confirmText: 'Delete', type: 'warning' }
+    );
+}
+</script>
+{% endblock %}

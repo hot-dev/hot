@@ -1,0 +1,660 @@
+::ai::test::chat_runloop ns
+meta ["test"]
+
+::chat ::ai::chat
+::tool ::ai::tool
+
+ReplyDelta         ::chat/ReplyDelta
+TextDelta          ::chat/TextDelta
+ToolUseStart       ::chat/ToolUseStart
+ToolUseInputDelta  ::chat/ToolUseInputDelta
+ToolUseEnd         ::chat/ToolUseEnd
+StreamStop         ::chat/StreamStop
+
+// ============================================================================
+// Fixtures
+// ============================================================================
+
+add-fn
+meta {
+    doc: """Test tool — sums two integers."""
+}
+fn (x: Int, y: Int): Int {
+    add(x, y)
+}
+
+multiply-fn
+meta {
+    doc: """Test tool — multiplies two integers."""
+}
+fn (x: Int, y: Int): Int {
+    mul(x, y)
+}
+
+failing-fn
+meta {
+    doc: """Test tool that always fails."""
+}
+fn (input: Str): Str {
+    fail(`failing-fn rejected '${input}'`)
+}
+
+// ----------------------------------------------------------------------------
+// Mock chat-fn — looks at message history to decide what to return
+// ----------------------------------------------------------------------------
+
+mock-chat-end-immediately
+meta {
+    doc: """Mock chat-fn that ends on the first turn with no tool calls."""
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    ::chat/ChatReply({
+        text: "Hello from mock!",
+        tool-calls: null,
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null
+    })
+}
+
+mock-chat-one-tool-then-end
+meta {
+    doc: """
+    Mock chat-fn that requests `add-fn(2, 3)` on the first turn, then
+    returns a final answer once it sees the tool result in messages.
+    """
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    has-tool-result some(messages, eq(%.role, "tool"))
+    cond {
+        has-tool-result => {
+            tool-msg find-first(messages, eq(%.role, "tool"))
+            ::chat/ChatReply({
+                text: `The answer is ${tool-msg.content}.`,
+                tool-calls: null,
+                stop-reason: "end_turn",
+                usage: null,
+                raw: null
+            })
+        }
+        => {
+            ::chat/ChatReply({
+                text: "Let me compute that.",
+                tool-calls: [::tool/ToolCall({
+                    id: "call-1",
+                    name: "::ai::test::chat_runloop/add-fn",
+                    input: {x: 2, y: 3}
+                })],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null
+            })
+        }
+    }
+}
+
+mock-chat-two-parallel-tools
+meta {
+    doc: """
+    Mock that requests two tool calls in one turn, then returns a
+    final answer after seeing both results.
+    """
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    tool-results filter(messages, eq(%.role, "tool"))
+    cond {
+        gte(length(tool-results), 2) => {
+            ::chat/ChatReply({
+                text: `add=${tool-results[0].content} mul=${tool-results[1].content}`,
+                tool-calls: null,
+                stop-reason: "end_turn",
+                usage: null,
+                raw: null
+            })
+        }
+        => {
+            ::chat/ChatReply({
+                text: null,
+                tool-calls: [
+                    ::tool/ToolCall({id: "c1", name: "::ai::test::chat_runloop/add-fn", input: {x: 2, y: 3}}),
+                    ::tool/ToolCall({id: "c2", name: "::ai::test::chat_runloop/multiply-fn", input: {x: 4, y: 5}})
+                ],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null
+            })
+        }
+    }
+}
+
+mock-chat-infinite-tool-calls
+meta {
+    doc: """Mock that always asks for another tool call — used to trigger max-iterations."""
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    ::chat/ChatReply({
+        text: null,
+        tool-calls: [::tool/ToolCall({
+            id: `call-${length(messages)}`,
+            name: "::ai::test::chat_runloop/add-fn",
+            input: {x: 1, y: 1}
+        })],
+        stop-reason: "tool_use",
+        usage: null,
+        raw: null
+    })
+}
+
+mock-chat-tool-error-recovery
+meta {
+    doc: """
+    Mock that calls a failing tool first, observes the error, then
+    falls back to a simple text answer.
+    """
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    tool-msg find-first(messages, eq(%.role, "tool"))
+    cond {
+        is-some(tool-msg) => {
+            ::chat/ChatReply({
+                text: "I saw the error and recovered.",
+                tool-calls: null,
+                stop-reason: "end_turn",
+                usage: null,
+                raw: null
+            })
+        }
+        => {
+            ::chat/ChatReply({
+                text: null,
+                tool-calls: [::tool/ToolCall({
+                    id: "call-err",
+                    name: "::ai::test::chat_runloop/failing-fn",
+                    input: {input: "bad"}
+                })],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null
+            })
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test-run-loop-immediate-end
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-end-immediately,
+        model: "mock-model"
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert-eq("Hello from mock!", result)
+}
+
+test-run-loop-one-tool-roundtrip
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-one-tool-then-end,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn)]
+    })
+    result ::chat/run-loop(opts, "what is 2 + 3?")
+    assert-eq("The answer is 5.", result)
+}
+
+test-run-loop-two-parallel-tools
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-two-parallel-tools,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn), ::tool/from-fn(multiply-fn)]
+    })
+    result ::chat/run-loop(opts, "compute things")
+    assert-eq("add=5 mul=20", result)
+}
+
+test-run-loop-max-iterations-exceeded
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-infinite-tool-calls,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn)],
+        max-iterations: 3
+    })
+    result ::chat/run-loop(opts, "loop forever")
+    assert(is-err(result), "max-iterations exceeded should return Err")
+}
+
+test-run-loop-tool-error-recovery
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-tool-error-recovery,
+        model: "mock-model",
+        tools: [::tool/from-fn(failing-fn)]
+    })
+    result ::chat/run-loop(opts, "try a failing tool")
+    assert-eq("I saw the error and recovered.", result)
+}
+
+// ============================================================================
+// Skill fixtures + run-loop integration
+// ============================================================================
+
+::skill ::ai::skill
+
+tone-skill
+meta {
+    skill: {
+        name: "customer-tone",
+        description: "Apply our customer voice rules.",
+        when: ["reply", "marketing"],
+        body: "Use a warm, plain-language tone."
+    }
+}
+fn () { {} }
+
+escalation-skill
+meta {
+    skill: {
+        name: "escalation",
+        description: "Decide when to hand off to a human.",
+        when: ["refund"]
+    }
+}
+fn () { {} }
+
+mock-chat-records-system
+meta {
+    doc: """
+    Mock chat-fn that echoes the system prompt it received as text and
+    ends immediately. Lets us assert that the resolver index was
+    injected into `system`.
+    """
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    ::chat/ChatReply({
+        text: or(system, ""),
+        tool-calls: null,
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null
+    })
+}
+
+mock-chat-records-tools
+meta {
+    doc: """
+    Mock chat-fn that returns the joined names of every tool it received.
+    """
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    names map(or(tools, []), %.name)
+    ::chat/ChatReply({
+        text: join(names, ","),
+        tool-calls: null,
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null
+    })
+}
+
+mock-chat-reads-skill
+meta {
+    doc: """
+    Mock chat-fn that calls `read_skill("customer-tone")` on its first
+    turn, then echoes the returned body once the tool result arrives.
+    """
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    tool-msg find-first(messages, eq(%.role, "tool"))
+    cond {
+        is-some(tool-msg) => {
+            ::chat/ChatReply({
+                text: tool-msg.content,
+                tool-calls: null,
+                stop-reason: "end_turn",
+                usage: null,
+                raw: null
+            })
+        }
+        => {
+            ::chat/ChatReply({
+                text: null,
+                tool-calls: [::tool/ToolCall({
+                    id: "rs-1",
+                    name: "read_skill",
+                    input: {name: "customer-tone"}
+                })],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null
+            })
+        }
+    }
+}
+
+test-run-loop-skills-inject-resolver-index
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-records-system,
+        model: "mock-model",
+        skills: [tone-skill, escalation-skill]
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert(contains(result, "Available skills"), "system prompt should include resolver header")
+    assert(contains(result, "customer-tone"), "system prompt should list customer-tone")
+    assert(contains(result, "escalation"), "system prompt should list escalation")
+}
+
+test-run-loop-skills-merge-system-prompt
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-records-system,
+        model: "mock-model",
+        system: "You are a careful agent.",
+        skills: [tone-skill]
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert(contains(result, "You are a careful agent."), "user system prompt should be preserved")
+    assert(contains(result, "customer-tone"), "resolver index should be appended")
+}
+
+test-run-loop-skills-no-skills-leaves-system-untouched
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-records-system,
+        model: "mock-model",
+        system: "Plain system."
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert-eq("Plain system.", result)
+}
+
+test-run-loop-skills-add-builtin-tools
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-records-tools,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn)],
+        skills: [tone-skill]
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert(contains(result, "list_skills"), "list_skills builtin should be present")
+    assert(contains(result, "read_skill"),  "read_skill builtin should be present")
+    assert(contains(result, "apply_skill"), "apply_skill builtin should be present")
+    assert(contains(result, "::ai::test::chat_runloop/add-fn"), "user-supplied tool should remain")
+}
+
+test-run-loop-skills-empty-skipped
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-records-tools,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn)],
+        skills: []
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert-eq("::ai::test::chat_runloop/add-fn", result)
+}
+
+test-run-loop-read-skill-roundtrip
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-reads-skill,
+        model: "mock-model",
+        skills: [tone-skill]
+    })
+    result ::chat/run-loop(opts, "explain the tone")
+    assert-eq("Use a warm, plain-language tone.", result)
+}
+
+// ============================================================================
+// emit-steps observability hook
+// ============================================================================
+
+test-run-loop-emit-steps-default-off
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-end-immediately,
+        model: "mock-model"
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert-eq("Hello from mock!", result)
+}
+
+test-run-loop-emit-steps-on-no-stream-context
+meta {
+    doc: """
+    With `emit-steps: true`, every turn calls `::hot::stream/data`.
+    There is no stream context in unit tests, so the call returns an
+    Err, but the helper swallows it via `if-err` and the loop must
+    still terminate normally.
+    """
+}
+
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-one-tool-then-end,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn)],
+        emit-steps: true
+    })
+    result ::chat/run-loop(opts, "what is 2 + 3?")
+    assert-eq("The answer is 5.", result)
+}
+
+// ============================================================================
+// Streaming run-loop
+// ============================================================================
+
+mock-stream-end-immediately
+meta {
+    doc: """Streaming mock: emits two text deltas + Stop, no tool calls."""
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::chat/Message>?, on-delta: Fn): ::chat/ChatReply {
+    on-delta(ReplyDelta.TextDelta(TextDelta({text: "Hello "})))
+    on-delta(ReplyDelta.TextDelta(TextDelta({text: "world!"})))
+    reply ::chat/ChatReply({
+        text: "Hello world!",
+        tool-calls: null,
+        stop-reason: "end_turn",
+        usage: {input-tokens: 5, output-tokens: 3},
+        raw: null
+    })
+    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+    reply
+}
+
+mock-stream-one-tool-then-end
+meta {
+    doc: """Streaming mock: requests `add-fn(2,3)` first; returns final answer once it sees the tool result."""
+}
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::chat/Message>?, on-delta: Fn): ::chat/ChatReply {
+    has-tool-result some(messages, eq(%.role, "tool"))
+    cond {
+        has-tool-result => {
+            on-delta(ReplyDelta.TextDelta(TextDelta({text: "The answer is "})))
+            tool-msg find-first(messages, eq(%.role, "tool"))
+            on-delta(ReplyDelta.TextDelta(TextDelta({text: `${tool-msg.content}.`})))
+            reply ::chat/ChatReply({
+                text: `The answer is ${tool-msg.content}.`,
+                tool-calls: null,
+                stop-reason: "end_turn",
+                usage: null,
+                raw: null
+            })
+            on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+            reply
+        }
+        => {
+            call ::tool/ToolCall({
+                id: "call-1",
+                name: "::ai::test::chat_runloop/add-fn",
+                input: {x: 2, y: 3}
+            })
+            on-delta(ReplyDelta.ToolUseStart(ToolUseStart({id: "call-1", name: "::ai::test::chat_runloop/add-fn"})))
+            on-delta(ReplyDelta.ToolUseInputDelta(ToolUseInputDelta({id: "call-1", partial-input-json: "{\"x\":2,\"y\":3}"})))
+            on-delta(ReplyDelta.ToolUseEnd(ToolUseEnd({id: "call-1"})))
+            reply ::chat/ChatReply({
+                text: null,
+                tool-calls: [call],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null
+            })
+            on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+            reply
+        }
+    }
+}
+
+test-run-loop-stream-immediate-end
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-stream-fn: mock-stream-end-immediately,
+        model: "mock-model"
+    })
+    result ::chat/run-loop-stream(opts, "hi")
+    assert-eq("Hello world!", result)
+}
+
+test-run-loop-stream-one-tool-roundtrip
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-stream-fn: mock-stream-one-tool-then-end,
+        model: "mock-model",
+        tools: [::tool/from-fn(add-fn)]
+    })
+    result ::chat/run-loop-stream(opts, "what is 2 + 3?")
+    assert-eq("The answer is 5.", result)
+}
+
+test-run-loop-stream-emit-stream-deltas-safe
+meta {
+    doc: """With `emit-stream-deltas: true` and no run/stream context, the loop should still complete normally."""
+}
+
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-stream-fn: mock-stream-end-immediately,
+        model: "mock-model",
+        emit-stream-deltas: true
+    })
+    result ::chat/run-loop-stream(opts, "hi")
+    assert-eq("Hello world!", result)
+}
+
+// ============================================================================
+// Token budget checks
+// ============================================================================
+
+test-count-tokens-heuristic-empty
+meta ["test"]
+fn () {
+    assert-eq(0, ::chat/count-tokens-heuristic([], "any-model"))
+}
+
+test-count-tokens-heuristic-bounded
+meta ["test"]
+fn () {
+    msgs [
+        ::chat/Message({role: "user", content: "Hello there!", tool-calls: null, tool-call-id: null})
+    ]
+    n ::chat/count-tokens-heuristic(msgs, "any-model")
+    assert(gt(n, 0))
+    assert(lt(n, 50))
+}
+
+mock-counter-large
+meta { doc: """Test helper: count-tokens-fn that always reports a large number.""" }
+fn (messages: Vec<::chat/Message>, model: Str): Int { 500 }
+
+mock-counter-small
+meta { doc: """Test helper: count-tokens-fn that always reports a small number.""" }
+fn (messages: Vec<::chat/Message>, model: Str): Int { 50 }
+
+test-budget-fail-on-overflow
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-end-immediately,
+        model: "mock-model",
+        max-context-tokens: 100,
+        count-tokens-fn: mock-counter-large
+    })
+    assert(is-err(::chat/run-loop(opts, "anything")))
+}
+
+test-budget-passes-when-under-limit
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-end-immediately,
+        model: "mock-model",
+        max-context-tokens: 100000,
+        count-tokens-fn: mock-counter-small
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert-eq("Hello from mock!", result)
+}
+
+test-budget-skipped-when-no-limit
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-fn: mock-chat-end-immediately,
+        model: "mock-model",
+        count-tokens-fn: mock-counter-large
+    })
+    result ::chat/run-loop(opts, "hi")
+    assert-eq("Hello from mock!", result)
+}
+
+test-budget-stream-fail-on-overflow
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-stream-fn: mock-stream-end-immediately,
+        model: "mock-model",
+        max-context-tokens: 100,
+        count-tokens-fn: mock-counter-large
+    })
+    assert(is-err(::chat/run-loop-stream(opts, "anything")))
+}
+
+test-message-helpers
+meta ["test"]
+fn () {
+    u ::chat/user-message("hi")
+    assert-eq("user", u.role)
+    assert-eq("hi", u.content)
+
+    a ::chat/assistant-message("done", null)
+    assert-eq("assistant", a.role)
+    assert-eq("done", a.content)
+    assert(is-null(a.tool-calls), "no tool calls")
+
+    tr ::chat/tool-result-message(::tool/ToolResult({id: "x", output: 42, is-error: false}))
+    assert-eq("tool", tr.role)
+    assert-eq(42, tr.content)
+    assert-eq("x", tr.tool-call-id)
+}

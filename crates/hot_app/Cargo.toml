@@ -1,0 +1,62 @@
+[package]
+name = "hot_app"
+version.workspace = true
+edition.workspace = true
+description = "Hot web app and dashboard"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+async-stream = { workspace = true }
+axum = { workspace = true }
+askama = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["fs", "trace", "set-header"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+hot = { workspace = true }
+futures = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+jsonwebtoken = { workspace = true }
+axum-extra = { workspace = true, features = ["cookie"] }
+time = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+oauth2 = { workspace = true }  # Note: v5.0 requires reqwest 0.12 but has breaking API changes
+reqwest = { workspace = true }
+url = { workspace = true }
+sqlx = { workspace = true }
+async-trait = { workspace = true }
+zip = { workspace = true }
+urlencoding = { workspace = true }
+regex = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
+http-body-util = { workspace = true, optional = true }
+
+[features]
+# Exposes `hot_app::test_support` for writing HTTP-level integration tests
+# against the real Axum router. Enabled automatically for the crate's own
+# tests via `dev-dependencies.hot_app = { features = ["test-utils"] }` in
+# downstream crates; within this crate, tests can opt in with the
+# `#[cfg(feature = "test-utils")]` guard or use the `test-utils` column in
+# `Cargo.toml`'s `[[test]]` required-features.
+test-utils = ["dep:http-body-util"]
+
+[dev-dependencies]
+hot = { workspace = true, features = ["test-utils"] }
+hot_app = { workspace = true, features = ["test-utils"] }
+
+[build-dependencies]
+walkdir = { workspace = true }
+
+[package.metadata.askama]
+dir = "templates"

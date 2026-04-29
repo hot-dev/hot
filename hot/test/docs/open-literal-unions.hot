@@ -1,0 +1,83 @@
+// Test file for OPEN literal union types — extensible literal unions
+// declared with the `open` modifier (`Foo type open "a" | "b"`) and
+// extended at top level via additional `Foo type open | "c"` declarations.
+::hot::test::docs::open-literal-unions ns
+meta ["test"]
+
+// =============================================================================
+// Initial open literal-union declaration (string members)
+// =============================================================================
+
+// Open literal union, seeded with three string members. Extensions below
+// add more members; the accumulated membership set is what the type
+// checker uses for compatibility checks.
+Fruit type open "apple" | "banana" | "orange"
+
+// Extension with a leading `|` (single-member extension; the leading
+// pipe makes the extension syntactically obvious).
+Fruit type open | "kiwi"
+
+// Extension without a leading `|` (multi-member; reads naturally as
+// "additional members").
+Fruit type open "mango" | "pineapple"
+
+// Re-extending with an existing member is a no-op (silently deduped),
+// not an error. This matches the user's intuition that "include this
+// member" should be safe to repeat.
+Fruit type open | "apple"
+
+// =============================================================================
+// Initial open literal-union declaration (int members)
+// =============================================================================
+
+DiceRoll type open 1 | 2 | 3
+DiceRoll type open | 4
+DiceRoll type open 5 | 6
+
+// =============================================================================
+// Tests — accumulated members are accepted as values of the union type
+// =============================================================================
+
+test-fruit-seed-members
+meta ["test"] fn () {
+  apple: Fruit "apple"
+  banana: Fruit "banana"
+  orange: Fruit "orange"
+  assert-eq("apple", apple, "seed: apple")
+  assert-eq("banana", banana, "seed: banana")
+  assert-eq("orange", orange, "seed: orange")
+}
+
+test-fruit-extended-members
+meta ["test"] fn () {
+  // Each of these was added via an extension above. The type checker
+  // accepts them because the accumulated member set includes them.
+  kiwi: Fruit "kiwi"
+  mango: Fruit "mango"
+  pineapple: Fruit "pineapple"
+  assert-eq("kiwi", kiwi, "extension: kiwi")
+  assert-eq("mango", mango, "extension: mango")
+  assert-eq("pineapple", pineapple, "extension: pineapple")
+}
+
+test-dice-roll-extended-members
+meta ["test"] fn () {
+  one: DiceRoll 1
+  four: DiceRoll 4
+  six: DiceRoll 6
+  assert-eq(1, one, "seed: 1")
+  assert-eq(4, four, "extension: 4")
+  assert-eq(6, six, "extension: 6")
+}
+
+test-fruit-function-accepts-extended
+meta ["test"] fn () {
+  // Function accepting Fruit must work with both seed and extended members.
+  describe-fruit fn (f: Fruit): Str {
+    if(eq(f, "apple"), "the original",
+      if(eq(f, "kiwi"), "added later",
+        "another fruit"))
+  }
+  assert-eq("the original", describe-fruit("apple"), "seed describe")
+  assert-eq("added later", describe-fruit("kiwi"), "extension describe")
+}

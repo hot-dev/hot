@@ -1,0 +1,40 @@
+::whatsapp::integration::messages ns
+meta ["test"]
+
+WHATSAPP_TEST_PHONE_NUMBER_ID ::hot::env/get("WHATSAPP_TEST_PHONE_NUMBER_ID", "")
+WHATSAPP_TEST_RECIPIENT ::hot::env/get("WHATSAPP_TEST_RECIPIENT", "")
+
+test-send-text-message
+meta ["test"]
+fn () {
+  assert(WHATSAPP_TEST_PHONE_NUMBER_ID, "Set WHATSAPP_TEST_PHONE_NUMBER_ID in .env")
+  assert(WHATSAPP_TEST_RECIPIENT, "Set WHATSAPP_TEST_RECIPIENT in .env")
+
+  response ::whatsapp::messages/send-text(::whatsapp::messages/SendTextRequest({
+    phone_number_id: WHATSAPP_TEST_PHONE_NUMBER_ID,
+    to: WHATSAPP_TEST_RECIPIENT,
+    text: "Hot integration test message"
+  }))
+
+  assert(response.messages, "sendText should return messages array")
+  assert(first(response.messages).id, "message should have an id")
+}
+
+test-send-location
+meta ["test"]
+fn () {
+  assert(WHATSAPP_TEST_PHONE_NUMBER_ID, "Set WHATSAPP_TEST_PHONE_NUMBER_ID in .env")
+  assert(WHATSAPP_TEST_RECIPIENT, "Set WHATSAPP_TEST_RECIPIENT in .env")
+
+  response ::whatsapp::messages/send-location(::whatsapp::messages/SendLocationRequest({
+    phone_number_id: WHATSAPP_TEST_PHONE_NUMBER_ID,
+    to: WHATSAPP_TEST_RECIPIENT,
+    latitude: Dec(37.7749),
+    longitude: Dec(-122.4194),
+    name: "San Francisco",
+    address: "San Francisco, CA"
+  }))
+
+  assert(response.messages, "sendLocation should return messages array")
+  assert(first(response.messages).id, "message should have an id")
+}

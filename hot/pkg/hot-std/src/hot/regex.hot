@@ -1,0 +1,191 @@
+::hot::regex ns
+meta {doc: """Regular expression matching and manipulation."""}
+
+first-match
+meta {
+    doc: """
+    Return first match of regex `pattern` in `value`, or null if no match.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/first-match("abc123def", "\\d+")  // "123"
+    ::hot::regex/first-match("no digits", "\\d+")  // null
+    ```
+    """
+}
+fn (value: Str, pattern: Str): Vec<Str> {
+    call-lib(::hot::regex/match, [value, pattern])
+}
+
+
+replace
+meta {
+    doc: """
+    Replace first match of regex `pattern` in `value` with `replacement`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/replace("abc123def", "\\d+", "NUM")
+    // "abcNUMdef"
+    ```
+
+    See also: `::hot::str/replace` for simple string replacement.
+    """
+}
+fn (value: Str, pattern: Str, replacement: Str): Str {
+    call-lib(::hot::regex/replace, [value, pattern, replacement])
+}
+
+
+split
+meta {
+    doc: """
+    Split `value` by regex `pattern`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/split("apple,banana;cherry", "[,;]")
+    // ["apple", "banana", "cherry"]
+
+    ::hot::regex/split("one   two\tthree", "\\s+")
+    // ["one", "two", "three"]
+    ```
+
+    See also: `::hot::str/split` for simple string splitting.
+    """
+}
+fn (value: Str, pattern: Str): Vec<Str> {
+    call-lib(::hot::regex/split, [value, pattern])
+}
+
+
+find
+meta {
+    doc: """
+    Return first match of regex `pattern` in `value` with position info.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/find("abc123def", "\\d+")
+    // {"match": "123", "start": 3, "end": 6}
+    ```
+    """
+}
+fn (value: Str, pattern: Str): Str {
+    call-lib(::hot::regex/find, [value, pattern])
+}
+
+
+find-all
+meta {
+    doc: """
+    Return all matches of regex `pattern` in `value` with position info.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/find-all("a1b22c333", "\\d+")
+    // [{"match": "1", "start": 1, "end": 2},
+    //  {"match": "22", "start": 3, "end": 5},
+    //  {"match": "333", "start": 6, "end": 9}]
+    ```
+    """
+}
+fn (value: Str, pattern: Str): Vec<Str> {
+    call-lib(::hot::regex/find-all, [value, pattern])
+}
+
+
+replace-all
+meta {
+    doc: """
+    Replace all matches of regex `pattern` in `value` with `replacement`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/replace-all("a1b2c3", "\\d+", "X")
+    // "aXbXcX"
+    ```
+    """
+}
+fn (value: Str, pattern: Str, replacement: Str): Str {
+    call-lib(::hot::regex/replace-all, [value, pattern, replacement])
+}
+
+
+is-match
+meta {
+    doc: """
+    Return true if regex `pattern` matches `value`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/is-match("abc123", "\\d+")   // true
+    ::hot::regex/is-match("no nums", "\\d+")  // false
+    ```
+    """
+}
+fn (value: Str, pattern: Str): Bool {
+    call-lib(::hot::regex/is-match, [value, pattern])
+}
+
+
+escape
+meta {
+    doc: """
+    Escape special regex characters in `value`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/escape("hello.world?")  // "hello\\.world\\?"
+    ::hot::regex/escape("[test]")        // "\\[test\\]"
+    ```
+    """
+}
+fn (value: Str): Str {
+    call-lib(::hot::regex/escape, [value])
+}
+
+
+capture
+meta {
+    doc: """
+    Return first captured group for regex `pattern` in `value`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/capture("user@domain", "(\\w+)@(\\w+)")
+    // {"match": "user@domain", "groups": ["user", "domain"]}
+    ```
+    """
+}
+fn (value: Str, pattern: Str): Str {
+    call-lib(::hot::regex/capture, [value, pattern])
+}
+
+
+capture-all
+meta {
+    doc: """
+    Return all captured groups for regex `pattern` in `value`.
+
+    **Example**
+
+    ```hot
+    ::hot::regex/capture-all("a=1 b=2", "(\\w+)=(\\d+)")
+    // [{"match": "a=1", "groups": ["a", "1"]},
+    //  {"match": "b=2", "groups": ["b", "2"]}]
+    ```
+    """
+}
+fn (value: Str, pattern: Str): Vec<Str> {
+    call-lib(::hot::regex/capture-all, [value, pattern])
+}

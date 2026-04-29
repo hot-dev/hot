@@ -1,0 +1,30 @@
+// Hot Configuration File - Scheduler
+// Configuration for running the Scheduler component.
+// Run `hot conf generate all` to see all available options.
+
+::hot::conf ns
+
+::env ::hot::env
+
+// Database Configuration
+hot.db.uri ::env/get("HOT_DB_URI", "")
+hot.db.schema "hot"
+
+// Logging Configuration
+hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
+hot.log.target "stdout"
+hot.log.dir ".hot/log"
+
+// Redis Configuration
+hot.redis.uri ::env/get("HOT_REDIS_URI", "")
+hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
+
+// Queue Configuration
+hot.queue.type "redis"
+
+// Scheduler Configuration
+hot.scheduler.enabled Bool(::env/get("HOT_SCHEDULER_ENABLED", "true"))
+hot.scheduler.sync-interval-seconds Int(::env/get("HOT_SCHEDULER_SYNC_INTERVAL_SECONDS", "30"))
+
+// Daemon Mode
+hot.daemon true

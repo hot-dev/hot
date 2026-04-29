@@ -1,0 +1,153 @@
+::openai::audio ns
+meta {doc: """OpenAI Audio API - Text-to-speech and speech-to-text."""}
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// =============================================================================
+// Types
+// =============================================================================
+
+// Text-to-Speech request
+SpeechRequest type {
+    model: Str,
+    input: Str,
+    voice: Str,
+    response_format: Str?,
+    speed: Dec?
+}
+
+// Transcription request
+TranscriptionRequest type {
+    file: Str,
+    model: Str,
+    language: Str?,
+    prompt: Str?,
+    response_format: Str?,
+    temperature: Dec?,
+    timestamp_granularities: Vec<Str>?
+}
+
+// Transcription response
+TranscriptionResponse type {
+    text: Str
+}
+
+// Translation request
+TranslationRequest type {
+    file: Str,
+    model: Str,
+    prompt: Str?,
+    response_format: Str?,
+    temperature: Dec?
+}
+
+// Translation response
+TranslationResponse type {
+    text: Str
+}
+
+// =============================================================================
+// API Functions
+// =============================================================================
+
+speech
+meta {
+    doc: """
+    POST /audio/speech - Generate audio from text (TTS).
+
+    Returns the raw audio bytes. Available voices: alloy, echo, fable, onyx, nova, shimmer.
+
+    **Example**
+
+    ```hot
+    audio-bytes ::openai::audio/speech(SpeechRequest({
+        model: "tts-1",
+        input: "Hello, this is a test.",
+        voice: "alloy"
+    }))
+
+    length(audio-bytes) // => substantial byte count
+    ::hot::file/write-file-bytes("output.mp3", audio-bytes)
+    ```
+
+    **Example - Different voice**
+
+    ```hot
+    audio-bytes ::openai::audio/speech(SpeechRequest({
+        model: "tts-1",
+        input: "Testing with a different voice.",
+        voice: "nova"
+    }))
+    ```
+    """
+}
+fn (request: SpeechRequest): Bytes | HttpError {
+    response api-request("POST", `${::openai/BASE_URL}/audio/speech`, {}, request)
+    if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+// Note: transcriptions and translations require multipart/form-data file uploads
+// which need special handling. These are placeholder functions.
+
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
+speak
+meta {
+    doc: """
+    Simple TTS - generate speech from text with default settings (tts-1 model, alloy voice).
+
+    A convenience wrapper around `speech` that uses sensible defaults. Pass a second argument to choose a different voice.
+
+    **Example**
+
+    ```hot
+    audio-bytes ::openai::audio/speak("Hello world!")
+    length(audio-bytes) // => substantial byte count
+    ::hot::file/write-file-bytes("output.mp3", audio-bytes)
+    ```
+
+    **Example - Custom voice**
+
+    ```hot
+    audio-bytes ::openai::audio/speak("Hello world!", "nova")
+    ```
+    """
+}
+fn (text: Str): Bytes | HttpError {
+    speak(text, "alloy")
+},
+(text: Str, voice: Str): Bytes | HttpError {
+    speech(SpeechRequest({
+        model: "tts-1",
+        input: text,
+        voice: voice
+    }))
+}
+
+// =============================================================================
+// Available Voices
+// =============================================================================
+
+VOICE_ALLOY "alloy"
+VOICE_ECHO "echo"
+VOICE_FABLE "fable"
+VOICE_ONYX "onyx"
+VOICE_NOVA "nova"
+VOICE_SHIMMER "shimmer"
+
+// =============================================================================
+// Available Models
+// =============================================================================
+
+// Standard TTS model
+TTS_1 "tts-1"
+
+// High-quality TTS model
+TTS_1_HD "tts-1-hd"
+
+// Whisper model for transcription
+WHISPER_1 "whisper-1"

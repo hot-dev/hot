@@ -1,0 +1,60 @@
+::postmark::templates ns
+
+api-request ::postmark::api/request
+HttpError ::postmark::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+CreateTemplateRequest type {
+    Alias: Str?,
+    Name: Str,
+    Subject: Str,
+    HtmlBody: Str?,
+    TextBody: Str?
+}
+
+TemplateRecordResponse type {
+    Name: Str?,
+    Alias: Str?,
+    TemplateId: Int?,
+    Active: Bool?
+}
+
+POSTTemplatesRequest type {
+    Alias: Str?,
+    Name: Str,
+    Subject: Str,
+    HtmlBody: Str?,
+    TextBody: Str?
+}
+
+POSTTemplatesResponse type {
+    Name: Str?,
+    Alias: Str?,
+    TemplateId: Int?,
+    Active: Bool?
+}
+
+
+create-template
+meta {
+    doc: """
+    Create a new email template on the Postmark server.
+
+    **Example**
+
+    ```hot
+    created ::postmark::templates/create-template(::postmark::templates/POSTTemplatesRequest({
+        Name: "Welcome Email",
+        Subject: "Hello {{name}}",
+        HtmlBody: "<html><body><h1>Hello {{name}}</h1></body></html>",
+        TextBody: "Hello {{name}}"
+    }))
+    created.TemplateId // => 12345
+    created.Active     // => true
+    ```
+    """
+}
+fn (request: POSTTemplatesRequest): POSTTemplatesResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/templates`, {}, request)
+  if(is-ok-response(response), POSTTemplatesResponse(response.body), err(HttpError(response)))
+}

@@ -1,0 +1,54 @@
+::slack::integration::auth ns
+meta ["test"]
+
+::ctx ::hot::ctx
+
+slack-token ::ctx/get("slack.api.key")
+
+test-auth-test
+meta ["test"]
+fn () {
+  assert(ne(slack-token, "PLACEHOLDER"), "Set SLACK_API_KEY in .env before running Slack integration tests")
+
+  response ::slack::misc/auth-test(::slack::misc/AuthTestRequest({}))
+
+  assert(response.ok, `auth.test should succeed. response=${to-json(response)}`)
+  assert(response.url, "auth.test should return workspace URL")
+  assert(response.team, "auth.test should return team name")
+  assert(response.user_id, "auth.test should return user_id")
+  assert(response.team_id, "auth.test should return team_id")
+  assert(response.bot_id, "auth.test should return bot_id for bot tokens")
+}
+
+test-api-test
+meta ["test"]
+fn () {
+  response ::slack::misc/api-test(::slack::misc/ApiTestRequest({
+    foo: "bar"
+  }))
+
+  assert(response.ok, `api.test should succeed. response=${to-json(response)}`)
+  assert(response.args, "api.test should return args")
+  assert-eq("bar", response.args.foo, "api.test should echo back foo=bar")
+}
+
+test-team-info
+meta ["test"]
+fn () {
+  response ::slack::misc/team-info(::slack::misc/TeamInfoRequest({}))
+
+  assert(response.ok, `team.info should succeed. response=${to-json(response)}`)
+  assert(response.team, "team.info should return team object")
+  assert(response.team.id, "team should have id")
+  assert(response.team.name, "team should have name")
+  assert(response.team.domain, "team should have domain")
+}
+
+test-emoji-list
+meta ["test"]
+fn () {
+  response ::slack::misc/emoji-list()
+
+  assert(response.ok, `emoji.list should succeed. response=${to-json(response)}`)
+  assert(response.emoji, "emoji.list should return emoji map")
+}

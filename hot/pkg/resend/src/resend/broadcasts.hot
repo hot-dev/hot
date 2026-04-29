@@ -1,0 +1,164 @@
+::resend::broadcasts ns
+
+api-request ::resend::api/request
+HttpError ::resend::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ListBroadcastsResponseSuccess type {
+    object: Str?,
+    data: Vec<Map>?
+}
+
+GetBroadcastResponseSuccess type {
+    id: Str?,
+    name: Str?,
+    audience_id: Str?,
+    from: Str?,
+    subject: Str?,
+    reply_to: Vec<Str>?,
+    preview_text: Str?,
+    status: Str?,
+    created_at: Str?,
+    scheduled_at: Str?,
+    sent_at: Str?
+}
+
+RemoveBroadcastResponseSuccess type {
+    id: Str?,
+    object: Str?,
+    deleted: Bool?
+}
+
+SendBroadcastOptions type {
+    scheduled_at: Str?
+}
+
+CreateBroadcastResponseSuccess type {
+    id: Str?,
+    object: Str?
+}
+
+SendBroadcastResponseSuccess type {
+    id: Str?
+}
+
+CreateBroadcastOptions type {
+    name: Str?,
+    audience_id: Str,
+    from: Str,
+    subject: Str,
+    reply_to: Vec<Str>?,
+    preview_text: Str?,
+    html: Str?,
+    text: Str?
+}
+
+// No parameters required for this GET request
+GETBroadcastsRequest type Map
+
+GETBroadcastsResponse type {
+    object: Str?,
+    data: Vec<Map>?
+}
+
+
+retrieve-list-broadcasts
+meta {
+    doc: """Retrieve all broadcasts in your Resend account, including draft, scheduled, and sent."""
+}
+fn (request: GETBroadcastsRequest): GETBroadcastsResponse {
+  response api-request("GET", `${::resend/BASE_URL}/broadcasts`)
+  if(is-ok-response(response), GETBroadcastsResponse(response.body), err(HttpError(response)))
+}
+
+POSTBroadcastsRequest type {
+    name: Str?,
+    audience_id: Str,
+    from: Str,
+    subject: Str,
+    reply_to: Vec<Str>?,
+    preview_text: Str?,
+    html: Str?,
+    text: Str?
+}
+
+POSTBroadcastsResponse type {
+    id: Str?,
+    object: Str?
+}
+
+
+create-broadcast
+meta {
+    doc: """Create a new broadcast draft targeting a specific audience. Must be sent separately via send-or-schedule-broadcast."""
+}
+fn (request: POSTBroadcastsRequest): POSTBroadcastsResponse {
+  response api-request("POST", `${::resend/BASE_URL}/broadcasts`, {}, request)
+  if(is-ok-response(response), POSTBroadcastsResponse(response.body), err(HttpError(response)))
+}
+
+GETBroadcastsIdRequest type {
+  id: Str
+}
+
+GETBroadcastsIdResponse type {
+    id: Str?,
+    name: Str?,
+    audience_id: Str?,
+    from: Str?,
+    subject: Str?,
+    reply_to: Vec<Str>?,
+    preview_text: Str?,
+    status: Str?,
+    created_at: Str?,
+    scheduled_at: Str?,
+    sent_at: Str?
+}
+
+
+retrieve-single-broadcast
+meta {
+    doc: """Retrieve a single broadcast by its ID, including status, schedule, and content details."""
+}
+fn (request: GETBroadcastsIdRequest): GETBroadcastsIdResponse {
+  response api-request("GET", `${::resend/BASE_URL}/broadcasts/${request.id}`)
+  if(is-ok-response(response), GETBroadcastsIdResponse(response.body), err(HttpError(response)))
+}
+
+DELETEBroadcastsIdRequest type {
+  id: Str
+}
+
+DELETEBroadcastsIdResponse type {
+    id: Str?,
+    object: Str?,
+    deleted: Bool?
+}
+
+
+remove-existing-broadcast-that-is-draft-status
+meta {
+    doc: """Remove an existing broadcast. Only broadcasts in draft status can be deleted."""
+}
+fn (request: DELETEBroadcastsIdRequest): DELETEBroadcastsIdResponse {
+  response api-request("DELETE", `${::resend/BASE_URL}/broadcasts/${request.id}`)
+  if(is-ok-response(response), DELETEBroadcastsIdResponse(response.body), err(HttpError(response)))
+}
+
+POSTBroadcastsIdSendRequest type {
+    scheduled_at: Str?
+}
+
+POSTBroadcastsIdSendResponse type {
+    id: Str?
+}
+
+
+send-or-schedule-broadcast
+meta {
+    doc: """Send a broadcast immediately or schedule it for later delivery via scheduled_at."""
+}
+fn (id: Str, request: POSTBroadcastsIdSendRequest): POSTBroadcastsIdSendResponse {
+  response api-request("POST", `${::resend/BASE_URL}/broadcasts/${id}/send`, {}, request)
+  if(is-ok-response(response), POSTBroadcastsIdSendResponse(response.body), err(HttpError(response)))
+}

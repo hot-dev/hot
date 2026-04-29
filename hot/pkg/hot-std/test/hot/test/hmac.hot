@@ -1,0 +1,81 @@
+::hot::test::hmac ns
+meta ["test"]
+
+// Test HMAC-SHA256
+test-hmac-sha256
+meta ["test"] fn () {
+    result ::hot::hmac/hmac-sha256("secret-key", "hello")
+    // HMAC-SHA256 produces 64 hex chars (256 bits)
+    assert-eq(64, ::hot::str/length(result), "hmac-sha256 should produce 64 hex chars")
+
+    // Same key/data should produce same HMAC
+    result2 ::hot::hmac/hmac-sha256("secret-key", "hello")
+    assert-eq(result, result2, "Same key/data should produce same HMAC")
+
+    // Different key should produce different HMAC
+    result3 ::hot::hmac/hmac-sha256("different-key", "hello")
+    assert(not(eq(result, result3)), "Different keys should produce different HMACs")
+}
+
+// Test HMAC-SHA256 bytes variant
+test-hmac-sha256-bytes
+meta ["test"] fn () {
+    result ::hot::hmac/hmac-sha256-bytes("secret-key", "hello")
+    // Encode to hex and check length (32 bytes = 64 hex chars)
+    hex-result ::hot::hex/encode(result)
+    assert-eq(64, ::hot::str/length(hex-result), "hmac-sha256-bytes should produce 32 bytes (64 hex chars)")
+}
+
+// Test HMAC-SHA512
+test-hmac-sha512
+meta ["test"] fn () {
+    result ::hot::hmac/hmac-sha512("secret-key", "hello")
+    // HMAC-SHA512 produces 128 hex chars (512 bits)
+    assert-eq(128, ::hot::str/length(result), "hmac-sha512 should produce 128 hex chars")
+}
+
+// Test HMAC-SHA1 (legacy)
+test-hmac-sha1
+meta ["test"] fn () {
+    result ::hot::hmac/hmac-sha1("secret-key", "hello")
+    // HMAC-SHA1 produces 40 hex chars (160 bits)
+    assert-eq(40, ::hot::str/length(result), "hmac-sha1 should produce 40 hex chars")
+}
+
+// Test HMAC verification
+test-hmac-verify
+meta ["test"] fn () {
+    key "webhook-secret"
+    data "payload-data"
+
+    // Compute HMAC
+    hmac ::hot::hmac/hmac-sha256(key, data)
+
+    // Verify correct HMAC
+    assert(
+        ::hot::hmac/hmac-verify(key, data, hmac, "sha256"),
+        "Valid HMAC should verify"
+    )
+
+    // Verify incorrect HMAC fails
+    wrong-hmac "0000000000000000000000000000000000000000000000000000000000000000"
+    assert(
+        not(::hot::hmac/hmac-verify(key, data, wrong-hmac, "sha256")),
+        "Invalid HMAC should not verify"
+    )
+}
+
+// Test HMAC verify with different algorithms
+test-hmac-verify-algorithms
+meta ["test"] fn () {
+    key "test-key"
+    data "test-data"
+
+    // Test SHA-1 verification
+    hmac1 ::hot::hmac/hmac-sha1(key, data)
+    assert(::hot::hmac/hmac-verify(key, data, hmac1, "sha1"), "SHA1 HMAC should verify")
+
+    // Test SHA-512 verification
+    hmac512 ::hot::hmac/hmac-sha512(key, data)
+    assert(::hot::hmac/hmac-verify(key, data, hmac512, "sha512"), "SHA512 HMAC should verify")
+}

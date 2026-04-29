@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.stripe-customers {
+  name: "hot.dev/stripe-customers",
+  version: "0.10.0",
+  hot-min-version: "1.2.0",
+  description: "stripe customers API bindings.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["payments"],
+  deps: {
+    "hot.dev/stripe-core": {
+      local: "../stripe-core",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/stripe-core"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

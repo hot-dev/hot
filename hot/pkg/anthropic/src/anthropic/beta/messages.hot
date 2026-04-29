@@ -1,0 +1,225 @@
+::anthropic::beta::messages ns
+
+api-request ::anthropic::api/request
+HttpError ::anthropic::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+BetaMessage type {
+    id: Str,
+    type: "message",
+    role: "assistant",
+    content: Vec<BetaContentBlock>,
+    model: Model,
+    stop_reason: Any,
+    stop_sequence: Any,
+    usage: Any
+}
+
+BetaCreateMessageParams type {
+    model: Model,
+    messages: Vec<BetaInputMessage>,
+    max_tokens: Int,
+    metadata: Any?,
+    stop_sequences: Vec<Str>?,
+    stream: Bool?,
+    system: Any?,
+    temperature: Dec?,
+    tool_choice: BetaToolChoice?,
+    tools: Vec?,
+    top_k: Int?,
+    top_p: Dec?
+}
+
+// Tool choice configuration for controlling tool use behavior.
+// Auto: {type: "auto"} - Model decides whether to use tools
+// Any: {type: "any"} - Model must use at least one tool
+// Specific: {type: "tool", name: "tool_name"} - Model must use the named tool
+// None: {type: "none"} - Model must not use tools
+BetaToolChoice type {
+    type: Str,
+    name: Str?,
+    disable_parallel_tool_use: Bool?
+}
+
+// Content block in a message response. Polymorphic -- may be text, tool_use, image, etc.
+BetaContentBlock type {
+    type: Str,
+    text: Str?,
+    id: Str?,
+    name: Str?,
+    input: Any?
+}
+
+BetaErrorResponse type {
+    type: "error",
+    error: Any
+}
+
+BetaInputMessage type {
+    role: "user" | "assistant",
+    content: Any
+}
+
+BetaCountMessageTokensParams type {
+    tool_choice: BetaToolChoice?,
+    tools: Vec?,
+    messages: Vec<BetaInputMessage>,
+    system: Any?,
+    model: Model
+}
+
+BetaCountMessageTokensResponse type {
+    input_tokens: Int
+}
+
+// Model ID string (e.g. "claude-sonnet-4-20250514")
+Model type Str
+
+BetaMessagesPostRequest type {
+    model: Model,
+    messages: Vec<BetaInputMessage>,
+    max_tokens: Int,
+    metadata: Any?,
+    stop_sequences: Vec<Str>?,
+    stream: Bool?,
+    system: Any?,
+    temperature: Dec?,
+    tool_choice: BetaToolChoice?,
+    tools: Vec?,
+    top_k: Int?,
+    top_p: Dec?
+}
+
+BetaMessagesPostResponse type {
+    id: Str,
+    type: "message",
+    role: "assistant",
+    content: Vec<BetaContentBlock>,
+    model: Model,
+    stop_reason: Any,
+    stop_sequence: Any,
+    usage: Any
+}
+
+
+post
+meta {
+    doc: """
+    POST /v1/messages (beta) - Create a message using the beta API endpoint.
+
+    Sends messages to Claude via the beta endpoint, which may include features
+    not yet available in the stable API.
+
+    **Example**
+
+    ```hot
+    request BetaMessagesPostRequest({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        messages: [{role: "user", content: "Hello from Beta!"}]
+    })
+
+    response ::anthropic::beta::messages/post(request)
+    response.content[0].text
+    ```
+    """
+}
+fn (request: BetaMessagesPostRequest): BetaMessagesPostResponse {
+  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages?beta=true`, {}, request)
+  if(is-ok-response(response), BetaMessagesPostResponse(response.body), err(HttpError(response)))
+}
+
+BetaMessagesCountTokensPostRequest type {
+    tool_choice: BetaToolChoice?,
+    tools: Vec?,
+    messages: Vec<BetaInputMessage>,
+    system: Any?,
+    model: Model
+}
+
+BetaMessagesCountTokensPostResponse type {
+    input_tokens: Int
+}
+
+
+count-tokens-post
+meta {
+    doc: """
+    POST /v1/messages/count_tokens (beta) - Count tokens in a message.
+
+    Counts the number of input tokens for a message request without creating
+    a message. Useful for estimating costs and checking context window limits.
+    Supports system prompts and multi-turn conversations.
+
+    **Example**
+
+    ```hot
+    // Simple token count
+    request BetaMessagesCountTokensPostRequest({
+        model: "claude-sonnet-4-20250514",
+        messages: [{role: "user", content: "Hello, world!"}]
+    })
+    response ::anthropic::beta::messages/count-tokens-post(request)
+    response.input_tokens // => 10
+
+    // With system prompt
+    request BetaMessagesCountTokensPostRequest({
+        model: "claude-sonnet-4-20250514",
+        system: "You are a helpful assistant.",
+        messages: [{role: "user", content: "Hello!"}]
+    })
+
+    // Multi-turn conversation
+    request BetaMessagesCountTokensPostRequest({
+        model: "claude-sonnet-4-20250514",
+        messages: [
+            {role: "user", content: "Hello!"},
+            {role: "assistant", content: "Hi there! How can I help you today?"},
+            {role: "user", content: "What's the weather like?"}
+        ]
+    })
+    ```
+    """
+}
+fn (request: BetaMessagesCountTokensPostRequest): BetaMessagesCountTokensPostResponse {
+  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/count_tokens?beta=true`, {}, request)
+  if(is-ok-response(response), BetaMessagesCountTokensPostResponse(response.body), err(HttpError(response)))
+}
+
+BetaMessagesCountTokensPostRequest type {
+    tool_choice: BetaToolChoice?,
+    tools: Vec?,
+    messages: Vec<BetaInputMessage>,
+    system: Any?,
+    model: Model
+}
+
+BetaMessagesCountTokensPostResponse type {
+    input_tokens: Int
+}
+
+
+count-tokens-post
+meta {
+    doc: """
+    POST /v1/messages/count_tokens - Count tokens in a message.
+
+    Counts the number of input tokens for a message request without creating
+    a message. Uses the stable (non-beta) endpoint.
+
+    **Example**
+
+    ```hot
+    request BetaMessagesCountTokensPostRequest({
+        model: "claude-sonnet-4-20250514",
+        messages: [{role: "user", content: "Hello, world!"}]
+    })
+    response ::anthropic::beta::messages/count-tokens-post(request)
+    response.input_tokens // => 10
+    ```
+    """
+}
+fn (request: BetaMessagesCountTokensPostRequest): BetaMessagesCountTokensPostResponse {
+  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/count_tokens`, {}, request)
+  if(is-ok-response(response), BetaMessagesCountTokensPostResponse(response.body), err(HttpError(response)))
+}

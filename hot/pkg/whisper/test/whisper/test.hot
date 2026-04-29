@@ -1,0 +1,170 @@
+::whisper::test ns
+meta ["test"]
+
+build-transcribe-args ::whisper/build-transcribe-args
+parse-transcribe-output ::whisper/parse-transcribe-output
+file-ext ::whisper/file-ext
+join-args ::whisper/join-args
+model-to-min-size ::whisper/model-to-min-size
+TranscribeOpts ::whisper/TranscribeOpts
+
+// ============================================================================
+// file-ext tests
+// ============================================================================
+
+test-file-ext-mp3
+meta ["test"] fn () {
+    assert-eq("mp3", file-ext("hot://uploads/audio.mp3"))
+}
+
+test-file-ext-nested-path
+meta ["test"] fn () {
+    assert-eq("wav", file-ext("hot://users/99/clips/note.wav"))
+}
+
+test-file-ext-multiple-dots
+meta ["test"] fn () {
+    assert-eq("gz", file-ext("archive.tar.gz"))
+}
+
+// ============================================================================
+// join-args tests
+// ============================================================================
+
+test-join-args-whisper-style
+meta ["test"] fn () {
+    s join-args(["/tmp/in.wav", "--model", "base", "--output_format", "json"])
+    assert(contains(s, "/tmp/in.wav"), "should include input path")
+    assert(contains(s, "--model base"), "should join model flag")
+}
+
+// ============================================================================
+// model-to-min-size tests
+// ============================================================================
+
+test-model-to-min-size-tiny-base
+meta ["test"] fn () {
+    assert-eq("small", model-to-min-size("tiny"))
+    assert-eq("small", model-to-min-size("base"))
+}
+
+test-model-to-min-size-small-medium-large
+meta ["test"] fn () {
+    assert-eq("medium", model-to-min-size("small"))
+    assert-eq("large", model-to-min-size("medium"))
+    assert-eq("xlarge", model-to-min-size("large"))
+}
+
+test-model-to-min-size-unknown
+meta ["test"] fn () {
+    assert-eq("small", model-to-min-size("unknown-model"))
+}
+
+test-model-to-min-size-case
+meta ["test"] fn () {
+    assert-eq("medium", model-to-min-size("SMALL"))
+}
+
+// ============================================================================
+// build-transcribe-args tests
+// ============================================================================
+
+test-transcribe-args-minimal
+meta ["test"] fn () {
+    opts TranscribeOpts({
+        model: null, language: null, format: null, task: null,
+        temperature: null, image: null, size: null,
+    })
+    args build-transcribe-args("/tmp/in.wav", "/tmp/out", opts)
+    assert-eq("/tmp/in.wav", first(args))
+    assert(in("--model", args), "should have --model")
+    assert(in("base", args), "default model base")
+    assert(in("--output_format", args), "should have output_format")
+    assert(in("json", args), "default format json")
+    assert(in("--output_dir", args), "should have output_dir")
+    assert(in("/tmp/out", args), "should have output dir path")
+}
+
+test-transcribe-args-full
+meta ["test"] fn () {
+    opts TranscribeOpts({
+        model: "small",
+        language: "en",
+        format: "json",
+        task: "translate",
+        temperature: "0",
+        image: null,
+        size: null,
+    })
+    args build-transcribe-args("/tmp/audio.ogg", "/tmp/whisper-out", opts)
+    assert-eq("/tmp/audio.ogg", first(args))
+    assert(in("--model", args), "model flag")
+    assert(in("small", args), "small model")
+    assert(in("--language", args), "language flag")
+    assert(in("en", args), "en")
+    assert(in("--task", args), "task flag")
+    assert(in("translate", args), "translate")
+    assert(in("--temperature", args), "temperature flag")
+    assert(in("0", args), "temp value")
+    assert(in("--output_dir", args), "output dir")
+    assert(in("/tmp/whisper-out", args), "dir path")
+}
+
+test-transcribe-args-vtt-format
+meta ["test"] fn () {
+    opts TranscribeOpts({
+        model: "tiny", language: null, format: "vtt", task: null,
+        temperature: null, image: null, size: null,
+    })
+    args build-transcribe-args("/tmp/x.mp3", "/tmp/o", opts)
+    assert(in("vtt", args), "vtt format")
+    assert(in("tiny", args), "tiny model")
+}
+
+// ============================================================================
+// parse-transcribe-output tests
+// ============================================================================
+
+test-parse-transcribe-output-basic
+meta ["test"] fn () {
+    json """{"text": "hello world", "language": "en", "segments": [{"id": 0, "start": 0.0, "end": 1.0, "text": "hello"}]}"""
+    result parse-transcribe-output(json)
+    assert-eq("hello world", result.text)
+    assert-eq("en", result.language)
+    assert-eq(1, length(result.segments))
+}
+
+test-parse-transcribe-output-with-whitespace
+meta ["test"] fn () {
+    json """
+    {"text": "hi", "language": "fr", "segments": []}
+    """
+    result parse-transcribe-output(json)
+    assert-eq("hi", result.text)
+    assert-eq("fr", result.language)
+    assert-eq(0, length(result.segments))
+}
+
+// ============================================================================
+// TranscribeOpts construction
+// ============================================================================
+
+test-transcribe-opts-construction
+meta ["test"] fn () {
+    opts TranscribeOpts({
+        model: "medium",
+        language: "de",
+        format: "srt",
+        task: "transcribe",
+        temperature: "0.2",
+        image: "custom:whisper",
+        size: "large",
+    })
+    assert-eq("medium", opts.model)
+    assert-eq("de", opts.language)
+    assert-eq("srt", opts.format)
+    assert-eq("transcribe", opts.task)
+    assert-eq("0.2", opts.temperature)
+    assert-eq("custom:whisper", opts.image)
+    assert-eq("large", opts.size)
+}

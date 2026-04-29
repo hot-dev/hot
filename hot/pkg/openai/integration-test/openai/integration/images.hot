@@ -1,0 +1,43 @@
+::openai::integration::images ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for OpenAI Images API (DALL-E)
+// =============================================================================
+// These tests require OPENAI_API_KEY to be set in context
+// Note: Image generation is relatively slow and uses credits
+
+test-images-generate-url
+meta ["test"]
+fn () {
+    response ::openai::images/generate(::openai::images/CreateImageRequest({
+        prompt: "A simple red circle on a white background",
+        model: "dall-e-2",
+        size: "256x256",
+        n: 1
+    }))
+
+    assert(response.data, "Response should have data array")
+    assert(gt(length(response.data), 0), "Should have at least one image")
+
+    image response.data[0]
+    assert(image.url, "Image should have URL")
+}
+
+test-images-generate-small
+meta ["test"]
+fn () {
+    // Use full API - convenience function has issues with Result matching
+    response ::openai::images/generate(::openai::images/CreateImageRequest({
+        prompt: "A small green dot",
+        model: "dall-e-2",
+        size: "256x256",
+        n: 1
+    }))
+
+    assert(response.data, "Should have data")
+    assert(gt(length(response.data), 0), "Should have at least one image")
+
+    image response.data[0]
+    assert(image.url, "Image should have URL")
+}

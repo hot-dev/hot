@@ -1,0 +1,230 @@
+::telegram-agent::dev-driver ns
+meta {
+    doc: """
+    Local iteration harness for the Team Brain agent. Builds a
+    transport-agnostic `IncomingMessage` and feeds it through
+    `::agent/process-incoming` so you can exercise commands (`/ask`,
+    `/summary`, …) end-to-end without registering a bot or talking to
+    a real Telegram / Slack workspace.
+
+    Two operating modes:
+
+    - **Dry mode** (`brain.dev.dry true`): replies are printed to
+      stdout instead of sent. Best for fast iteration and CI smoke
+      tests. Requires a real LLM API key to actually generate text.
+
+    - **Live mode** (default): replies are sent to the real transport
+      using the chosen adapter's outbound credentials. Use this when
+      you've registered a bot and want to verify end-to-end.
+
+    ## One-shot example
+
+    Drop a synthetic message into memory and ask a question:
+
+    ```
+    hot ctx set brain.dev.dry true
+    hot ctx set anthropic.api.key "sk-ant-..."
+
+    # Seed first so /ask has something to find:
+    hot ctx set telegram.chat.id "-1001234567890"
+    hot run hot/src/telegram-agent/seed.hot
+
+    # Now ask:
+    hot ctx set dev.cmd "ask"
+    hot ctx set dev.text "what did we decide about the launch?"
+    hot run hot/src/telegram-agent/dev-driver.hot
+    ```
+
+    Pick the transport with `dev.transport` (defaults to `telegram`):
+
+    ```
+    hot ctx set dev.transport slack
+    hot ctx set slack.channel.id "C0123ABC"
+    hot ctx set slack.team.id    "T0123XYZ"
+    ```
+
+    ## Supported `dev.cmd` values
+
+    | cmd        | maps to                                |
+    |------------|----------------------------------------|
+    | `ask`      | `/ask <dev.text>`                      |
+    | `summary`  | `/summary <dev.text>` (e.g. `6` hours) |
+    | `decisions`| `/decisions <dev.text>`                |
+    | `search`   | `/search <dev.text>`                   |
+    | `stats`    | `/stats`                               |
+    | `diag`     | `/diag`                                |
+    | `help`     | `/help`                                |
+    | `text`     | plain message (gets recorded, no command) |
+    """
+}
+
+::ctx       ::hot::ctx
+::run       ::hot::run
+::time      ::hot::time
+::session   ::ai::session
+::transport ::telegram-agent::transport
+::tg-adapter   ::telegram-agent::telegram-adapter
+::slack-adapter ::telegram-agent::slack-adapter
+::agent     ::telegram-agent::agent
+
+DEFAULT_USERNAME "dev-driver"
+
+// ============================================================================
+// Build a transport-stamped Session for the chosen transport.
+// ============================================================================
+
+build-session
+meta {
+    doc: """
+    Construct a `Session` matching `dev.transport`. For Telegram we
+    reuse the adapter's session builder so the id namespace stays
+    consistent (`telegram:${chat-id}`); for Slack we build
+    `slack:${team-id}:${channel-id}` via the slack adapter.
+    """
+}
+fn (transport: Str): ::session/Session {
+    cond {
+        eq(transport, "slack") => {
+            team-id    or(::ctx/get("slack.team.id"), "T-DEV")
+            channel-id or(::ctx/get("slack.channel.id"), "C-DEV")
+            ::slack-adapter/session-from-channel(team-id, channel-id)
+        }
+        => {
+            chat-id Int(::ctx/get("telegram.chat.id"))
+            ::tg-adapter/session-from-chat-id(chat-id)
+        }
+    }
+}
+
+// ============================================================================
+// Command dispatch
+// ============================================================================
+// Map `dev.cmd` + `dev.text` to a real bot-command string the
+// IncomingMessage will carry. Keeps the driver's CLI sugar separate
+// from the bot's command parser.
+
+cmd-to-text fn (cmd: Str, arg: Str): Str {
+    cond {
+        eq(cmd, "ask")       => { concat("/ask ", arg) }
+        eq(cmd, "summary")   => { if(is-empty(arg), "/summary", concat("/summary ", arg)) }
+        eq(cmd, "decisions") => { if(is-empty(arg), "/decisions", concat("/decisions ", arg)) }
+        eq(cmd, "search")    => { concat("/search ", arg) }
+        eq(cmd, "stats")     => { "/stats" }
+        eq(cmd, "diag")      => { "/diag" }
+        eq(cmd, "help")      => { "/help" }
+        eq(cmd, "text")      => { arg }
+        => { fail(`unknown dev.cmd: ${cmd}. See dev-driver.hot doc for supported commands.`) }
+    }
+}
+
+// `process-incoming` enqueues bus events for the bus-routed commands
+// (`/ask`, `/summary`, `/decisions`, `/search`). In `hot run` no
+// worker is alive to consume them, so we synthesize the same event
+// payloads here and call the handlers directly. Direct-reply commands
+// (`/help`, `/brain`, `/ai`, `/stats`, `/diag`) still flow through
+// `process-incoming` so we exercise the production dispatch path.
+dispatch-direct fn (cmd: Str, session: ::session/Session, sender: ::session/Identity, arg: Str, msg-id: Str): Any {
+    ev-data cond {
+        eq(cmd, "ask") => {
+            cond {
+                is-empty(arg) => { fail("ask requires dev.text") }
+                =>            { {session: session, question: arg, sender: sender, reply-to: msg-id} }
+            }
+        }
+        eq(cmd, "summary") => {
+            hours if(is-empty(arg), 24, Int(arg))
+            {session: session, hours: hours, reply-to: msg-id}
+        }
+        eq(cmd, "decisions") => {
+            hours if(is-empty(arg), 48, Int(arg))
+            {session: session, hours: hours, reply-to: msg-id}
+        }
+        eq(cmd, "search") => {
+            cond {
+                is-empty(arg) => { fail("search requires dev.text") }
+                =>            { {session: session, query: arg, reply-to: msg-id} }
+            }
+        }
+        => { null }
+    }
+    cond {
+        eq(cmd, "ask")       => { ::agent/handle-ask({data: ev-data}) }
+        eq(cmd, "summary")   => { ::agent/handle-summarize({data: ev-data}) }
+        eq(cmd, "decisions") => { ::agent/handle-decisions({data: ev-data}) }
+        eq(cmd, "search")    => { ::agent/handle-search({data: ev-data}) }
+        =>                      { null }
+    }
+}
+
+// ============================================================================
+// Build an IncomingMessage and run.
+// ============================================================================
+
+build-incoming fn (session: ::session/Session, sender: ::session/Identity, text: Str): ::transport/IncomingMessage {
+    now-ms ::time/epoch-millis(::time/now())
+    now    div(now-ms, 1000)
+    msg-id Str(add(900000000, mod(now, 100000)))
+    ::transport/IncomingMessage({
+        session: session,
+        sender: sender,
+        text: text,
+        message-id: msg-id,
+        timestamp: now,
+        voice: null,
+        raw: null,
+    })
+}
+
+run-driver
+meta {
+    doc: """
+    Reads `dev.cmd`, `dev.text`, `dev.transport` (default `telegram`)
+    from ctx, builds a transport-agnostic `IncomingMessage`, and
+    routes through `::agent/process-incoming` (or the relevant
+    handler directly for bus-routed commands).
+
+    With `brain.dev.dry true`, replies print to stdout. Without it,
+    the agent will call the real transport API.
+
+    Ctx variables are validated at runtime (not via `meta {ctx: …}`)
+    so the project still compiles when they aren't set — they're only
+    required when this script is invoked.
+    """
+}
+fn (): Any {
+    cmd       ::ctx/get("dev.cmd")
+    transport or(::ctx/get("dev.transport"), "telegram")
+    cond {
+        is-null(cmd) => { fail("Missing dev.cmd. Try `hot ctx set dev.cmd ask && hot ctx set dev.text \"your question\"`.") }
+        => {
+            arg      or(::ctx/get("dev.text"), "")
+            username or(::ctx/get("dev.user", DEFAULT_USERNAME), DEFAULT_USERNAME)
+            user-id  or(::ctx/get("dev.user.id", "9999"), "9999")
+            dry      ::transport/is-dry-run()
+
+            session build-session(transport)
+            sender  ::session/Identity({id: user-id, name: username})
+            text    cmd-to-text(cmd, arg)
+            im      build-incoming(session, sender, text)
+
+            println(`[dev-driver] dispatching ${cmd} on ${transport} (dry=${dry}) -> ${slice(text, 0, 80)}`)
+
+            bus-cmd or(eq(cmd, "ask"),
+                       eq(cmd, "summary"),
+                       eq(cmd, "decisions"),
+                       eq(cmd, "search"))
+            cond {
+                // Pre-register the session for bus-routed commands too,
+                // since we're skipping `process-incoming` (which would
+                // otherwise call `register-session`).
+                bus-cmd => {
+                    ::agent/register-session(session)
+                    dispatch-direct(cmd, session, sender, arg, im.message-id)
+                }
+                => { ::agent/process-incoming(im) }
+            }
+        }
+    }
+}
+
+run-driver()

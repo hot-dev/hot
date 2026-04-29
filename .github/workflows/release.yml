@@ -1,0 +1,1322 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - 'stable'
+      - 'beta'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_to_cdn:
+        description: 'Publish installers to the release S3/CDN bucket'
+        type: boolean
+        default: false
+      beta_release:
+        description: 'Publish beta installers to releases/beta without creating a GitHub release or updating Homebrew'
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '1'
+  CARGO_NET_RETRY: 2
+  CARGO_HTTP_TIMEOUT: 30
+  SQLX_OFFLINE: 'true'
+  TAILWIND_VERSION: v4.1.18
+
+jobs:
+  validate-release:
+    name: Validate Release Version
+    # Release pipeline is maintainer-only. Forks should not publish under the
+    # upstream name. Change this condition if you maintain a published fork.
+    if: github.repository == 'hot-dev/hot'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+      is_beta: ${{ steps.version.outputs.is_beta }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Validate release identity
+      id: version
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION=$(tr -d '[:space:]' < resources/version.txt)
+        TAG_NAME="v${VERSION}"
+        IS_BETA=false
+        if [[ "${{ github.ref }}" == "refs/heads/beta" || "${{ github.event.inputs.beta_release }}" == "true" ]]; then
+          IS_BETA=true
+        fi
+
+        if [[ -z "$VERSION" ]]; then
+          echo "::error::resources/version.txt is empty"
+          exit 1
+        fi
+
+        if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" != "$TAG_NAME" ]]; then
+          echo "::error::Tag ${{ github.ref_name }} does not match resources/version.txt (${TAG_NAME})"
+          exit 1
+        fi
+
+        if [[ "$IS_BETA" != "true" ]]; then
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "::error::GitHub release ${TAG_NAME} already exists. Increment resources/version.txt for a new release."
+            exit 1
+          fi
+
+          remote_tag_sha=$(git ls-remote --tags origin "refs/tags/${TAG_NAME}" | awk '{print $1}' | head -1)
+          if [[ -n "$remote_tag_sha" && "${{ github.ref_type }}" != "tag" ]]; then
+            echo "::error::Tag ${TAG_NAME} already exists. Release versions are immutable; increment the patch version."
+            exit 1
+          fi
+        else
+          echo "Beta release mode: skipping GitHub release and remote tag uniqueness checks."
+        fi
+
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+        echo "is_beta=$IS_BETA" >> "$GITHUB_OUTPUT"
+        echo "Validated release ${TAG_NAME} (beta: ${IS_BETA})"
+
+  package-cdn:
+    name: Generate Package CDN
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Setup toolchain, cache, sccache, tailwind
+      uses: ./.github/actions/rust-setup
+      with:
+        rust-toolchain: 1.95.0
+        tailwind-version: ${{ env.TAILWIND_VERSION }}
+
+    - name: Generate package docs
+      run: |
+        PKG_ARGS=""
+        while IFS= read -r pkg; do
+          [[ "$pkg" =~ ^[[:space:]]*# ]] && continue
+          [[ -z "${pkg//[[:space:]]/}" ]] && continue
+          PKG_ARGS="$PKG_ARGS --pkg ${pkg}"
+        done < hot/pkg/pkg-publish.txt
+
+        cargo run --locked --bin hot -- docs $PKG_ARGS
+
+    - name: Generate CDN structure
+      env:
+        PACKAGE_CDN_NAMESPACE: ${{ needs.validate-release.outputs.is_beta == 'true' && 'releases/beta/packages/hot.dev' || 'hot.dev' }}
+      run: ./scripts/hot-pkg-cdn.sh ./cdn-output
+
+    - name: Upload package CDN artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: package-cdn
+        path: cdn-output/
+
+    - name: Validate AWS secrets for package CDN upload
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.PKG_S3_BUCKET != '' }}
+      run: |
+        if [ -z "${{ secrets.PKG_AWS_ROLE_ARN }}" ]; then
+          echo "::error::PKG_AWS_ROLE_ARN secret is not configured."
+          exit 1
+        fi
+
+    - name: Configure AWS credentials for package CDN upload
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.PKG_S3_BUCKET != '' }}
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ secrets.PKG_AWS_ROLE_ARN }}
+        aws-region: ${{ vars.PKG_AWS_REGION || 'us-east-2' }}
+
+    - name: Upload package CDN to S3
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.PKG_S3_BUCKET != '' }}
+      env:
+        PACKAGE_CDN_BUCKET: ${{ vars.PKG_S3_BUCKET }}
+        CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.PKG_CLOUDFRONT_DIST_ID }}
+      run: ./scripts/hot-pkg-cdn-upload.sh ./cdn-output
+
+  # Build binaries for all targets
+  build:
+    needs: validate-release
+    strategy:
+      matrix:
+        include:
+          # Linux targets
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x86_64
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: aarch64
+
+          # macOS targets
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: aarch64
+
+          # Windows targets
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x86_64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: aarch64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    # The repo pins a specific toolchain via rust-toolchain.toml. The
+    # dtolnay action above installs `targets` against the `stable` toolchain,
+    # but `cargo build` will transparently switch to the pinned channel
+    # (which only has the host target installed under `profile = "minimal"`).
+    # Re-add the matrix target against the pinned toolchain to avoid E0463
+    # ("can't find crate for `core`") when cross-compiling.
+    - name: Install matrix target for pinned toolchain
+      shell: bash
+      run: rustup target add ${{ matrix.target }}
+
+    - name: Install TailwindCSS CLI (macOS)
+      if: runner.os == 'macOS'
+      run: brew install tailwindcss
+
+    - name: Setup Homebrew (Linux)
+      if: runner.os == 'Linux'
+      uses: Homebrew/actions/setup-homebrew@main
+
+    - name: Install TailwindCSS CLI (Linux)
+      if: runner.os == 'Linux'
+      run: brew install tailwindcss
+
+    - name: Install TailwindCSS CLI (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # Download TailwindCSS standalone binary directly from GitHub releases
+        # This avoids winget issues with msstore source agreements in CI
+        $tailwindVersion = "${{ env.TAILWIND_VERSION }}"
+        $url = "https://github.com/tailwindlabs/tailwindcss/releases/download/${tailwindVersion}/tailwindcss-windows-x64.exe"
+        $installDir = "C:\Program Files\TailwindCSS"
+
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        Invoke-WebRequest -Uri $url -OutFile "$installDir\tailwindcss.exe"
+
+        # Add to PATH for this workflow
+        echo $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+        echo "TailwindCSS installed to $installDir"
+
+    - name: Verify TailwindCSS installation
+      run: |
+        echo "Verifying TailwindCSS installation..."
+        tailwindcss --version
+        echo "TailwindCSS location: $(which tailwindcss)"
+
+    - name: Setup cross compilation (Linux ARM)
+      if: matrix.target == 'aarch64-unknown-linux-gnu'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+    - name: Setup musl toolchain for hotbox (Linux x86_64 only)
+      if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+        rustup target add x86_64-unknown-linux-musl
+
+    - name: Cache cargo registry
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Setup Cargo optimizations
+      shell: bash
+      run: |
+        mkdir -p ~/.cargo
+        cat > ~/.cargo/config.toml << 'EOF'
+        [build]
+        jobs = 4
+
+        [net]
+        retry = 2
+        git-fetch-with-cli = true
+
+        [registries.crates-io]
+        index = "sparse+https://index.crates.io/"
+        EOF
+
+    - name: Build binary
+      run: cargo build --release --target ${{ matrix.target }} -j 4
+
+    - name: Build hotbox binary (Linux x86_64, static musl)
+      if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
+      run: cargo build --release --target x86_64-unknown-linux-musl -p hotbox -j 4
+
+    - name: Build hotbox binary (Linux aarch64, static musl via Docker)
+      if: matrix.platform == 'linux' && matrix.arch == 'aarch64'
+      run: |
+        CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -c1-16)
+        DOCKER_BUILDKIT=1 docker build --progress=plain \
+          --build-arg CARGO_LOCK_HASH="$CARGO_LOCK_HASH" \
+          -f - \
+          --output "type=local,dest=target/hotbox-musl-build" \
+          . <<'DOCKERFILE'
+        FROM rust:1.95.0-slim AS builder
+        RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
+        RUN rustup target add aarch64-unknown-linux-musl
+        RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
+        ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+        ENV CARGO_INCREMENTAL=1 CARGO_NET_RETRY=2
+        WORKDIR /workspace
+        COPY Cargo.toml Cargo.lock ./
+        COPY crates/ ./crates/
+        ARG CARGO_LOCK_HASH=default
+        RUN --mount=type=cache,id=hotbox-arm64-registry-${CARGO_LOCK_HASH},target=/usr/local/cargo/registry \
+            --mount=type=cache,id=hotbox-arm64-git-${CARGO_LOCK_HASH},target=/usr/local/cargo/git \
+            --mount=type=cache,id=hotbox-arm64-target-${CARGO_LOCK_HASH},target=/workspace/target \
+            cargo build --release --target aarch64-unknown-linux-musl -p hotbox && \
+            cp /workspace/target/aarch64-unknown-linux-musl/release/hotbox /hotbox
+        FROM scratch
+        COPY --from=builder /hotbox /hotbox
+        DOCKERFILE
+
+    - name: Prepare binary (Unix)
+      if: matrix.platform != 'windows'
+      run: |
+        mkdir -p artifacts
+        cp target/${{ matrix.target }}/release/hot artifacts/hot-${{ matrix.platform }}-${{ matrix.arch }}
+        chmod +x artifacts/hot-${{ matrix.platform }}-${{ matrix.arch }}
+
+    - name: Prepare hotbox binary (Linux only)
+      if: matrix.platform == 'linux'
+      run: |
+        HOTBOX_ARCH=${{ matrix.arch }}
+        if [ "$HOTBOX_ARCH" = "aarch64" ]; then HOTBOX_ARCH="arm64"; fi
+        mkdir -p artifacts
+        if [ "${{ matrix.arch }}" = "x86_64" ]; then
+          cp target/x86_64-unknown-linux-musl/release/hotbox artifacts/hotbox-linux-${HOTBOX_ARCH}
+        else
+          cp target/hotbox-musl-build/hotbox artifacts/hotbox-linux-${HOTBOX_ARCH}
+          rm -rf target/hotbox-musl-build
+        fi
+        chmod +x artifacts/hotbox-linux-${HOTBOX_ARCH}
+        file artifacts/hotbox-linux-${HOTBOX_ARCH}
+
+    - name: Prepare binary (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        mkdir artifacts
+        copy target\${{ matrix.target }}\release\hot.exe artifacts\hot-${{ matrix.platform }}-${{ matrix.arch }}.exe
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: binary-${{ matrix.platform }}-${{ matrix.arch }}
+        path: artifacts/
+
+  # Package for Linux (using Docker)
+  package-linux:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download Linux binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-linux-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Setup binaries for Docker packaging
+      run: |
+        mkdir -p target/docker-builds/linux
+        cp binaries/hot-linux-x86_64 target/docker-builds/linux/
+        cp binaries/hot-linux-aarch64 target/docker-builds/linux/
+        # Copy hotbox Linux binaries for inclusion in packages
+        for f in binaries/hotbox-linux-*; do
+          [ -f "$f" ] && cp "$f" target/docker-builds/linux/
+        done
+
+    - name: Create Linux packages
+      run: ./scripts/package-linux.sh
+
+    - name: Upload Linux packages
+      uses: actions/upload-artifact@v6
+      with:
+        name: packages-linux
+        path: |
+          target/packages/*.deb
+          target/packages/*.rpm
+
+  # Package for macOS
+  package-macos:
+    needs: build
+    runs-on: macos-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download macOS binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-macos-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Download Linux hotbox binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-linux-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Setup binaries for packaging
+      run: |
+        mkdir -p target/x86_64-apple-darwin/release
+        mkdir -p target/aarch64-apple-darwin/release
+        cp binaries/hot-macos-x86_64 target/x86_64-apple-darwin/release/hot
+        cp binaries/hot-macos-aarch64 target/aarch64-apple-darwin/release/hot
+        chmod +x target/x86_64-apple-darwin/release/hot
+        chmod +x target/aarch64-apple-darwin/release/hot
+        # Stage hotbox Linux binaries for inclusion in macOS packages
+        mkdir -p resources/bin
+        for f in binaries/hotbox-linux-*; do
+          [ -f "$f" ] && cp "$f" resources/bin/
+        done
+        chmod +x resources/bin/hotbox-linux-* 2>/dev/null || true
+
+    - name: Import Apple certificates
+      if: ${{ vars.APPLE_SIGNING_ENABLED == 'true' }}
+      env:
+        APPLE_CERTIFICATE_APP_BASE64: ${{ secrets.APPLE_CERTIFICATE_APP_BASE64 }}
+        APPLE_CERTIFICATE_INST_BASE64: ${{ secrets.APPLE_CERTIFICATE_INST_BASE64 }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      run: |
+        # Create temporary keychain
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+        KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        # Import Application certificate
+        APP_CERT_PATH=$RUNNER_TEMP/app_certificate.p12
+        echo "$APPLE_CERTIFICATE_APP_BASE64" | base64 --decode > "$APP_CERT_PATH"
+        security import "$APP_CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+        rm "$APP_CERT_PATH"
+
+        # Import Installer certificate
+        INST_CERT_PATH=$RUNNER_TEMP/inst_certificate.p12
+        echo "$APPLE_CERTIFICATE_INST_BASE64" | base64 --decode > "$INST_CERT_PATH"
+        security import "$INST_CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+        rm "$INST_CERT_PATH"
+
+        # Add keychain to search list and set as default
+        security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+        # Allow codesign to access the keychain without prompts
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+        echo "Certificates imported successfully"
+
+    - name: Create macOS packages
+      env:
+        APPLE_DEVELOPER_ID_APP: ${{ vars.APPLE_DEVELOPER_ID_APP }}
+        APPLE_DEVELOPER_ID_INST: ${{ vars.APPLE_DEVELOPER_ID_INST }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      run: ./scripts/package-mac.sh
+
+    - name: Cleanup keychain
+      if: always()
+      run: |
+        if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+          security delete-keychain "$KEYCHAIN_PATH" || true
+        fi
+
+    - name: Upload macOS packages
+      uses: actions/upload-artifact@v6
+      with:
+        name: packages-macos
+        path: target/packages/*.pkg
+
+  # Package for Homebrew (tarballs for macOS and Linux)
+  package-homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download macOS binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-macos-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Download Linux binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-linux-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Get version
+      id: version
+      run: |
+        VERSION=$(cat resources/version.txt | tr -d '[:space:]')
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+
+    - name: Create Homebrew tarballs
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        mkdir -p packages
+
+        # Map our arch names to Homebrew-friendly names
+        declare -A ARCH_MAP=(
+          ["aarch64"]="arm64"
+          ["x86_64"]="x86_64"
+        )
+
+        # Create tarballs for both macOS and Linux
+        for platform in macos linux; do
+          for arch in aarch64 x86_64; do
+            echo "Creating Homebrew tarball for ${platform} ${arch}..."
+
+            STAGING="staging-homebrew/${platform}-${arch}"
+            mkdir -p "${STAGING}/pkg" "${STAGING}/db" "${STAGING}/app" "${STAGING}/ai" "${STAGING}/init" "${STAGING}/bin"
+
+            # Copy binary
+            cp "binaries/hot-${platform}-${arch}" "${STAGING}/hot"
+            chmod +x "${STAGING}/hot"
+
+            # Copy hotbox Linux binaries (both arches, for bind-mounting into containers)
+            for hb_arch in arm64 x86_64; do
+              if [ -f "binaries/hotbox-linux-${hb_arch}" ]; then
+                cp "binaries/hotbox-linux-${hb_arch}" "${STAGING}/bin/hotbox-linux-${hb_arch}"
+                chmod +x "${STAGING}/bin/hotbox-linux-${hb_arch}"
+              fi
+            done
+
+            # Copy runtime resources:
+            # - pkg/ for hot-std (standard library)
+            # - db/ for database migrations
+            # - app/ for dev server assets (CSS, JS, images)
+            # - ai/ for AI AGENTS.md and skills
+            # - init/ for project initialization templates
+            # - bin/ for hotbox Linux binaries (container tasks)
+            # - LICENSE and NOTICE for license display
+
+            # Copy standard library
+            cp -r hot/pkg/hot-std "${STAGING}/pkg/"
+
+            # Copy database migrations
+            cp -r resources/db/* "${STAGING}/db/"
+
+            # Copy app assets (CSS, JS, images for dev server)
+            cp -r resources/app/* "${STAGING}/app/"
+
+            # Copy AI resources (AGENTS.md and skills)
+            cp -r resources/ai/* "${STAGING}/ai/"
+
+            # Copy init templates
+            cp -r resources/init/* "${STAGING}/init/"
+
+            # Copy license and notice files
+            cp LICENSE "${STAGING}/LICENSE"
+            cp NOTICE "${STAGING}/NOTICE"
+
+            # Create tarball with Homebrew-friendly arch name
+            BREW_ARCH="${ARCH_MAP[$arch]}"
+            TARBALL="packages/hot_${VERSION}_${platform}_${BREW_ARCH}.tar.gz"
+            tar -czvf "${TARBALL}" -C "${STAGING}" .
+
+            # Calculate SHA256
+            SHA256=$(sha256sum "${TARBALL}" | cut -d' ' -f1)
+            echo "${platform}_${BREW_ARCH}=${SHA256}" >> packages/homebrew-checksums.txt
+
+            echo "Created: ${TARBALL}"
+            echo "  SHA256: ${SHA256}"
+          done
+        done
+
+        echo ""
+        echo "Checksums:"
+        cat packages/homebrew-checksums.txt
+
+    - name: Upload Homebrew tarballs
+      uses: actions/upload-artifact@v6
+      with:
+        name: packages-homebrew
+        path: |
+          packages/*.tar.gz
+          packages/homebrew-checksums.txt
+
+  # Package and sign for Windows (native Windows runner with NSIS + Trusted Signing)
+  package-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Download Windows binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-windows-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Download Linux hotbox binaries
+      uses: actions/download-artifact@v7
+      with:
+        pattern: binary-linux-*
+        path: binaries/
+        merge-multiple: true
+
+    - name: Install NSIS and ImageMagick
+      run: choco install nsis imagemagick -y
+
+    - name: Get version
+      id: version
+      shell: pwsh
+      run: |
+        $version = Get-Content resources/version.txt -Raw
+        $version = $version.Trim()
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "Version: $version"
+
+    - name: Prepare staging directory
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.version }}"
+
+        # Create staging directories
+        New-Item -ItemType Directory -Force -Path staging/x86_64
+        New-Item -ItemType Directory -Force -Path staging/x86_64/resources
+        New-Item -ItemType Directory -Force -Path target/packages
+
+        # Copy binary
+        Copy-Item binaries/hot-windows-x86_64.exe staging/x86_64/hot.exe
+
+        # Copy resources needed at runtime:
+        # - db/ for database migrations (read from disk at runtime)
+        # - pkg/ for hot-std (standard library)
+        # - app/ for dev server assets (CSS, JS, images)
+        # - ai/ for AI AGENTS.md and skills
+        # - init/ for project initialization templates
+        # - bin/ for hotbox Linux binaries (container tasks)
+        # - LICENSE and NOTICE for license display
+
+        # Copy hotbox Linux binaries
+        New-Item -ItemType Directory -Force -Path staging/x86_64/resources/bin
+        Get-ChildItem binaries/hotbox-linux-* | ForEach-Object {
+            Copy-Item $_.FullName staging/x86_64/resources/bin/
+        }
+
+        # Copy database migrations
+        Copy-Item -Recurse resources/db staging/x86_64/resources/db
+
+        # Copy standard library
+        New-Item -ItemType Directory -Force -Path staging/x86_64/resources/pkg
+        Copy-Item -Recurse hot/pkg/hot-std staging/x86_64/resources/pkg/hot-std
+
+        # Copy app assets (CSS, JS, images for dev server)
+        Copy-Item -Recurse resources/app staging/x86_64/resources/app
+
+        # Copy AI resources (AGENTS.md and skills)
+        Copy-Item -Recurse resources/ai staging/x86_64/resources/ai
+
+        # Copy init templates
+        Copy-Item -Recurse resources/init staging/x86_64/resources/init
+
+        # Copy license and notice files
+        Copy-Item LICENSE staging/x86_64/resources/LICENSE
+        Copy-Item NOTICE staging/x86_64/resources/NOTICE
+
+        # Copy installer branding images
+        Copy-Item resources/installer/win/hot_header.bmp staging/x86_64/
+        Copy-Item resources/installer/win/hot_welcome.bmp staging/x86_64/
+
+        # Create plain text license (strip markdown and convert to ASCII-safe text for NSIS)
+        $license = Get-Content LICENSE -Raw -Encoding UTF8
+        # Strip markdown formatting
+        $license = $license -replace '^#+ ', '' -replace '\*\*([^*]+)\*\*', '$1' -replace '\*([^*]+)\*', '$1' -replace '`([^`]+)`', '$1'
+        # Convert Unicode characters to ASCII equivalents for NSIS compatibility
+        # Using Unicode code points to avoid PowerShell parsing issues
+        $license = $license -replace ([char]0x00A9), '(c)'      # ©
+        $license = $license -replace ([char]0x00AE), '(R)'      # ®
+        $license = $license -replace ([char]0x2122), '(TM)'     # ™
+        $license = $license -replace ([char]0x2014), '--'       # — em dash
+        $license = $license -replace ([char]0x2013), '-'        # – en dash
+        $license = $license -replace ([char]0x201C), '"'        # " left double quote
+        $license = $license -replace ([char]0x201D), '"'        # " right double quote
+        $license = $license -replace ([char]0x2018), "'"        # ' left single quote
+        $license = $license -replace ([char]0x2019), "'"        # ' right single quote
+        $license = $license -replace ([char]0x2026), '...'      # … ellipsis
+        $license = $license -replace ([char]0x2022), '*'        # • bullet
+        # Save as ASCII encoding for NSIS
+        $license | Out-File -Encoding ASCII staging/x86_64/LICENSE.txt
+
+    - name: Convert PNG to ICO
+      shell: pwsh
+      run: |
+        # Refresh PATH to include ImageMagick
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+        # Create multi-resolution ICO file using ImageMagick
+        magick resources/application/icons/hot_icon.png -define icon:auto-resize=256,128,64,48,32,16 staging/x86_64/hot_icon.ico
+
+        # Verify the ICO was created
+        if (Test-Path staging/x86_64/hot_icon.ico) {
+            echo "ICO file created successfully"
+            Get-Item staging/x86_64/hot_icon.ico
+        } else {
+            echo "ERROR: Failed to create ICO file"
+            exit 1
+        }
+
+    - name: Sign binary with Trusted Signing
+      if: ${{ vars.TRUSTED_SIGNING_ENABLED == 'true' }}
+      uses: azure/artifact-signing-action@v1.2.0
+      with:
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+        trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
+        certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+        files-folder: ${{ github.workspace }}/staging/x86_64
+        files-folder-filter: exe
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+        exclude-workload-identity-credential: true
+        exclude-managed-identity-credential: true
+        exclude-shared-token-cache-credential: true
+        exclude-visual-studio-credential: true
+        exclude-visual-studio-code-credential: true
+        exclude-azure-cli-credential: true
+        exclude-azure-powershell-credential: true
+        exclude-azure-developer-cli-credential: true
+        exclude-interactive-browser-credential: true
+
+    - name: Create NSIS installer script
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.version }}"
+        $nsiScript = @"
+        !include "MUI2.nsh"
+        !include "LogicLib.nsh"
+
+        Name "Hot Dev"
+        OutFile "hot_${version}_x86_64_installer.exe"
+        InstallDir "`$PROGRAMFILES64\Hot Dev"
+        RequestExecutionLevel admin
+
+        !define MUI_ABORTWARNING
+        !define MUI_ICON "hot_icon.ico"
+        !define MUI_UNICON "hot_icon.ico"
+
+        ; Header image (top right on most pages)
+        !define MUI_HEADERIMAGE
+        !define MUI_HEADERIMAGE_BITMAP "hot_header.bmp"
+        !define MUI_HEADERIMAGE_RIGHT
+
+        ; Welcome/Finish page image (left panel)
+        !define MUI_WELCOMEFINISHPAGE_BITMAP "hot_welcome.bmp"
+        !define MUI_UNWELCOMEFINISHPAGE_BITMAP "hot_welcome.bmp"
+
+        !insertmacro MUI_PAGE_WELCOME
+        !insertmacro MUI_PAGE_LICENSE "LICENSE.txt"
+        !insertmacro MUI_PAGE_DIRECTORY
+        !insertmacro MUI_PAGE_INSTFILES
+        !insertmacro MUI_PAGE_FINISH
+
+        !insertmacro MUI_UNPAGE_CONFIRM
+        !insertmacro MUI_UNPAGE_INSTFILES
+
+        !insertmacro MUI_LANGUAGE "English"
+
+        ; Check for running processes on init
+        Function .onInit
+            ; Check if hot.exe is running and offer to close it
+            Call CheckAndCloseRunningProcesses
+        FunctionEnd
+
+        ; Function to check for and close running hot.exe processes
+        Function CheckAndCloseRunningProcesses
+            ; Use tasklist to check if hot.exe is running
+            nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq hot.exe" /NH'
+            Pop `$0  ; Exit code
+            Pop `$1  ; Output
+
+            ; Check if "hot.exe" appears in the output (means it's running)
+            Push `$1
+            Push "hot.exe"
+            Call StrContains
+            Pop `$2
+
+            StrCmp `$2 "" ProcessNotRunning
+
+            ; Process is running - notify user and offer to close
+            MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
+                "Hot Dev is currently running.`$\r`$\n`$\r`$\nThe installer needs to close all running instances of Hot to continue.`$\r`$\n`$\r`$\nClick OK to close Hot and continue installation, or Cancel to abort." \
+                IDOK CloseProcess IDCANCEL AbortInstall
+
+        CloseProcess:
+            ; Force kill all hot.exe processes
+            nsExec::ExecToLog 'taskkill /F /IM hot.exe'
+
+            ; Brief delay to allow process to fully terminate
+            Sleep 1000
+
+            ; Verify process was closed
+            nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq hot.exe" /NH'
+            Pop `$0
+            Pop `$1
+
+            Push `$1
+            Push "hot.exe"
+            Call StrContains
+            Pop `$2
+
+            StrCmp `$2 "" ProcessClosed
+
+            ; Still running - warn user
+            MessageBox MB_OK|MB_ICONEXCLAMATION \
+                "Unable to close all Hot processes. Please close them manually and try again."
+            Abort
+
+        ProcessClosed:
+            DetailPrint "Closed running Hot processes"
+            Goto ProcessNotRunning
+
+        AbortInstall:
+            Abort
+
+        ProcessNotRunning:
+        FunctionEnd
+
+        ; Helper function: Check if string contains substring
+        Function StrContains
+            Exch `$1 ; needle
+            Exch
+            Exch `$0 ; haystack
+            Push `$2
+            Push `$3
+
+            StrLen `$2 `$1
+            StrLen `$3 `$0
+
+            `${If} `$2 > `$3
+                StrCpy `$0 ""
+                Goto StrContainsDone
+            `${EndIf}
+
+            StrCpy `$3 0
+
+        StrContainsLoop:
+            StrCpy `$4 `$0 `$2 `$3
+            StrCmp `$4 `$1 StrContainsFound
+            IntOp `$3 `$3 + 1
+            StrLen `$4 `$0
+            IntCmp `$3 `$4 0 0 StrContainsNotFound
+            Goto StrContainsLoop
+
+        StrContainsFound:
+            StrCpy `$0 "found"
+            Goto StrContainsDone
+
+        StrContainsNotFound:
+            StrCpy `$0 ""
+
+        StrContainsDone:
+            Pop `$3
+            Pop `$2
+            Exch `$0
+            Exch
+            Pop `$1
+        FunctionEnd
+
+        Section "Install"
+            ; Clean up old installation files to prevent stale files from being found
+            ; Remove old resources directory (will be recreated with fresh files)
+            RMDir /r "`$INSTDIR\resources"
+            ; Remove legacy paths from older installers
+            RMDir /r "`$INSTDIR\pkg"
+            RMDir /r "`$INSTDIR\db"
+            RMDir /r "`$INSTDIR\app"
+            Delete "`$INSTDIR\hot.exe"
+            Delete "`$INSTDIR\hot_icon.ico"
+
+            ; Install fresh files
+            SetOutPath "`$INSTDIR"
+            File "hot.exe"
+            File "hot_icon.ico"
+
+            SetOutPath "`$INSTDIR\resources"
+            File /r "resources\*.*"
+
+            ; Create uninstaller
+            WriteUninstaller "`$INSTDIR\uninstall.exe"
+
+            ; Add to PATH
+            EnVar::SetHKLM
+            EnVar::AddValue "Path" "`$INSTDIR"
+
+            ; Start menu shortcuts
+            CreateDirectory "`$SMPROGRAMS\Hot Dev"
+            CreateShortcut "`$SMPROGRAMS\Hot Dev\Hot Dev.lnk" "`$INSTDIR\hot.exe"
+            CreateShortcut "`$SMPROGRAMS\Hot Dev\Uninstall.lnk" "`$INSTDIR\uninstall.exe"
+
+            ; Registry for Add/Remove Programs
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "DisplayName" "Hot Dev"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "UninstallString" "`$INSTDIR\uninstall.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "DisplayIcon" "`$INSTDIR\hot_icon.ico"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "DisplayVersion" "${version}"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev" "Publisher" "Hot Dev, LLC"
+        SectionEnd
+
+        Section "Uninstall"
+            ; Remove all installed files
+            Delete "`$INSTDIR\hot.exe"
+            Delete "`$INSTDIR\hot_icon.ico"
+            Delete "`$INSTDIR\uninstall.exe"
+            RMDir /r "`$INSTDIR\resources"
+            ; Remove legacy paths from older installers
+            RMDir /r "`$INSTDIR\pkg"
+            RMDir /r "`$INSTDIR\db"
+            RMDir /r "`$INSTDIR\app"
+            ; Remove install directory (only if empty)
+            RMDir "`$INSTDIR"
+
+            ; Remove from PATH
+            EnVar::SetHKLM
+            EnVar::DeleteValue "Path" "`$INSTDIR"
+
+            ; Remove shortcuts
+            Delete "`$SMPROGRAMS\Hot Dev\Hot Dev.lnk"
+            Delete "`$SMPROGRAMS\Hot Dev\Uninstall.lnk"
+            RMDir "`$SMPROGRAMS\Hot Dev"
+
+            ; Remove registry
+            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HotDev"
+        SectionEnd
+        "@
+
+        $nsiScript | Out-File -Encoding UTF8 staging/x86_64/installer.nsi
+
+    - name: Install NSIS EnVar plugin
+      shell: pwsh
+      run: |
+        # Download EnVar plugin for PATH manipulation
+        Invoke-WebRequest -Uri "https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip" -OutFile envar.zip
+        Expand-Archive envar.zip -DestinationPath envar
+        $nsisPath = "C:\Program Files (x86)\NSIS"
+        Copy-Item envar/Plugins/x86-ansi/* "$nsisPath/Plugins/x86-ansi/" -Force
+        Copy-Item envar/Plugins/x86-unicode/* "$nsisPath/Plugins/x86-unicode/" -Force
+
+    - name: Build installer with NSIS
+      shell: pwsh
+      run: |
+        cd staging/x86_64
+        & "C:\Program Files (x86)\NSIS\makensis.exe" /V3 installer.nsi
+        Move-Item *.exe ../../target/packages/
+
+    - name: Sign installer with Trusted Signing
+      if: ${{ vars.TRUSTED_SIGNING_ENABLED == 'true' }}
+      uses: azure/artifact-signing-action@v1.2.0
+      with:
+        azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+        trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
+        certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+        files-folder: ${{ github.workspace }}/target/packages
+        files-folder-filter: exe
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+        exclude-workload-identity-credential: true
+        exclude-managed-identity-credential: true
+        exclude-shared-token-cache-credential: true
+        exclude-visual-studio-credential: true
+        exclude-visual-studio-code-credential: true
+        exclude-azure-cli-credential: true
+        exclude-azure-powershell-credential: true
+        exclude-azure-developer-cli-credential: true
+        exclude-interactive-browser-credential: true
+
+    - name: Upload Windows packages
+      uses: actions/upload-artifact@v6
+      with:
+        name: packages-windows
+        path: target/packages/*.exe
+
+  # Determine release channel based on branch.
+  # The public hot repo does not use GitHub Environments; staging/production
+  # environments belong to hot-cloud deployments.
+  determine-release-channel:
+    if: github.repository == 'hot-dev/hot'
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.channel.outputs.channel }}
+      is_stable_release: ${{ steps.channel.outputs.is_stable_release }}
+      is_beta: ${{ steps.channel.outputs.is_beta }}
+    steps:
+      - name: Determine release channel from branch
+        id: channel
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" || "${{ github.ref }}" == "refs/heads/stable" ]]; then
+            echo "channel=stable" >> $GITHUB_OUTPUT
+            echo "is_stable_release=true" >> $GITHUB_OUTPUT
+            echo "is_beta=false" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/beta" || "${{ github.event.inputs.beta_release }}" == "true" ]]; then
+            echo "channel=beta" >> $GITHUB_OUTPUT
+            echo "is_stable_release=false" >> $GITHUB_OUTPUT
+            echo "is_beta=true" >> $GITHUB_OUTPUT
+          else
+            echo "channel=preview" >> $GITHUB_OUTPUT
+            echo "is_stable_release=false" >> $GITHUB_OUTPUT
+            echo "is_beta=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Create GitHub Release with all packages
+  create-release:
+    needs: [validate-release, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write  # Required for AWS OIDC
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Get version
+      id: version
+      run: |
+        VERSION="${{ needs.validate-release.outputs.version }}"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Release version: $VERSION"
+
+    - name: Download all packages
+      uses: actions/download-artifact@v7
+      with:
+        pattern: packages-*
+        path: packages/
+        merge-multiple: true
+
+    - name: List packages
+      run: |
+        echo "Packages to release:"
+        ls -la packages/
+
+    - name: Create GitHub Release
+      if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ needs.validate-release.outputs.tag_name }}
+        name: Hot v${{ steps.version.outputs.version }}
+        files: packages/*
+        generate_release_notes: true
+        draft: false
+        prerelease: ${{ needs.determine-release-channel.outputs.is_stable_release != 'true' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Validate AWS secrets for S3 upload
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      run: |
+        if [ -z "${{ secrets.RELEASE_AWS_ROLE_ARN }}" ]; then
+          echo "::error::RELEASE_AWS_ROLE_ARN secret is not configured."
+          echo "Please add the RELEASE_AWS_ROLE_ARN secret to repository or organization secrets."
+          exit 1
+        fi
+
+    - name: Configure AWS credentials for S3 upload
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ secrets.RELEASE_AWS_ROLE_ARN }}
+        aws-region: ${{ vars.RELEASE_AWS_REGION || 'us-east-2' }}
+
+    - name: Upload installers to S3
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        BUCKET="${{ vars.RELEASE_S3_BUCKET }}"
+        IS_BETA="${{ needs.validate-release.outputs.is_beta }}"
+
+        if [ "$IS_BETA" = "true" ]; then
+          VERSION_PREFIX="releases/beta/${VERSION}"
+          LATEST_PREFIX="releases/beta/latest"
+        else
+          VERSION_PREFIX="releases/${VERSION}"
+          LATEST_PREFIX="releases/latest"
+        fi
+
+        # Map source filenames to standardized names
+        # Format: hot_{version}_{os}_{arch}.{ext} for versioned
+        # Format: hot_{os}_{arch}.{ext} for latest
+        declare -A FILE_MAP=(
+          ["hot_${VERSION}_aarch64-apple-darwin.pkg"]="macos_arm64.pkg"
+          ["hot_${VERSION}_x86_64-apple-darwin.pkg"]="macos_x86_64.pkg"
+          ["hot_${VERSION}_aarch64.deb"]="linux_arm64.deb"
+          ["hot_${VERSION}_x86_64.deb"]="linux_x86_64.deb"
+          ["hot_${VERSION}_x86_64_installer.exe"]="windows_x86_64.exe"
+        )
+
+        echo "Uploading installers to s3://${BUCKET}/${VERSION_PREFIX}/"
+
+        # Upload installer packages with standardized names
+        for file in packages/*.pkg packages/*.deb packages/*.exe; do
+          if [ -f "$file" ]; then
+            src_filename=$(basename "$file")
+            if [ -n "${FILE_MAP[$src_filename]}" ]; then
+              versioned_name="hot_${VERSION}_${FILE_MAP[$src_filename]}"
+              latest_name="hot_${FILE_MAP[$src_filename]}"
+
+              echo "Uploading: $src_filename -> $versioned_name"
+              aws s3 cp "$file" "s3://${BUCKET}/${VERSION_PREFIX}/${versioned_name}"
+
+              echo "Uploading: $src_filename -> ${LATEST_PREFIX}/${latest_name}"
+              aws s3 cp "$file" "s3://${BUCKET}/${LATEST_PREFIX}/${latest_name}"
+            else
+              echo "Warning: Unknown file $src_filename, skipping"
+            fi
+          fi
+        done
+
+        # Upload Homebrew tarballs
+        echo ""
+        echo "Uploading Homebrew tarballs..."
+        for file in packages/*.tar.gz; do
+          if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            echo "Uploading Homebrew tarball: $filename"
+
+            # Upload versioned tarball
+            aws s3 cp "$file" "s3://${BUCKET}/${VERSION_PREFIX}/${filename}"
+
+            # Upload to latest (strip version from filename for stable URL)
+            # hot_0.7.0_macos_arm64.tar.gz -> hot_macos_arm64.tar.gz
+            latest_name=$(echo "$filename" | sed "s/_${VERSION}_/_/")
+            aws s3 cp "$file" "s3://${BUCKET}/${LATEST_PREFIX}/${latest_name}"
+          fi
+        done
+
+        # Write version.txt to latest folder
+        echo "$VERSION" | aws s3 cp - "s3://${BUCKET}/${LATEST_PREFIX}/version.txt"
+
+        if [ "$IS_BETA" = "true" ]; then
+          echo "Beta release mode: skipping root install scripts and index."
+        else
+          # Upload install scripts and index to bucket root
+          echo "Uploading install scripts and index..."
+          aws s3 cp resources/installer/install.sh "s3://${BUCKET}/install.sh" --content-type "text/plain"
+          aws s3 cp resources/installer/install.ps1 "s3://${BUCKET}/install.ps1" --content-type "text/plain"
+          aws s3 cp resources/installer/index.html "s3://${BUCKET}/index.html" --content-type "text/html"
+        fi
+
+        echo ""
+        echo "S3 upload complete!"
+        echo "Files available at:"
+        echo "  - s3://${BUCKET}/${VERSION_PREFIX}/"
+        echo "  - s3://${BUCKET}/${LATEST_PREFIX}/"
+        echo "  - https://get.hot.dev/${VERSION_PREFIX}/"
+        echo "  - https://get.hot.dev/${LATEST_PREFIX}/"
+        if [ "$IS_BETA" != "true" ]; then
+          echo "  - s3://${BUCKET}/install.sh"
+          echo "  - s3://${BUCKET}/install.ps1"
+          echo "  - s3://${BUCKET}/index.html"
+        fi
+
+    - name: Invalidate CloudFront cache
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' && vars.RELEASE_CLOUDFRONT_DIST_ID != '' }}
+      run: |
+        echo "Invalidating CloudFront cache for updated paths..."
+        if [ "${{ needs.validate-release.outputs.is_beta }}" = "true" ]; then
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.RELEASE_CLOUDFRONT_DIST_ID }}" \
+            --paths "/releases/beta/${{ steps.version.outputs.version }}/*" "/releases/beta/latest/*"
+        else
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.RELEASE_CLOUDFRONT_DIST_ID }}" \
+            --paths "/releases/latest/*" "/install.sh" "/install.ps1" "/index.html"
+        fi
+        echo "CloudFront invalidation created"
+
+    - name: Update Homebrew formula
+      if: ${{ needs.determine-release-channel.outputs.is_stable_release == 'true' && needs.validate-release.outputs.is_beta != 'true' && vars.RELEASE_S3_BUCKET != '' }}
+      env:
+        HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      run: |
+        # Skip if HOMEBREW_TAP_TOKEN is not configured
+        if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+          echo "HOMEBREW_TAP_TOKEN not configured, skipping Homebrew formula update"
+          exit 0
+        fi
+
+        VERSION="${{ steps.version.outputs.version }}"
+
+        # Read SHA256 checksums from the checksums file
+        # Format in file: macos_arm64=abc123..., macos_x86_64=def456..., linux_arm64=..., linux_x86_64=...
+        MACOS_ARM64_SHA256=$(grep "^macos_arm64=" packages/homebrew-checksums.txt | cut -d= -f2)
+        MACOS_X86_64_SHA256=$(grep "^macos_x86_64=" packages/homebrew-checksums.txt | cut -d= -f2)
+        LINUX_ARM64_SHA256=$(grep "^linux_arm64=" packages/homebrew-checksums.txt | cut -d= -f2)
+        LINUX_X86_64_SHA256=$(grep "^linux_x86_64=" packages/homebrew-checksums.txt | cut -d= -f2)
+
+        if [ -z "$MACOS_ARM64_SHA256" ] || [ -z "$MACOS_X86_64_SHA256" ] || [ -z "$LINUX_ARM64_SHA256" ] || [ -z "$LINUX_X86_64_SHA256" ]; then
+          echo "::error::Could not read all SHA256 checksums from packages/homebrew-checksums.txt"
+          cat packages/homebrew-checksums.txt
+          exit 1
+        fi
+
+        echo "Updating Homebrew formula to version ${VERSION}"
+        echo "  macOS ARM64 SHA256: ${MACOS_ARM64_SHA256}"
+        echo "  macOS x86_64 SHA256: ${MACOS_X86_64_SHA256}"
+        echo "  Linux ARM64 SHA256: ${LINUX_ARM64_SHA256}"
+        echo "  Linux x86_64 SHA256: ${LINUX_X86_64_SHA256}"
+
+        # Clone the homebrew tap repo
+        git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/hot-dev/homebrew-hot.git" homebrew-tap
+        cd homebrew-tap
+
+        # Ensure Formula directory exists
+        mkdir -p Formula
+
+        # Generate the formula
+        cat > Formula/hot.rb << FORMULA_EOF
+        class Hot < Formula
+          desc "Hot programming language and runtime"
+          homepage "https://hot.dev"
+          version "${VERSION}"
+          license "Apache-2.0"
+
+          on_macos do
+            on_arm do
+              url "https://get.hot.dev/releases/${VERSION}/hot_${VERSION}_macos_arm64.tar.gz"
+              sha256 "${MACOS_ARM64_SHA256}"
+            end
+            on_intel do
+              url "https://get.hot.dev/releases/${VERSION}/hot_${VERSION}_macos_x86_64.tar.gz"
+              sha256 "${MACOS_X86_64_SHA256}"
+            end
+          end
+
+          on_linux do
+            on_arm do
+              url "https://get.hot.dev/releases/${VERSION}/hot_${VERSION}_linux_arm64.tar.gz"
+              sha256 "${LINUX_ARM64_SHA256}"
+            end
+            on_intel do
+              url "https://get.hot.dev/releases/${VERSION}/hot_${VERSION}_linux_x86_64.tar.gz"
+              sha256 "${LINUX_X86_64_SHA256}"
+            end
+          end
+
+          def install
+            bin.install "hot"
+
+            # Install hotbox Linux binaries (for container tasks via hot dev)
+            (share/"hot/bin").install Dir["bin/hotbox-*"]
+
+            # Install standard library
+            (share/"hot/pkg").install "pkg/hot-std"
+
+            # Install database migrations
+            (share/"hot/db").install Dir["db/*"]
+
+            # Install app assets (CSS, JS, images for dev server)
+            (share/"hot/app").install Dir["app/*"]
+
+            # Install AI resources (AGENTS.md and skills)
+            (share/"hot/ai").install Dir["ai/*"]
+
+            # Install init templates
+            (share/"hot/init").install Dir["init/*"]
+
+            # Install license and notice files
+            (share/"hot").install "LICENSE"
+            (share/"hot").install "NOTICE"
+
+            # Generate and install shell completions
+            generate_completions_from_executable(bin/"hot", "completions")
+          end
+
+          def caveats
+            <<~EOS
+              To get started with Hot:
+                hot init myproject
+                cd myproject
+                hot dev
+
+              Documentation: https://hot.dev/docs
+            EOS
+          end
+
+          test do
+            assert_match version.to_s, shell_output("#{bin}/hot version")
+          end
+        end
+        FORMULA_EOF
+
+        # Copy README from main repo
+        cp ../resources/homebrew/README.md README.md
+
+        # Configure git
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Commit and push
+        git add Formula/hot.rb README.md
+        git commit -m "Hot ${VERSION}"
+        git push
+
+        echo ""
+        echo "✅ Homebrew formula updated successfully!"
+        echo "Users can now install with: brew install hot-dev/hot/hot"

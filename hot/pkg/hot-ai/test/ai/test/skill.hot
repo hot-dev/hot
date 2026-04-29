@@ -1,0 +1,519 @@
+::ai::test::skill ns
+meta ["test"]
+
+::skill ::ai::skill
+::tool  ::ai::tool
+
+// ---------------------------------------------------------------------------
+// Fixture skills
+// ---------------------------------------------------------------------------
+
+customer-tone
+meta {
+    skill: {
+        description: "Apply the company customer-voice rules.",
+        when: ["customer reply", "support email"],
+        body: "Use a warm tone. Avoid jargon."
+    }
+}
+fn () { {} }
+
+escalation
+meta {
+    skill: {
+        name: "escalate",
+        description: "Decide when to hand off to a human.",
+        when: ["refund", "angry"]
+    }
+}
+fn () { {} }
+
+dynamic-skill
+meta {
+    skill: {
+        description: "Compute body from context.",
+        when: ["dynamic"]
+    }
+}
+fn (topic: Str): Str {
+    `Custom guidance for ${topic}.`
+}
+
+minimal-skill
+meta {skill: {description: "Just a description."}}
+fn () { {} }
+
+// Note: dynamic-skill's body-fn must be wired post-hoc, since
+// `meta {skill: {body-fn: dynamic-skill}}` is a forward reference
+// the parser cannot resolve. `from-fn` therefore picks up
+// `body` and `body-fn` from the meta map by key; tests below
+// construct dynamic-body skills via `Skill({...})` directly.
+
+// ---------------------------------------------------------------------------
+// from-fn
+// ---------------------------------------------------------------------------
+
+test-from-fn-defaults
+meta ["test"]
+fn () {
+    s ::skill/from-fn(customer-tone)
+    assert(is-type(s, ::skill/Skill), "from-fn returns a Skill")
+    assert-eq("::ai::test::skill/customer-tone", s.name)
+    assert-eq("Apply the company customer-voice rules.", s.description)
+    assert-eq(2, length(s.when))
+    assert-eq("Use a warm tone. Avoid jargon.", s.body)
+}
+
+test-from-fn-name-override
+meta ["test"]
+fn () {
+    s ::skill/from-fn(escalation)
+    assert-eq("escalate", s.name)
+    assert(is-null(s.body), "no body given")
+}
+
+test-from-fn-minimal
+meta ["test"]
+fn () {
+    s ::skill/from-fn(minimal-skill)
+    assert-eq("Just a description.", s.description)
+    when s.when
+    assert(or(is-null(when), is-empty(when)), "when defaults to empty")
+}
+
+// ---------------------------------------------------------------------------
+// for-agent
+// ---------------------------------------------------------------------------
+
+test-for-agent-mixed
+meta ["test"]
+fn () {
+    custom ::skill/Skill({
+        name: "custom",
+        description: "Custom skill",
+        when: [],
+        body: "Hand-built.",
+        body-fn: null,
+        tools: null,
+        requires: null,
+        fn: null
+    })
+    skills ::skill/for-agent([customer-tone, custom])
+    assert-eq(2, length(skills))
+    assert-eq("::ai::test::skill/customer-tone", skills[0].name)
+    assert-eq("custom", skills[1].name)
+}
+
+// ---------------------------------------------------------------------------
+// load-body
+// ---------------------------------------------------------------------------
+
+test-load-body-inline
+meta ["test"]
+fn () {
+    s ::skill/from-fn(customer-tone)
+    body ::skill/load-body(s, {})
+    assert-eq("Use a warm tone. Avoid jargon.", body)
+}
+
+test-load-body-empty-fallback
+meta ["test"]
+fn () {
+    s ::skill/from-fn(escalation)
+    body ::skill/load-body(s, {})
+    assert-eq("", body)
+}
+
+test-load-body-via-body-fn
+meta ["test"]
+fn () {
+    s ::skill/Skill({
+        name: "dynamic",
+        description: "Dynamic body",
+        when: [],
+        body: null,
+        body-fn: dynamic-skill,
+        tools: null,
+        requires: null,
+        fn: null
+    })
+    body ::skill/load-body(s, {topic: "refund"})
+    assert-eq("Custom guidance for refund.", body)
+}
+
+// ---------------------------------------------------------------------------
+// Resolver index
+// ---------------------------------------------------------------------------
+
+test-index-line
+meta ["test"]
+fn () {
+    s ::skill/from-fn(customer-tone)
+    line ::skill/index-line(s)
+    assert(contains(line, "::ai::test::skill/customer-tone"), "name present")
+    assert(contains(line, "Apply the company"), "description present")
+    assert(contains(line, "customer reply"), "first when present")
+}
+
+test-index-line-no-when
+meta ["test"]
+fn () {
+    s ::skill/from-fn(minimal-skill)
+    line ::skill/index-line(s)
+    assert(contains(line, "Just a description."), "description present")
+    assert(not(contains(line, "(when:")), "no when block when empty")
+}
+
+test-build-index-empty
+meta ["test"]
+fn () {
+    assert-eq("", ::skill/build-index([]))
+}
+
+test-build-index-multi
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    idx ::skill/build-index(skills)
+    assert(contains(idx, "Available skills"), "header present")
+    assert(contains(idx, "customer-tone"), "first skill listed")
+    assert(contains(idx, "escalate"), "name override respected")
+}
+
+// ---------------------------------------------------------------------------
+// Built-in tools
+// ---------------------------------------------------------------------------
+
+test-builtins-shape
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    bt ::skill/builtins(skills)
+    assert-eq(3, length(bt))
+    names map(bt, %.name)
+    assert(in("list_skills", names), "list_skills present")
+    assert(in("read_skill", names), "read_skill present")
+    assert(in("apply_skill", names), "apply_skill present")
+}
+
+test-builtin-list-skills-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    tools ::skill/builtins(skills)
+    list-tool ::tool/find-by-name(tools, "list_skills")
+    out list-tool.fn()
+    assert-eq(2, length(out))
+    assert-eq("::ai::test::skill/customer-tone", out[0].name)
+}
+
+test-builtin-read-skill-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    tools ::skill/builtins(skills)
+    read-tool ::tool/find-by-name(tools, "read_skill")
+    out read-tool.fn("::ai::test::skill/customer-tone")
+    assert-eq("Use a warm tone. Avoid jargon.", out)
+}
+
+test-builtin-read-skill-missing
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    tools ::skill/builtins(skills)
+    read-tool ::tool/find-by-name(tools, "read_skill")
+    out read-tool.fn("nope")
+    assert(contains(out, "Unknown skill"), "missing skill returns error string")
+}
+
+test-builtin-apply-skill-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    tools ::skill/builtins(skills)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    out apply-tool.fn("::ai::test::skill/customer-tone", {})
+    assert-eq("Use a warm tone. Avoid jargon.", out)
+}
+
+// ---------------------------------------------------------------------------
+// SkillResolver — in-memory variant
+// ---------------------------------------------------------------------------
+
+test-in-memory-resolver-shape
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/in-memory-resolver(skills)
+    assert(is-type(r, ::skill/SkillResolver), "returns a SkillResolver")
+    assert(is-fn(r.list-fn), "list-fn is a function")
+    assert(is-fn(r.read-fn), "read-fn is a function")
+    assert(is-null(r.search-fn), "search-fn is null for in-memory")
+}
+
+test-in-memory-resolver-list
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/in-memory-resolver(skills)
+    out r.list-fn({})
+    assert-eq(2, length(out))
+    assert-eq("::ai::test::skill/customer-tone", out[0].name)
+    assert-eq("escalate", out[1].name)
+}
+
+test-in-memory-resolver-read-hit
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/in-memory-resolver(skills)
+    s r.read-fn("escalate")
+    assert(is-type(s, ::skill/Skill), "returns Skill on hit")
+    assert-eq("escalate", s.name)
+}
+
+test-in-memory-resolver-read-miss
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    r ::skill/in-memory-resolver(skills)
+    assert(is-null(r.read-fn("nope")), "miss returns null")
+}
+
+// ---------------------------------------------------------------------------
+// search-skills-of helper
+// ---------------------------------------------------------------------------
+
+test-search-substring-name
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    hits ::skill/search-skills-of(skills, "escal", {})
+    assert-eq(1, length(hits))
+    assert-eq("escalate", hits[0].name)
+}
+
+test-search-substring-when
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    hits ::skill/search-skills-of(skills, "refund", {})
+    assert-eq(1, length(hits))
+    assert-eq("escalate", hits[0].name)
+}
+
+test-search-empty-query
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    hits ::skill/search-skills-of(skills, "", {})
+    assert-eq(0, length(hits))
+}
+
+test-search-limit
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation, minimal-skill])
+    hits ::skill/search-skills-of(skills, "skill", {limit: 1})
+    assert(lte(length(hits), 1), "respects limit")
+}
+
+test-search-no-match
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    hits ::skill/search-skills-of(skills, "zzzzz-no-such-token", {})
+    assert-eq(0, length(hits))
+}
+
+test-search-ranks-name-over-description
+meta ["test"]
+fn () {
+    // "customer" matches both customer-tone (name+desc) and the
+    // description of escalation? actually only customer-tone here, but
+    // we add a description-only match by reusing minimal-skill. The
+    // important assertion is that name hits beat description-only hits.
+    name-hit ::skill/Skill({
+        name: "alpha",
+        description: "unrelated",
+        when: [],
+        body: null,
+        body-fn: null,
+        tools: null,
+        requires: null,
+        fn: null
+    })
+    desc-hit ::skill/Skill({
+        name: "beta",
+        description: "alpha is mentioned here",
+        when: [],
+        body: null,
+        body-fn: null,
+        tools: null,
+        requires: null,
+        fn: null
+    })
+    hits ::skill/search-skills-of([desc-hit, name-hit], "alpha", {})
+    assert-eq(2, length(hits))
+    assert-eq("alpha", hits[0].name)
+    assert-eq("beta", hits[1].name)
+}
+
+// ---------------------------------------------------------------------------
+// searchable-resolver
+// ---------------------------------------------------------------------------
+
+test-searchable-resolver-shape
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/searchable-resolver(skills, {})
+    assert(is-type(r, ::skill/SkillResolver), "returns a SkillResolver")
+    assert(is-fn(r.search-fn), "search-fn is set")
+}
+
+test-searchable-resolver-list-defaults-empty
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/searchable-resolver(skills, {})
+    assert-eq(0, length(r.list-fn({})))
+}
+
+test-searchable-resolver-list-always-on
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    always [skills[0]]
+    r ::skill/searchable-resolver(skills, {always-on: always})
+    out r.list-fn({})
+    assert-eq(1, length(out))
+    assert-eq("::ai::test::skill/customer-tone", out[0].name)
+}
+
+test-searchable-resolver-search-fn
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/searchable-resolver(skills, {})
+    hits r.search-fn("escal", {})
+    assert-eq(1, length(hits))
+    assert-eq("escalate", hits[0].name)
+}
+
+// ---------------------------------------------------------------------------
+// Resolver-aware built-in tools
+// ---------------------------------------------------------------------------
+
+test-builtins-with-resolver-no-search
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    r ::skill/in-memory-resolver(skills)
+    bt ::skill/builtins-with-resolver(r)
+    assert-eq(3, length(bt))
+    names map(bt, %.name)
+    assert(in("list_skills", names), "list_skills present")
+    assert(in("read_skill", names), "read_skill present")
+    assert(in("apply_skill", names), "apply_skill present")
+}
+
+test-builtins-with-resolver-with-search
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/searchable-resolver(skills, {})
+    bt ::skill/builtins-with-resolver(r)
+    assert-eq(4, length(bt))
+    names map(bt, %.name)
+    assert(in("search_skills", names), "search_skills present")
+}
+
+test-builtin-list-skills-r-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/in-memory-resolver(skills)
+    tools ::skill/builtins-with-resolver(r)
+    list-tool ::tool/find-by-name(tools, "list_skills")
+    out list-tool.fn()
+    assert-eq(2, length(out))
+}
+
+test-builtin-read-skill-r-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    r ::skill/in-memory-resolver(skills)
+    tools ::skill/builtins-with-resolver(r)
+    read-tool ::tool/find-by-name(tools, "read_skill")
+    out read-tool.fn("::ai::test::skill/customer-tone")
+    assert-eq("Use a warm tone. Avoid jargon.", out)
+}
+
+test-builtin-read-skill-r-missing
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    r ::skill/in-memory-resolver(skills)
+    tools ::skill/builtins-with-resolver(r)
+    read-tool ::tool/find-by-name(tools, "read_skill")
+    out read-tool.fn("nope")
+    assert(contains(out, "Unknown skill"), "missing returns error string")
+}
+
+test-builtin-apply-skill-r-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    r ::skill/in-memory-resolver(skills)
+    tools ::skill/builtins-with-resolver(r)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    out apply-tool.fn("::ai::test::skill/customer-tone", {})
+    assert-eq("Use a warm tone. Avoid jargon.", out)
+}
+
+test-builtin-search-skills-r-call
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone, escalation])
+    r ::skill/searchable-resolver(skills, {})
+    tools ::skill/builtins-with-resolver(r)
+    search-tool ::tool/find-by-name(tools, "search_skills")
+    out search-tool.fn("escal", null)
+    assert-eq(1, length(out))
+    assert-eq("escalate", out[0].name)
+}
+
+// ---------------------------------------------------------------------------
+// effective-resolver precedence
+// ---------------------------------------------------------------------------
+
+test-effective-resolver-explicit-wins
+meta ["test"]
+fn () {
+    skills-vec ::skill/for-agent([customer-tone])
+    explicit ::skill/in-memory-resolver(skills-vec)
+    out ::skill/effective-resolver(explicit, [escalation])
+    assert(is-type(out, ::skill/SkillResolver), "returns the resolver")
+    listed out.list-fn({})
+    assert-eq(1, length(listed))
+    assert-eq("::ai::test::skill/customer-tone", listed[0].name)
+}
+
+test-effective-resolver-wraps-skills
+meta ["test"]
+fn () {
+    out ::skill/effective-resolver(null, [customer-tone, escalation])
+    assert(is-type(out, ::skill/SkillResolver), "returns a resolver")
+    listed out.list-fn({})
+    assert-eq(2, length(listed))
+}
+
+test-effective-resolver-null-when-empty
+meta ["test"]
+fn () {
+    assert(is-null(::skill/effective-resolver(null, null)), "null -> null")
+    assert(is-null(::skill/effective-resolver(null, [])), "empty -> null")
+}

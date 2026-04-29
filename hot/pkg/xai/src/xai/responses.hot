@@ -1,0 +1,543 @@
+::xai::responses ns
+
+// ============================================================================
+// xAI Chat Responses API
+// https://docs.x.ai/docs/guides/chat
+// ============================================================================
+
+api-request ::xai::api/request
+api-request-stream ::xai::api/request-stream
+HttpError ::xai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types
+// ============================================================================
+
+// Literal union for message roles
+Role type "user" | "system" | "assistant" | "tool"
+
+// Literal union for finish reasons
+FinishReason type "stop" | "length" | "tool_calls" | "content_filter"
+
+// Literal union for response status
+ResponseStatus type "completed" | "failed" | "incomplete" | "in_progress"
+
+// Message input for requests
+InputMessage type {
+    role: Role,
+    content: Any,
+    name: Str?,
+    tool_calls: Vec<ToolCall>?,
+    tool_call_id: Str?
+}
+
+// Tool call structure
+ToolCall type {
+    id: Str,
+    type: Str,
+    function: FunctionCall
+}
+
+FunctionCall type {
+    name: Str,
+    arguments: Str
+}
+
+// Tool definition
+Tool type {
+    type: Str,
+    function: FunctionDefinition
+}
+
+FunctionDefinition type {
+    name: Str,
+    description: Str?,
+    parameters: Any?,
+    strict: Bool?
+}
+
+// Response format configuration
+ResponseFormat type {
+    type: Str,
+    json_schema: Any?
+}
+
+// Create response request
+CreateResponseRequest type {
+    model: Str,
+    input: Any,
+    instructions: Str?,
+    max_output_tokens: Int?,
+    temperature: Dec?,
+    top_p: Dec?,
+    tools: Vec<Tool>?,
+    tool_choice: Any?,
+    parallel_tool_calls: Bool?,
+    response_format: ResponseFormat?,
+    store: Bool?,
+    metadata: Map?,
+    stream: Bool?,
+    reasoning: ReasoningConfig?,
+    previous_response_id: Str?
+}
+
+// Reasoning configuration (for extended thinking)
+ReasoningConfig type {
+    effort: Str?,
+    encrypted_content: Str?
+}
+
+// Output item types
+OutputItem type {
+    type: Str,
+    id: Str?,
+    status: Str?,
+    role: Role?,
+    content: Vec<ContentPart>?,
+    name: Str?,
+    arguments: Str?,
+    call_id: Str?,
+    output: Str?
+}
+
+ContentPart type {
+    type: Str,
+    text: Str?,
+    annotations: Vec<Any>?
+}
+
+// Token usage
+Usage type {
+    input_tokens: Int,
+    output_tokens: Int,
+    total_tokens: Int?,
+    input_tokens_details: TokenDetails?,
+    output_tokens_details: TokenDetails?
+}
+
+TokenDetails type {
+    cached_tokens: Int?,
+    reasoning_tokens: Int?
+}
+
+// Create response result
+CreateResponseResponse type {
+    id: Str,
+    object: Str,
+    created_at: Int,
+    model: Str,
+    status: ResponseStatus,
+    output: Vec<OutputItem>,
+    usage: Usage?,
+    error: Any?,
+    incomplete_details: Any?,
+    metadata: Map?
+}
+
+// Streaming response wrapper
+StreamingResponseResponse type {
+    status: Int,
+    headers: Map,
+    body: Any  // Iterator yielding stream events
+}
+
+// Stream event types
+StreamEvent type {
+    type: Str,
+    response: CreateResponseResponse?,
+    output_index: Int?,
+    item: OutputItem?,
+    content_index: Int?,
+    part: ContentPart?,
+    delta: Str?
+}
+
+// ============================================================================
+// Non-Streaming API
+// ============================================================================
+
+create
+meta {
+    doc: """
+    Create a response (non-streaming).
+
+    The Responses API is the recommended way to interact with xAI models.
+    It supports stateful conversations where previous prompts and responses
+    are stored server-side for 30 days.
+
+    **Example**
+
+    ```hot
+    response create(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "What is the capital of France?",
+        max_output_tokens: 1024
+    }))
+
+    response.id // => "resp_abc123..."
+    response.output // => [{type: "message", ...}]
+    ```
+
+    **With conversation history**
+
+    ```hot
+    response create(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: [
+            {role: "user", content: "My name is Alice."},
+            {role: "assistant", content: "Nice to meet you, Alice!"},
+            {role: "user", content: "What is my name?"}
+        ],
+        max_output_tokens: 100
+    }))
+    ```
+
+    **Continue a previous conversation**
+
+    ```hot
+    response create(CreateResponseRequest({
+        model: "grok-3",
+        input: "Tell me more",
+        previous_response_id: "resp_abc123"
+    }))
+    ```
+    """
+}
+fn (request: CreateResponseRequest): CreateResponseResponse {
+    response api-request("POST", `${::xai/BASE_URL}/responses`, {}, request)
+    if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Streaming API
+// ============================================================================
+
+create-stream
+meta {
+    doc: """
+    Create a streaming response. Returns a StreamingResponseResponse with an iterator body that yields SSE events.
+
+    **Event Types**
+    - `response.created` - Initial response metadata
+    - `response.output_item.added` - New output item started
+    - `response.content_part.added` - Content part started
+    - `response.output_text.delta` - Text chunk
+    - `response.output_text.done` - Text output complete
+    - `response.output_item.done` - Output item complete
+    - `response.completed` - Full response complete
+
+    **Example**
+
+    ```hot
+    response create-stream(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Count from 1 to 3.",
+        max_output_tokens: 50
+    }))
+
+    response.status // => 200
+
+    events collect(response.body)
+    // events is a Vec of SSE event objects
+    ```
+    """
+}
+fn (request: CreateResponseRequest): StreamingResponseResponse {
+    // Force stream: true
+    streaming-request {...untype(request), stream: true}
+    response api-request-stream("POST", `${::xai/BASE_URL}/responses`, {}, streaming-request, "sse")
+    cond {
+        gte(response.status, 400) => { err(HttpError(response)) }
+        => { StreamingResponseResponse(response) }
+    }
+}
+
+// ============================================================================
+// Retrieve Response
+// ============================================================================
+
+get
+meta {
+    doc: """
+    Retrieve a previously created response by ID.
+
+    Requires that the response was created with `store: true` (which is the default).
+
+    **Example**
+
+    ```hot
+    // Create with store: true (default)
+    created create(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say hello",
+        store: true
+    }))
+
+    // Later, retrieve it
+    retrieved get(created.id)
+    eq(created.id, retrieved.id) // => true
+    ```
+    """
+}
+fn (response-id: Str): CreateResponseResponse {
+    response api-request("GET", `${::xai/BASE_URL}/responses/${response-id}`)
+    if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Delete Response
+// ============================================================================
+
+delete
+meta {
+    doc: """
+    Delete a stored response. This removes it from server-side storage.
+
+    **Example**
+
+    ```hot
+    delete("resp_abc123")
+    ```
+    """
+}
+fn (response-id: Str): Map {
+    response api-request("DELETE", `${::xai/BASE_URL}/responses/${response-id}`)
+    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+chat
+meta {
+    doc: """
+    Simple chat - send a message and get a response string.
+
+    Accepts an optional system instruction and max token limit. This is a convenience
+    wrapper around create() that returns the extracted text directly.
+
+    **Example**
+
+    ```hot
+    answer chat("grok-3", "What is the capital of France?")
+    // => "The capital of France is Paris."
+
+    // With system instructions
+    answer chat("grok-3-mini", "What is 2+2?", "Respond with just the number.")
+    // => "4"
+    ```
+    """
+}
+fn
+(model: Str, message: Str): Str {
+    chat(model, message, null, null)
+},
+(model: Str, message: Str, system: Str): Str {
+    chat(model, message, system, null)
+},
+(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+    request {
+        model: model,
+        input: message,
+        instructions: system,
+        max_output_tokens: or(max-tokens, 4096)
+    }
+
+    response create(CreateResponseRequest(request))
+
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => { extract-response-text(response) }
+    }
+}
+
+// Helper to build a user message
+user-message
+meta {
+    doc: """
+    Create a user message for use in multi-turn conversations.
+
+    **Example**
+
+    ```hot
+    msg user-message("Hello")
+    msg.role // => "user"
+    msg.content // => "Hello"
+    ```
+    """
+}
+fn (content: Str): InputMessage {
+    InputMessage({role: "user", content: content})
+}
+
+// Helper to build a system message
+system-message
+meta {
+    doc: """
+    Create a system message for setting model behavior.
+
+    **Example**
+
+    ```hot
+    msg system-message("You are a helpful math tutor.")
+    msg.role // => "system"
+    msg.content // => "You are a helpful math tutor."
+    ```
+    """
+}
+fn (content: Str): InputMessage {
+    InputMessage({role: "system", content: content})
+}
+
+// Helper to build an assistant message
+assistant-message
+meta {
+    doc: """
+    Create an assistant message for providing conversation history.
+
+    **Example**
+
+    ```hot
+    msg assistant-message("Nice to meet you!")
+    msg.role // => "assistant"
+
+    // Use in multi-turn input
+    response create(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: [
+            user-message("My name is Alice."),
+            assistant-message("Nice to meet you, Alice!"),
+            user-message("What is my name?")
+        ]
+    }))
+    ```
+    """
+}
+fn (content: Str): InputMessage {
+    InputMessage({role: "assistant", content: content})
+}
+
+// Extract text from a response
+extract-response-text
+meta {
+    doc: """
+    Extract the text content from a response. Returns empty string if no text content is found.
+
+    Walks through the response output items, finds the first "message" item,
+    and extracts the first "output_text" content part.
+
+    **Example**
+
+    ```hot
+    response create(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say 'test'",
+        max_output_tokens: 50
+    }))
+
+    text extract-response-text(response)
+    is-str(text) // => true
+    ```
+    """
+}
+fn (response: CreateResponseResponse): Str {
+    output response.output
+    cond {
+        or(is-null(output), is-zero(length(output))) => { "" }
+        => {
+            // Find the first message output item
+            message-items filter(output, eq(%.type, "message"))
+            cond {
+                is-zero(length(message-items)) => { "" }
+                => {
+                    message-item first(message-items)
+                    content message-item.content
+                    cond {
+                        or(is-null(content), is-zero(length(content))) => { "" }
+                        => {
+                            // Find first text content part
+                            text-parts filter(content, eq(%.type, "output_text"))
+                            cond {
+                                is-zero(length(text-parts)) => { "" }
+                                => { or(first(text-parts).text, "") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Extract text delta from a streaming event
+extract-delta-text
+meta {
+    doc: """
+    Extract the text content from a streaming SSE event. Returns empty string if the event is not a text delta.
+
+    Only extracts text from events with type "response.output_text.delta".
+
+    **Example**
+
+    ```hot
+    response create-stream(CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say hello"
+    }))
+
+    for-each(response.body, (event) {
+        text extract-delta-text(event)
+        // text contains the delta chunk, or "" for non-text events
+    })
+    ```
+    """
+}
+fn (event): Str {
+    cond {
+        is-null(event) => { "" }
+        is-null(event.data) => { "" }
+        => {
+            data event.data
+            cond {
+                not(eq(data.type, "response.output_text.delta")) => { "" }
+                => { or(data.delta, "") }
+            }
+        }
+    }
+}
+
+// Check if a streaming event indicates completion
+is-stream-done
+meta {
+    doc: """
+    Check if a streaming event indicates the stream is complete.
+
+    Returns true for event types: "response.completed", "response.failed", or "response.incomplete".
+
+    **Example**
+
+    ```hot
+    for-each(response.body, (event) {
+        cond {
+            is-stream-done(event) => { "Stream finished" }
+            => {
+                text extract-delta-text(event)
+                // process text chunk
+            }
+        }
+    })
+    ```
+    """
+}
+fn (event): Bool {
+    cond {
+        is-null(event) => { false }
+        is-null(event.data) => { false }
+        => {
+            data event.data
+            in(data.type, ["response.completed", "response.failed", "response.incomplete"])
+        }
+    }
+}

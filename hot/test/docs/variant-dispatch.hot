@@ -1,0 +1,107 @@
+// Variant Dispatch and Auto-Unwrap on Match
+//
+// Hot's match flow dispatches on the `$type` tag of an enum variant.
+// When a variant has a payload (e.g. `Animal.Bird({species: "Eagle"})`),
+// the payload is stored under `$val` and the variant tag under `$type`.
+// Match arms see the original tagged value; field access reaches into
+// `$val` automatically, so user code reads as if there were no wrapper.
+::hot::test::docs::variant-dispatch ns
+meta ["test"]
+
+// -- Setup: a small bestiary --
+
+Critter enum open {
+  Dog,
+  Cat
+}
+
+Avian type {
+  species: Str,
+  wingspan: Dec
+}
+Avian -> Critter.Bird
+
+Aquatic type { species: Str, depth: Int }
+Aquatic -> Critter.Fish
+
+// -- Variant tag is what `match` dispatches on --
+
+label-critter fn match (a: Critter): Str {
+  Critter.Dog => { "dog" }
+  Critter.Cat => { "cat" }
+  Critter.Bird => { "bird" }
+  Critter.Fish => { "fish" }
+  _ => { "unknown" }
+}
+
+test-match-dispatches-by-variant-tag
+meta ["test"] fn () {
+  d Critter.Dog
+  c Critter.Cat
+  b Critter.Bird({species: "Eagle", wingspan: 2.1})
+  f Critter.Fish({species: "Tuna", depth: 200})
+
+  assert-eq("dog", label-critter(d), "Unit variant Dog dispatches correctly")
+  assert-eq("cat", label-critter(c), "Unit variant Cat dispatches correctly")
+  assert-eq("bird", label-critter(b), "Arrow-enrolled variant Bird dispatches correctly")
+  assert-eq("fish", label-critter(f), "Arrow-enrolled variant Fish dispatches correctly")
+}
+
+// -- Tagged shape: $type and $val --
+
+test-tagged-payload-shape
+meta ["test"] fn () {
+  b Critter.Bird({species: "Eagle", wingspan: 2.1})
+
+  // The variant value is a tagged map: $type holds the fully-qualified
+  // variant name, and $val holds the validated payload.
+  assert(ends-with(b.$type, ".Bird"), "Variant tag is the qualified variant name")
+  assert-eq("Eagle", b.$val.species, "Payload is preserved under $val")
+}
+
+// -- Dot access reaches into $val automatically --
+
+test-dot-access-skips-val
+meta ["test"] fn () {
+  b Critter.Bird({species: "Eagle", wingspan: 2.1})
+
+  // Field access on a tagged variant reaches into $val transparently —
+  // the user does not write `b.$val.species`.
+  assert-eq("Eagle", b.species, "Dot access on variant skips $val")
+  assert-eq(2.1, b.wingspan, "Numeric field also reaches into $val")
+}
+
+// -- Tagged serialization round-trip --
+
+test-tagged-serialization
+meta ["test"] fn () {
+  b Critter.Bird({species: "Eagle", wingspan: 2.1})
+
+  // Tagged variants serialize to JSON preserving $type and $val so a
+  // peer process can reconstruct the variant.
+  json to-json(b)
+  assert(contains(json, "$type"), "Tagged variant serializes the tag")
+  assert(contains(json, "Bird"), "Tagged variant serializes the variant name")
+  assert(contains(json, "Eagle"), "Tagged variant serializes the payload")
+}
+
+// -- Match-all flow returns a map of branch results --
+
+categorize fn match-all (a: Critter): Map {
+  Critter.Bird => { "flies" }
+  Critter.Fish => { "swims" }
+  Critter.Dog => { "walks" }
+  Critter.Cat => { "stalks" }
+}
+
+test-match-all-returns-branch-map
+meta ["test"] fn () {
+  b Critter.Bird({species: "Eagle", wingspan: 2.1})
+
+  result categorize(b)
+  // match-all collects results from EVERY matching arm, keyed by the
+  // qualified variant name. Only the Bird arm fires because match
+  // patterns are exact tags.
+  assert-eq("flies", get(result, "Critter.Bird"), "Bird arm produced its result under Critter.Bird")
+  assert(is-null(get(result, "Critter.Fish", null)), "Non-matching arms are absent from the map")
+}

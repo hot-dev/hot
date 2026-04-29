@@ -1,0 +1,32 @@
+::hot::stream ns
+meta {
+    doc: """Stream data emission for real-time partial results and progress updates."""
+}
+
+Stream type {
+    id: Uuid
+}
+
+data
+meta {
+    core: true,
+    doc: """
+    Emit typed data to the current run's stream.
+
+    Data is immediately published for real-time delivery and persisted for replay.
+
+    **Arguments**
+    - `data-type` - A string identifying the type of data (e.g., `"progress"`, `"update"`)
+    - `payload` - The data payload (any Hot value)
+
+    **Example**
+
+    ```hot
+    data("progress", {current: 50, total: 100})
+    data("update", {message: "Processing complete"})
+    ```
+    """
+}
+fn (data-type: Str, payload: Any): Null {
+    call-lib(::hot::stream/data, [data-type, payload])
+}

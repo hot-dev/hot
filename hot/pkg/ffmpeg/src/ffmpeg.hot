@@ -1,0 +1,643 @@
+::ffmpeg ns
+meta {
+    doc: """
+    FFmpeg video/audio processing via Hot Box containers.
+
+    Provides functions for video transcoding, thumbnail extraction,
+    audio extraction, and media probing using ffmpeg in isolated containers.
+
+    Each function runs ffmpeg inside a container with appropriate resource
+    sizing. Input files are referenced by `hot://` storage URLs and outputs
+    are written back to `hot://` storage.
+
+    **Quick Start**
+
+    ```hot
+    // Probe a media file
+    info ::ffmpeg/probe("hot://uploads/video.mp4")
+    tap(info.format.duration)
+
+    // Extract a thumbnail
+    thumb ::ffmpeg/thumbnail("hot://uploads/video.mp4")
+    tap(thumb.url)
+
+    // Transcode to mp4
+    out ::ffmpeg/transcode("hot://uploads/video.mov", {format: "mp4", codec: "libx264"})
+    tap(out.url)
+
+    // Extract audio as mp3
+    audio ::ffmpeg/extract-audio("hot://uploads/video.mp4")
+    tap(audio.url)
+
+    // With explicit output path
+    thumb ::ffmpeg/thumbnail("hot://uploads/video.mp4", {
+        output: "hot://media/video-thumb.jpg",
+    })
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+// Default image — Alpine with ffmpeg installed at runtime.
+// Users can pass a custom image with ffmpeg pre-installed for faster execution.
+DEFAULT_IMAGE "alpine:3.21"
+INSTALL_CMD "apk add --no-cache ffmpeg > /dev/null 2>&1"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+ThumbnailOpts
+meta {
+    doc: """
+    Options for thumbnail extraction.
+
+    **Fields**
+    - `time` — Seek position, e.g. `"00:00:05"` (default: `"00:00:01"`)
+    - `width` — Output width in pixels (default: source width)
+    - `height` — Output height in pixels (default: source height)
+    - `format` — Output format: `"jpg"`, `"png"`, `"webp"` (default: `"jpg"`)
+    - `quality` — Quality 1–31, lower is better (default: `2`)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `extra-args` — Additional ffmpeg arguments
+    - `image` — Custom Docker image with ffmpeg (default: alpine + ffmpeg)
+    - `size` — Box size override (default: `"small"`)
+    - `timeout` — Execution timeout in seconds (default: `300`)
+    """
+}
+type {
+    time: Str?,
+    width: Int?,
+    height: Int?,
+    format: Str?,
+    quality: Int?,
+    output: Str?,
+    extra-args: Vec<Str>?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?,
+}
+
+TranscodeOpts
+meta {
+    doc: """
+    Options for video transcoding.
+
+    **Fields**
+    - `format` — Output format, e.g. `"mp4"`, `"webm"`, `"mkv"` (required)
+    - `codec` — Video codec, e.g. `"libx264"`, `"libvpx-vp9"` (default: auto)
+    - `audio-codec` — Audio codec, e.g. `"aac"`, `"libopus"` (default: auto)
+    - `bitrate` — Video bitrate, e.g. `"2M"`, `"500k"`
+    - `audio-bitrate` — Audio bitrate, e.g. `"128k"`, `"192k"`
+    - `resolution` — Output resolution, e.g. `"1280x720"`
+    - `preset` — Encoding preset, e.g. `"fast"`, `"medium"`, `"slow"`
+    - `crf` — Constant Rate Factor 0–51 (default: 23 for x264)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `extra-args` — Additional ffmpeg arguments
+    - `image` — Custom Docker image with ffmpeg
+    - `size` — Box size override (default: `"medium"`)
+    - `timeout` — Execution timeout in seconds (default: `300`)
+    """
+}
+type {
+    format: Str,
+    codec: Str?,
+    audio-codec: Str?,
+    bitrate: Str?,
+    audio-bitrate: Str?,
+    resolution: Str?,
+    preset: Str?,
+    crf: Int?,
+    output: Str?,
+    extra-args: Vec<Str>?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?,
+}
+
+ExtractAudioOpts
+meta {
+    doc: """
+    Options for audio extraction.
+
+    **Fields**
+    - `format` — Output format: `"mp3"`, `"aac"`, `"flac"`, `"wav"`, `"opus"` (default: `"mp3"`)
+    - `bitrate` — Bitrate, e.g. `"192k"`, `"320k"` (default: `"192k"`)
+    - `sample-rate` — Sample rate in Hz, e.g. `44100`, `48000`
+    - `channels` — Number of channels: `1` for mono, `2` for stereo
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `extra-args` — Additional ffmpeg arguments
+    - `image` — Custom Docker image with ffmpeg
+    - `size` — Box size override (default: `"small"`)
+    - `timeout` — Execution timeout in seconds (default: `300`)
+    """
+}
+type {
+    format: Str?,
+    bitrate: Str?,
+    sample-rate: Int?,
+    channels: Int?,
+    output: Str?,
+    extra-args: Vec<Str>?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?,
+}
+
+// ============================================================================
+// Command Builders (internal, testable without Docker)
+// ============================================================================
+
+build-thumbnail-args
+meta {
+    doc: "Build ffmpeg CLI arguments for thumbnail extraction."
+}
+fn (input-path: Str, output-path: Str, time: Str, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?): Vec<Str> {
+    base ["-y", "-i", input-path, "-ss", time, "-vframes", "1", "-q:v", Str(quality)]
+
+    scale cond {
+        and(is-some(width), is-some(height)) => {
+            ["-vf", `scale=${Str(width)}:${Str(height)}`]
+        }
+
+        is-some(width) => {
+            ["-vf", `scale=${Str(width)}:-1`]
+        }
+
+        is-some(height) => {
+            ["-vf", `scale=-1:${Str(height)}`]
+        }
+        => { [] }
+    }
+
+    extra or(extra-args, [])
+    [...base, ...scale, ...extra, output-path]
+}
+
+build-transcode-args
+meta {
+    doc: "Build ffmpeg CLI arguments for video transcoding."
+}
+fn (input-path: Str, output-path: Str, opts: TranscodeOpts): Vec<Str> {
+    base ["-y", "-i", input-path]
+
+    codec-args if(is-some(opts.codec), ["-c:v", opts.codec], [])
+    audio-codec-args if(is-some(opts.audio-codec), ["-c:a", opts.audio-codec], [])
+    bitrate-args if(is-some(opts.bitrate), ["-b:v", opts.bitrate], [])
+    audio-bitrate-args if(is-some(opts.audio-bitrate), ["-b:a", opts.audio-bitrate], [])
+    preset-args if(is-some(opts.preset), ["-preset", opts.preset], [])
+    crf-args if(is-some(opts.crf), ["-crf", Str(opts.crf)], [])
+
+    resolution-args cond {
+        is-some(opts.resolution) => {
+            parts split(opts.resolution, "x")
+            ["-vf", `scale=${first(parts)}:${last(parts)}`]
+        }
+        => { [] }
+    }
+
+    extra or(opts.extra-args, [])
+
+    [
+        ...base, ...codec-args, ...audio-codec-args, ...bitrate-args,
+        ...audio-bitrate-args, ...preset-args, ...crf-args,
+        ...resolution-args, ...extra, output-path
+    ]
+}
+
+build-extract-audio-args
+meta {
+    doc: "Build ffmpeg CLI arguments for audio extraction."
+}
+fn (input-path: Str, output-path: Str, bitrate: Str, sample-rate: Int?, channels: Int?, extra-args: Vec<Str>?): Vec<Str> {
+    base ["-y", "-i", input-path, "-vn", "-b:a", bitrate]
+    sr-args if(is-some(sample-rate), ["-ar", Str(sample-rate)], [])
+    ch-args if(is-some(channels), ["-ac", Str(channels)], [])
+
+    extra or(extra-args, [])
+    [...base, ...sr-args, ...ch-args, ...extra, output-path]
+}
+
+build-probe-args
+meta {
+    doc: "Build ffprobe CLI arguments for media probing."
+}
+fn (input-path: Str): Vec<Str> {
+    ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", input-path]
+}
+
+// ============================================================================
+// Output Parsers (internal, testable without Docker)
+// ============================================================================
+
+parse-probe-output
+meta {
+    doc: "Parse ffprobe JSON output into a structured Map."
+}
+fn (stdout: Str?): Map {
+    text or(stdout, "") |> trim()
+    if(is-empty(text), {}, from-json(text))
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
+    info ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+    })
+    ::task/await(info.id)
+}
+
+start-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
+    ::box/start({
+        image: img,
+        script: full-script,
+        timeout: timeout,
+        size: box-size,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+probe
+meta {
+    doc: """
+    Get media file metadata using ffprobe.
+
+    Returns a Map containing `format` and `streams` information from ffprobe's
+    JSON output: duration, size, bitrate, codecs, resolution, sample rates, etc.
+
+    **Example**
+
+    ```hot
+    info ::ffmpeg/probe("hot://uploads/video.mp4")
+    info.format.duration     // "120.500000"
+    info.format.bit_rate     // "2500000"
+    info.streams             // [{codec_name: "h264", width: 1920, ...}, ...]
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    probe-args join-args(build-probe-args(in-path))
+    script `hotbox cp '${input}' ${in-path} && ffprobe ${probe-args}`
+
+    result run-ffmpeg-box(script, "small", null, 300)
+    checked check-box-result(result, "ffprobe")
+    parse-probe-output(checked.stdout)
+},
+(input: Str, image: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    probe-args join-args(build-probe-args(in-path))
+    script `hotbox cp '${input}' ${in-path} && ffprobe ${probe-args}`
+
+    result run-ffmpeg-box(script, "small", image, 300)
+    checked check-box-result(result, "ffprobe")
+    parse-probe-output(checked.stdout)
+}
+
+thumbnail
+meta {
+    doc: """
+    Extract a thumbnail frame from a video file.
+
+    Returns `{url: Str, format: Str}` with the output file URL in Hot storage.
+
+    **Example**
+
+    ```hot
+    // Default: first frame at 1 second, JPEG
+    thumb ::ffmpeg/thumbnail("hot://uploads/video.mp4")
+    thumb.url     // "hot://ffmpeg/<uuid>/thumbnail.jpg"
+
+    // With options
+    thumb ::ffmpeg/thumbnail("hot://uploads/video.mp4", {
+        time: "00:00:10",
+        width: 320,
+        format: "png"
+    })
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    thumbnail(input, ThumbnailOpts({
+        time: null, width: null, height: null,
+        format: null, quality: null, output: null, extra-args: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: ThumbnailOpts): Map {
+    format or(opts.format, "jpg")
+    time or(opts.time, "00:00:01")
+    quality or(opts.quality, 2)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://ffmpeg/${uuid}/thumbnail.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    ffmpeg-args join-args(build-thumbnail-args(in-path, out-path, time, opts.width, opts.height, quality, opts.extra-args))
+    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "ffmpeg")
+
+    {url: hot-output, format,}
+}
+
+transcode
+meta {
+    doc: """
+    Transcode a video file to a different format or encoding.
+
+    Returns `{url: Str, format: Str}` with the output file URL in Hot storage.
+
+    **Example**
+
+    ```hot
+    // Convert MOV to MP4 with H.264
+    out ::ffmpeg/transcode("hot://uploads/video.mov", {
+        format: "mp4",
+        codec: "libx264",
+        crf: 23
+    })
+    out.url     // "hot://ffmpeg/<uuid>/output.mp4"
+
+    // Convert to WebM with VP9
+    out ::ffmpeg/transcode("hot://uploads/video.mp4", {
+        format: "webm",
+        codec: "libvpx-vp9",
+        audio-codec: "libopus",
+        bitrate: "2M"
+    })
+    ```
+    """,
+    box: {min-size: "medium"}
+}
+fn (input: Str, opts: TranscodeOpts): Map {
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://ffmpeg/${uuid}/output.${opts.format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${opts.format}`
+
+    ffmpeg-args join-args(build-transcode-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "medium")
+    result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "ffmpeg")
+
+    {url: hot-output, format: opts.format}
+}
+
+extract-audio
+meta {
+    doc: """
+    Extract the audio track from a video file.
+
+    Returns `{url: Str, format: Str}` with the output file URL in Hot storage.
+
+    **Example**
+
+    ```hot
+    // Default: extract as MP3 at 192k
+    audio ::ffmpeg/extract-audio("hot://uploads/video.mp4")
+    audio.url     // "hot://ffmpeg/<uuid>/audio.mp3"
+
+    // Extract as FLAC
+    audio ::ffmpeg/extract-audio("hot://uploads/video.mp4", {format: "flac"})
+
+    // Extract mono WAV at 16kHz (good for speech processing)
+    audio ::ffmpeg/extract-audio("hot://uploads/video.mp4", {
+        format: "wav",
+        sample-rate: 16000,
+        channels: 1
+    })
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    extract-audio(input, ExtractAudioOpts({
+        format: null, bitrate: null, sample-rate: null,
+        channels: null, output: null, extra-args: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: ExtractAudioOpts): Map {
+    format or(opts.format, "mp3")
+    bitrate or(opts.bitrate, "192k")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://ffmpeg/${uuid}/audio.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    ffmpeg-args join-args(build-extract-audio-args(in-path, out-path, bitrate, opts.sample-rate, opts.channels, opts.extra-args))
+    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    check-box-result(result, "ffmpeg")
+
+    {url: hot-output, format,}
+}
+
+version
+meta {
+    doc: """
+    Return ffmpeg version information.
+
+    **Example**
+
+    ```hot
+    ver ::ffmpeg/version()
+    ver.version
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (): Map {
+    version(null)
+},
+(image: Str?): Map {
+    script `ffmpeg -version`
+
+    result run-ffmpeg-box(script, "small", image, 300)
+    checked check-box-result(result, "ffmpeg")
+
+    raw or(checked.stdout, "") |> trim()
+    first-line raw |> split("\n") |> first() |> trim()
+    parts split(first-line, " ")
+    ver if(gt(length(parts), 2), parts[2], first-line)
+    {version: ver, raw,}
+}
+
+// ============================================================================
+// Async (start-*) API — return TaskInfo without awaiting
+// ============================================================================
+
+start-probe
+meta {
+    doc: "Start a probe task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    probe-args join-args(build-probe-args(in-path))
+    script `hotbox cp '${input}' ${in-path} && ffprobe ${probe-args}`
+
+    start-ffmpeg-box(script, "small", null, 300)
+}
+
+start-thumbnail
+meta {
+    doc: "Start a thumbnail extraction task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-thumbnail(input, ThumbnailOpts({
+        time: null, width: null, height: null,
+        format: null, quality: null, output: null, extra-args: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: ThumbnailOpts): Map {
+    format or(opts.format, "jpg")
+    time or(opts.time, "00:00:01")
+    quality or(opts.quality, 2)
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://ffmpeg/${uuid}/thumbnail.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    ffmpeg-args join-args(build-thumbnail-args(in-path, out-path, time, opts.width, opts.height, quality, opts.extra-args))
+    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-transcode
+meta {
+    doc: "Start a transcode task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "medium"}
+}
+fn (input: Str, opts: TranscodeOpts): Map {
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://ffmpeg/${uuid}/output.${opts.format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${opts.format}`
+
+    ffmpeg-args join-args(build-transcode-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "medium")
+    info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}
+
+start-extract-audio
+meta {
+    doc: "Start an audio extraction task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-extract-audio(input, ExtractAudioOpts({
+        format: null, bitrate: null, sample-rate: null,
+        channels: null, output: null, extra-args: null,
+        image: null, size: null, timeout: null,
+    }))
+},
+(input: Str, opts: ExtractAudioOpts): Map {
+    format or(opts.format, "mp3")
+    bitrate or(opts.bitrate, "192k")
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://ffmpeg/${uuid}/audio.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    ffmpeg-args join-args(build-extract-audio-args(in-path, out-path, bitrate, opts.sample-rate, opts.channels, opts.extra-args))
+    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output: hot-output})
+}

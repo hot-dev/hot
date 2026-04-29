@@ -1,0 +1,70 @@
+::ai::bus ns
+meta {
+    doc: "Typed inter-agent event bus. All messages carry Session + Identity. Supports targeted (tell), broadcast, and collaboration patterns."
+}
+
+Session      ::ai::session/Session
+Identity     ::ai::session/Identity
+AgentMessage ::ai::message/AgentMessage
+
+// ============================================================================
+// Broadcast and Collaboration types
+// ============================================================================
+
+BroadcastMessage
+meta { doc: "A message sent to all agents via fan-out." }
+type {
+    session: Session,
+    sender: Identity,
+    from-agent: Str,
+    topic: Str,
+    data: Map,
+}
+
+CollaborationRequest
+meta {
+    doc: "A request for help from one agent to others, with reply-event and correlation-id for async responses."
+}
+type {
+    session: Session,
+    sender: Identity,
+    from-agent: Str,
+    question: Str,
+    reply-event: Str,
+    correlation-id: Str,
+    context: Map?,
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+tell
+meta { doc: "Send a targeted message to a specific agent's inbox." }
+fn (msg: AgentMessage): Map {
+    send(`agent:${msg.to-agent}:inbox`, msg)
+}
+
+broadcast
+meta { doc: "Broadcast a message to all listening agents." }
+fn (msg: BroadcastMessage): Map {
+    send("agents:broadcast", msg)
+}
+
+collaborate
+meta { doc: "Send a collaboration request. Responses arrive at `req.reply-event`." }
+fn (req: CollaborationRequest): Map {
+    send("agents:collaborate", req)
+}
+
+respond
+meta { doc: "Respond to a collaboration request." }
+fn (req: CollaborationRequest, answer: Str): Map {
+    send(req.reply-event, {
+        session: req.session,
+        sender: req.sender,
+        correlation-id: req.correlation-id,
+        from-agent: req.from-agent,
+        answer: answer,
+    })
+}

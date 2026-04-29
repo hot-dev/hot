@@ -1,0 +1,28 @@
+::anthropic::integration::batches ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Anthropic Message Batches API
+// =============================================================================
+// These tests require ANTHROPIC_API_KEY to be set in context (via ctx.hot or conf)
+
+test-batches-list
+meta ["test"]
+fn () {
+    // List batches - may be empty if no batches created
+    batches ::anthropic::batches/list()
+
+    // Response should have data array (may be empty)
+    assert(is-vec(batches.data), "Response should have data array")
+    // has_more should be a boolean
+    assert(is-bool(batches.has_more), "has_more should be boolean")
+}
+
+test-batches-list-with-limit
+meta ["test"]
+fn () {
+    batches ::anthropic::batches/list(5)
+
+    assert(is-vec(batches.data), "Response should have data array")
+    assert(lte(length(batches.data), 5), "Should respect limit parameter")
+}

@@ -1,0 +1,132 @@
+::slack::integration::messaging ns
+meta ["test"]
+
+::ctx ::hot::ctx
+
+SLACK_TEST_CHANNEL_ID ::hot::env/get("SLACK_TEST_CHANNEL_ID", "")
+
+test-chat-post-and-delete
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  // Step 1: Post a message
+  post-response ::slack::messaging/chat-post-message(::slack::messaging/ChatPostMessageRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    text: "Hot integration test message"
+  }))
+
+  assert(post-response.ok, `chat.postMessage should succeed. response=${to-json(post-response)}`)
+
+  if(post-response.ok, {
+    assert(post-response.channel, "chat.postMessage should return channel")
+    assert(post-response.ts, "chat.postMessage should return message timestamp")
+    assert-eq(SLACK_TEST_CHANNEL_ID, post-response.channel, "channel should match requested channel")
+
+    // Step 2: Get permalink for the message
+    permalink-response ::slack::messaging/chat-get-permalink(::slack::messaging/ChatGetPermalinkRequest({
+      channel: SLACK_TEST_CHANNEL_ID,
+      message_ts: post-response.ts
+    }))
+
+    assert(permalink-response.ok, `chat.getPermalink should succeed. response=${to-json(permalink-response)}`)
+    if(permalink-response.ok, {
+      assert(permalink-response.permalink, "chat.getPermalink should return permalink URL")
+      assert(contains(permalink-response.permalink, "slack.com"), "permalink should contain slack.com")
+    }, null)
+
+    // Step 3: Update the message
+    update-response ::slack::messaging/chat-update(::slack::messaging/ChatUpdateRequest({
+      channel: SLACK_TEST_CHANNEL_ID,
+      ts: post-response.ts,
+      text: "Hot integration test message (updated)"
+    }))
+
+    assert(update-response.ok, `chat.update should succeed. response=${to-json(update-response)}`)
+    if(update-response.ok, {
+      assert-eq(post-response.ts, update-response.ts, "updated message ts should match original")
+    }, null)
+
+    // Step 4: Clean up - delete the message
+    delete-response ::slack::messaging/chat-delete(::slack::messaging/ChatDeleteRequest({
+      channel: SLACK_TEST_CHANNEL_ID,
+      ts: post-response.ts
+    }))
+
+    assert(delete-response.ok, `chat.delete should succeed. response=${to-json(delete-response)}`)
+  }, null)
+}
+
+test-reactions-add-and-remove
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  // Post a message to react to
+  post-response ::slack::messaging/chat-post-message(::slack::messaging/ChatPostMessageRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    text: "Reactions test message"
+  }))
+  assert(post-response.ok, `chat.postMessage should succeed for reaction test. response=${to-json(post-response)}`)
+
+  // Add a reaction
+  add-response ::slack::messaging/reactions-add(::slack::messaging/ReactionsAddRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    timestamp: post-response.ts,
+    name: "thumbsup"
+  }))
+  assert(add-response.ok, `reactions.add should succeed. response=${to-json(add-response)}`)
+
+  // Remove the reaction
+  remove-response ::slack::messaging/reactions-remove(::slack::messaging/ReactionsRemoveRequest({
+    name: "thumbsup",
+    channel: SLACK_TEST_CHANNEL_ID,
+    timestamp: post-response.ts
+  }))
+  assert(remove-response.ok, `reactions.remove should succeed. response=${to-json(remove-response)}`)
+
+  // Clean up
+  ::slack::messaging/chat-delete(::slack::messaging/ChatDeleteRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    ts: post-response.ts
+  }))
+}
+
+test-pins-add-and-remove
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  // Post a message to pin
+  post-response ::slack::messaging/chat-post-message(::slack::messaging/ChatPostMessageRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    text: "Pin test message"
+  }))
+  assert(post-response.ok, `chat.postMessage should succeed for pin test. response=${to-json(post-response)}`)
+
+  // Pin the message
+  pin-response ::slack::messaging/pins-add(::slack::messaging/PinsAddRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    timestamp: post-response.ts
+  }))
+  assert(pin-response.ok, `pins.add should succeed. response=${to-json(pin-response)}`)
+
+  // List pins
+  list-response ::slack::messaging/pins-list(::slack::messaging/PinsListRequest({
+    channel: SLACK_TEST_CHANNEL_ID
+  }))
+  assert(list-response.ok, `pins.list should succeed. response=${to-json(list-response)}`)
+
+  // Unpin the message
+  unpin-response ::slack::messaging/pins-remove(::slack::messaging/PinsRemoveRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    timestamp: post-response.ts
+  }))
+  assert(unpin-response.ok, `pins.remove should succeed. response=${to-json(unpin-response)}`)
+
+  // Clean up
+  ::slack::messaging/chat-delete(::slack::messaging/ChatDeleteRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    ts: post-response.ts
+  }))
+}

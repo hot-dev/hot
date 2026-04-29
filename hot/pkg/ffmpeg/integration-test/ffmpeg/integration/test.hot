@@ -1,0 +1,77 @@
+::ffmpeg::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::ffmpeg
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-ffmpeg
+// ============================================================================
+
+
+// Use a publicly available small test video
+// Big Buck Bunny trailer — short, small, widely available
+TEST_VIDEO_URL "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
+
+// Helper: download a test file to hot:// storage for use as input
+setup-test-input fn (url: Str, name: Str): Str {
+    hot-path `hot://ffmpeg-test/${name}`
+    cmd `wget -q -O /tmp/test-file '${url}' && hotbox cp /tmp/test-file '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 60,
+        size: "nano",
+        network: "internet",
+    })
+    result ::hot::task/await(info.id)
+    hot-path
+}
+
+test-probe-real-video
+meta ["test"] fn () {
+    input setup-test-input(TEST_VIDEO_URL, "probe-test.mp4")
+    info ::ffmpeg/probe(input)
+    assert(is-some(info.format), "probe should return format info")
+    assert(is-some(info.streams), "probe should return streams")
+    assert(gt(length(info.streams), 0), "should have at least one stream")
+}
+
+test-thumbnail-real-video
+meta ["test"] fn () {
+    input setup-test-input(TEST_VIDEO_URL, "thumb-test.mp4")
+    result ::ffmpeg/thumbnail(input)
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("jpg", result.format, "default format should be jpg")
+    assert(starts-with(result.url, "hot://ffmpeg/"), "URL should be in ffmpeg namespace")
+}
+
+test-thumbnail-with-options
+meta ["test"] fn () {
+    input setup-test-input(TEST_VIDEO_URL, "thumb-opts-test.mp4")
+    result ::ffmpeg/thumbnail(input, {
+        time: "00:00:03",
+        width: 160,
+        format: "png",
+    })
+    assert-eq("png", result.format, "should be PNG format")
+    assert(contains(result.url, ".png"), "URL should have .png extension")
+}
+
+test-extract-audio-real-video
+meta ["test"] fn () {
+    input setup-test-input(TEST_VIDEO_URL, "audio-test.mp4")
+    result ::ffmpeg/extract-audio(input)
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("mp3", result.format, "default format should be mp3")
+}
+
+test-transcode-real-video
+meta ["test"] fn () {
+    input setup-test-input(TEST_VIDEO_URL, "transcode-test.mp4")
+    result ::ffmpeg/transcode(input, {
+        format: "webm",
+        size: "medium",
+    })
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("webm", result.format, "should be webm format")
+}

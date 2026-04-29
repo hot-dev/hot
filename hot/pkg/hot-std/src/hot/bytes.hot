@@ -1,0 +1,120 @@
+::hot::bytes ns
+meta {doc: """Byte array operations for binary protocol support."""}
+
+to-int
+meta {
+    doc: """
+    Convert bytes to a signed integer.
+    Default is big-endian (network byte order). Supports 1-8 bytes.
+
+    **Example**
+
+    ```hot
+    // Big-endian (default)
+    to-int(Bytes([0, 0, 0, 16]))     // 16
+    to-int(Bytes([0, 16]))           // 16
+
+    // Little-endian
+    to-int(Bytes([16, 0, 0, 0]), "le")  // 16
+    ```
+    """
+}
+fn
+(bytes: Bytes): Int {
+    call-lib(::hot::bytes/to-int, [bytes])
+},
+(bytes: Bytes, endian: Str): Int {
+    call-lib(::hot::bytes/to-int, [bytes, endian])
+}
+
+
+to-uint
+meta {
+    doc: """
+    Convert bytes to an unsigned integer.
+    Default is big-endian. Supports 1-8 bytes.
+    Values > i64::MAX will wrap to negative.
+
+    **Example**
+
+    ```hot
+    // Unsigned interpretation
+    to-uint(Bytes([255, 255]))  // 65535 (not -1)
+    ```
+    """
+}
+fn
+(bytes: Bytes): Int {
+    call-lib(::hot::bytes/to-uint, [bytes])
+},
+(bytes: Bytes, endian: Str): Int {
+    call-lib(::hot::bytes/to-uint, [bytes, endian])
+}
+
+
+from-int
+meta {
+    doc: """
+    Convert an integer to bytes with specified size (1-8 bytes).
+    Default is big-endian (network byte order).
+
+    **Example**
+
+    ```hot
+    // Big-endian (default)
+    from-int(256, 2)        // Bytes([1, 0])
+    from-int(16, 4)         // Bytes([0, 0, 0, 16])
+
+    // Little-endian
+    from-int(256, 2, "le")  // Bytes([0, 1])
+    ```
+    """
+}
+fn
+(value: Int, size: Int): Bytes {
+    call-lib(::hot::bytes/from-int, [value, size])
+},
+(value: Int, size: Int, endian: Str): Bytes {
+    call-lib(::hot::bytes/from-int, [value, size, endian])
+}
+
+
+crc32
+meta {
+    doc: """
+    Calculate CRC32 checksum (IEEE polynomial).
+    Used by protocols like AWS Event Stream for integrity checks.
+
+    **Example**
+
+    ```hot
+    crc32("hello")                  // 907060870
+    crc32(Bytes([72, 101, 108, 108, 111]))  // 907060870 (same)
+
+    // Verify message integrity
+    message-crc crc32(message-bytes)
+    eq(message-crc, expected-crc)
+    ```
+    """
+}
+fn (data: Bytes | Str | Vec): Int {
+    call-lib(::hot::bytes/crc32, [data])
+}
+
+
+to-vec
+meta {
+    doc: """
+    Convert bytes to a vector of integers for easier manipulation.
+
+    **Example**
+
+    ```hot
+    data Bytes([1, 2, 3])
+    to-vec(data)  // [1, 2, 3]
+    ```
+    """
+}
+fn (bytes: Bytes): Vec<Int> {
+    call-lib(::hot::bytes/to-vec, [bytes])
+}

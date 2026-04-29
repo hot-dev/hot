@@ -1,0 +1,170 @@
+::ai::rag ns
+meta {
+    doc: "Retrieve-Augment-Generate: compose memory search with AI generation. Accepts chat-fn parameter for provider-free AI calls."
+}
+
+ChatOptions ::ai::chat/ChatOptions
+AgentMemory ::ai::memory/AgentMemory
+Thread      ::ai::memory/Thread
+Role        ::ai::message/Role
+
+// ============================================================================
+// Pure helpers (testable without stores)
+// ============================================================================
+
+format-session-results
+meta {
+    doc: "Format a Vec of store search results (with v.sender-name, v.content) as `[name]: content` lines."
+}
+fn (results: Vec): Vec {
+    map(results, (r) {
+        `[${or(r.value.sender-name, "unknown")}]: ${r.value.content}`
+    })
+}
+
+format-kb-results
+meta { doc: "Format a Vec of KB search results as `[KB] content` lines." }
+fn (results: Vec): Vec {
+    map(results, (r) {
+        content get(r.value, "content", to-json(r.value))
+        `[KB] ${content}`
+    })
+}
+
+format-thread-lines
+meta { doc: "Format a Vec of ChatMessages as `role: content` lines." }
+fn (history: Vec): Str {
+    cond {
+        is-empty(history) => { "" }
+        => {
+            lines map(history, (m) {
+                role-str match m.role {
+                    Role.User      => { "user" }
+                    Role.Assistant => { "assistant" }
+                    Role.System    => { "system" }
+                }
+                `${role-str}: ${m.content}`
+            })
+            concat("Previous conversation:\n", join(lines, "\n"), "\n---\n")
+        }
+    }
+}
+
+build-rag-prompt
+meta {
+    doc: "Compose a RAG prompt from optional history, optional context, and a question."
+}
+fn (history-text: Str, context: Str, question: Str): Str {
+    cond {
+        and(is-empty(context), is-empty(history-text)) => { question }
+        is-empty(history-text) => {
+            ```
+            Context from memory:
+            ${context}
+
+            ---
+            Question: ${question}
+            ```
+        }
+
+        is-empty(context) => {
+            ```
+            ${history-text}Question: ${question}
+            ```
+        }
+        => {
+            ```
+            ${history-text}Context from memory:
+            ${context}
+
+            ---
+            Question: ${question}
+            ```
+        }
+    }
+}
+
+DEFAULT_SYSTEM "You are a helpful AI assistant. Answer based on the provided context. Cite sources when possible."
+DEFAULT_SYSTEM_THREAD "You are a helpful AI assistant. Answer based on the provided context and conversation history."
+DEFAULT_SUMMARY_SYSTEM "You are a helpful assistant that summarizes conversations concisely."
+DEFAULT_SUMMARY_INSTRUCTION "Summarize the key topics, decisions, and action items from this conversation."
+
+// ============================================================================
+// Core RAG (impure — uses AgentMemory)
+// ============================================================================
+
+build-context
+meta {
+    doc: "Search session memory and KB, format as a context string for AI prompts. Options: limit (default 10), min-score (default 0.5)."
+}
+fn (mem: AgentMemory, query: Str, opts: Map?): Str {
+    limit get(or(opts, {}), "limit", 10)
+    min-score get(or(opts, {}), "min-score", 0.5)
+    search-opts {limit: limit, min-score: min-score}
+
+    session-results ::ai::memory/recall(mem, query, search-opts)
+    kb-results ::ai::memory/search-kb(mem, query, {limit: limit})
+
+    all-lines concat(format-session-results(session-results), format-kb-results(kb-results))
+    if(is-empty(all-lines), "", join(all-lines, "\n"))
+}
+
+ask
+meta {
+    doc: "Search memory for relevant context, then generate an AI answer. Returns {answer, sources}."
+}
+fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
+    context build-context(mem, question, opts)
+    prompt build-rag-prompt("", context, question)
+    system or(chat-opts.system, DEFAULT_SYSTEM)
+    answer chat-opts.chat-fn(chat-opts.model, prompt, system)
+    sources ::ai::memory/recall(mem, question, opts)
+    {answer: answer, sources: sources}
+}
+
+ask-with-thread
+meta {
+    doc: "Like ask, but includes thread history for multi-turn context. Appends question and answer to the thread automatically."
+}
+fn (mem: AgentMemory, t: Thread, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
+    context build-context(mem, question, opts)
+    history ::ai::memory/thread-history(t, null)
+    history-text format-thread-lines(history)
+    prompt build-rag-prompt(history-text, context, question)
+    system or(chat-opts.system, DEFAULT_SYSTEM_THREAD)
+    answer chat-opts.chat-fn(chat-opts.model, prompt, system)
+
+    ::ai::memory/thread-add(t, Role.User, question)
+    ::ai::memory/thread-add(t, Role.Assistant, answer)
+
+    sources ::ai::memory/recall(mem, question, opts)
+    {answer: answer, sources: sources}
+}
+
+summarize
+meta {
+    doc: "Summarize recent messages from session memory using AI. Options: hours, limit, instruction."
+}
+fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Str {
+    messages ::ai::memory/recent(mem, opts)
+
+    cond {
+        is-empty(messages) => { "No messages found in the time window." }
+        => {
+            lines map(messages, (entry) {
+                `[${or(entry.value.sender-name, "unknown")}]: ${entry.value.content}`
+            })
+            instruction get(or(opts, {}), "instruction", DEFAULT_SUMMARY_INSTRUCTION)
+            prompt ```
+            Here are ${length(messages)} recent messages:
+
+            ${join(lines, "\n")}
+
+            ---
+            ${instruction}
+            ```
+            system or(chat-opts.system, DEFAULT_SUMMARY_SYSTEM)
+            chat-opts.chat-fn(chat-opts.model, prompt, system)
+        }
+    }
+}

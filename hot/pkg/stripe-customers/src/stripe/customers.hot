@@ -1,0 +1,2680 @@
+::stripe::stripe::customers ns
+
+api-request ::stripe::api/request
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+PaymentMethodSofort type {
+    country: Str?
+}
+
+PaymentMethodAffirm type {
+
+}
+
+PaymentMethodSwish type {
+
+}
+
+PaymentMethodMobilepay type {
+
+}
+
+PaymentMethodTwint type {
+
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransfer type {
+    eu_bank_transfer: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceEuBankTransfer?,
+    gb_bank_transfer: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceGbBankTransfer?,
+    jp_bank_transfer: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceJpBankTransfer?,
+    reference: Str?,
+    type: "eu_bank_transfer" | "gb_bank_transfer" | "jp_bank_transfer" | "mx_bank_transfer" | "us_bank_transfer",
+    us_bank_transfer: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceUsBankTransfer?
+}
+
+PaymentMethod type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflows type {
+    inputs: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs?
+}
+
+PaymentMethodPaynow type {
+
+}
+
+TokenCardNetworks type {
+    preferred: Str?
+}
+
+PaymentFlowsPaymentIntentPresentmentDetails type {
+    presentment_amount: Int,
+    presentment_currency: Str
+}
+
+CustomerSessionResourceComponentsResourcePaymentElement type {
+    enabled: Bool,
+    features: Any?
+}
+
+PaymentMethodMbWay type {
+
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceFundedTransaction type {
+    bank_transfer: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransfer
+}
+
+ConfirmationToken type {
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    mandate_data: Any?,
+    object: "confirmation_token",
+    payment_intent: Str?,
+    payment_method_options: Any?,
+    payment_method_preview: Any?,
+    return_url: Str?,
+    setup_future_usage: "off_session" | "on_session"?,
+    setup_intent: Str?,
+    shipping: Any?,
+    use_stripe_sdk: Bool
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceAppliedToPaymentTransaction type {
+    payment_intent: Any
+}
+
+PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet type {
+    type: "apple_pay" | "google_pay" | "samsung_pay" | "unknown"
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceUsBankTransfer type {
+    network: "ach" | "domestic_wire_us" | "swift"?,
+    sender_name: Str?
+}
+
+PaymentMethodCardPresent type {
+    brand: Str?,
+    brand_product: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    offline: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?,
+    wallet: PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet?
+}
+
+PaymentMethodRevolutPay type {
+
+}
+
+PaymentMethodP24 type {
+    bank: "alior_bank" | "bank_millennium" | "bank_nowy_bfg_sa" | "bank_pekao_sa" | "banki_spbdzielcze" | "blik" | "bnp_paribas" | "boz" | "citi_handlowy" | "credit_agricole" | "envelobank" | "etransfer_pocztowy24" | "getin_bank" | "ideabank" | "ing" | "inteligo" | "mbank_mtransfer" | "nest_przelew" | "noble_pay" | "pbac_z_ipko" | "plus_bank" | "santander_przelew24" | "tmobile_usbugi_bankowe" | "toyota_bank" | "velobank" | "volkswagen_bank"?
+}
+
+PaymentMethodKakaoPay type {
+
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceTransferredToBalance type {
+    balance_transaction: Any
+}
+
+CustomerSessionResourceComponentsResourcePricingTable type {
+    enabled: Bool
+}
+
+PaymentMethodBlik type {
+
+}
+
+PaymentFlowsPaymentDetails type {
+    customer_reference: Str?,
+    order_reference: Str?
+}
+
+PaymentIntent type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax type {
+    calculation: Str
+}
+
+Address type {
+    city: Str?,
+    country: Str?,
+    line1: Str?,
+    line2: Str?,
+    postal_code: Str?,
+    state: Str?
+}
+
+InvoiceSettingCustomerSetting type {
+    custom_fields: Vec<InvoiceSettingCustomField>?,
+    default_payment_method: Any?,
+    footer: Str?,
+    rendering_options: Any?
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceEuBankTransfer type {
+    bic: Str?,
+    iban_last4: Str?,
+    sender_name: Str?
+}
+
+PaymentMethodKonbini type {
+
+}
+
+PaymentMethodNzBankAccount type {
+    account_holder_name: Str?,
+    bank_code: Str,
+    bank_name: Str,
+    branch_code: Str,
+    last4: Str,
+    suffix: Str?
+}
+
+SetupIntent type {
+    application: Any?,
+    attach_to_self: Bool?,
+    automatic_payment_methods: Any?,
+    cancellation_reason: "abandoned" | "duplicate" | "requested_by_customer"?,
+    client_secret: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    flow_directions: Vec<"inbound" | "outbound">?,
+    id: Str,
+    last_setup_error: Any?,
+    latest_attempt: Any?,
+    livemode: Bool,
+    mandate: Any?,
+    metadata: Map?,
+    next_action: Any?,
+    object: "setup_intent",
+    on_behalf_of: Any?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>,
+    single_use_mandate: Any?,
+    status: "canceled" | "processing" | "requires_action" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    usage: Str
+}
+
+FundingInstructionsBankTransfer type {
+    country: Str,
+    financial_addresses: Vec<FundingInstructionsBankTransferFinancialAddress>,
+    type: "eu_bank_transfer" | "jp_bank_transfer"
+}
+
+PaymentMethodAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceGbBankTransfer type {
+    account_number_last4: Str?,
+    sender_name: Str?,
+    sort_code: Str?
+}
+
+FundingInstructions type {
+    bank_transfer: FundingInstructionsBankTransfer,
+    currency: Str,
+    funding_type: "bank_transfer",
+    livemode: Bool,
+    object: "funding_instructions"
+}
+
+CustomerBalanceTransaction type {
+    amount: Int,
+    checkout_session: Any?,
+    created: Int,
+    credit_note: Any?,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    description: Str?,
+    ending_balance: Int,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "customer_balance_transaction",
+    type: "adjustment" | "applied_to_invoice" | "checkout_session_subscription_payment" | "checkout_session_subscription_payment_canceled" | "credit_note" | "initial" | "invoice_overpaid" | "invoice_too_large" | "invoice_too_small" | "migration" | "unapplied_from_invoice" | "unspent_receiver_credit"
+}
+
+PaymentMethodAlma type {
+
+}
+
+PaymentMethodIdeal type {
+    bank: "abn_amro" | "asn_bank" | "bunq" | "buut" | "finom" | "handelsbanken" | "ing" | "knab" | "mollie" | "moneyou" | "n26" | "nn" | "rabobank" | "regiobank" | "revolut" | "sns_bank" | "triodos_bank" | "van_lanschot" | "yoursafe"?,
+    bic: "ABNANL2A" | "ASNBNL21" | "BITSNL2A" | "BUNQNL2A" | "BUUTNL2A" | "FNOMNL22" | "FVLBNL22" | "HANDNL2A" | "INGBNL2A" | "KNABNL2H" | "MLLENL2A" | "MOYONL21" | "NNBANL2G" | "NTSBDEB1" | "RABONL2U" | "RBRBNL21" | "REVOIE23" | "REVOLT21" | "SNSBNL2A" | "TRIONL2U"?
+}
+
+TaxId type {
+    country: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "tax_id",
+    owner: Any?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str,
+    verification: Any?
+}
+
+PaymentMethodKrCard type {
+    brand: "bc" | "citi" | "hana" | "hyundai" | "jeju" | "jeonbuk" | "kakaobank" | "kbank" | "kdbbank" | "kookmin" | "kwangju" | "lotte" | "mg" | "nh" | "post" | "samsung" | "savingsbank" | "shinhan" | "shinhyup" | "suhyup" | "tossbank" | "woori"?,
+    last4: Str?
+}
+
+PaymentMethodPayByBank type {
+
+}
+
+ApiErrors type {
+    advice_code: Str?,
+    charge: Str?,
+    code: Str?,
+    decline_code: Str?,
+    doc_url: Str?,
+    message: Str?,
+    network_advice_code: Str?,
+    network_decline_code: Str?,
+    param: Str?,
+    payment_intent: PaymentIntent?,
+    payment_method: PaymentMethod?,
+    payment_method_type: Str?,
+    request_log_url: Str?,
+    setup_intent: SetupIntent?,
+    source: Any?,
+    type: "api_error" | "card_error" | "idempotency_error" | "invalid_request_error"
+}
+
+PaymentMethodPayto type {
+    bsb_number: Str?,
+    last4: Str?,
+    pay_id: Str?
+}
+
+PaymentMethodAfterpayClearpay type {
+
+}
+
+PaymentMethodBacsDebit type {
+    fingerprint: Str?,
+    last4: Str?,
+    sort_code: Str?
+}
+
+Card type {
+    account: Any?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line1_check: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    address_zip_check: Str?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    available_payout_methods: Vec<"instant" | "standard">?,
+    brand: Str,
+    country: Str?,
+    currency: Str?,
+    customer: Any?,
+    cvc_check: Str?,
+    default_for_currency: Bool?,
+    dynamic_last4: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    id: Str,
+    iin: Str?,
+    last4: Str,
+    metadata: Map?,
+    name: Str?,
+    networks: TokenCardNetworks?,
+    object: "card",
+    regulated_status: "regulated" | "unregulated"?,
+    status: Str?,
+    tokenization_method: Str?
+}
+
+PaymentMethodPix type {
+
+}
+
+PaymentMethodOxxo type {
+
+}
+
+PaymentFlowsPrivatePaymentMethodsAlipay type {
+
+}
+
+PaymentMethodFpx type {
+    bank: "affin_bank" | "agrobank" | "alliance_bank" | "ambank" | "bank_islam" | "bank_muamalat" | "bank_of_china" | "bank_rakyat" | "bsn" | "cimb" | "deutsche_bank" | "hong_leong_bank" | "hsbc" | "kfh" | "maybank2e" | "maybank2u" | "ocbc" | "pb_enterprise" | "public_bank" | "rhb" | "standard_chartered" | "uob"
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs type {
+    tax: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax?
+}
+
+PaymentMethodKlarna type {
+    dob: Any?
+}
+
+CustomerTax type {
+    automatic_tax: "failed" | "not_collecting" | "supported" | "unrecognized_location",
+    ip_address: Str?,
+    location: Any?,
+    provider: "anrok" | "avalara" | "sphere" | "stripe"
+}
+
+DiscountSource type {
+    coupon: Any?,
+    type: "coupon"
+}
+
+DeletedDiscount type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    deleted: Bool,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+DeletedCustomer type {
+    deleted: Bool,
+    id: Str,
+    object: "customer"
+}
+
+PaymentMethodCashapp type {
+    buyer_id: Str?,
+    cashtag: Str?
+}
+
+PaymentMethodCrypto type {
+
+}
+
+CustomerSessionResourceComponents type {
+    buy_button: CustomerSessionResourceComponentsResourceBuyButton,
+    customer_sheet: CustomerSessionResourceComponentsResourceCustomerSheet,
+    mobile_payment_element: CustomerSessionResourceComponentsResourceMobilePaymentElement,
+    payment_element: CustomerSessionResourceComponentsResourcePaymentElement,
+    pricing_table: CustomerSessionResourceComponentsResourcePricingTable
+}
+
+PaymentMethodAcssDebit type {
+    bank_name: Str?,
+    fingerprint: Str?,
+    institution_number: Str?,
+    last4: Str?,
+    transit_number: Str?
+}
+
+CustomerSessionResourceComponentsResourceCustomerSheet type {
+    enabled: Bool,
+    features: Any?
+}
+
+SubscriptionsResourceBillingMode type {
+    flexible: Any?,
+    type: "classic" | "flexible",
+    updated_at: Int?
+}
+
+PaymentMethodWechatPay type {
+
+}
+
+FundingInstructionsBankTransferSpeiRecord type {
+    account_holder_address: Address,
+    account_holder_name: Str,
+    bank_address: Address,
+    bank_code: Str,
+    bank_name: Str,
+    clabe: Str
+}
+
+PaymentMethodNaverPay type {
+    buyer_id: Str?,
+    funding: "card" | "points"
+}
+
+CustomerCashBalanceTransaction type {
+    adjusted_for_overdraft: CustomerBalanceResourceCashBalanceTransactionResourceAdjustedForOverdraft?,
+    applied_to_payment: CustomerBalanceResourceCashBalanceTransactionResourceAppliedToPaymentTransaction?,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    ending_balance: Int,
+    funded: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransaction?,
+    id: Str,
+    livemode: Bool,
+    net_amount: Int,
+    object: "customer_cash_balance_transaction",
+    refunded_from_payment: CustomerBalanceResourceCashBalanceTransactionResourceRefundedFromPaymentTransaction?,
+    transferred_to_balance: CustomerBalanceResourceCashBalanceTransactionResourceTransferredToBalance?,
+    type: "adjusted_for_overdraft" | "applied_to_payment" | "funded" | "funding_reversed" | "refunded_from_payment" | "return_canceled" | "return_initiated" | "transferred_to_balance" | "unapplied_from_payment",
+    unapplied_from_payment: CustomerBalanceResourceCashBalanceTransactionResourceUnappliedFromPaymentTransaction?
+}
+
+ConnectAccountReference type {
+    account: Any?,
+    type: "account" | "self"
+}
+
+CashBalance type {
+    available: Map?,
+    customer: Str,
+    customer_account: Str?,
+    livemode: Bool,
+    object: "cash_balance",
+    settings: CustomerBalanceCustomerBalanceSettings
+}
+
+RadarRadarOptions type {
+    session: Str?
+}
+
+SubscriptionsResourceSubscriptionInvoiceSettings type {
+    account_tax_ids: Vec?,
+    issuer: ConnectAccountReference
+}
+
+PaymentMethodBancontact type {
+
+}
+
+PaymentMethodEps type {
+    bank: "arzte_und_apotheker_bank" | "austrian_anadi_bank_ag" | "bank_austria" | "bankhaus_carl_spangler" | "bankhaus_schelhammer_und_schattera_ag" | "bawag_psk_ag" | "bks_bank_ag" | "brull_kallmus_bank_ag" | "btv_vier_lander_bank" | "capital_bank_grawe_gruppe_ag" | "deutsche_bank_ag" | "dolomitenbank" | "easybank_ag" | "erste_bank_und_sparkassen" | "hypo_alpeadriabank_international_ag" | "hypo_bank_burgenland_aktiengesellschaft" | "hypo_noe_lb_fur_niederosterreich_u_wien" | "hypo_oberosterreich_salzburg_steiermark" | "hypo_tirol_bank_ag" | "hypo_vorarlberg_bank_ag" | "marchfelder_bank" | "oberbank_ag" | "raiffeisen_bankengruppe_osterreich" | "schoellerbank_ag" | "sparda_bank_wien" | "volksbank_gruppe" | "volkskreditbank_ag" | "vr_bank_braunau"?
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceFundedTransactionResourceBankTransferResourceJpBankTransfer type {
+    sender_bank: Str?,
+    sender_branch: Str?,
+    sender_name: Str?
+}
+
+PaymentMethodMultibanco type {
+
+}
+
+Subscription type {
+    application: Any?,
+    application_fee_percent: Dec?,
+    automatic_tax: SubscriptionAutomaticTax,
+    billing_cycle_anchor: Int,
+    billing_cycle_anchor_config: Any?,
+    billing_mode: SubscriptionsResourceBillingMode,
+    billing_thresholds: Any?,
+    cancel_at: Int?,
+    cancel_at_period_end: Bool,
+    canceled_at: Int?,
+    cancellation_details: Any?,
+    collection_method: "charge_automatically" | "send_invoice",
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    days_until_due: Int?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>?,
+    description: Str?,
+    discounts: Vec,
+    ended_at: Int?,
+    id: Str,
+    invoice_settings: SubscriptionsResourceSubscriptionInvoiceSettings,
+    items: Map,
+    latest_invoice: Any?,
+    livemode: Bool,
+    metadata: Map,
+    next_pending_invoice_item_invoice: Int?,
+    object: "subscription",
+    on_behalf_of: Any?,
+    pause_collection: Any?,
+    payment_settings: Any?,
+    pending_invoice_item_interval: Any?,
+    pending_setup_intent: Any?,
+    pending_update: Any?,
+    schedule: Any?,
+    start_date: Int,
+    status: "active" | "canceled" | "incomplete" | "incomplete_expired" | "past_due" | "paused" | "trialing" | "unpaid",
+    test_clock: Any?,
+    transfer_data: Any?,
+    trial_end: Int?,
+    trial_settings: Any?,
+    trial_start: Int?
+}
+
+Error type {
+    error: ApiErrors
+}
+
+FundingInstructionsBankTransferZenginRecord type {
+    account_holder_address: Address,
+    account_holder_name: Str?,
+    account_number: Str?,
+    account_type: Str?,
+    bank_address: Address,
+    bank_code: Str?,
+    bank_name: Str?,
+    branch_code: Str?,
+    branch_name: Str?
+}
+
+PaymentMethodGiropay type {
+
+}
+
+PaymentMethodCard type {
+    brand: Str,
+    checks: Any?,
+    country: Str?,
+    display_brand: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    generated_from: Any?,
+    last4: Str,
+    networks: Any?,
+    regulated_status: "regulated" | "unregulated"?,
+    three_d_secure_usage: Any?,
+    wallet: Any?
+}
+
+PaymentSource type {
+
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceRefundedFromPaymentTransaction type {
+    refund: Any
+}
+
+FundingInstructionsBankTransferSwiftRecord type {
+    account_holder_address: Address,
+    account_holder_name: Str,
+    account_number: Str,
+    account_type: Str,
+    bank_address: Address,
+    bank_name: Str,
+    swift_code: Str
+}
+
+PaymentMethodPaypal type {
+    country: Str?,
+    payer_email: Str?,
+    payer_id: Str?
+}
+
+PaymentMethodCustomerBalance type {
+
+}
+
+PaymentMethodGrabpay type {
+
+}
+
+PaymentMethodAmazonPay type {
+
+}
+
+CustomerSessionResourceComponentsResourceBuyButton type {
+    enabled: Bool
+}
+
+Customer type {
+    address: Any?,
+    balance: Int?,
+    business_name: Str?,
+    cash_balance: Any?,
+    created: Int,
+    currency: Str?,
+    customer_account: Str?,
+    default_source: Any?,
+    delinquent: Bool?,
+    description: Str?,
+    discount: Any?,
+    email: Str?,
+    id: Str,
+    individual_name: Str?,
+    invoice_credit_balance: Map?,
+    invoice_prefix: Str?,
+    invoice_settings: InvoiceSettingCustomerSetting?,
+    livemode: Bool,
+    metadata: Map?,
+    name: Str?,
+    next_invoice_sequence: Int?,
+    object: "customer",
+    phone: Str?,
+    preferred_locales: Vec<Str>?,
+    shipping: Any?,
+    sources: Map?,
+    subscriptions: Map?,
+    tax: CustomerTax?,
+    tax_exempt: "exempt" | "none" | "reverse"?,
+    tax_ids: Map?,
+    test_clock: Any?
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceUnappliedFromPaymentTransaction type {
+    payment_intent: Any
+}
+
+PaymentMethodCustom type {
+    display_name: Str?,
+    logo: Any?,
+    type: Str
+}
+
+FundingInstructionsBankTransferAbaRecord type {
+    account_holder_address: Address,
+    account_holder_name: Str,
+    account_number: Str,
+    account_type: Str,
+    bank_address: Address,
+    bank_name: Str,
+    routing_number: Str
+}
+
+PaymentMethodSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    generated_from: Any?,
+    last4: Str?
+}
+
+PaymentMethodUsBankAccount type {
+    account_holder_type: "company" | "individual"?,
+    account_type: "checking" | "savings"?,
+    bank_name: Str?,
+    financial_connections_account: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    networks: Any?,
+    routing_number: Str?,
+    status_details: Any?
+}
+
+CustomerSession type {
+    client_secret: Str,
+    components: CustomerSessionResourceComponents?,
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    expires_at: Int,
+    livemode: Bool,
+    object: "customer_session"
+}
+
+Token type {
+    bank_account: BankAccount?,
+    card: Card?,
+    client_ip: Str?,
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    object: "token",
+    type: Str,
+    used: Bool
+}
+
+PaymentMethodBillie type {
+
+}
+
+TaxRate type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+FundingInstructionsBankTransferIbanRecord type {
+    account_holder_address: Address,
+    account_holder_name: Str,
+    bank_address: Address,
+    bic: Str,
+    country: Str,
+    iban: Str
+}
+
+SubscriptionAutomaticTax type {
+    disabled_reason: "requires_location_inputs"?,
+    enabled: Bool,
+    liability: Any?
+}
+
+PaymentMethodLink type {
+    email: Str?
+}
+
+PaymentMethodPayco type {
+
+}
+
+PaymentMethodSamsungPay type {
+
+}
+
+CustomerSessionResourceComponentsResourceMobilePaymentElement type {
+    enabled: Bool,
+    features: Any?
+}
+
+PaymentMethodSatispay type {
+
+}
+
+PaymentMethodZip type {
+
+}
+
+Discount type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    end: Int?,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+CustomerBalanceResourceCashBalanceTransactionResourceAdjustedForOverdraft type {
+    balance_transaction: Any,
+    linked_transaction: Any
+}
+
+FundingInstructionsBankTransferFinancialAddress type {
+    aba: FundingInstructionsBankTransferAbaRecord?,
+    iban: FundingInstructionsBankTransferIbanRecord?,
+    sort_code: FundingInstructionsBankTransferSortCodeRecord?,
+    spei: FundingInstructionsBankTransferSpeiRecord?,
+    supported_networks: Vec<"ach" | "bacs" | "domestic_wire_us" | "fps" | "sepa" | "spei" | "swift" | "zengin">?,
+    swift: FundingInstructionsBankTransferSwiftRecord?,
+    type: "aba" | "iban" | "sort_code" | "spei" | "swift" | "zengin",
+    zengin: FundingInstructionsBankTransferZenginRecord?
+}
+
+DeletedTaxId type {
+    deleted: Bool,
+    id: Str,
+    object: "tax_id"
+}
+
+InvoiceSettingCustomField type {
+    name: Str,
+    value: Str
+}
+
+PaymentMethodInteracPresent type {
+    brand: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?
+}
+
+BankAccount type {
+    account: Any?,
+    account_holder_name: Str?,
+    account_holder_type: Str?,
+    account_type: Str?,
+    available_payout_methods: Vec<"instant" | "standard">?,
+    bank_name: Str?,
+    country: Str,
+    currency: Str,
+    customer: Any?,
+    default_for_currency: Bool?,
+    fingerprint: Str?,
+    future_requirements: Any?,
+    id: Str,
+    last4: Str,
+    metadata: Map?,
+    object: "bank_account",
+    requirements: Any?,
+    routing_number: Str?,
+    status: Str
+}
+
+PaymentMethodPromptpay type {
+
+}
+
+CustomerBalanceCustomerBalanceSettings type {
+    reconciliation_mode: "automatic" | "manual",
+    using_merchant_default: Bool
+}
+
+PaymentMethodBoleto type {
+    tax_id: Str
+}
+
+FundingInstructionsBankTransferSortCodeRecord type {
+    account_holder_address: Address,
+    account_holder_name: Str,
+    account_number: Str,
+    bank_address: Address,
+    sort_code: Str
+}
+
+BillingDetails type {
+    address: Any?,
+    email: Str?,
+    name: Str?,
+    phone: Str?,
+    tax_id: Str?
+}
+
+PostCustomerSessionsRequest type {
+    components: Map,
+    customer: Str?,
+    customer_account: Str?,
+    expand: Vec<Str>?
+}
+
+PostCustomerSessionsResponse type {
+    client_secret: Str,
+    components: CustomerSessionResourceComponents?,
+    created: Int,
+    customer: Any,
+    customer_account: Str?,
+    expires_at: Int,
+    livemode: Bool,
+    object: "customer_session"
+}
+
+
+create-customer-session
+meta {doc: """POST /v1/customer_sessions - Create a Customer Session"""}
+fn (request: PostCustomerSessionsRequest): PostCustomerSessionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customer_sessions`, {}, request)
+  if(is-ok-response(response), PostCustomerSessionsResponse(response.body), err(HttpError(response)))
+}
+
+PostTokensRequest type {
+    account: Map?,
+    bank_account: Map?,
+    card: Any?,
+    customer: Str?,
+    cvc_update: Map?,
+    expand: Vec<Str>?,
+    person: Map?,
+    pii: Map?
+}
+
+PostTokensResponse type {
+    bank_account: BankAccount?,
+    card: Card?,
+    client_ip: Str?,
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    object: "token",
+    type: Str,
+    used: Bool
+}
+
+
+create-cvc-update-token
+meta {doc: """POST /v1/tokens - Create a CVC update token"""}
+fn (request: PostTokensRequest): PostTokensResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tokens`, {}, request)
+  if(is-ok-response(response), PostTokensResponse(response.body), err(HttpError(response)))
+}
+
+GetTokensTokenRequest type {
+
+}
+
+GetTokensTokenResponse type {
+    bank_account: BankAccount?,
+    card: Card?,
+    client_ip: Str?,
+    created: Int,
+    id: Str,
+    livemode: Bool,
+    object: "token",
+    type: Str,
+    used: Bool
+}
+
+
+retrieve-token
+meta {doc: """GET /v1/tokens/{token} - Retrieve a token"""}
+fn (token: Str, expand: Str, request: GetTokensTokenRequest): GetTokensTokenResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tokens/${token}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTokensTokenResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersRequest type {
+
+}
+
+GetCustomersResponse type {
+    data: Vec<Customer>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-customers
+meta {doc: """GET /v1/customers - List all customers"""}
+fn (created: Str, email: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, test-clock: Str, request: GetCustomersRequest): GetCustomersResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers?created=${created}&email=${email}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&test_clock=${test-clock}`, {}, request)
+  if(is-ok-response(response), GetCustomersResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersRequest type {
+    address: Any?,
+    balance: Int?,
+    business_name: Any?,
+    cash_balance: Map?,
+    description: Str?,
+    email: Str?,
+    expand: Vec<Str>?,
+    individual_name: Any?,
+    invoice_prefix: Str?,
+    invoice_settings: Map?,
+    metadata: Any?,
+    name: Str?,
+    next_invoice_sequence: Int?,
+    payment_method: Str?,
+    phone: Str?,
+    preferred_locales: Vec<Str>?,
+    shipping: Any?,
+    source: Str?,
+    tax: Map?,
+    tax_exempt: "" | "exempt" | "none" | "reverse"?,
+    tax_id_data: Vec<Map>?,
+    test_clock: Str?
+}
+
+PostCustomersResponse type {
+    address: Any?,
+    balance: Int?,
+    business_name: Str?,
+    cash_balance: Any?,
+    created: Int,
+    currency: Str?,
+    customer_account: Str?,
+    default_source: Any?,
+    delinquent: Bool?,
+    description: Str?,
+    discount: Any?,
+    email: Str?,
+    id: Str,
+    individual_name: Str?,
+    invoice_credit_balance: Map?,
+    invoice_prefix: Str?,
+    invoice_settings: InvoiceSettingCustomerSetting?,
+    livemode: Bool,
+    metadata: Map?,
+    name: Str?,
+    next_invoice_sequence: Int?,
+    object: "customer",
+    phone: Str?,
+    preferred_locales: Vec<Str>?,
+    shipping: Any?,
+    sources: Map?,
+    subscriptions: Map?,
+    tax: CustomerTax?,
+    tax_exempt: "exempt" | "none" | "reverse"?,
+    tax_ids: Map?,
+    test_clock: Any?
+}
+
+
+create-customer
+meta {doc: """POST /v1/customers - Create a customer"""}
+fn (request: PostCustomersRequest): PostCustomersResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers`, {}, request)
+  if(is-ok-response(response), PostCustomersResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersSearchRequest type {
+
+}
+
+GetCustomersSearchResponse type {
+    data: Vec<Customer>,
+    has_more: Bool,
+    next_page: Str?,
+    object: "search_result",
+    total_count: Int?,
+    url: Str
+}
+
+
+search-customers
+meta {doc: """GET /v1/customers/search - Search customers"""}
+fn (expand: Str, limit: Str, page: Str, query: Str, request: GetCustomersSearchRequest): GetCustomersSearchResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/search?expand=${expand}&limit=${limit}&page=${page}&query=${query}`, {}, request)
+  if(is-ok-response(response), GetCustomersSearchResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerRequest type {
+
+}
+
+GetCustomersCustomerResponse type {
+    value: Any
+}
+
+
+retrieve-customer
+meta {doc: """GET /v1/customers/{customer} - Retrieve a customer"""}
+fn (customer: Str, expand: Str, request: GetCustomersCustomerRequest): GetCustomersCustomerResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerRequest type {
+    address: Any?,
+    balance: Int?,
+    bank_account: Any?,
+    business_name: Any?,
+    card: Any?,
+    cash_balance: Map?,
+    default_alipay_account: Str?,
+    default_bank_account: Str?,
+    default_card: Str?,
+    default_source: Str?,
+    description: Str?,
+    email: Str?,
+    expand: Vec<Str>?,
+    individual_name: Any?,
+    invoice_prefix: Str?,
+    invoice_settings: Map?,
+    metadata: Any?,
+    name: Str?,
+    next_invoice_sequence: Int?,
+    phone: Str?,
+    preferred_locales: Vec<Str>?,
+    shipping: Any?,
+    source: Str?,
+    tax: Map?,
+    tax_exempt: "" | "exempt" | "none" | "reverse"?
+}
+
+PostCustomersCustomerResponse type {
+    address: Any?,
+    balance: Int?,
+    business_name: Str?,
+    cash_balance: Any?,
+    created: Int,
+    currency: Str?,
+    customer_account: Str?,
+    default_source: Any?,
+    delinquent: Bool?,
+    description: Str?,
+    discount: Any?,
+    email: Str?,
+    id: Str,
+    individual_name: Str?,
+    invoice_credit_balance: Map?,
+    invoice_prefix: Str?,
+    invoice_settings: InvoiceSettingCustomerSetting?,
+    livemode: Bool,
+    metadata: Map?,
+    name: Str?,
+    next_invoice_sequence: Int?,
+    object: "customer",
+    phone: Str?,
+    preferred_locales: Vec<Str>?,
+    shipping: Any?,
+    sources: Map?,
+    subscriptions: Map?,
+    tax: CustomerTax?,
+    tax_exempt: "exempt" | "none" | "reverse"?,
+    tax_ids: Map?,
+    test_clock: Any?
+}
+
+
+update-customer
+meta {doc: """POST /v1/customers/{customer} - Update a customer"""}
+fn (customer: Str, request: PostCustomersCustomerRequest): PostCustomersCustomerResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerRequest type {
+
+}
+
+DeleteCustomersCustomerResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "customer"
+}
+
+
+delete-customer
+meta {doc: """DELETE /v1/customers/{customer} - Delete a customer"""}
+fn (customer: Str, request: DeleteCustomersCustomerRequest): DeleteCustomersCustomerResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerBalanceTransactionsRequest type {
+
+}
+
+GetCustomersCustomerBalanceTransactionsResponse type {
+    data: Vec<CustomerBalanceTransaction>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-customer-balance-transactions
+meta {
+    doc: """GET /v1/customers/{customer}/balance_transactions - List customer balance transactions"""
+}
+fn (customer: Str, created: Str, ending-before: Str, expand: Str, invoice: Str, limit: Str, starting-after: Str, request: GetCustomersCustomerBalanceTransactionsRequest): GetCustomersCustomerBalanceTransactionsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/balance_transactions?created=${created}&ending_before=${ending-before}&expand=${expand}&invoice=${invoice}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerBalanceTransactionsResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerBalanceTransactionsRequest type {
+    amount: Int,
+    currency: Str,
+    description: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostCustomersCustomerBalanceTransactionsResponse type {
+    amount: Int,
+    checkout_session: Any?,
+    created: Int,
+    credit_note: Any?,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    description: Str?,
+    ending_balance: Int,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "customer_balance_transaction",
+    type: "adjustment" | "applied_to_invoice" | "checkout_session_subscription_payment" | "checkout_session_subscription_payment_canceled" | "credit_note" | "initial" | "invoice_overpaid" | "invoice_too_large" | "invoice_too_small" | "migration" | "unapplied_from_invoice" | "unspent_receiver_credit"
+}
+
+
+create-customer-balance-transaction
+meta {
+    doc: """POST /v1/customers/{customer}/balance_transactions - Create a customer balance transaction"""
+}
+fn (customer: Str, request: PostCustomersCustomerBalanceTransactionsRequest): PostCustomersCustomerBalanceTransactionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/balance_transactions`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerBalanceTransactionsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerBalanceTransactionsTransactionRequest type {
+
+}
+
+GetCustomersCustomerBalanceTransactionsTransactionResponse type {
+    amount: Int,
+    checkout_session: Any?,
+    created: Int,
+    credit_note: Any?,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    description: Str?,
+    ending_balance: Int,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "customer_balance_transaction",
+    type: "adjustment" | "applied_to_invoice" | "checkout_session_subscription_payment" | "checkout_session_subscription_payment_canceled" | "credit_note" | "initial" | "invoice_overpaid" | "invoice_too_large" | "invoice_too_small" | "migration" | "unapplied_from_invoice" | "unspent_receiver_credit"
+}
+
+
+retrieve-customer-balance-transaction
+meta {
+    doc: """GET /v1/customers/{customer}/balance_transactions/{transaction} - Retrieve a customer balance transaction"""
+}
+fn (customer: Str, transaction: Str, expand: Str, request: GetCustomersCustomerBalanceTransactionsTransactionRequest): GetCustomersCustomerBalanceTransactionsTransactionResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/balance_transactions/${transaction}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerBalanceTransactionsTransactionResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerBalanceTransactionsTransactionRequest type {
+    description: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?
+}
+
+PostCustomersCustomerBalanceTransactionsTransactionResponse type {
+    amount: Int,
+    checkout_session: Any?,
+    created: Int,
+    credit_note: Any?,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    description: Str?,
+    ending_balance: Int,
+    id: Str,
+    invoice: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "customer_balance_transaction",
+    type: "adjustment" | "applied_to_invoice" | "checkout_session_subscription_payment" | "checkout_session_subscription_payment_canceled" | "credit_note" | "initial" | "invoice_overpaid" | "invoice_too_large" | "invoice_too_small" | "migration" | "unapplied_from_invoice" | "unspent_receiver_credit"
+}
+
+
+update-customer-credit-balance-transaction
+meta {
+    doc: """POST /v1/customers/{customer}/balance_transactions/{transaction} - Update a customer credit balance transaction"""
+}
+fn (customer: Str, transaction: Str, request: PostCustomersCustomerBalanceTransactionsTransactionRequest): PostCustomersCustomerBalanceTransactionsTransactionResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/balance_transactions/${transaction}`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerBalanceTransactionsTransactionResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerBankAccountsRequest type {
+
+}
+
+GetCustomersCustomerBankAccountsResponse type {
+    data: Vec<BankAccount>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-bank-accounts
+meta {doc: """GET /v1/customers/{customer}/bank_accounts - List all bank accounts"""}
+fn (customer: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetCustomersCustomerBankAccountsRequest): GetCustomersCustomerBankAccountsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/bank_accounts?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerBankAccountsResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerBankAccountsRequest type {
+    alipay_account: Str?,
+    bank_account: Any?,
+    card: Any?,
+    expand: Vec<Str>?,
+    metadata: Map?,
+    source: Str?
+}
+
+PostCustomersCustomerBankAccountsResponse type {
+
+}
+
+
+create-card
+meta {doc: """POST /v1/customers/{customer}/bank_accounts - Create a card"""}
+fn (customer: Str, request: PostCustomersCustomerBankAccountsRequest): PostCustomersCustomerBankAccountsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/bank_accounts`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerBankAccountsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerBankAccountsIdRequest type {
+
+}
+
+GetCustomersCustomerBankAccountsIdResponse type {
+    account: Any?,
+    account_holder_name: Str?,
+    account_holder_type: Str?,
+    account_type: Str?,
+    available_payout_methods: Vec<"instant" | "standard">?,
+    bank_name: Str?,
+    country: Str,
+    currency: Str,
+    customer: Any?,
+    default_for_currency: Bool?,
+    fingerprint: Str?,
+    future_requirements: Any?,
+    id: Str,
+    last4: Str,
+    metadata: Map?,
+    object: "bank_account",
+    requirements: Any?,
+    routing_number: Str?,
+    status: Str
+}
+
+
+retrieve-bank-account
+meta {
+    doc: """GET /v1/customers/{customer}/bank_accounts/{id} - Retrieve a bank account"""
+}
+fn (customer: Str, id: Str, expand: Str, request: GetCustomersCustomerBankAccountsIdRequest): GetCustomersCustomerBankAccountsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/bank_accounts/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerBankAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerBankAccountsIdRequest type {
+    account_holder_name: Str?,
+    account_holder_type: "company" | "individual"?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    exp_month: Str?,
+    exp_year: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    name: Str?,
+    owner: Map?
+}
+
+PostCustomersCustomerBankAccountsIdResponse type {
+    value: Any
+}
+
+
+post-customers-customer-bank-accounts-id
+meta {doc: """POST /v1/customers/{customer}/bank_accounts/{id}"""}
+fn (customer: Str, id: Str, request: PostCustomersCustomerBankAccountsIdRequest): PostCustomersCustomerBankAccountsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/bank_accounts/${id}`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerBankAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerBankAccountsIdRequest type {
+    expand: Vec<Str>?
+}
+
+DeleteCustomersCustomerBankAccountsIdResponse type {
+    value: Any
+}
+
+
+delete-customer-source
+meta {
+    doc: """DELETE /v1/customers/{customer}/bank_accounts/{id} - Delete a customer source"""
+}
+fn (customer: Str, id: Str, request: DeleteCustomersCustomerBankAccountsIdRequest): DeleteCustomersCustomerBankAccountsIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/bank_accounts/${id}`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerBankAccountsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerBankAccountsIdVerifyRequest type {
+    amounts: Vec<Int>?,
+    expand: Vec<Str>?
+}
+
+PostCustomersCustomerBankAccountsIdVerifyResponse type {
+    account: Any?,
+    account_holder_name: Str?,
+    account_holder_type: Str?,
+    account_type: Str?,
+    available_payout_methods: Vec<"instant" | "standard">?,
+    bank_name: Str?,
+    country: Str,
+    currency: Str,
+    customer: Any?,
+    default_for_currency: Bool?,
+    fingerprint: Str?,
+    future_requirements: Any?,
+    id: Str,
+    last4: Str,
+    metadata: Map?,
+    object: "bank_account",
+    requirements: Any?,
+    routing_number: Str?,
+    status: Str
+}
+
+
+verify-bank-account
+meta {
+    doc: """POST /v1/customers/{customer}/bank_accounts/{id}/verify - Verify a bank account"""
+}
+fn (customer: Str, id: Str, request: PostCustomersCustomerBankAccountsIdVerifyRequest): PostCustomersCustomerBankAccountsIdVerifyResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/bank_accounts/${id}/verify`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerBankAccountsIdVerifyResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerCardsRequest type {
+
+}
+
+GetCustomersCustomerCardsResponse type {
+    data: Vec<Card>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-cards
+meta {doc: """GET /v1/customers/{customer}/cards - List all cards"""}
+fn (customer: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetCustomersCustomerCardsRequest): GetCustomersCustomerCardsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/cards?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerCardsResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerCardsRequest type {
+    alipay_account: Str?,
+    bank_account: Any?,
+    card: Any?,
+    expand: Vec<Str>?,
+    metadata: Map?,
+    source: Str?
+}
+
+PostCustomersCustomerCardsResponse type {
+
+}
+
+
+create-card
+meta {doc: """POST /v1/customers/{customer}/cards - Create a card"""}
+fn (customer: Str, request: PostCustomersCustomerCardsRequest): PostCustomersCustomerCardsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/cards`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerCardsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerCardsIdRequest type {
+
+}
+
+GetCustomersCustomerCardsIdResponse type {
+    account: Any?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line1_check: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    address_zip_check: Str?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    available_payout_methods: Vec<"instant" | "standard">?,
+    brand: Str,
+    country: Str?,
+    currency: Str?,
+    customer: Any?,
+    cvc_check: Str?,
+    default_for_currency: Bool?,
+    dynamic_last4: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    id: Str,
+    iin: Str?,
+    last4: Str,
+    metadata: Map?,
+    name: Str?,
+    networks: TokenCardNetworks?,
+    object: "card",
+    regulated_status: "regulated" | "unregulated"?,
+    status: Str?,
+    tokenization_method: Str?
+}
+
+
+retrieve-card
+meta {doc: """GET /v1/customers/{customer}/cards/{id} - Retrieve a card"""}
+fn (customer: Str, id: Str, expand: Str, request: GetCustomersCustomerCardsIdRequest): GetCustomersCustomerCardsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/cards/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerCardsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerCardsIdRequest type {
+    account_holder_name: Str?,
+    account_holder_type: "company" | "individual"?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    exp_month: Str?,
+    exp_year: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    name: Str?,
+    owner: Map?
+}
+
+PostCustomersCustomerCardsIdResponse type {
+    value: Any
+}
+
+
+post-customers-customer-cards-id
+meta {doc: """POST /v1/customers/{customer}/cards/{id}"""}
+fn (customer: Str, id: Str, request: PostCustomersCustomerCardsIdRequest): PostCustomersCustomerCardsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/cards/${id}`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerCardsIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerCardsIdRequest type {
+    expand: Vec<Str>?
+}
+
+DeleteCustomersCustomerCardsIdResponse type {
+    value: Any
+}
+
+
+delete-customer-source
+meta {doc: """DELETE /v1/customers/{customer}/cards/{id} - Delete a customer source"""}
+fn (customer: Str, id: Str, request: DeleteCustomersCustomerCardsIdRequest): DeleteCustomersCustomerCardsIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/cards/${id}`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerCardsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerCashBalanceRequest type {
+
+}
+
+GetCustomersCustomerCashBalanceResponse type {
+    available: Map?,
+    customer: Str,
+    customer_account: Str?,
+    livemode: Bool,
+    object: "cash_balance",
+    settings: CustomerBalanceCustomerBalanceSettings
+}
+
+
+retrieve-cash-balance
+meta {doc: """GET /v1/customers/{customer}/cash_balance - Retrieve a cash balance"""}
+fn (customer: Str, expand: Str, request: GetCustomersCustomerCashBalanceRequest): GetCustomersCustomerCashBalanceResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/cash_balance?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerCashBalanceResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerCashBalanceRequest type {
+    expand: Vec<Str>?,
+    settings: Map?
+}
+
+PostCustomersCustomerCashBalanceResponse type {
+    available: Map?,
+    customer: Str,
+    customer_account: Str?,
+    livemode: Bool,
+    object: "cash_balance",
+    settings: CustomerBalanceCustomerBalanceSettings
+}
+
+
+update-cash-balances-settings
+meta {
+    doc: """POST /v1/customers/{customer}/cash_balance - Update a cash balance's settings"""
+}
+fn (customer: Str, request: PostCustomersCustomerCashBalanceRequest): PostCustomersCustomerCashBalanceResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/cash_balance`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerCashBalanceResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerCashBalanceTransactionsRequest type {
+
+}
+
+GetCustomersCustomerCashBalanceTransactionsResponse type {
+    data: Vec<CustomerCashBalanceTransaction>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-cash-balance-transactions
+meta {
+    doc: """GET /v1/customers/{customer}/cash_balance_transactions - List cash balance transactions"""
+}
+fn (customer: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetCustomersCustomerCashBalanceTransactionsRequest): GetCustomersCustomerCashBalanceTransactionsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/cash_balance_transactions?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerCashBalanceTransactionsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerCashBalanceTransactionsTransactionRequest type {
+
+}
+
+GetCustomersCustomerCashBalanceTransactionsTransactionResponse type {
+    adjusted_for_overdraft: CustomerBalanceResourceCashBalanceTransactionResourceAdjustedForOverdraft?,
+    applied_to_payment: CustomerBalanceResourceCashBalanceTransactionResourceAppliedToPaymentTransaction?,
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    ending_balance: Int,
+    funded: CustomerBalanceResourceCashBalanceTransactionResourceFundedTransaction?,
+    id: Str,
+    livemode: Bool,
+    net_amount: Int,
+    object: "customer_cash_balance_transaction",
+    refunded_from_payment: CustomerBalanceResourceCashBalanceTransactionResourceRefundedFromPaymentTransaction?,
+    transferred_to_balance: CustomerBalanceResourceCashBalanceTransactionResourceTransferredToBalance?,
+    type: "adjusted_for_overdraft" | "applied_to_payment" | "funded" | "funding_reversed" | "refunded_from_payment" | "return_canceled" | "return_initiated" | "transferred_to_balance" | "unapplied_from_payment",
+    unapplied_from_payment: CustomerBalanceResourceCashBalanceTransactionResourceUnappliedFromPaymentTransaction?
+}
+
+
+retrieve-cash-balance-transaction
+meta {
+    doc: """GET /v1/customers/{customer}/cash_balance_transactions/{transaction} - Retrieve a cash balance transaction"""
+}
+fn (customer: Str, transaction: Str, expand: Str, request: GetCustomersCustomerCashBalanceTransactionsTransactionRequest): GetCustomersCustomerCashBalanceTransactionsTransactionResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/cash_balance_transactions/${transaction}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerCashBalanceTransactionsTransactionResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerDiscountRequest type {
+
+}
+
+GetCustomersCustomerDiscountResponse type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    end: Int?,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+
+get-customers-customer-discount
+meta {doc: """GET /v1/customers/{customer}/discount"""}
+fn (customer: Str, expand: Str, request: GetCustomersCustomerDiscountRequest): GetCustomersCustomerDiscountResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/discount?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerDiscountResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerDiscountRequest type {
+
+}
+
+DeleteCustomersCustomerDiscountResponse type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    deleted: Bool,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+
+delete-customer-discount
+meta {doc: """DELETE /v1/customers/{customer}/discount - Delete a customer discount"""}
+fn (customer: Str, request: DeleteCustomersCustomerDiscountRequest): DeleteCustomersCustomerDiscountResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/discount`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerDiscountResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerFundingInstructionsRequest type {
+    bank_transfer: Map,
+    currency: Str,
+    expand: Vec<Str>?,
+    funding_type: "bank_transfer"
+}
+
+PostCustomersCustomerFundingInstructionsResponse type {
+    bank_transfer: FundingInstructionsBankTransfer,
+    currency: Str,
+    funding_type: "bank_transfer",
+    livemode: Bool,
+    object: "funding_instructions"
+}
+
+
+create-or-retrieve-funding-instructions-customer-cash-balance
+meta {
+    doc: """POST /v1/customers/{customer}/funding_instructions - Create or retrieve funding instructions for a customer cash balance"""
+}
+fn (customer: Str, request: PostCustomersCustomerFundingInstructionsRequest): PostCustomersCustomerFundingInstructionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/funding_instructions`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerFundingInstructionsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerPaymentMethodsRequest type {
+
+}
+
+GetCustomersCustomerPaymentMethodsResponse type {
+    data: Vec<PaymentMethod>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-customers-paymentmethods
+meta {
+    doc: """GET /v1/customers/{customer}/payment_methods - List a Customer's PaymentMethods"""
+}
+fn (customer: Str, allow-redisplay: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, type-param: Str, request: GetCustomersCustomerPaymentMethodsRequest): GetCustomersCustomerPaymentMethodsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/payment_methods?allow_redisplay=${allow-redisplay}&ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&type=${type-param}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerPaymentMethodsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerPaymentMethodsPaymentMethodRequest type {
+
+}
+
+GetCustomersCustomerPaymentMethodsPaymentMethodResponse type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+
+retrieve-customers-paymentmethod
+meta {
+    doc: """GET /v1/customers/{customer}/payment_methods/{payment_method} - Retrieve a Customer's PaymentMethod"""
+}
+fn (customer: Str, payment-method: Str, expand: Str, request: GetCustomersCustomerPaymentMethodsPaymentMethodRequest): GetCustomersCustomerPaymentMethodsPaymentMethodResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/payment_methods/${payment-method}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerPaymentMethodsPaymentMethodResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerSourcesRequest type {
+
+}
+
+GetCustomersCustomerSourcesResponse type {
+    data: Vec,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+get-customers-customer-sources
+meta {doc: """GET /v1/customers/{customer}/sources"""}
+fn (customer: Str, ending-before: Str, expand: Str, limit: Str, object: Str, starting-after: Str, request: GetCustomersCustomerSourcesRequest): GetCustomersCustomerSourcesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/sources?ending_before=${ending-before}&expand=${expand}&limit=${limit}&object=${object}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerSourcesResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerSourcesRequest type {
+    alipay_account: Str?,
+    bank_account: Any?,
+    card: Any?,
+    expand: Vec<Str>?,
+    metadata: Map?,
+    source: Str?
+}
+
+PostCustomersCustomerSourcesResponse type {
+
+}
+
+
+create-card
+meta {doc: """POST /v1/customers/{customer}/sources - Create a card"""}
+fn (customer: Str, request: PostCustomersCustomerSourcesRequest): PostCustomersCustomerSourcesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/sources`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerSourcesResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerSourcesIdRequest type {
+
+}
+
+GetCustomersCustomerSourcesIdResponse type {
+
+}
+
+
+get-customers-customer-sources-id
+meta {doc: """GET /v1/customers/{customer}/sources/{id}"""}
+fn (customer: Str, id: Str, expand: Str, request: GetCustomersCustomerSourcesIdRequest): GetCustomersCustomerSourcesIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/sources/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerSourcesIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerSourcesIdRequest type {
+    account_holder_name: Str?,
+    account_holder_type: "company" | "individual"?,
+    address_city: Str?,
+    address_country: Str?,
+    address_line1: Str?,
+    address_line2: Str?,
+    address_state: Str?,
+    address_zip: Str?,
+    exp_month: Str?,
+    exp_year: Str?,
+    expand: Vec<Str>?,
+    metadata: Any?,
+    name: Str?,
+    owner: Map?
+}
+
+PostCustomersCustomerSourcesIdResponse type {
+    value: Any
+}
+
+
+post-customers-customer-sources-id
+meta {doc: """POST /v1/customers/{customer}/sources/{id}"""}
+fn (customer: Str, id: Str, request: PostCustomersCustomerSourcesIdRequest): PostCustomersCustomerSourcesIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/sources/${id}`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerSourcesIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerSourcesIdRequest type {
+    expand: Vec<Str>?
+}
+
+DeleteCustomersCustomerSourcesIdResponse type {
+    value: Any
+}
+
+
+delete-customer-source
+meta {
+    doc: """DELETE /v1/customers/{customer}/sources/{id} - Delete a customer source"""
+}
+fn (customer: Str, id: Str, request: DeleteCustomersCustomerSourcesIdRequest): DeleteCustomersCustomerSourcesIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/sources/${id}`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerSourcesIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerSourcesIdVerifyRequest type {
+    amounts: Vec<Int>?,
+    expand: Vec<Str>?
+}
+
+PostCustomersCustomerSourcesIdVerifyResponse type {
+    account: Any?,
+    account_holder_name: Str?,
+    account_holder_type: Str?,
+    account_type: Str?,
+    available_payout_methods: Vec<"instant" | "standard">?,
+    bank_name: Str?,
+    country: Str,
+    currency: Str,
+    customer: Any?,
+    default_for_currency: Bool?,
+    fingerprint: Str?,
+    future_requirements: Any?,
+    id: Str,
+    last4: Str,
+    metadata: Map?,
+    object: "bank_account",
+    requirements: Any?,
+    routing_number: Str?,
+    status: Str
+}
+
+
+verify-bank-account
+meta {
+    doc: """POST /v1/customers/{customer}/sources/{id}/verify - Verify a bank account"""
+}
+fn (customer: Str, id: Str, request: PostCustomersCustomerSourcesIdVerifyRequest): PostCustomersCustomerSourcesIdVerifyResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/sources/${id}/verify`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerSourcesIdVerifyResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerSubscriptionsRequest type {
+
+}
+
+GetCustomersCustomerSubscriptionsResponse type {
+    data: Vec<Subscription>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-active-subscriptions
+meta {
+    doc: """GET /v1/customers/{customer}/subscriptions - List active subscriptions"""
+}
+fn (customer: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetCustomersCustomerSubscriptionsRequest): GetCustomersCustomerSubscriptionsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerSubscriptionsResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerSubscriptionsRequest type {
+    add_invoice_items: Vec<Map>?,
+    application_fee_percent: Any?,
+    automatic_tax: Map?,
+    backdate_start_date: Int?,
+    billing_cycle_anchor: Int?,
+    billing_thresholds: Any?,
+    cancel_at: Any?,
+    cancel_at_period_end: Bool?,
+    collection_method: "charge_automatically" | "send_invoice"?,
+    currency: Str?,
+    days_until_due: Int?,
+    default_payment_method: Str?,
+    default_source: Str?,
+    default_tax_rates: Any?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    invoice_settings: Map?,
+    items: Vec<Map>?,
+    metadata: Any?,
+    off_session: Bool?,
+    payment_behavior: "allow_incomplete" | "default_incomplete" | "error_if_incomplete" | "pending_if_incomplete"?,
+    payment_settings: Map?,
+    pending_invoice_item_interval: Any?,
+    proration_behavior: "always_invoice" | "create_prorations" | "none"?,
+    transfer_data: Map?,
+    trial_end: Any?,
+    trial_from_plan: Bool?,
+    trial_period_days: Int?,
+    trial_settings: Map?
+}
+
+PostCustomersCustomerSubscriptionsResponse type {
+    application: Any?,
+    application_fee_percent: Dec?,
+    automatic_tax: SubscriptionAutomaticTax,
+    billing_cycle_anchor: Int,
+    billing_cycle_anchor_config: Any?,
+    billing_mode: SubscriptionsResourceBillingMode,
+    billing_thresholds: Any?,
+    cancel_at: Int?,
+    cancel_at_period_end: Bool,
+    canceled_at: Int?,
+    cancellation_details: Any?,
+    collection_method: "charge_automatically" | "send_invoice",
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    days_until_due: Int?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>?,
+    description: Str?,
+    discounts: Vec,
+    ended_at: Int?,
+    id: Str,
+    invoice_settings: SubscriptionsResourceSubscriptionInvoiceSettings,
+    items: Map,
+    latest_invoice: Any?,
+    livemode: Bool,
+    metadata: Map,
+    next_pending_invoice_item_invoice: Int?,
+    object: "subscription",
+    on_behalf_of: Any?,
+    pause_collection: Any?,
+    payment_settings: Any?,
+    pending_invoice_item_interval: Any?,
+    pending_setup_intent: Any?,
+    pending_update: Any?,
+    schedule: Any?,
+    start_date: Int,
+    status: "active" | "canceled" | "incomplete" | "incomplete_expired" | "past_due" | "paused" | "trialing" | "unpaid",
+    test_clock: Any?,
+    transfer_data: Any?,
+    trial_end: Int?,
+    trial_settings: Any?,
+    trial_start: Int?
+}
+
+
+create-subscription
+meta {doc: """POST /v1/customers/{customer}/subscriptions - Create a subscription"""}
+fn (customer: Str, request: PostCustomersCustomerSubscriptionsRequest): PostCustomersCustomerSubscriptionsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerSubscriptionsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerSubscriptionsSubscriptionExposedIdRequest type {
+
+}
+
+GetCustomersCustomerSubscriptionsSubscriptionExposedIdResponse type {
+    application: Any?,
+    application_fee_percent: Dec?,
+    automatic_tax: SubscriptionAutomaticTax,
+    billing_cycle_anchor: Int,
+    billing_cycle_anchor_config: Any?,
+    billing_mode: SubscriptionsResourceBillingMode,
+    billing_thresholds: Any?,
+    cancel_at: Int?,
+    cancel_at_period_end: Bool,
+    canceled_at: Int?,
+    cancellation_details: Any?,
+    collection_method: "charge_automatically" | "send_invoice",
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    days_until_due: Int?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>?,
+    description: Str?,
+    discounts: Vec,
+    ended_at: Int?,
+    id: Str,
+    invoice_settings: SubscriptionsResourceSubscriptionInvoiceSettings,
+    items: Map,
+    latest_invoice: Any?,
+    livemode: Bool,
+    metadata: Map,
+    next_pending_invoice_item_invoice: Int?,
+    object: "subscription",
+    on_behalf_of: Any?,
+    pause_collection: Any?,
+    payment_settings: Any?,
+    pending_invoice_item_interval: Any?,
+    pending_setup_intent: Any?,
+    pending_update: Any?,
+    schedule: Any?,
+    start_date: Int,
+    status: "active" | "canceled" | "incomplete" | "incomplete_expired" | "past_due" | "paused" | "trialing" | "unpaid",
+    test_clock: Any?,
+    transfer_data: Any?,
+    trial_end: Int?,
+    trial_settings: Any?,
+    trial_start: Int?
+}
+
+
+retrieve-subscription
+meta {
+    doc: """GET /v1/customers/{customer}/subscriptions/{subscription_exposed_id} - Retrieve a subscription"""
+}
+fn (customer: Str, subscription-exposed-id: Str, expand: Str, request: GetCustomersCustomerSubscriptionsSubscriptionExposedIdRequest): GetCustomersCustomerSubscriptionsSubscriptionExposedIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions/${subscription-exposed-id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerSubscriptionsSubscriptionExposedIdResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerSubscriptionsSubscriptionExposedIdRequest type {
+    add_invoice_items: Vec<Map>?,
+    application_fee_percent: Any?,
+    automatic_tax: Map?,
+    billing_cycle_anchor: "now" | "unchanged"?,
+    billing_thresholds: Any?,
+    cancel_at: Any?,
+    cancel_at_period_end: Bool?,
+    cancellation_details: Map?,
+    collection_method: "charge_automatically" | "send_invoice"?,
+    days_until_due: Int?,
+    default_payment_method: Str?,
+    default_source: Any?,
+    default_tax_rates: Any?,
+    discounts: Any?,
+    expand: Vec<Str>?,
+    invoice_settings: Map?,
+    items: Vec<Map>?,
+    metadata: Any?,
+    off_session: Bool?,
+    pause_collection: Any?,
+    payment_behavior: "allow_incomplete" | "default_incomplete" | "error_if_incomplete" | "pending_if_incomplete"?,
+    payment_settings: Map?,
+    pending_invoice_item_interval: Any?,
+    proration_behavior: "always_invoice" | "create_prorations" | "none"?,
+    proration_date: Int?,
+    transfer_data: Any?,
+    trial_end: Any?,
+    trial_from_plan: Bool?,
+    trial_settings: Map?
+}
+
+PostCustomersCustomerSubscriptionsSubscriptionExposedIdResponse type {
+    application: Any?,
+    application_fee_percent: Dec?,
+    automatic_tax: SubscriptionAutomaticTax,
+    billing_cycle_anchor: Int,
+    billing_cycle_anchor_config: Any?,
+    billing_mode: SubscriptionsResourceBillingMode,
+    billing_thresholds: Any?,
+    cancel_at: Int?,
+    cancel_at_period_end: Bool,
+    canceled_at: Int?,
+    cancellation_details: Any?,
+    collection_method: "charge_automatically" | "send_invoice",
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    days_until_due: Int?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>?,
+    description: Str?,
+    discounts: Vec,
+    ended_at: Int?,
+    id: Str,
+    invoice_settings: SubscriptionsResourceSubscriptionInvoiceSettings,
+    items: Map,
+    latest_invoice: Any?,
+    livemode: Bool,
+    metadata: Map,
+    next_pending_invoice_item_invoice: Int?,
+    object: "subscription",
+    on_behalf_of: Any?,
+    pause_collection: Any?,
+    payment_settings: Any?,
+    pending_invoice_item_interval: Any?,
+    pending_setup_intent: Any?,
+    pending_update: Any?,
+    schedule: Any?,
+    start_date: Int,
+    status: "active" | "canceled" | "incomplete" | "incomplete_expired" | "past_due" | "paused" | "trialing" | "unpaid",
+    test_clock: Any?,
+    transfer_data: Any?,
+    trial_end: Int?,
+    trial_settings: Any?,
+    trial_start: Int?
+}
+
+
+update-subscription-on-customer
+meta {
+    doc: """POST /v1/customers/{customer}/subscriptions/{subscription_exposed_id} - Update a subscription on a customer"""
+}
+fn (customer: Str, subscription-exposed-id: Str, request: PostCustomersCustomerSubscriptionsSubscriptionExposedIdRequest): PostCustomersCustomerSubscriptionsSubscriptionExposedIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions/${subscription-exposed-id}`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerSubscriptionsSubscriptionExposedIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdRequest type {
+    expand: Vec<Str>?,
+    invoice_now: Bool?,
+    prorate: Bool?
+}
+
+DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdResponse type {
+    application: Any?,
+    application_fee_percent: Dec?,
+    automatic_tax: SubscriptionAutomaticTax,
+    billing_cycle_anchor: Int,
+    billing_cycle_anchor_config: Any?,
+    billing_mode: SubscriptionsResourceBillingMode,
+    billing_thresholds: Any?,
+    cancel_at: Int?,
+    cancel_at_period_end: Bool,
+    canceled_at: Int?,
+    cancellation_details: Any?,
+    collection_method: "charge_automatically" | "send_invoice",
+    created: Int,
+    currency: Str,
+    customer: Any,
+    customer_account: Str?,
+    days_until_due: Int?,
+    default_payment_method: Any?,
+    default_source: Any?,
+    default_tax_rates: Vec<TaxRate>?,
+    description: Str?,
+    discounts: Vec,
+    ended_at: Int?,
+    id: Str,
+    invoice_settings: SubscriptionsResourceSubscriptionInvoiceSettings,
+    items: Map,
+    latest_invoice: Any?,
+    livemode: Bool,
+    metadata: Map,
+    next_pending_invoice_item_invoice: Int?,
+    object: "subscription",
+    on_behalf_of: Any?,
+    pause_collection: Any?,
+    payment_settings: Any?,
+    pending_invoice_item_interval: Any?,
+    pending_setup_intent: Any?,
+    pending_update: Any?,
+    schedule: Any?,
+    start_date: Int,
+    status: "active" | "canceled" | "incomplete" | "incomplete_expired" | "past_due" | "paused" | "trialing" | "unpaid",
+    test_clock: Any?,
+    transfer_data: Any?,
+    trial_end: Int?,
+    trial_settings: Any?,
+    trial_start: Int?
+}
+
+
+cancel-subscription
+meta {
+    doc: """DELETE /v1/customers/{customer}/subscriptions/{subscription_exposed_id} - Cancel a subscription"""
+}
+fn (customer: Str, subscription-exposed-id: Str, request: DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdRequest): DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions/${subscription-exposed-id}`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountRequest type {
+
+}
+
+GetCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountResponse type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    end: Int?,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+
+get-customers-customer-subscriptions-subscription-exposed-id-discount
+meta {
+    doc: """GET /v1/customers/{customer}/subscriptions/{subscription_exposed_id}/discount"""
+}
+fn (customer: Str, subscription-exposed-id: Str, expand: Str, request: GetCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountRequest): GetCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions/${subscription-exposed-id}/discount?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountRequest type {
+
+}
+
+DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountResponse type {
+    checkout_session: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    deleted: Bool,
+    id: Str,
+    invoice: Str?,
+    invoice_item: Str?,
+    object: "discount",
+    promotion_code: Any?,
+    source: DiscountSource,
+    start: Int,
+    subscription: Str?,
+    subscription_item: Str?
+}
+
+
+delete-customer-discount
+meta {
+    doc: """DELETE /v1/customers/{customer}/subscriptions/{subscription_exposed_id}/discount - Delete a customer discount"""
+}
+fn (customer: Str, subscription-exposed-id: Str, request: DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountRequest): DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/subscriptions/${subscription-exposed-id}/discount`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerSubscriptionsSubscriptionExposedIdDiscountResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerTaxIdsRequest type {
+
+}
+
+GetCustomersCustomerTaxIdsResponse type {
+    data: Vec<TaxId>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-customer-tax-ids
+meta {doc: """GET /v1/customers/{customer}/tax_ids - List all Customer tax IDs"""}
+fn (customer: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetCustomersCustomerTaxIdsRequest): GetCustomersCustomerTaxIdsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/tax_ids?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerTaxIdsResponse(response.body), err(HttpError(response)))
+}
+
+PostCustomersCustomerTaxIdsRequest type {
+    expand: Vec<Str>?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str
+}
+
+PostCustomersCustomerTaxIdsResponse type {
+    country: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "tax_id",
+    owner: Any?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str,
+    verification: Any?
+}
+
+
+create-customer-tax-id
+meta {doc: """POST /v1/customers/{customer}/tax_ids - Create a Customer tax ID"""}
+fn (customer: Str, request: PostCustomersCustomerTaxIdsRequest): PostCustomersCustomerTaxIdsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}/tax_ids`, {}, request)
+  if(is-ok-response(response), PostCustomersCustomerTaxIdsResponse(response.body), err(HttpError(response)))
+}
+
+GetCustomersCustomerTaxIdsIdRequest type {
+
+}
+
+GetCustomersCustomerTaxIdsIdResponse type {
+    country: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "tax_id",
+    owner: Any?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str,
+    verification: Any?
+}
+
+
+retrieve-customer-tax-id
+meta {
+    doc: """GET /v1/customers/{customer}/tax_ids/{id} - Retrieve a Customer tax ID"""
+}
+fn (customer: Str, id: Str, expand: Str, request: GetCustomersCustomerTaxIdsIdRequest): GetCustomersCustomerTaxIdsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/tax_ids/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetCustomersCustomerTaxIdsIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteCustomersCustomerTaxIdsIdRequest type {
+
+}
+
+DeleteCustomersCustomerTaxIdsIdResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "tax_id"
+}
+
+
+delete-customer-tax-id
+meta {
+    doc: """DELETE /v1/customers/{customer}/tax_ids/{id} - Delete a Customer tax ID"""
+}
+fn (customer: Str, id: Str, request: DeleteCustomersCustomerTaxIdsIdRequest): DeleteCustomersCustomerTaxIdsIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}/tax_ids/${id}`, {}, request)
+  if(is-ok-response(response), DeleteCustomersCustomerTaxIdsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetConfirmationTokensConfirmationTokenRequest type {
+
+}
+
+GetConfirmationTokensConfirmationTokenResponse type {
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    mandate_data: Any?,
+    object: "confirmation_token",
+    payment_intent: Str?,
+    payment_method_options: Any?,
+    payment_method_preview: Any?,
+    return_url: Str?,
+    setup_future_usage: "off_session" | "on_session"?,
+    setup_intent: Str?,
+    shipping: Any?,
+    use_stripe_sdk: Bool
+}
+
+
+retrieve-confirmationtoken
+meta {
+    doc: """GET /v1/confirmation_tokens/{confirmation_token} - Retrieve a ConfirmationToken"""
+}
+fn (confirmation-token: Str, expand: Str, request: GetConfirmationTokensConfirmationTokenRequest): GetConfirmationTokensConfirmationTokenResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/confirmation_tokens/${confirmation-token}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetConfirmationTokensConfirmationTokenResponse(response.body), err(HttpError(response)))
+}

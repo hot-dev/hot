@@ -1,0 +1,130 @@
+::gemini::api ns
+
+// Namespace alias for ctx module
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+http-request-stream ::hot::http/request-stream
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated HTTP request to the Gemini API. Automatically appends the API key from context. Additional headers can be provided to merge/override defaults.
+
+    Supports 2 to 5 arguments: method and URL (minimum), plus optional headers, body, and explicit API key override.
+
+    **Example**
+
+    ```hot
+    response ::gemini::api/request("GET", `${::gemini/BASE_URL}/v1/models`)
+    response.status // => 200
+    response.body   // => {models: [...]}
+    ```
+
+    **With body**
+
+    ```hot
+    response ::gemini::api/request("POST", url, {}, {contents: [...]})
+    ```
+    """,
+    ctx: {"gemini.api.key": {}}
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default) — delegates to 5-arity
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("gemini.api.key"))
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  url-with-key if(contains(url, "?"), `${url}&key=${api-key}`, `${url}?key=${api-key}`)
+
+  default-headers {}
+
+  cond {
+    or(eq(body, ""), is-null(body)) => {
+      final-headers {...default-headers, ...additional-headers}
+      ::hot::http/request(HttpRequest({
+        method,
+        url: url-with-key,
+        headers: final-headers
+      }))
+    }
+    => {
+      headers {...default-headers, Content-Type: "application/json"}
+      final-headers {...headers, ...additional-headers}
+      ::hot::http/request(HttpRequest({
+        method,
+        url: url-with-key,
+        headers: final-headers,
+        body: to-json(untype(body))
+      }))
+    }
+  }
+}
+
+request-stream
+meta {
+    doc: """
+    Make a streaming HTTP request to the Gemini API. Returns a response with an iterator body for consuming SSE or NDJSON streams.
+
+    Supports 4 to 6 arguments: method, URL, headers, body (minimum), plus optional format and explicit API key override.
+
+    **Example**
+
+    ```hot
+    response ::gemini::api/request-stream("POST", url, {}, body, "sse")
+    for-each(response.body, (event) {
+        // process each streaming event
+    })
+    ```
+    """,
+    ctx: {"gemini.api.key": {}}
+}
+fn
+(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, "sse")
+},
+// 5-arity: use ctx api key (default) — delegates to 6-arity
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, format, ::ctx/get("gemini.api.key"))
+},
+// 6-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
+  url-with-key if(contains(url, "?"), `${url}&key=${api-key}`, `${url}?key=${api-key}`)
+
+  default-headers {}
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  ::hot::http/request-stream(HttpRequest({
+    method,
+    url: url-with-key,
+    headers: final-headers,
+    body: to-json(untype(body))
+  }), format)
+}

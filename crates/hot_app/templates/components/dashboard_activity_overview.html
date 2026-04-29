@@ -1,0 +1,150 @@
+<!-- Activity Overview Charts Component - Scrollable 2-Column Grid -->
+<div class="bg-white dark:bg-gray-800 shadow rounded-lg p-4">
+    <h2 class="text-lg font-semibold mb-4 text-gray-900 dark:text-white">Activity Overview</h2>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- Run Activity -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Run Activity</h3>
+                <button onclick="openFullscreen('activityTimelineChart', 'Run Activity')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="activityTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- Run Types -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Run Types</h3>
+                <button onclick="openFullscreen('runTypeTimelineChart', 'Run Types')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="runTypeTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- Task Activity -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Task Activity</h3>
+                <button onclick="openFullscreen('taskActivityTimelineChart', 'Task Activity')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="taskActivityTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- CUS Over Time -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Compute Unit Seconds (CUS)</h3>
+                <button onclick="openFullscreen('taskCusTimelineChart', 'Compute Unit Seconds (CUS)')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="taskCusTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- Event Activity -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Event Activity</h3>
+                <button onclick="openFullscreen('eventActivityTimelineChart', 'Event Activity')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="eventActivityTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- Event Types -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Event Types</h3>
+                <button onclick="openFullscreen('eventTypeTimelineChart', 'Event Types')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="eventTypeTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- Stream Activity -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Stream Activity</h3>
+                <button onclick="openFullscreen('streamActivityTimelineChart', 'Stream Activity')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="streamActivityTimelineChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+
+        <!-- Average Runs & Events per Stream -->
+        <div class="relative">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Average Runs & Events per Stream</h3>
+                <button onclick="openFullscreen('streamCompositionChart', 'Average Runs & Events per Stream')"
+                        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+                        title="View fullscreen">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                        <path fill-rule="evenodd" d="M15 3.75a.75.75 0 01.75-.75h4.5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0V5.56l-3.97 3.97a.75.75 0 11-1.06-1.06l3.97-3.97h-2.69a.75.75 0 01-.75-.75zm-12 0A.75.75 0 013.75 3h4.5a.75.75 0 010 1.5H5.56l3.97 3.97a.75.75 0 01-1.06 1.06L4.5 5.56v2.69a.75.75 0 01-1.5 0v-4.5zm11.47 11.78a.75.75 0 111.06-1.06l3.97 3.97v-2.69a.75.75 0 011.5 0v4.5a.75.75 0 01-.75.75h-4.5a.75.75 0 010-1.5h2.69l-3.97-3.97zm-4.94-1.06a.75.75 0 010 1.06L5.56 19.5h2.69a.75.75 0 010 1.5h-4.5a.75.75 0 01-.75-.75v-4.5a.75.75 0 011.5 0v2.69l3.97-3.97a.75.75 0 011.06 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <div class="relative" style="height: 280px;">
+                <div id="streamCompositionChart" class="w-full h-full"></div>
+                {% include "components/dashboard_chart_skeleton.html" %}
+            </div>
+        </div>
+    </div>
+</div>

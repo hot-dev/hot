@@ -1,0 +1,102 @@
+<!-- Local Development Feature Restriction Modal -->
+<!-- This modal is shown when users try to access features not available in local development -->
+<div id="localDevModal" class="fixed inset-0 z-50 hidden overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+    <!-- Background backdrop -->
+    <div class="fixed inset-0 bg-gray-900/75 backdrop-blur-sm transition-opacity" aria-hidden="true" onclick="closeLocalDevModal()"></div>
+
+    <!-- Modal panel -->
+    <div class="flex min-h-full items-center justify-center p-4">
+        <div class="relative transform overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-left shadow-xl transition-all w-full max-w-lg">
+            <!-- Header -->
+            <div class="bg-gradient-to-r from-hot-red-500 to-hot-red-600 px-6 py-4">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <svg class="h-8 w-8 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        </svg>
+                    </div>
+                    <h3 class="ml-3 text-lg font-semibold text-white" id="modal-title">
+                        Feature Not Available in Local Development
+                    </h3>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div class="px-6 py-5">
+                <p class="text-gray-700 dark:text-gray-300 mb-4">
+                    This feature is only available in the hosted version of <strong>Hot Dev</strong>.
+                </p>
+                <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-4">
+                    <h4 class="text-sm font-semibold text-blue-900 dark:text-blue-200 mb-2">
+                        Available with Hot Dev Cloud:
+                    </h4>
+                    <ul class="text-sm text-blue-800 dark:text-blue-300 space-y-1.5 list-disc list-inside">
+                        <li>Invite team members and collaborate</li>
+                        <li>Create multiple organizations</li>
+                        <li>Manage multiple environments (dev, staging, production)</li>
+                        <li>Team access control and permissions</li>
+                        <li>Cloud deployment and hosting</li>
+                        <li>And much more...</li>
+                    </ul>
+                </div>
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                    For local development, you can continue building and testing with a single organization and environment.
+                    When you're ready to collaborate or deploy, sign up for a free Hot Dev account.
+                </p>
+            </div>
+
+            <!-- Footer / Actions -->
+            <div class="bg-gray-50 dark:bg-gray-900 px-6 py-4 flex items-center justify-between">
+                <button type="button" onclick="closeLocalDevModal()" class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
+                    Dismiss
+                </button>
+                <a href="{{ page_context.web_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center px-5 py-2.5 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                    <span>Get Started at hot.dev</span>
+                    <svg class="ml-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Show the local dev modal
+    function showLocalDevModal() {
+        const modal = document.getElementById('localDevModal');
+        if (modal) {
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden'; // Prevent background scrolling
+        }
+    }
+
+    // Close the local dev modal
+    function closeLocalDevModal() {
+        const modal = document.getElementById('localDevModal');
+        if (modal) {
+            modal.classList.add('hidden');
+            document.body.style.overflow = ''; // Restore scrolling
+        }
+    }
+
+    // Handle keyboard events (Escape key)
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') {
+            closeLocalDevModal();
+        }
+    });
+
+    // Attach click handlers to all buttons/links with data-local-dev-restricted attribute
+    document.addEventListener('DOMContentLoaded', function() {
+        const restrictedElements = document.querySelectorAll('[data-local-dev-restricted]');
+        restrictedElements.forEach(function(element) {
+            element.addEventListener('click', function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                showLocalDevModal();
+                return false;
+            });
+        });
+    });
+</script>

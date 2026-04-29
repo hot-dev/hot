@@ -1,0 +1,108 @@
+::hot::test::result ns
+meta ["test"]
+
+is-ok ::hot::type/is-ok
+is-err ::hot::type/is-err
+ok ::hot::type/ok
+err ::hot::type/err
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+not ::hot::bool/not
+eq ::hot::cmp/eq
+div ::hot::math/div
+if ::hot::bool/if
+
+// Helper function that can legitimately return either success or error
+safe-divide fn (a, b) {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+
+// Helper function that always succeeds
+always-succeeds fn (x) {
+    ok(x)
+}
+
+// Helper function that always fails
+always-fails fn (x) {
+    err(`Failed with: ${x}`)
+}
+
+test-result
+meta ["test"] fn () {
+    // Test with functions that can legitimately return success or error
+    assert(is-ok(safe-divide(10, 2)), "is-ok should return true for successful division")
+    assert(is-err(safe-divide(10, 0)), "is-err should return true for division by zero")
+
+    // Test with functions that always succeed or fail
+    assert(is-ok(always-succeeds(42)), "is-ok should return true for always-succeeds")
+    assert(is-err(always-fails("test")), "is-err should return true for always-fails")
+
+    // Test with direct ok/err constructors
+    assert(is-ok(ok(1)), "is-ok should return true for ok")
+    assert(is-err(err(1)), "is-err should return true for err")
+
+    // Test negations
+    assert(not(is-ok(err(1))), "is-ok should return false for err")
+    assert(not(is-err(ok(1))), "is-err should return false for ok")
+    assert(not(is-ok(always-fails("test"))), "is-ok should return false for always-fails")
+    assert(not(is-err(always-succeeds(42))), "is-err should return false for always-succeeds")
+}
+
+
+test-if-ok
+meta ["test"] fn () {
+    // if-ok with function: transforms Ok value
+    result if-ok(ok(1), (n) { add(n, 10) })
+    assert(is-ok(result), "if-ok with fn produces Ok")
+
+    // if-ok with Err: passes through unchanged
+    err-result if-ok(err("bad"), (n) { add(n, 10) })
+    assert(is-err(err-result), "if-ok on Err passes through")
+
+    // if-ok with value: replaces Ok value
+    replaced if-ok(ok(1), "replaced")
+    assert(is-ok(replaced), "if-ok with value produces Ok")
+
+    // if-ok on plain (non-Result) value
+    plain if-ok(42, (n) { add(n, 1) })
+    assert(is-ok(plain), "if-ok on plain value treats as Ok")
+
+    // Chain: ok value through pipeline
+    chained ok(5)
+        |> if-ok((n) { mul(n, 2) })
+        |> if-ok((n) { add(n, 1) })
+    assert(is-ok(chained), "chained if-ok stays Ok")
+
+    // Chain: err passes through all if-ok
+    err-chain err("fail")
+        |> if-ok((n) { mul(n, 2) })
+        |> if-ok((n) { add(n, 1) })
+    assert(is-err(err-chain), "err passes through chained if-ok")
+}
+
+
+test-if-err
+meta ["test"] fn () {
+    // if-err with value: recovers from error with default
+    recovered if-err(err("bad"), "default")
+    assert(is-ok(recovered), "if-err with value recovers to Ok")
+
+    // if-err with Ok: passes through unchanged
+    ok-through if-err(ok(42), "default")
+    assert(is-ok(ok-through), "if-err on Ok passes through")
+
+    // if-err with function: transforms error
+    transformed if-err(err("bad"), (e) { err(`wrapped: ${e}`) })
+    assert(is-err(transformed), "if-err fn can produce new Err")
+
+    // Chain: recover from error
+    pipeline err("fail")
+        |> if-err("recovered")
+    assert(is-ok(pipeline), "if-err recovers from error in pipeline")
+
+    // Combine if-ok and if-err
+    combo ok(10)
+        |> if-ok((n) { mul(n, 2) })
+        |> if-err("fallback")
+    assert(is-ok(combo), "combo if-ok then if-err on Ok")
+}

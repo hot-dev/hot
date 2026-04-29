@@ -1,0 +1,21 @@
+::slack::integration::apps ns
+meta ["test"]
+
+test-bots-info
+meta ["test"]
+fn () {
+  // First get our bot_id via auth.test
+  auth ::slack::misc/auth-test(::slack::misc/AuthTestRequest({}))
+  assert(auth.ok, `auth.test should succeed. response=${to-json(auth)}`)
+  assert(auth.bot_id, `auth.test should include bot_id. response=${to-json(auth)}`)
+
+  // Now get bot info
+  response ::slack::apps/bots-info(::slack::apps/BotsInfoRequest({
+    bot: auth.bot_id
+  }))
+
+  assert(response.ok, `bots.info should succeed. response=${to-json(response)}`)
+  assert(response.bot, "bots.info should return bot object")
+  assert(response.bot.id, "bot should have id")
+  assert(response.bot.name, "bot should have name")
+}

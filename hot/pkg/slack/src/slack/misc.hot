@@ -1,0 +1,436 @@
+::slack::misc ns
+
+api-request ::slack::api/request
+HttpError ::slack::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Auth
+// ============================================================================
+
+// No parameters required for this request
+AuthTestRequest type Map
+
+AuthTestResponse type {
+  ok: Bool?,
+  error: Str?,
+  url: Str?,
+  team: Str?,
+  user: Str?,
+  team_id: Str?,
+  user_id: Str?,
+  bot_id: Str?,
+  is_enterprise_install: Bool?
+}
+
+
+auth-test
+meta {
+    doc: """
+POST /auth.test - Check authentication and identity. Returns information about the authenticated user/bot including workspace URL, team name, and user/bot IDs.
+
+**Example**
+
+```hot
+response ::slack::misc/auth-test(::slack::misc/AuthTestRequest({}))
+response.url       // => "https://myteam.slack.com/"
+response.team      // => "My Team"
+response.user_id   // => "U1234567"
+response.team_id   // => "T1234567"
+response.bot_id    // => "B1234567"
+```
+"""
+}
+fn (request: AuthTestRequest): AuthTestResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/auth.test`, {}, request)
+  if(is-ok-response(response), AuthTestResponse(response.body), err(HttpError(response)))
+}
+
+AuthRevokeRequest type {
+  test: Bool?
+}
+
+AuthRevokeResponse type {
+  ok: Bool?,
+  error: Str?,
+  revoked: Bool?
+}
+
+
+auth-revoke
+meta {
+    doc: """GET /auth.revoke - Revoke a token. Pass `test: true` to check revocation without actually revoking."""
+}
+fn (request: AuthRevokeRequest): AuthRevokeResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/auth.revoke?test=${or(request.test, "")}`)
+  if(is-ok-response(response), AuthRevokeResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// API
+// ============================================================================
+
+ApiTestRequest type {
+  error: Str?,
+  foo: Str?
+}
+
+ApiTestResponse type {
+  ok: Bool?,
+  error: Str?,
+  args: Map?
+}
+
+
+api-test
+meta {
+    doc: """
+GET /api.test - Check API calling code. Useful for testing connectivity. Any key-value pairs passed in the request are echoed back in `response.args`.
+
+**Example**
+
+```hot
+response ::slack::misc/api-test(::slack::misc/ApiTestRequest({
+  foo: "bar"
+}))
+response.ok        // => true
+response.args.foo  // => "bar"
+```
+"""
+}
+fn (request: ApiTestRequest): ApiTestResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/api.test?error=${or(request.error, "")}&foo=${or(request.foo, "")}`)
+  if(is-ok-response(response), ApiTestResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Team
+// ============================================================================
+
+TeamInfoRequest type {
+  team: Str?
+}
+
+TeamInfoResponse type {
+  ok: Bool?,
+  error: Str?,
+  team: Map?
+}
+
+
+team-info
+meta {
+    doc: """
+GET /team.info - Get information about the current team. Returns the team object with id, name, domain, and other workspace details.
+
+**Example**
+
+```hot
+response ::slack::misc/team-info(::slack::misc/TeamInfoRequest({}))
+response.team.id      // => "T1234567"
+response.team.name    // => "My Team"
+response.team.domain  // => "myteam"
+```
+"""
+}
+fn (request: TeamInfoRequest): TeamInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.info?team=${or(request.team, "")}`)
+  if(is-ok-response(response), TeamInfoResponse(response.body), err(HttpError(response)))
+}
+
+TeamAccessLogsRequest type {
+  before: Str?,
+  count: Int?,
+  page: Int?
+}
+
+TeamAccessLogsResponse type {
+  ok: Bool?,
+  error: Str?,
+  logins: Vec<Map>?,
+  paging: Map?
+}
+
+
+team-access-logs
+meta {
+    doc: """GET /team.accessLogs - Get the access logs for the current team. Requires an admin or owner token. Returns login records with user, IP, and user agent info."""
+}
+fn (request: TeamAccessLogsRequest): TeamAccessLogsResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.accessLogs?before=${or(request.before, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}`)
+  if(is-ok-response(response), TeamAccessLogsResponse(response.body), err(HttpError(response)))
+}
+
+TeamBillableInfoRequest type {
+  user: Str?
+}
+
+TeamBillableInfoResponse type {
+  ok: Bool?,
+  error: Str?,
+  billable_info: Map?
+}
+
+
+team-billable-info
+meta {
+    doc: """GET /team.billableInfo - Get billable user information for the current team. Optionally filter by a specific user ID."""
+}
+fn (request: TeamBillableInfoRequest): TeamBillableInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.billableInfo?user=${or(request.user, "")}`)
+  if(is-ok-response(response), TeamBillableInfoResponse(response.body), err(HttpError(response)))
+}
+
+TeamIntegrationLogsRequest type {
+  app_id: Str?,
+  change_type: Str?,
+  count: Int?,
+  page: Int?,
+  service_id: Str?,
+  user: Str?
+}
+
+TeamIntegrationLogsResponse type {
+  ok: Bool?,
+  error: Str?,
+  logs: Vec<Map>?,
+  paging: Map?
+}
+
+
+team-integration-logs
+meta {
+    doc: """GET /team.integrationLogs - Get the integration activity logs for the current team. Filter by app_id, change_type, service_id, or user."""
+}
+fn (request: TeamIntegrationLogsRequest): TeamIntegrationLogsResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.integrationLogs?app_id=${or(request.app_id, "")}&change_type=${or(request.change_type, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&service_id=${or(request.service_id, "")}&user=${or(request.user, "")}`)
+  if(is-ok-response(response), TeamIntegrationLogsResponse(response.body), err(HttpError(response)))
+}
+
+TeamProfileGetRequest type {
+  visibility: Str?
+}
+
+TeamProfileGetResponse type {
+  ok: Bool?,
+  error: Str?,
+  profile: Map?
+}
+
+
+team-profile-get
+meta {
+    doc: """GET /team.profile.get - Get the team profile field definitions. Optionally filter by visibility level."""
+}
+fn (request: TeamProfileGetRequest): TeamProfileGetResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/team.profile.get?visibility=${or(request.visibility, "")}`)
+  if(is-ok-response(response), TeamProfileGetResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Emoji
+// ============================================================================
+
+EmojiListResponse type {
+  ok: Bool?,
+  error: Str?,
+  emoji: Map?
+}
+
+
+emoji-list
+meta {
+    doc: """
+GET /emoji.list - List all custom emoji for a team. Returns a map of emoji names to their URLs or alias targets.
+
+**Example**
+
+```hot
+response ::slack::misc/emoji-list()
+response.emoji  // => {shipit: "https://...", bowtie: "alias:bow"}
+```
+"""
+}
+fn (): EmojiListResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/emoji.list`)
+  if(is-ok-response(response), EmojiListResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Dialog
+// ============================================================================
+
+DialogOpenRequest type {
+  dialog: Str,
+  trigger_id: Str
+}
+
+DialogOpenResponse type {
+  ok: Bool?,
+  error: Str?
+}
+
+
+dialog-open
+meta {
+    doc: """GET /dialog.open - Open a dialog with a user. Requires a valid `trigger_id` from an interactive event. The `dialog` parameter is a JSON-encoded dialog definition."""
+}
+fn (request: DialogOpenRequest): DialogOpenResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/dialog.open?dialog=${request.dialog}&trigger_id=${request.trigger_id}`)
+  if(is-ok-response(response), DialogOpenResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Migration
+// ============================================================================
+
+MigrationExchangeRequest type {
+  users: Str,
+  team_id: Str?,
+  to_old: Bool?
+}
+
+MigrationExchangeResponse type {
+  ok: Bool?,
+  error: Str?,
+  team_id: Str?,
+  enterprise_id: Str?,
+  user_id_map: Map?,
+  invalid_user_ids: Vec<Str>?
+}
+
+
+migration-exchange
+meta {
+    doc: """GET /migration.exchange - Exchange legacy user IDs to new Enterprise Grid format. Pass a comma-separated list of user IDs. Set `to_old: true` to convert in the reverse direction."""
+}
+fn (request: MigrationExchangeRequest): MigrationExchangeResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/migration.exchange?users=${request.users}&team_id=${or(request.team_id, "")}&to_old=${or(request.to_old, "")}`)
+  if(is-ok-response(response), MigrationExchangeResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// Views
+// ============================================================================
+
+ViewsOpenRequest type {
+  trigger_id: Str,
+  view: Str
+}
+
+ViewsOpenResponse type {
+  ok: Bool?,
+  error: Str?,
+  view: Map?
+}
+
+
+views-open
+meta {
+    doc: """POST /views.open - Open a modal view for a user. Requires a valid `trigger_id` from an interactive event and a JSON-encoded view payload."""
+}
+fn (request: ViewsOpenRequest): ViewsOpenResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.open`, {}, request)
+  if(is-ok-response(response), ViewsOpenResponse(response.body), err(HttpError(response)))
+}
+
+ViewsPublishRequest type {
+  user_id: Str,
+  view: Str,
+  hash: Str?
+}
+
+ViewsPublishResponse type {
+  ok: Bool?,
+  error: Str?,
+  view: Map?
+}
+
+
+views-publish
+meta {
+    doc: """POST /views.publish - Publish a static view to the App Home tab for a user. Use `hash` to avoid overwriting concurrent updates."""
+}
+fn (request: ViewsPublishRequest): ViewsPublishResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.publish`, {}, request)
+  if(is-ok-response(response), ViewsPublishResponse(response.body), err(HttpError(response)))
+}
+
+ViewsPushRequest type {
+  trigger_id: Str,
+  view: Str
+}
+
+ViewsPushResponse type {
+  ok: Bool?,
+  error: Str?,
+  view: Map?
+}
+
+
+views-push
+meta {
+    doc: """POST /views.push - Push a new view onto the stack of an existing root view. Requires a valid `trigger_id` from a view interaction."""
+}
+fn (request: ViewsPushRequest): ViewsPushResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.push`, {}, request)
+  if(is-ok-response(response), ViewsPushResponse(response.body), err(HttpError(response)))
+}
+
+ViewsUpdateRequest type {
+  view_id: Str?,
+  external_id: Str?,
+  view: Str,
+  hash: Str?
+}
+
+ViewsUpdateResponse type {
+  ok: Bool?,
+  error: Str?,
+  view: Map?
+}
+
+
+views-update
+meta {
+    doc: """POST /views.update - Update an existing view by `view_id` or `external_id`. Use `hash` to avoid overwriting concurrent updates."""
+}
+fn (request: ViewsUpdateRequest): ViewsUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/views.update`, {}, request)
+  if(is-ok-response(response), ViewsUpdateResponse(response.body), err(HttpError(response)))
+}
+
+// ============================================================================
+// OAuth
+// ============================================================================
+
+OauthV2AccessRequest type {
+  client_id: Str,
+  client_secret: Str,
+  code: Str,
+  redirect_uri: Str?
+}
+
+OauthV2AccessResponse type {
+  ok: Bool?,
+  error: Str?,
+  access_token: Str?,
+  token_type: Str?,
+  scope: Str?,
+  bot_user_id: Str?,
+  app_id: Str?,
+  team: Map?,
+  authed_user: Map?,
+  enterprise: Map?,
+  is_enterprise_install: Bool?
+}
+
+
+oauth-v2-access
+meta {
+    doc: """POST /oauth.v2.access - Exchange a temporary OAuth verifier code for an access token. Used during the OAuth 2.0 flow to complete app installation."""
+}
+fn (request: OauthV2AccessRequest): OauthV2AccessResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/oauth.v2.access`, {}, request)
+  if(is-ok-response(response), OauthV2AccessResponse(response.body), err(HttpError(response)))
+}

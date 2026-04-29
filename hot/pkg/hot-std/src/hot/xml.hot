@@ -1,0 +1,182 @@
+::hot::xml ns
+meta {doc: """XML parsing and serialization with helper functions."""}
+
+Xml
+meta {
+    doc: """
+Represents an XML element with tag, attributes, and content.
+
+**Fields**
+- `tag`: The element tag name (Str)
+- `attrs`: Attribute map (Map<Str, Str>)
+- `content`: Child elements and text nodes (Vec)
+
+**Example**
+
+```hot
+// Create an XML element manually
+elem Xml({
+    "tag": "person",
+    "attrs": {"id": "123"},
+    "content": [
+        Xml({"tag": "name", "attrs": {}, "content": ["Alice"]}),
+        Xml({"tag": "age", "attrs": {}, "content": ["30"]})
+    ]
+})
+```
+"""
+}
+type {
+    tag: Str,
+    attrs: Map,
+    content: Vec
+}
+
+
+from-xml
+meta {
+    core: true,
+    doc: """
+    Parse an XML string into an Xml structure.
+
+    **Example**
+
+    ```hot
+    xml from-xml("<person id='123'><name>Alice</name></person>")
+    xml.tag     // "person"
+    xml.attrs   // {"id": "123"}
+    ```
+    """
+}
+fn (value: Str): Xml {
+    call-lib(::hot::xml/from-xml, [value])
+}
+
+
+to-xml
+meta {
+    core: true,
+    doc: """
+    Serialize an Xml structure to an XML string.
+
+    **Example**
+
+    ```hot
+    xml Xml({
+        "tag": "person",
+        "attrs": {"id": "123"},
+        "content": ["Alice"]
+    })
+    to-xml(xml)   // "<person id=\"123\">Alice</person>"
+    ```
+    """
+}
+fn (xml: Xml): Str {
+    call-lib(::hot::xml/to-xml, [xml])
+}
+
+
+child
+meta {
+    core: true,
+    doc: """
+    Get the first child element with the matching tag name.
+    Returns null if no matching child is found.
+
+    **Example**
+
+    ```hot
+    xml from-xml("<root><item>A</item><item>B</item></root>")
+    item child(xml, "item")
+    item.tag    // "item"
+    text(item)  // "A"
+    ```
+    """
+}
+fn (xml: Xml, tag: Str): Xml? {
+    call-lib(::hot::xml/child, [xml, tag])
+}
+
+
+children
+meta {
+    core: true,
+    doc: """
+    Get all child elements with the matching tag name.
+
+    **Example**
+
+    ```hot
+    xml from-xml("<root><item>A</item><item>B</item><other>C</other></root>")
+    items children(xml, "item")
+    length(items)  // 2
+    ```
+    """
+}
+fn (xml: Xml, tag: Str): Vec<Xml> {
+    call-lib(::hot::xml/children, [xml, tag])
+}
+
+
+text
+meta {
+    core: true,
+    doc: """
+    Get the concatenated text content of an element.
+
+    **Example**
+
+    ```hot
+    xml from-xml("<name>Alice <b>Smith</b></name>")
+    text(xml)   // "Alice Smith"
+    ```
+    """
+}
+fn (xml: Xml): Str {
+    call-lib(::hot::xml/text, [xml])
+}
+
+
+attr
+meta {
+    core: true,
+    doc: """
+    Get an attribute value by name. Returns null if not found.
+
+    **Example**
+
+    ```hot
+    xml from-xml("<person id='123' status='active'/>")
+    attr(xml, "id")       // "123"
+    attr(xml, "status")   // "active"
+    attr(xml, "missing")  // null
+    ```
+    """
+}
+fn (xml: Xml, name: Str): Str? {
+    call-lib(::hot::xml/attr, [xml, name])
+}
+
+
+at
+meta {
+    core: true,
+    doc: """
+    Navigate through nested XML using tag names as path segments.
+    Returns null if any segment in the path is not found.
+
+    **Example**
+
+    ```hot
+    xml from-xml("<root><user><name>Alice</name></user></root>")
+    name at(xml, ["user", "name"])
+    text(name)   // "Alice"
+
+    // Or chain text() directly
+    text(at(xml, ["user", "name"]))  // "Alice"
+    ```
+    """
+}
+fn (xml: Xml, segments: Vec<Str>): Xml? {
+    call-lib(::hot::xml/at, concat([xml], segments))
+}

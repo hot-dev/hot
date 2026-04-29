@@ -1,0 +1,43 @@
+::hot::test::task ns
+meta ["test"]
+
+::task ::hot::task
+Stream ::hot::stream/Stream
+Run ::hot::run/Run
+
+test-task-info-type
+meta ["test"] fn () {
+    stream-id Uuid(7)
+    run-id Uuid(7)
+    stream Stream({id: stream-id})
+    run Run({
+        id: run-id,
+        type: "event",
+        status: "completed",
+        start-time: null,
+        retry-attempt: 0,
+        max-retries: 0,
+        retry-delay: 0,
+        origin-run-id: null
+    })
+    info ::task/TaskInfo({id: "abc-123", stream: stream, "origin-run": run})
+    assert-eq("abc-123", info.id, "TaskInfo.id")
+    assert-eq(stream-id, info.stream.id, "TaskInfo.stream.id")
+    assert-eq(run-id, info.origin-run.id, "TaskInfo.origin-run.id")
+    assert(is-type(info, ::task/TaskInfo), "is TaskInfo type")
+}
+
+test-task-options-type
+meta ["test"] fn () {
+    opts ::task/TaskOptions({timeout: 3600000, type: "container"})
+    assert-eq(3600000, opts.timeout, "TaskOptions.timeout")
+    assert-eq("container", opts.type, "TaskOptions.type")
+    assert(is-type(opts, ::task/TaskOptions), "is TaskOptions type")
+}
+
+test-task-options-nullable-fields
+meta ["test"] fn () {
+    opts ::task/TaskOptions({timeout: null, type: null})
+    assert(is-null(opts.timeout), "TaskOptions.timeout accepts null")
+    assert(is-null(opts.type), "TaskOptions.type accepts null")
+}

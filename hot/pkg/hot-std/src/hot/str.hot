@@ -1,0 +1,329 @@
+::hot::str ns
+meta {doc: """String manipulation and formatting functions."""}
+
+split
+meta {
+    core: true,
+    doc: """
+    Split string `s` on delimiter `delim`.
+
+    **Example**
+
+    ```hot
+    split("a,b,c", ",")        // ["a", "b", "c"]
+    split("hello world", " ")  // ["hello", "world"]
+    ```
+
+    See also: `::hot::regex/split` for pattern-based splitting.
+    """
+}
+fn (s: Str, delim: Str): Vec<Str> {
+    call-lib(::hot::str/split, [s, delim])
+}
+
+
+join
+meta {
+    core: true,
+    doc: """
+    Join `values` with delimiter `delim`.
+
+    **Example**
+
+    ```hot
+    join(["a", "b", "c"], ",")  // "a,b,c"
+    join(["hello", "world"], " ")  // "hello world"
+    ```
+    """
+}
+fn (values: Vec<Str>, delim: Str): Str {
+    call-lib(::hot::str/join, [values, delim])
+}
+
+
+trim
+meta {
+    core: true,
+    doc: """
+    Trim whitespace from both ends of `s`.
+
+    **Example**
+
+    ```hot
+    trim("  hello  ")   // "hello"
+    trim("\t\ntext\n")  // "text"
+    ```
+    """
+}
+fn (s: Str): Str {
+    call-lib(::hot::str/trim, [s])
+}
+
+
+trim-start
+meta {
+    core: true,
+    doc: """
+    Trim whitespace from the start of `s`.
+
+    **Example**
+
+    ```hot
+    trim-start("  hello  ")  // "hello  "
+    ```
+    """
+}
+fn (s: Str): Str {
+    call-lib(::hot::str/trim-start, [s])
+}
+
+
+trim-end
+meta {
+    core: true,
+    doc: """
+    Trim whitespace from the end of `s`.
+
+    **Example**
+
+    ```hot
+    trim-end("  hello  ")  // "  hello"
+    ```
+    """
+}
+fn (s: Str): Str {
+    call-lib(::hot::str/trim-end, [s])
+}
+
+
+replace
+meta {
+    core: true,
+    doc: """
+    Replace first occurrence of `from` with `to` in `s`.
+
+    **Example**
+
+    ```hot
+    replace("hello world", "world", "Hot")  // "hello Hot"
+    replace("aaa", "a", "b")                 // "baa" (first only)
+    ```
+
+    See also: `::hot::regex/replace` for pattern-based replacement.
+    """
+}
+fn (s: Str, from: Str, to: Str): Str {
+    call-lib(::hot::str/replace, [s, from, to])
+}
+
+
+lowercase
+meta {
+    core: true,
+    doc: """
+    Convert `s` to lowercase.
+
+    **Example**
+
+    ```hot
+    lowercase("HELLO")  // "hello"
+    lowercase("HeLLo")  // "hello"
+    ```
+    """
+}
+fn (s: Str): Str {
+    call-lib(::hot::str/lowercase, [s])
+}
+
+uppercase
+meta {
+    core: true,
+    doc: """
+    Convert `s` to uppercase.
+
+    **Example**
+
+    ```hot
+    uppercase("hello")  // "HELLO"
+    uppercase("HeLLo")  // "HELLO"
+    ```
+    """
+}
+fn (s: Str): Str {
+    call-lib(::hot::str/uppercase, [s])
+}
+
+// alias these to the coll versions
+length
+meta {
+    core: true,
+    doc: """
+    Get the length of string `s`. Alias of `::hot::coll/length`.
+
+    **Example**
+
+    ```hot
+    length("hello")  // 5
+    length("")       // 0
+    ```
+    """
+}
+fn (s: Str): Int {
+    ::hot::coll/length(s)
+}
+
+is-empty
+meta {
+    core: true,
+    doc: """
+    Return true if string `s` is empty. Alias of `::hot::coll/is-empty`.
+
+    **Example**
+
+    ```hot
+    is-empty("")       // true
+    is-empty("hello")  // false
+    ```
+    """
+}
+fn (s: Str): Bool {
+    ::hot::coll/is-empty(s)
+}
+
+slice
+meta {
+    core: true,
+    doc: """
+    Get a slice of string `s` from `start` to `end`. Alias of `::hot::coll/slice`.
+
+    **Example**
+
+    ```hot
+    slice("hello world", 0, 5)   // "hello"
+    slice("hello world", 6, 11)  // "world"
+    ```
+    """
+}
+fn (s: Str, start: Int, end: Int): Str {
+    ::hot::coll/slice(s, start, end)
+}
+
+is-blank
+meta {
+    core: true,
+    doc: """
+    Return true if `s` is null, empty, or contains only whitespace.
+
+    **Example**
+
+    ```hot
+    is-blank(null)         // true
+    is-blank("")          // true
+    is-blank("   ")       // true
+    is-blank("  \t\n  ")  // true
+    is-blank("hello")     // false
+    ```
+    """
+}
+fn (s: Str | Null): Bool { or(is-null(s), is-empty(trim(s))) }
+
+
+contains
+meta {
+    core: true,
+    doc: """
+    Return true if `s` contains `substring`.
+
+    **Example**
+
+    ```hot
+    contains("hello world", "world")  // true
+    contains("hello world", "xyz")    // false
+    ```
+    """
+}
+fn (s: Str, substring: Str): Bool {
+    call-lib(::hot::str/contains, [s, substring])
+}
+
+
+starts-with
+meta {
+    core: true,
+    doc: """
+    Return true if `s` starts with `prefix`.
+
+    **Example**
+
+    ```hot
+    starts-with("hello world", "hello")  // true
+    starts-with("hello world", "world")  // false
+    ```
+    """
+}
+fn (s: Str, prefix: Str): Bool {
+    call-lib(::hot::str/starts-with, [s, prefix])
+}
+
+
+ends-with
+meta {
+    core: true,
+    doc: """
+    Return true if `s` ends with `suffix`.
+
+    **Example**
+
+    ```hot
+    ends-with("hello.txt", ".txt")  // true
+    ends-with("hello.txt", ".md")   // false
+    ```
+    """
+}
+fn (s: Str, suffix: Str): Bool {
+    call-lib(::hot::str/ends-with, [s, suffix])
+}
+
+
+pad-start
+meta {
+    core: true,
+    doc: """
+    Pad `s` on the left to `width` using `pad` (default space).
+
+    **Example**
+
+    ```hot
+    pad-start("42", 5, "0")   // "00042"
+    pad-start("hi", 5)        // "   hi"
+    pad-start("hello", 3)     // "hello" (unchanged)
+    ```
+    """
+}
+fn
+(s: Any, width: Int, pad: Str): Str {
+    call-lib(::hot::str/pad-start, [s, width, pad])
+},
+(s: Any, width: Int): Str { pad-start(s, width, " ") }
+
+
+pad-end
+meta {
+    core: true,
+    doc: """
+    Pad `s` on the right to `width` using `pad` (default space).
+
+    **Example**
+
+    ```hot
+    pad-end("hi", 5, ".")   // "hi..."
+    pad-end("hi", 5)        // "hi   "
+    pad-end("hello", 3)     // "hello" (unchanged)
+    ```
+    """
+}
+fn
+(s: Any, width: Int, pad: Str): Str {
+    call-lib(::hot::str/pad-end, [s, width, pad])
+},
+(s: Any, width: Int): Str { pad-end(s, width, " ") }

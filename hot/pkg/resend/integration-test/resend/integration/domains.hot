@@ -1,0 +1,35 @@
+::resend::integration::domains ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for Resend Domains API
+// =============================================================================
+// These tests require resend.api.key (full_access) to be set in context
+// Note: domain creation/deletion tests are skipped to avoid modifying
+// account-level DNS configuration. Only read-only tests are included.
+
+// -----------------------------------------------------------------------------
+// List & Retrieve Domains (single test to stay within rate limits)
+// -----------------------------------------------------------------------------
+
+test-domains-list-and-retrieve
+meta ["test"]
+fn () {
+    // List all domains
+    domains ::resend::domains/retrieve-list-domains(::resend::domains/GETDomainsRequest({}))
+    assert(domains.data, "Response should have 'data' field")
+
+    // If domains exist, retrieve the first one
+    if(not(is-empty(domains.data)), {
+        domain-id first(domains.data).id
+        assert(domain-id, "First domain should have an id")
+
+        detail ::resend::domains/retrieve-single-domain(::resend::domains/GETDomainsDomainIdRequest({
+            domain-id: domain-id
+        }))
+
+        assert(detail.id, "Domain should have an id")
+        assert(detail.name, "Domain should have a name")
+        assert(detail.status, "Domain should have a status")
+    })
+}

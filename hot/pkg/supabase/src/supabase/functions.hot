@@ -1,0 +1,79 @@
+::supabase::functions ns
+
+::core ::supabase::core
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+
+InvokeFunctionRequest type {
+  name: Str,
+  body: Any?,
+  headers: Map?,
+  region: Str?
+}
+
+invoke
+meta {
+    doc: """
+Invoke a Supabase Edge Function by name. The function receives the JSON body and any additional headers. Set `region` to run in a specific region (e.g. "us-east-1").
+
+**Example**
+
+```hot
+::functions ::supabase::functions
+
+// Simple invocation
+result ::functions/invoke(::functions/InvokeFunctionRequest({
+  name: "hello-world"
+}))
+
+// With body and headers
+result ::functions/invoke(::functions/InvokeFunctionRequest({
+  name: "process-order",
+  body: {order_id: "abc-123", action: "confirm"},
+  headers: {"x-custom-header": "value"}
+}))
+```
+"""
+}
+fn (request: InvokeFunctionRequest): Any {
+  base-url ::core/project-url()
+  anon-key ::core/anon-key()
+
+  url `${base-url}/functions/v1/${request.name}`
+
+  default-headers {
+    apikey: anon-key,
+    Authorization: `Bearer ${anon-key}`
+  }
+
+  has-body and(is-some(request.body), not(cond {
+    is-map(request.body) => { is-empty(request.body) }
+    is-str(request.body) => { eq(request.body, "") }
+    => { false }
+  }))
+
+  default-headers if(has-body, {...default-headers, Content-Type: "application/json"}, default-headers)
+    |> assoc-some("x-region", request.region)
+
+  final-headers if(is-some(request.headers), {...default-headers, ...request.headers}, default-headers)
+
+  encoded-body cond {
+    not(has-body) => { "" }
+    is-str(request.body) => { request.body }
+    => { to-json(untype(request.body)) }
+  }
+
+  response http-request(HttpRequest({
+    method: "POST",
+    url,
+    headers: final-headers,
+    body: encoded-body
+  }))
+
+  cond {
+    not(is-ok-response(response)) => { err({status: response.status, body: response.body}) }
+    => { response.body }
+  }
+}

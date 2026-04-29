@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.whatsapp {
+  name: "hot.dev/whatsapp",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "WhatsApp Business Cloud API bindings for Hot. Send messages, templates, interactive messages, manage media, and verify webhooks.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["messaging"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

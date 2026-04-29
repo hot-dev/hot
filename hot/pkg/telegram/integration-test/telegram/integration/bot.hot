@@ -1,0 +1,77 @@
+::telegram::integration::bot ns
+meta ["test"]
+
+test-get-me
+meta ["test"]
+fn () {
+  response ::telegram::bot/get-me()
+
+  assert(response.id, "getMe should return bot id")
+  assert(response.username, "getMe should return username")
+  assert(response.first_name, "getMe should return first_name")
+  assert(response.is_bot, "is_bot should be true")
+}
+
+test-get-and-set-commands
+meta ["test"]
+fn () {
+  ::telegram::bot/set-my-commands(::telegram::bot/SetMyCommandsRequest({
+    commands: [
+      {command: "start", description: "Start the bot"},
+      {command: "help", description: "Show help"}
+    ]
+  }))
+
+  commands ::telegram::bot/get-my-commands(::telegram::bot/GetMyCommandsRequest({}))
+
+  assert-eq(2, length(commands), "should have 2 commands")
+  assert-eq("start", first(commands).command, "first command should be start")
+  assert-eq("help", last(commands).command, "second command should be help")
+
+  ::telegram::bot/delete-my-commands(::telegram::bot/DeleteMyCommandsRequest({}))
+
+  empty-commands ::telegram::bot/get-my-commands(::telegram::bot/GetMyCommandsRequest({}))
+  assert-eq(0, length(empty-commands), "commands should be empty after delete")
+}
+
+test-get-my-name
+meta ["test"]
+fn () {
+  response ::telegram::bot/get-my-name(::telegram::bot/GetMyNameRequest({}))
+
+  assert(is-some(response.name), "getMyName should return a name field")
+}
+
+test-get-and-set-description
+meta ["test"]
+fn () {
+  original ::telegram::bot/get-my-description(::telegram::bot/GetMyDescriptionRequest({}))
+
+  ::telegram::bot/set-my-description(::telegram::bot/SetMyDescriptionRequest({
+    description: "Hot integration test bot"
+  }))
+
+  updated ::telegram::bot/get-my-description(::telegram::bot/GetMyDescriptionRequest({}))
+  assert-eq("Hot integration test bot", updated.description, "description should match")
+
+  ::telegram::bot/set-my-description(::telegram::bot/SetMyDescriptionRequest({
+    description: or(original.description, "")
+  }))
+}
+
+test-get-and-set-short-description
+meta ["test"]
+fn () {
+  original ::telegram::bot/get-my-short-description(::telegram::bot/GetMyShortDescriptionRequest({}))
+
+  ::telegram::bot/set-my-short-description(::telegram::bot/SetMyShortDescriptionRequest({
+    short_description: "Hot test bot"
+  }))
+
+  updated ::telegram::bot/get-my-short-description(::telegram::bot/GetMyShortDescriptionRequest({}))
+  assert-eq("Hot test bot", updated.short_description, "short_description should match")
+
+  ::telegram::bot/set-my-short-description(::telegram::bot/SetMyShortDescriptionRequest({
+    short_description: or(original.short_description, "")
+  }))
+}

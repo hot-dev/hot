@@ -1,0 +1,145 @@
+::openai::test::chat-tools ns
+meta ["test"]
+
+::ct      ::openai::chat-tools
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+
+// ============================================================================
+// Outbound conversions
+// ============================================================================
+
+test-to-openai-user-message
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "user", content: "hello"})
+    out ::ct/to-openai-message(m)
+    assert-eq("user", out.role)
+    assert-eq("hello", out.content)
+}
+
+test-to-openai-assistant-text-only
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "assistant", content: "hi back"})
+    out ::ct/to-openai-message(m)
+    assert-eq("assistant", out.role)
+    assert-eq("hi back", out.content)
+    assert(is-null(get(out, "tool_calls")), "no tool_calls on text-only message")
+}
+
+test-to-openai-assistant-with-tools
+meta ["test"]
+fn () {
+    call ::ai-tool/ToolCall({id: "call_1", name: "get_weather", input: {city: "Paris"}})
+    m ::ai-chat/Message({role: "assistant", content: "let me check", tool-calls: [call]})
+    out ::ct/to-openai-message(m)
+    assert-eq("assistant", out.role)
+    assert-eq("let me check", out.content)
+    tcs out.tool_calls
+    assert-eq(1, length(tcs))
+    assert-eq("call_1", tcs[0].id)
+    assert-eq("function", tcs[0].type)
+    assert-eq("get_weather", tcs[0].function.name)
+    args from-json(tcs[0].function.arguments)
+    assert-eq("Paris", args.city)
+}
+
+test-to-openai-tool-result
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "tool", content: "72F", tool-call-id: "call_1"})
+    out ::ct/to-openai-message(m)
+    assert-eq("tool", out.role)
+    assert-eq("72F", out.content)
+    assert-eq("call_1", out.tool_call_id)
+}
+
+test-to-openai-tool-result-non-string
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({role: "tool", content: 42, tool-call-id: "call_2"})
+    out ::ct/to-openai-message(m)
+    assert-eq("tool", out.role)
+    assert-eq("42", out.content)
+}
+
+tool-fixture-fn
+meta { doc: """Fixture for to-openai-tool test.""" }
+fn (x: Int): Int { x }
+
+test-to-openai-tool-shape
+meta ["test"]
+fn () {
+    t ::ai-tool/from-fn(tool-fixture-fn, {description: "Echoes its input"})
+    out ::ct/to-openai-tool(t)
+    assert-eq("function", out.type)
+    assert-eq("Echoes its input", out.function.description)
+    assert(is-some(out.function.parameters), "parameters present")
+}
+
+// ============================================================================
+// Inbound conversions
+// ============================================================================
+
+test-parse-tool-call-with-args
+meta ["test"]
+fn () {
+    raw {
+        id: "tu_1",
+        type: "function",
+        function: {name: "weather", arguments: """{"city":"NYC"}"""}
+    }
+
+    call ::ct/parse-tool-call(raw)
+    assert-eq("tu_1", call.id)
+    assert-eq("weather", call.name)
+    assert-eq("NYC", call.input.city)
+}
+
+test-parse-tool-call-empty-args
+meta ["test"]
+fn () {
+    raw {id: "x", type: "function", function: {name: "now", arguments: ""}}
+    call ::ct/parse-tool-call(raw)
+    assert-eq("now", call.name)
+    assert(is-empty(call.input), "empty input map")
+}
+
+test-response-text-and-tool-calls
+meta ["test"]
+fn () {
+    msg {
+        role: "assistant",
+        content: "calling now",
+        tool_calls: [
+            {id: "tu_1", type: "function", function: {name: "f", arguments: "{}"}}
+        ]
+    }
+
+    assert-eq("calling now", ::ct/response-text(msg))
+    calls ::ct/response-tool-calls(msg)
+    assert-eq(1, length(calls))
+    assert-eq("tu_1", calls[0].id)
+}
+
+test-response-text-null-content
+meta ["test"]
+fn () {
+    msg {role: "assistant", content: null}
+    assert-eq("", ::ct/response-text(msg))
+}
+
+test-response-usage-shape
+meta ["test"]
+fn () {
+    u ::ct/response-usage({prompt_tokens: 100, completion_tokens: 25, total_tokens: 125})
+    assert-eq(100, u.input-tokens)
+    assert-eq(25, u.output-tokens)
+}
+
+test-response-usage-null
+meta ["test"]
+fn () {
+    assert(is-null(::ct/response-usage(null)), "null usage stays null")
+}

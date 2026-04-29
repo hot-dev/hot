@@ -1,0 +1,832 @@
+::discord::discord::webhooks ns
+
+api-request ::discord::api/request
+HttpError ::discord::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ApplicationResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Str,
+    type: Any?,
+    cover_image: Str?,
+    primary_sku_id: SnowflakeType?,
+    bot: UserResponse?,
+    slug: Str?,
+    guild_id: SnowflakeType?,
+    rpc_origins: Vec?,
+    bot_public: Bool?,
+    bot_require_code_grant: Bool?,
+    terms_of_service_url: Str?,
+    privacy_policy_url: Str?,
+    custom_install_url: Str?,
+    install_params: ApplicationOAuth2InstallParamsResponse?,
+    integration_types_config: Map?,
+    verify_key: Str,
+    flags: Int,
+    max_participants: Any?,
+    tags: Vec<Str>?
+}
+
+PollMediaResponse type {
+    text: Str?,
+    emoji: MessageReactionEmojiResponse?
+}
+
+MessageResponse type {
+    type: MessageType,
+    content: Str,
+    mentions: Vec<UserResponse>,
+    mention_roles: Vec<SnowflakeType>,
+    attachments: Vec<MessageAttachmentResponse>,
+    embeds: Vec<MessageEmbedResponse>,
+    timestamp: Str,
+    edited_timestamp: Any?,
+    flags: Int,
+    components: Vec,
+    stickers: Vec?,
+    sticker_items: Vec<MessageStickerItemResponse>?,
+    id: SnowflakeType,
+    channel_id: SnowflakeType,
+    author: UserResponse,
+    pinned: Bool,
+    mention_everyone: Bool,
+    tts: Bool,
+    call: MessageCallResponse?,
+    activity: MessageActivityResponse?,
+    application: BasicApplicationResponse?,
+    application_id: SnowflakeType?,
+    interaction: MessageInteractionResponse?,
+    nonce: Any?,
+    webhook_id: SnowflakeType?,
+    message_reference: MessageReferenceResponse?,
+    thread: ThreadResponse?,
+    mention_channels: Vec?,
+    role_subscription_data: MessageRoleSubscriptionDataResponse?,
+    purchase_notification: PurchaseNotificationResponse?,
+    position: Int?,
+    resolved: ResolvedObjectsResponse?,
+    poll: PollResponse?,
+    shared_client_theme: Any?,
+    interaction_metadata: Any?,
+    message_snapshots: Vec<MessageSnapshotResponse>?,
+    reactions: Vec<MessageReactionResponse>?,
+    referenced_message: Any?
+}
+
+MessageStickerItemResponse type {
+    id: SnowflakeType,
+    name: Str,
+    format_type: StickerFormatTypes
+}
+
+MessageReferenceType type {
+
+}
+
+PollAnswerResponse type {
+    answer_id: Int,
+    poll_media: PollMediaResponse
+}
+
+StickerFormatTypes type {
+
+}
+
+ThreadMetadataResponse type {
+    archived: Bool,
+    archive_timestamp: Any?,
+    auto_archive_duration: ThreadAutoArchiveDuration,
+    locked: Bool,
+    create_timestamp: Str?,
+    invitable: Bool?
+}
+
+ThreadMemberResponse type {
+    id: SnowflakeType,
+    user_id: SnowflakeType,
+    join_timestamp: Str,
+    flags: Int,
+    member: GuildMemberResponse?
+}
+
+PollLayoutTypes type {
+
+}
+
+MessageReactionEmojiResponse type {
+    id: Any?,
+    name: Any?,
+    animated: Bool?
+}
+
+MessageReactionCountDetailsResponse type {
+    burst: Int,
+    normal: Int
+}
+
+GuildIncomingWebhookResponse type {
+    application_id: Any?,
+    avatar: Any?,
+    channel_id: Any?,
+    guild_id: Any?,
+    id: SnowflakeType,
+    name: Str,
+    type: 1,
+    user: UserResponse?,
+    token: Str?,
+    url: Str?
+}
+
+MessageEmbedProviderResponse type {
+    name: Str,
+    url: Str?
+}
+
+IncomingWebhookUpdateRequestPartial type {
+    content: Any?,
+    embeds: Any?,
+    allowed_mentions: Any?,
+    components: Any?,
+    attachments: Any?,
+    poll: Any?,
+    flags: Any?
+}
+
+UserResponse type {
+    id: SnowflakeType,
+    username: Str,
+    avatar: Any?,
+    discriminator: Str,
+    public_flags: Int,
+    flags: Int53Type,
+    bot: Bool?,
+    system: Bool?,
+    banner: Any?,
+    accent_color: Any?,
+    global_name: Any?,
+    avatar_decoration_data: Any?,
+    collectibles: Any?,
+    primary_guild: Any?
+}
+
+MessageEmbedImageResponse type {
+    url: Str?,
+    proxy_url: Str?,
+    width: UInt32Type?,
+    height: UInt32Type?,
+    content_type: Str?,
+    placeholder: Str?,
+    placeholder_version: UInt32Type?,
+    description: Str?,
+    flags: UInt32Type?
+}
+
+MessageActivityResponse type {
+
+}
+
+PollResponse type {
+    question: PollMediaResponse,
+    answers: Vec<PollAnswerResponse>,
+    expiry: Str,
+    allow_multiselect: Bool,
+    layout_type: PollLayoutTypes,
+    results: PollResultsResponse
+}
+
+VideoQualityModes type {
+
+}
+
+ThreadResponse type {
+    id: SnowflakeType,
+    type: 10 | 11 | 12,
+    last_message_id: Any?,
+    flags: Int,
+    last_pin_timestamp: Any?,
+    guild_id: SnowflakeType,
+    name: Str,
+    parent_id: Any?,
+    rate_limit_per_user: Int?,
+    bitrate: Int?,
+    user_limit: Int?,
+    rtc_region: Any?,
+    video_quality_mode: VideoQualityModes?,
+    permissions: Any?,
+    owner_id: SnowflakeType,
+    thread_metadata: ThreadMetadataResponse,
+    message_count: Int,
+    member_count: Int,
+    total_message_sent: Int,
+    applied_tags: Vec<SnowflakeType>?,
+    member: ThreadMemberResponse?
+}
+
+InteractionTypes type {
+
+}
+
+SnowflakeType type {
+
+}
+
+ApplicationOAuth2InstallParamsResponse type {
+    scopes: Vec<"applications.commands" | "bot">,
+    permissions: Str
+}
+
+MessageCallResponse type {
+    ended_timestamp: Any?,
+    participants: Vec<SnowflakeType>
+}
+
+MessageEmbedResponse type {
+    type: Str,
+    url: Str?,
+    title: Str?,
+    description: Str?,
+    color: Int?,
+    timestamp: Str?,
+    fields: Vec<MessageEmbedFieldResponse>?,
+    author: MessageEmbedAuthorResponse?,
+    provider: MessageEmbedProviderResponse?,
+    image: MessageEmbedImageResponse?,
+    thumbnail: MessageEmbedImageResponse?,
+    video: MessageEmbedVideoResponse?,
+    footer: MessageEmbedFooterResponse?
+}
+
+MessageEmbedFieldResponse type {
+    name: Str,
+    value: Str,
+    inline: Bool
+}
+
+MessageRoleSubscriptionDataResponse type {
+    role_subscription_listing_id: SnowflakeType,
+    tier_name: Str,
+    total_months_subscribed: Int,
+    is_renewal: Bool
+}
+
+GithubWebhook type {
+    action: Any?,
+    ref: Any?,
+    ref_type: Any?,
+    comment: Any?,
+    issue: Any?,
+    pull_request: Any?,
+    repository: Any?,
+    forkee: Any?,
+    sender: GithubUser,
+    member: Any?,
+    release: Any?,
+    head_commit: Any?,
+    commits: Any?,
+    forced: Any?,
+    compare: Any?,
+    review: Any?,
+    check_run: Any?,
+    check_suite: Any?,
+    discussion: Any?,
+    answer: Any?
+}
+
+GithubUser type {
+    id: Int,
+    login: Str,
+    html_url: Str,
+    avatar_url: Str
+}
+
+MessageInteractionResponse type {
+    id: SnowflakeType,
+    type: InteractionTypes,
+    name: Str,
+    user: UserResponse?,
+    name_localized: Str?
+}
+
+ThreadAutoArchiveDuration type {
+
+}
+
+GuildProductPurchaseResponse type {
+    listing_id: SnowflakeType,
+    product_name: Str
+}
+
+MessageAttachmentResponse type {
+    id: SnowflakeType,
+    filename: Str,
+    size: Int,
+    url: Str,
+    proxy_url: Str,
+    width: Int?,
+    height: Int?,
+    duration_secs: Dec?,
+    waveform: Str?,
+    description: Str?,
+    content_type: Str?,
+    ephemeral: Bool?,
+    title: Any?,
+    application: ApplicationResponse?,
+    clip_created_at: Str?,
+    clip_participants: Vec<UserResponse>?
+}
+
+MessageEmbedVideoResponse type {
+    url: Str?,
+    proxy_url: Str?,
+    width: UInt32Type?,
+    height: UInt32Type?,
+    content_type: Str?,
+    placeholder: Str?,
+    placeholder_version: UInt32Type?,
+    description: Str?,
+    flags: UInt32Type?
+}
+
+MessageReactionResponse type {
+    emoji: MessageReactionEmojiResponse,
+    count: Int,
+    count_details: MessageReactionCountDetailsResponse,
+    burst_colors: Vec<Str>,
+    me_burst: Bool,
+    me: Bool
+}
+
+SlackWebhook type {
+    text: Any?,
+    username: Any?,
+    icon_url: Any?,
+    attachments: Any?
+}
+
+ResolvedObjectsResponse type {
+    users: Any?,
+    members: Any?,
+    channels: Any?,
+    roles: Any?
+}
+
+PollResultsEntryResponse type {
+    id: Int,
+    count: Int,
+    me_voted: Bool
+}
+
+BasicApplicationResponse type {
+    id: SnowflakeType,
+    name: Str,
+    icon: Any?,
+    description: Str,
+    type: Any?,
+    cover_image: Str?,
+    primary_sku_id: SnowflakeType?,
+    bot: UserResponse?
+}
+
+MessageEmbedFooterResponse type {
+    text: Str,
+    icon_url: Str?,
+    proxy_icon_url: Str?
+}
+
+MessageType type {
+
+}
+
+MessageReferenceResponse type {
+    type: MessageReferenceType,
+    channel_id: SnowflakeType,
+    message_id: SnowflakeType?,
+    guild_id: SnowflakeType?
+}
+
+PurchaseType type {
+
+}
+
+MessageEmbedAuthorResponse type {
+    name: Str,
+    url: Str?,
+    icon_url: Str?,
+    proxy_icon_url: Str?
+}
+
+MessageSnapshotResponse type {
+    message: MinimalContentMessageResponse
+}
+
+MinimalContentMessageResponse type {
+    type: MessageType,
+    content: Str,
+    mentions: Vec<UserResponse>,
+    mention_roles: Vec<SnowflakeType>,
+    attachments: Vec<MessageAttachmentResponse>,
+    embeds: Vec<MessageEmbedResponse>,
+    timestamp: Str,
+    edited_timestamp: Any?,
+    flags: Int,
+    components: Vec,
+    stickers: Vec?,
+    sticker_items: Vec<MessageStickerItemResponse>?
+}
+
+Int53Type type {
+
+}
+
+GuildMemberResponse type {
+    avatar: Any?,
+    avatar_decoration_data: Any?,
+    banner: Any?,
+    communication_disabled_until: Any?,
+    flags: Int,
+    joined_at: Str,
+    nick: Any?,
+    pending: Bool,
+    premium_since: Any?,
+    roles: Vec<SnowflakeType>,
+    collectibles: Any?,
+    user: UserResponse,
+    mute: Bool,
+    deaf: Bool
+}
+
+PurchaseNotificationResponse type {
+    type: PurchaseType,
+    guild_product_purchase: GuildProductPurchaseResponse?
+}
+
+PollResultsResponse type {
+    answer_counts: Vec<PollResultsEntryResponse>,
+    is_finalized: Bool
+}
+
+UInt32Type type {
+
+}
+
+CreateWebhookRequest type {
+    name: Str,
+    avatar: Any?
+}
+
+CreateWebhookResponse type {
+    application_id: Any?,
+    avatar: Any?,
+    channel_id: Any?,
+    guild_id: Any?,
+    id: SnowflakeType,
+    name: Str,
+    type: 1,
+    user: UserResponse?,
+    token: Str?,
+    url: Str?
+}
+
+
+create
+meta {doc: """POST /channels/{channel_id}/webhooks"""}
+fn (request: CreateWebhookRequest): CreateWebhookResponse {
+  response api-request("POST", `${::discord/BASE_URL}/channels/{channel_id}/webhooks`, {}, request)
+  if(is-ok-response(response), CreateWebhookResponse(response.body), err(HttpError(response)))
+}
+
+GetWebhookRequest type {
+
+}
+
+GetWebhookResponse type {
+    value: Any
+}
+
+
+get
+meta {doc: """GET /webhooks/{webhook_id}"""}
+fn (request: GetWebhookRequest): GetWebhookResponse {
+  response api-request("GET", `${::discord/BASE_URL}/webhooks/{webhook_id}`)
+  if(is-ok-response(response), GetWebhookResponse(response.body), err(HttpError(response)))
+}
+
+UpdateWebhookRequest type {
+    name: Str?,
+    avatar: Any?,
+    channel_id: Any?
+}
+
+UpdateWebhookResponse type {
+    value: Any
+}
+
+
+update
+meta {doc: """PATCH /webhooks/{webhook_id}"""}
+fn (request: UpdateWebhookRequest): UpdateWebhookResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/webhooks/{webhook_id}`, {}, request)
+  if(is-ok-response(response), UpdateWebhookResponse(response.body), err(HttpError(response)))
+}
+
+DeleteWebhookRequest type {
+
+}
+
+DeleteWebhookResponse type {
+
+}
+
+
+delete
+meta {doc: """DELETE /webhooks/{webhook_id}"""}
+fn (request: DeleteWebhookRequest): DeleteWebhookResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/webhooks/{webhook_id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+GetWebhookByTokenRequest type {
+
+}
+
+GetWebhookByTokenResponse type {
+    value: Any
+}
+
+
+get-by-token
+meta {doc: """GET /webhooks/{webhook_id}/{webhook_token}"""}
+fn (request: GetWebhookByTokenRequest): GetWebhookByTokenResponse {
+  response api-request("GET", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}`)
+  if(is-ok-response(response), GetWebhookByTokenResponse(response.body), err(HttpError(response)))
+}
+
+ExecuteWebhookRequest type {
+    value: Any
+}
+
+ExecuteWebhookResponse type {
+    type: MessageType,
+    content: Str,
+    mentions: Vec<UserResponse>,
+    mention_roles: Vec<SnowflakeType>,
+    attachments: Vec<MessageAttachmentResponse>,
+    embeds: Vec<MessageEmbedResponse>,
+    timestamp: Str,
+    edited_timestamp: Any?,
+    flags: Int,
+    components: Vec,
+    stickers: Vec?,
+    sticker_items: Vec<MessageStickerItemResponse>?,
+    id: SnowflakeType,
+    channel_id: SnowflakeType,
+    author: UserResponse,
+    pinned: Bool,
+    mention_everyone: Bool,
+    tts: Bool,
+    call: MessageCallResponse?,
+    activity: MessageActivityResponse?,
+    application: BasicApplicationResponse?,
+    application_id: SnowflakeType?,
+    interaction: MessageInteractionResponse?,
+    nonce: Any?,
+    webhook_id: SnowflakeType?,
+    message_reference: MessageReferenceResponse?,
+    thread: ThreadResponse?,
+    mention_channels: Vec?,
+    role_subscription_data: MessageRoleSubscriptionDataResponse?,
+    purchase_notification: PurchaseNotificationResponse?,
+    position: Int?,
+    resolved: ResolvedObjectsResponse?,
+    poll: PollResponse?,
+    shared_client_theme: Any?,
+    interaction_metadata: Any?,
+    message_snapshots: Vec<MessageSnapshotResponse>?,
+    reactions: Vec<MessageReactionResponse>?,
+    referenced_message: Any?
+}
+
+
+execute
+meta {doc: """POST /webhooks/{webhook_id}/{webhook_token}"""}
+fn (wait: Str, thread-id: Str, with-components: Str, request: ExecuteWebhookRequest): ExecuteWebhookResponse {
+  response api-request("POST", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}?wait=${wait}&thread_id=${thread-id}&with_components=${with-components}`, {}, request)
+  if(is-ok-response(response), ExecuteWebhookResponse(response.body), err(HttpError(response)))
+}
+
+UpdateWebhookByTokenRequest type {
+    name: Str?,
+    avatar: Any?
+}
+
+UpdateWebhookByTokenResponse type {
+    value: Any
+}
+
+
+update-by-token
+meta {doc: """PATCH /webhooks/{webhook_id}/{webhook_token}"""}
+fn (request: UpdateWebhookByTokenRequest): UpdateWebhookByTokenResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}`, {}, request)
+  if(is-ok-response(response), UpdateWebhookByTokenResponse(response.body), err(HttpError(response)))
+}
+
+DeleteWebhookByTokenRequest type {
+
+}
+
+DeleteWebhookByTokenResponse type {
+
+}
+
+
+delete-by-token
+meta {doc: """DELETE /webhooks/{webhook_id}/{webhook_token}"""}
+fn (request: DeleteWebhookByTokenRequest): DeleteWebhookByTokenResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+GetWebhookMessageRequest type {
+  thread-id: Str
+}
+
+GetWebhookMessageResponse type {
+    type: MessageType,
+    content: Str,
+    mentions: Vec<UserResponse>,
+    mention_roles: Vec<SnowflakeType>,
+    attachments: Vec<MessageAttachmentResponse>,
+    embeds: Vec<MessageEmbedResponse>,
+    timestamp: Str,
+    edited_timestamp: Any?,
+    flags: Int,
+    components: Vec,
+    stickers: Vec?,
+    sticker_items: Vec<MessageStickerItemResponse>?,
+    id: SnowflakeType,
+    channel_id: SnowflakeType,
+    author: UserResponse,
+    pinned: Bool,
+    mention_everyone: Bool,
+    tts: Bool,
+    call: MessageCallResponse?,
+    activity: MessageActivityResponse?,
+    application: BasicApplicationResponse?,
+    application_id: SnowflakeType?,
+    interaction: MessageInteractionResponse?,
+    nonce: Any?,
+    webhook_id: SnowflakeType?,
+    message_reference: MessageReferenceResponse?,
+    thread: ThreadResponse?,
+    mention_channels: Vec?,
+    role_subscription_data: MessageRoleSubscriptionDataResponse?,
+    purchase_notification: PurchaseNotificationResponse?,
+    position: Int?,
+    resolved: ResolvedObjectsResponse?,
+    poll: PollResponse?,
+    shared_client_theme: Any?,
+    interaction_metadata: Any?,
+    message_snapshots: Vec<MessageSnapshotResponse>?,
+    reactions: Vec<MessageReactionResponse>?,
+    referenced_message: Any?
+}
+
+
+get-message
+meta {doc: """GET /webhooks/{webhook_id}/{webhook_token}/messages/{message_id}"""}
+fn (request: GetWebhookMessageRequest): GetWebhookMessageResponse {
+  response api-request("GET", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}?thread_id=${request.thread-id}`)
+  if(is-ok-response(response), GetWebhookMessageResponse(response.body), err(HttpError(response)))
+}
+
+UpdateWebhookMessageRequest type {
+    content: Any?,
+    embeds: Any?,
+    allowed_mentions: Any?,
+    components: Any?,
+    attachments: Any?,
+    poll: Any?,
+    flags: Any?
+}
+
+UpdateWebhookMessageResponse type {
+    type: MessageType,
+    content: Str,
+    mentions: Vec<UserResponse>,
+    mention_roles: Vec<SnowflakeType>,
+    attachments: Vec<MessageAttachmentResponse>,
+    embeds: Vec<MessageEmbedResponse>,
+    timestamp: Str,
+    edited_timestamp: Any?,
+    flags: Int,
+    components: Vec,
+    stickers: Vec?,
+    sticker_items: Vec<MessageStickerItemResponse>?,
+    id: SnowflakeType,
+    channel_id: SnowflakeType,
+    author: UserResponse,
+    pinned: Bool,
+    mention_everyone: Bool,
+    tts: Bool,
+    call: MessageCallResponse?,
+    activity: MessageActivityResponse?,
+    application: BasicApplicationResponse?,
+    application_id: SnowflakeType?,
+    interaction: MessageInteractionResponse?,
+    nonce: Any?,
+    webhook_id: SnowflakeType?,
+    message_reference: MessageReferenceResponse?,
+    thread: ThreadResponse?,
+    mention_channels: Vec?,
+    role_subscription_data: MessageRoleSubscriptionDataResponse?,
+    purchase_notification: PurchaseNotificationResponse?,
+    position: Int?,
+    resolved: ResolvedObjectsResponse?,
+    poll: PollResponse?,
+    shared_client_theme: Any?,
+    interaction_metadata: Any?,
+    message_snapshots: Vec<MessageSnapshotResponse>?,
+    reactions: Vec<MessageReactionResponse>?,
+    referenced_message: Any?
+}
+
+
+update-message
+meta {doc: """PATCH /webhooks/{webhook_id}/{webhook_token}/messages/{message_id}"""}
+fn (thread-id: Str, with-components: Str, request: UpdateWebhookMessageRequest): UpdateWebhookMessageResponse {
+  response api-request("PATCH", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}?thread_id=${thread-id}&with_components=${with-components}`, {}, request)
+  if(is-ok-response(response), UpdateWebhookMessageResponse(response.body), err(HttpError(response)))
+}
+
+DeleteWebhookMessageRequest type {
+  thread-id: Str
+}
+
+DeleteWebhookMessageResponse type {
+
+}
+
+
+delete-message
+meta {doc: """DELETE /webhooks/{webhook_id}/{webhook_token}/messages/{message_id}"""}
+fn (request: DeleteWebhookMessageRequest): DeleteWebhookMessageResponse {
+  response api-request("DELETE", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}?thread_id=${request.thread-id}`)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ExecuteGithubCompatibleWebhookRequest type {
+    action: Any?,
+    ref: Any?,
+    ref_type: Any?,
+    comment: Any?,
+    issue: Any?,
+    pull_request: Any?,
+    repository: Any?,
+    forkee: Any?,
+    sender: GithubUser,
+    member: Any?,
+    release: Any?,
+    head_commit: Any?,
+    commits: Any?,
+    forced: Any?,
+    compare: Any?,
+    review: Any?,
+    check_run: Any?,
+    check_suite: Any?,
+    discussion: Any?,
+    answer: Any?
+}
+
+ExecuteGithubCompatibleWebhookResponse type {
+
+}
+
+
+execute-compatible-webhook
+meta {doc: """POST /webhooks/{webhook_id}/{webhook_token}/github"""}
+fn (wait: Str, thread-id: Str, request: ExecuteGithubCompatibleWebhookRequest): ExecuteGithubCompatibleWebhookResponse {
+  response api-request("POST", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}/github?wait=${wait}&thread_id=${thread-id}`, {}, request)
+  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+}
+
+ExecuteSlackCompatibleWebhookRequest type {
+    text: Any?,
+    username: Any?,
+    icon_url: Any?,
+    attachments: Any?
+}
+
+ExecuteSlackCompatibleWebhookResponse type {
+    value: Any
+}
+
+
+execute-compatible-webhook
+meta {doc: """POST /webhooks/{webhook_id}/{webhook_token}/slack"""}
+fn (wait: Str, thread-id: Str, request: ExecuteSlackCompatibleWebhookRequest): ExecuteSlackCompatibleWebhookResponse {
+  response api-request("POST", `${::discord/BASE_URL}/webhooks/{webhook_id}/{webhook_token}/slack?wait=${wait}&thread_id=${thread-id}`, {}, request)
+  if(is-ok-response(response), ExecuteSlackCompatibleWebhookResponse(response.body), err(HttpError(response)))
+}

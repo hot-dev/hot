@@ -1,0 +1,244 @@
+::ai::memory ns
+meta {
+    doc: "Session-scoped agent memory with three storage levels: session (shared conversation history), user (per-user persistent data), and KB (shared domain knowledge)."
+}
+
+::store   ::hot::store
+::time    ::hot::time
+::session ::ai::session
+
+Session  ::session/Session
+Identity ::session/Identity
+Message  ::ai::message/Message
+Role     ::ai::message/Role
+
+// ============================================================================
+// AgentMemory — bundles the three scoped stores
+// ============================================================================
+
+AgentMemory
+meta {
+    doc: "Bundles three scoped stores for an agent + session + identity combination."
+}
+type {
+    agent-name: Str,
+    // Field types fully qualified to dodge the same alias-resolution
+    // glitch as the constructors below — see the long comment in
+    // `create-memory`.
+    session-store: ::hot::store/Map,
+    user-store: ::hot::store/Map,
+    kb-store: ::hot::store/Map,
+}
+
+create-memory
+meta { doc: "Build an AgentMemory with all three scoped stores." }
+fn (agent-name: Str, session: Session, identity: Identity): AgentMemory {
+    // NOTE: The constructor calls below use the fully qualified
+    // `::hot::store/Map(...)` form even though `::store ::hot::store`
+    // is aliased at the top of this file. Hot's compiler does not
+    // currently rewrite the alias for type-constructor calls in
+    // certain dispatch contexts (likely because `Map` is also a core
+    // generic type name), so `::store/Map(...)` slips through to the
+    // VM and fails with `Qualified function '::store/Map' not found`.
+    // Other `::store/...` calls in this file (put, get, search, …)
+    // resolve correctly. Use the long form here until the compiler is
+    // taught to disambiguate the type-named constructor.
+    // user-store is keyed under (session, identity) — see
+    // `::ai::session/session-user-key` for the rationale. Without that,
+    // the same person showing up in two different sessions (e.g. a
+    // Telegram group + a Slack channel) would share a single profile
+    // store, which is almost never what callers want.
+    AgentMemory({
+        agent-name: agent-name,
+        session-store: ::hot::store/Map({
+            name: ::session/session-key(agent-name, session, "memory"),
+            embedding: true,
+        }),
+        user-store: ::hot::store/Map({
+            name: ::session/session-user-key(agent-name, session, identity, "profile"),
+        }),
+        kb-store: ::hot::store/Map({
+            name: ::session/agent-key(agent-name, "kb"),
+            embedding: true,
+        }),
+    })
+}
+
+// ============================================================================
+// Session memory — conversation history
+// ============================================================================
+
+remember
+meta { doc: "Store a Message in session memory. Auto-generates a time-based key." }
+fn (mem: AgentMemory, message: Message): Any {
+    key `${message.timestamp}:${message.id}`
+    ::store/put(mem.session-store, key, {
+        content: message.content,
+        sender-id: message.sender.id,
+        sender-name: or(message.sender.name, message.sender.id),
+        source: message.source,
+        timestamp: message.timestamp,
+        metadata: message.metadata,
+    })
+}
+
+recent
+meta {
+    doc: "Retrieve recent messages from session memory. Options: hours (default 24), limit (default 100)."
+}
+fn (mem: AgentMemory, opts: Map?): Vec {
+    hours get(or(opts, {}), "hours", 24)
+    limit get(or(opts, {}), "limit", 100)
+    // `::time/now` returns an `Instant` record; go through
+    // `epoch-millis` because Hot has no `Instant -> Int` coercion.
+    since sub(div(::time/epoch-millis(::time/now()), 1000), mul(hours, 3600))
+    results ::store/filter(mem.session-store, (k, v) { gte(v.timestamp, since) })
+    slice(results, 0, limit)
+}
+
+recall
+meta {
+    doc: "Semantic search over session memory. Options: limit (default 10), min-score (default 0.5)."
+}
+fn (mem: AgentMemory, query: Str, opts: Map?): Vec {
+    search-opts {
+        limit: get(or(opts, {}), "limit", 10),
+        min-score: get(or(opts, {}), "min-score", 0.5),
+    }
+
+    ::store/search(mem.session-store, query, search-opts)
+}
+
+forget-session
+meta { doc: "Clear all entries in session memory." }
+fn (mem: AgentMemory): Bool {
+    ::store/clear(mem.session-store)
+}
+
+// ============================================================================
+// User memory — per-user persistent data
+// ============================================================================
+
+get-user-data
+meta { doc: "Read a value from the user's persistent store." }
+fn (mem: AgentMemory, key: Str): Any {
+    ::store/get(mem.user-store, key)
+}
+
+set-user-data
+meta { doc: "Write a value to the user's persistent store." }
+fn (mem: AgentMemory, key: Str, value: Any): Any {
+    ::store/put(mem.user-store, key, value)
+}
+
+// ============================================================================
+// Knowledge base — shared domain knowledge
+// ============================================================================
+
+learn
+meta { doc: "Add an entry to the shared knowledge base. Auto-embedded for search." }
+fn (mem: AgentMemory, key: Str, content: Map): Any {
+    ::store/put(mem.kb-store, key, content)
+}
+
+search-kb
+meta {
+    doc: "Semantic search over the shared knowledge base. Options: limit (default 5)."
+}
+fn (mem: AgentMemory, query: Str, opts: Map?): Vec {
+    limit get(or(opts, {}), "limit", 5)
+    ::store/search(mem.kb-store, query, {limit: limit})
+}
+
+// ============================================================================
+// Per-user conversation threads (multi-turn /ask)
+// ============================================================================
+
+Thread
+meta { doc: "A per-user conversation thread for multi-turn interactions." }
+type {
+    store: ::hot::store/Map,
+    turn-limit: Int
+}
+
+thread
+meta {
+    doc: """
+    Create or get a per-(session, user) thread store for multi-turn
+    interactions. Options: `max-turns` (default 20).
+
+    The thread is scoped to (session, identity) so the same user in a
+    different session has an independent thread. Pass the same
+    `session` you used to build `AgentMemory` so memory and thread
+    stay aligned.
+    """
+}
+fn (agent-name: Str, session: Session, identity: Identity, opts: Map?): Thread {
+    max-turns get(or(opts, {}), "max-turns", 20)
+    Thread({
+        // See note in create-memory about the fully qualified
+        // ::hot::store/Map(...) — same compiler limitation applies.
+        store: ::hot::store/Map({
+            name: ::session/session-user-key(agent-name, session, identity, "thread"),
+        }),
+        turn-limit: max-turns,
+    })
+}
+
+thread-add
+meta { doc: "Append a message to a conversation thread." }
+fn (t: Thread, role: Role, content: Str): Any {
+    // Same `::time/now -> Int` workaround as in `recent` above.
+    key `${div(::time/epoch-millis(::time/now()), 1000)}:${Uuid()}`
+    role-str match role {
+        Role.User      => { "user" }
+        Role.Assistant => { "assistant" }
+        Role.System    => { "system" }
+        Role.Tool      => { "tool" }
+    }
+
+    ::store/put(t.store, key, {role: role-str, content: content})
+
+    // Prune if over turn-limit (each turn = 2 messages: user + assistant)
+    max-messages mul(t.turn-limit, 2)
+    count ::store/length(t.store)
+    if(gt(count, max-messages), {
+        excess sub(count, max-messages)
+        to-remove ::store/slice(t.store, 0, excess)
+        map(to-remove, (entry) { ::store/delete(t.store, entry.key) })
+    })
+}
+
+thread-history
+meta {
+    doc: "Get the recent thread history as ChatMessages. Options: limit (default all)."
+}
+fn (t: Thread, opts: Map?): Vec {
+    entries ::store/list(t.store)
+    limited cond {
+        is-some(opts) => {
+            lim get(opts, "limit", length(entries))
+            tail-start max(sub(length(entries), lim), 0)
+            slice(entries, tail-start)
+        }
+        => { entries }
+    }
+
+    map(limited, (entry) {
+        ::ai::message/ChatMessage({
+            role: match entry.value.role {
+                "user"      => { Role.User }
+                "assistant" => { Role.Assistant }
+                "system"    => { Role.System }
+                =>          { Role.User }
+            },
+            content: entry.value.content,
+        })
+    })
+}
+
+thread-clear
+meta { doc: "Reset a conversation thread." }
+fn (t: Thread): Bool {
+    ::store/clear(t.store)
+}

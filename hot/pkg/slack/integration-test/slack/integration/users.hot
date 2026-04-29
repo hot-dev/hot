@@ -1,0 +1,69 @@
+::slack::integration::users ns
+meta ["test"]
+
+test-users-list
+meta ["test"]
+fn () {
+  response ::slack::users/users-list(::slack::users/UsersListRequest({
+    limit: 50
+  }))
+
+  assert(response.ok, `users.list should succeed. response=${to-json(response)}`)
+
+  if(response.ok, {
+    assert(response.members, "users.list should return members")
+    assert(gt(length(response.members), 0), "workspace should have at least one user")
+
+    // Verify user structure
+    first-user first(response.members)
+    assert(first-user.id, "user should have id")
+    assert(first-user.name, "user should have name")
+  }, null)
+}
+
+test-users-info
+meta ["test"]
+fn () {
+  // First get a user id from the list
+  list-response ::slack::users/users-list(::slack::users/UsersListRequest({
+    limit: 1
+  }))
+  assert(list-response.ok, `users.list should succeed. response=${to-json(list-response)}`)
+
+  if(list-response.ok, {
+    user-id first(list-response.members).id
+    assert(user-id, "should have a user id")
+
+    // Now get info for that user
+    info-response ::slack::users/users-info(::slack::users/UsersInfoRequest({
+      user: user-id
+    }))
+
+    assert(info-response.ok, `users.info should succeed. response=${to-json(info-response)}`)
+    if(info-response.ok, {
+      assert(info-response.user, "users.info should return user object")
+      assert-eq(user-id, info-response.user.id, "user id should match requested id")
+    }, null)
+  }, null)
+}
+
+test-users-profile-get
+meta ["test"]
+fn () {
+  // First get a user id
+  list-response ::slack::users/users-list(::slack::users/UsersListRequest({
+    limit: 1
+  }))
+  assert(list-response.ok, `users.list should succeed. response=${to-json(list-response)}`)
+
+  if(list-response.ok, {
+    user-id first(list-response.members).id
+
+    response ::slack::users/users-profile-get(::slack::users/UsersProfileGetRequest({
+      user: user-id
+    }))
+
+    assert(response.ok, `users.profile.get should succeed. response=${to-json(response)}`)
+    assert(response.profile, "users.profile.get should return profile")
+  }, null)
+}

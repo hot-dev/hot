@@ -1,0 +1,90 @@
+::ai::test::bus ns
+meta ["test"]
+
+::bus     ::ai::bus
+::session ::ai::session
+::msg     ::ai::message
+
+Session              ::session/Session
+Identity             ::session/Identity
+AgentMessage         ::msg/AgentMessage
+BroadcastMessage     ::bus/BroadcastMessage
+CollaborationRequest ::bus/CollaborationRequest
+
+// Fixtures
+chat   Session({id: "general"})
+sender Identity({id: "u1", name: "alice"})
+
+// ============================================================================
+// BroadcastMessage construction
+// ============================================================================
+
+test-broadcast-message-shape
+meta ["test"] fn () {
+    b BroadcastMessage({
+        session: chat,
+        sender: sender,
+        from-agent: "scout",
+        topic: "alert",
+        data: {level: "high"},
+    })
+    assert-eq("general",   b.session.id)
+    assert-eq("alice",     b.sender.name)
+    assert-eq("scout",     b.from-agent)
+    assert-eq("alert",     b.topic)
+    assert-eq("high",      b.data.level)
+}
+
+// ============================================================================
+// CollaborationRequest construction
+// ============================================================================
+
+test-collaboration-request-shape
+meta ["test"] fn () {
+    req CollaborationRequest({
+        session: chat,
+        sender: sender,
+        from-agent: "brain",
+        question: "When did Alice last log in?",
+        reply-event: "brain:reply:42",
+        correlation-id: "42",
+    })
+    assert-eq("brain",                       req.from-agent)
+    assert-eq("When did Alice last log in?", req.question)
+    assert-eq("brain:reply:42",              req.reply-event)
+    assert-eq("42",                          req.correlation-id)
+    assert(is-null(req.context))
+}
+
+test-collaboration-request-with-context
+meta ["test"] fn () {
+    req CollaborationRequest({
+        session: chat,
+        sender: sender,
+        from-agent: "brain",
+        question: "Hello?",
+        reply-event: "brain:reply:1",
+        correlation-id: "1",
+        context: {source: "telegram"},
+    })
+    assert-eq("telegram", req.context.source)
+}
+
+// ============================================================================
+// AgentMessage (reused from ::ai::message)
+// ============================================================================
+
+test-agent-message-for-tell
+meta ["test"] fn () {
+    m AgentMessage({
+        session: chat,
+        sender: sender,
+        to-agent: "helper",
+        from-agent: "brain",
+        content: "please handle this",
+        timestamp: 100,
+    })
+    assert-eq("helper", m.to-agent)
+    assert-eq("brain",  m.from-agent)
+    assert-eq("please handle this", m.content)
+}

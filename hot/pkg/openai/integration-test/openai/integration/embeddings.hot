@@ -1,0 +1,59 @@
+::openai::integration::embeddings ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for OpenAI Embeddings API
+// =============================================================================
+// These tests require OPENAI_API_KEY to be set in context
+
+test-embeddings-create-simple
+meta ["test"]
+fn () {
+    response ::openai::embeddings/create(::openai::embeddings/EmbeddingRequest({
+        input: "The quick brown fox jumps over the lazy dog",
+        model: "text-embedding-3-small"
+    }))
+
+    assert(response.data, "Response should have data array")
+    assert(gt(length(response.data), 0), "Should have at least one embedding")
+
+    embedding response.data[0].embedding
+    assert(embedding, "Should have embedding vector")
+    assert(gt(length(embedding), 0), "Embedding should have dimensions")
+    assert(response.usage, "Response should have usage info")
+}
+
+test-embeddings-create-multiple
+meta ["test"]
+fn () {
+    response ::openai::embeddings/create(::openai::embeddings/EmbeddingRequest({
+        input: ["Hello world", "Goodbye world"],
+        model: "text-embedding-3-small"
+    }))
+
+    assert(response.data, "Response should have data array")
+    assert-eq(2, length(response.data), "Should have two embeddings")
+}
+
+test-embeddings-with-dimensions
+meta ["test"]
+fn () {
+    response ::openai::embeddings/create(::openai::embeddings/EmbeddingRequest({
+        input: "Test text",
+        model: "text-embedding-3-small",
+        dimensions: 256
+    }))
+
+    assert(response.data, "Response should have data array")
+    embedding response.data[0].embedding
+    assert-eq(256, length(embedding), "Embedding should have 256 dimensions")
+}
+
+test-embeddings-convenience-function
+meta ["test"]
+fn () {
+    vector ::openai::embeddings/embed("Hello world")
+
+    assert(vector, "Should get embedding vector")
+    assert(gt(length(vector), 0), "Vector should have dimensions")
+}

@@ -1,0 +1,64 @@
+::hot::test::term ns
+meta ["test"]
+
+assert-eq ::hot::test/assert-eq
+black ::hot::term/black
+blue ::hot::term/blue
+bright-black ::hot::term/bright-black
+bright-blue ::hot::term/bright-blue
+bright-cyan ::hot::term/bright-cyan
+bright-green ::hot::term/bright-green
+bright-magenta ::hot::term/bright-magenta
+bright-red ::hot::term/bright-red
+bright-white ::hot::term/bright-white
+bright-yellow ::hot::term/bright-yellow
+colors ::hot::term/colors
+cyan ::hot::term/cyan
+green ::hot::term/green
+magenta ::hot::term/magenta
+println ::hot::io/println
+red ::hot::term/red
+white ::hot::term/white
+yellow ::hot::term/yellow
+
+test-colors
+meta ["test"] fn () {
+    assert-eq("\x1b[31mred\x1b[0m", red("red"), "red function should return red ANSI escape sequence")
+    assert-eq(
+        "\x1b[32mgreen\x1b[0m",
+        green("green"),
+        "green function should return green ANSI escape sequence"
+    )
+    assert-eq(
+        "\x1b[91mbright red\x1b[0m",
+        bright-red("bright red"),
+        "bright-red function should return bright red ANSI escape sequence"
+    )
+    assert-eq(
+        "\x1b[92mbright green\x1b[0m",
+        bright-green("bright green"),
+        "bright-green function should return bright green ANSI escape sequence"
+    )
+
+    // Test color map access
+    println(`DEBUG: colors.red = ${colors}`)
+    assert-eq(31, colors.red, "colors.red should return 31")
+    // Visual test - print all colors (for manual verification)
+    println("Visual Color Test")
+    println(black("black"))
+    println(red("red"))
+    println(green("green"))
+    println(yellow("yellow"))
+    println(blue("blue"))
+    println(magenta("magenta"))
+    println(cyan("cyan"))
+    println(white("white"))
+    println(bright-black("bright black"))
+    println(bright-red("bright red"))
+    println(bright-green("bright green"))
+    println(bright-yellow("bright yellow"))
+    println(bright-blue("bright blue"))
+    println(bright-magenta("bright magenta"))
+    println(bright-cyan("bright cyan"))
+    println(bright-white("bright white"))
+}

@@ -1,0 +1,1533 @@
+::stripe::stripe::tax ns
+
+api-request ::stripe::api/request
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+RadarRadarOptions type {
+    session: Str?
+}
+
+TaxProductResourceTaxAssociationTransactionAttemptsResourceErrored type {
+    reason: "another_payment_associated_with_calculation" | "calculation_expired" | "currency_mismatch" | "original_transaction_voided" | "unique_reference_violation"
+}
+
+Error type {
+    error: ApiErrors
+}
+
+PaymentMethodLink type {
+    email: Str?
+}
+
+PaymentMethod type {
+    acss_debit: PaymentMethodAcssDebit?,
+    affirm: PaymentMethodAffirm?,
+    afterpay_clearpay: PaymentMethodAfterpayClearpay?,
+    alipay: PaymentFlowsPrivatePaymentMethodsAlipay?,
+    allow_redisplay: "always" | "limited" | "unspecified"?,
+    alma: PaymentMethodAlma?,
+    amazon_pay: PaymentMethodAmazonPay?,
+    au_becs_debit: PaymentMethodAuBecsDebit?,
+    bacs_debit: PaymentMethodBacsDebit?,
+    bancontact: PaymentMethodBancontact?,
+    billie: PaymentMethodBillie?,
+    billing_details: BillingDetails,
+    blik: PaymentMethodBlik?,
+    boleto: PaymentMethodBoleto?,
+    card: PaymentMethodCard?,
+    card_present: PaymentMethodCardPresent?,
+    cashapp: PaymentMethodCashapp?,
+    created: Int,
+    crypto: PaymentMethodCrypto?,
+    custom: PaymentMethodCustom?,
+    customer: Any?,
+    customer_account: Str?,
+    customer_balance: PaymentMethodCustomerBalance?,
+    eps: PaymentMethodEps?,
+    fpx: PaymentMethodFpx?,
+    giropay: PaymentMethodGiropay?,
+    grabpay: PaymentMethodGrabpay?,
+    id: Str,
+    ideal: PaymentMethodIdeal?,
+    interac_present: PaymentMethodInteracPresent?,
+    kakao_pay: PaymentMethodKakaoPay?,
+    klarna: PaymentMethodKlarna?,
+    konbini: PaymentMethodKonbini?,
+    kr_card: PaymentMethodKrCard?,
+    link: PaymentMethodLink?,
+    livemode: Bool,
+    mb_way: PaymentMethodMbWay?,
+    metadata: Map?,
+    mobilepay: PaymentMethodMobilepay?,
+    multibanco: PaymentMethodMultibanco?,
+    naver_pay: PaymentMethodNaverPay?,
+    nz_bank_account: PaymentMethodNzBankAccount?,
+    object: "payment_method",
+    oxxo: PaymentMethodOxxo?,
+    p24: PaymentMethodP24?,
+    pay_by_bank: PaymentMethodPayByBank?,
+    payco: PaymentMethodPayco?,
+    paynow: PaymentMethodPaynow?,
+    paypal: PaymentMethodPaypal?,
+    payto: PaymentMethodPayto?,
+    pix: PaymentMethodPix?,
+    promptpay: PaymentMethodPromptpay?,
+    radar_options: RadarRadarOptions?,
+    revolut_pay: PaymentMethodRevolutPay?,
+    samsung_pay: PaymentMethodSamsungPay?,
+    satispay: PaymentMethodSatispay?,
+    sepa_debit: PaymentMethodSepaDebit?,
+    sofort: PaymentMethodSofort?,
+    swish: PaymentMethodSwish?,
+    twint: PaymentMethodTwint?,
+    type: "acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "card_present" | "cashapp" | "crypto" | "custom" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "interac_present" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "link" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip",
+    us_bank_account: PaymentMethodUsBankAccount?,
+    wechat_pay: PaymentMethodWechatPay?,
+    zip: PaymentMethodZip?
+}
+
+TaxProductRegistrationsResourceCountryOptionsEurope type {
+    standard: TaxProductRegistrationsResourceCountryOptionsEuStandard?,
+    type: "ioss" | "oss_non_union" | "oss_union" | "standard"
+}
+
+TaxProductRegistrationsResourceCountryOptionsCaProvinceStandard type {
+    province: Str
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax type {
+    calculation: Str
+}
+
+PaymentMethodAcssDebit type {
+    bank_name: Str?,
+    fingerprint: Str?,
+    institution_number: Str?,
+    last4: Str?,
+    transit_number: Str?
+}
+
+PaymentMethodAmazonPay type {
+
+}
+
+PaymentMethodPayco type {
+
+}
+
+TaxRegistration type {
+    active_from: Int,
+    country: Str,
+    country_options: TaxProductRegistrationsResourceCountryOptions,
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    object: "tax.registration",
+    status: "active" | "expired" | "scheduled"
+}
+
+TaxProductRegistrationsResourceCountryOptions type {
+    ae: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    al: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    am: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ao: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    at: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    au: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    aw: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    az: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ba: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    bb: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    bd: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    be: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    bf: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    bg: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    bh: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    bj: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    bs: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    by: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ca: TaxProductRegistrationsResourceCountryOptionsCanada?,
+    cd: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    ch: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    cl: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    cm: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    co: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    cr: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    cv: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    cy: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    cz: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    de: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    dk: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    ec: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ee: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    eg: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    es: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    et: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    fi: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    fr: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    gb: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    ge: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    gn: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    gr: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    hr: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    hu: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    id: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ie: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    in: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    is: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    it: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    jp: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    ke: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    kg: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    kh: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    kr: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    kz: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    la: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    lt: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    lu: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    lv: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    ma: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    md: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    me: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    mk: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    mr: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    mt: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    mx: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    my: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ng: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    nl: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    no: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    np: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    nz: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    om: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    pe: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ph: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    pl: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    pt: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    ro: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    rs: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    ru: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    sa: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    se: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    sg: TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods?,
+    si: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    sk: TaxProductRegistrationsResourceCountryOptionsEurope?,
+    sn: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    sr: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    th: TaxProductRegistrationsResourceCountryOptionsThailand?,
+    tj: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    tr: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    tw: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    tz: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ua: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    ug: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    us: TaxProductRegistrationsResourceCountryOptionsUnitedStates?,
+    uy: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    uz: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    vn: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    za: TaxProductRegistrationsResourceCountryOptionsDefault?,
+    zm: TaxProductRegistrationsResourceCountryOptionsSimplified?,
+    zw: TaxProductRegistrationsResourceCountryOptionsDefault?
+}
+
+TaxProductRegistrationsResourceCountryOptionsUsLocalAmusementTax type {
+    jurisdiction: Str
+}
+
+TaxTransactionLineItem type {
+    amount: Int,
+    amount_tax: Int,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax.transaction_line_item",
+    product: Str?,
+    quantity: Int,
+    reference: Str,
+    reversal: Any?,
+    tax_behavior: "exclusive" | "inclusive",
+    tax_code: Str,
+    type: "reversal" | "transaction"
+}
+
+TaxProductResourceCustomerDetails type {
+    address: Any?,
+    address_source: "billing" | "shipping"?,
+    ip_address: Str?,
+    tax_ids: Vec<TaxProductResourceCustomerDetailsResourceTaxId>,
+    taxability_override: "customer_exempt" | "none" | "reverse_charge"
+}
+
+TaxProductRegistrationsResourceCountryOptionsCanada type {
+    province_standard: TaxProductRegistrationsResourceCountryOptionsCaProvinceStandard?,
+    type: "province_standard" | "simplified" | "standard"
+}
+
+TaxProductResourceLineItemTaxBreakdown type {
+    amount: Int,
+    jurisdiction: TaxProductResourceJurisdiction,
+    sourcing: "destination" | "origin",
+    tax_rate_details: Any?,
+    taxability_reason: "customer_exempt" | "not_collecting" | "not_subject_to_tax" | "not_supported" | "portion_product_exempt" | "portion_reduced_rated" | "portion_standard_rated" | "product_exempt" | "product_exempt_holiday" | "proportionally_rated" | "reduced_rated" | "reverse_charge" | "standard_rated" | "taxable_basis_reduced" | "zero_rated",
+    taxable_amount: Int
+}
+
+TaxProductRegistrationsResourceCountryOptionsSimplified type {
+    type: "simplified"
+}
+
+SetupIntent type {
+    application: Any?,
+    attach_to_self: Bool?,
+    automatic_payment_methods: Any?,
+    cancellation_reason: "abandoned" | "duplicate" | "requested_by_customer"?,
+    client_secret: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    flow_directions: Vec<"inbound" | "outbound">?,
+    id: Str,
+    last_setup_error: Any?,
+    latest_attempt: Any?,
+    livemode: Bool,
+    mandate: Any?,
+    metadata: Map?,
+    next_action: Any?,
+    object: "setup_intent",
+    on_behalf_of: Any?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>,
+    single_use_mandate: Any?,
+    status: "canceled" | "processing" | "requires_action" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    usage: Str
+}
+
+TaxProductRegistrationsResourceCountryOptionsUsStateSalesTax type {
+    elections: Vec<TaxProductRegistrationsResourceCountryOptionsUsStateSalesTaxElection>?
+}
+
+PaymentFlowsPaymentIntentPresentmentDetails type {
+    presentment_amount: Int,
+    presentment_currency: Str
+}
+
+TaxProductResourceTaxAssociationTransactionAttempts type {
+    committed: TaxProductResourceTaxAssociationTransactionAttemptsResourceCommitted?,
+    errored: TaxProductResourceTaxAssociationTransactionAttemptsResourceErrored?,
+    source: Str,
+    status: Str
+}
+
+PaymentMethodAlma type {
+
+}
+
+PaymentMethodAfterpayClearpay type {
+
+}
+
+PaymentMethodRevolutPay type {
+
+}
+
+PaymentMethodInteracPresent type {
+    brand: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?
+}
+
+PaymentMethodBacsDebit type {
+    fingerprint: Str?,
+    last4: Str?,
+    sort_code: Str?
+}
+
+PaymentMethodCard type {
+    brand: Str,
+    checks: Any?,
+    country: Str?,
+    display_brand: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str,
+    generated_from: Any?,
+    last4: Str,
+    networks: Any?,
+    regulated_status: "regulated" | "unregulated"?,
+    three_d_secure_usage: Any?,
+    wallet: Any?
+}
+
+PaymentMethodSepaDebit type {
+    bank_code: Str?,
+    branch_code: Str?,
+    country: Str?,
+    fingerprint: Str?,
+    generated_from: Any?,
+    last4: Str?
+}
+
+PaymentMethodBoleto type {
+    tax_id: Str
+}
+
+PaymentMethodKlarna type {
+    dob: Any?
+}
+
+PaymentMethodSamsungPay type {
+
+}
+
+PaymentMethodPaynow type {
+
+}
+
+PaymentMethodPayByBank type {
+
+}
+
+PaymentMethodWechatPay type {
+
+}
+
+TaxAssociation type {
+    calculation: Str,
+    id: Str,
+    object: "tax.association",
+    payment_intent: Str,
+    tax_transaction_attempts: Vec<TaxProductResourceTaxAssociationTransactionAttempts>?
+}
+
+PaymentMethodKonbini type {
+
+}
+
+TaxProductResourceCustomerDetailsResourceTaxId type {
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str
+}
+
+TaxCalculation type {
+    amount_total: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    expires_at: Int?,
+    id: Str?,
+    line_items: Map?,
+    livemode: Bool,
+    object: "tax.calculation",
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_amount_exclusive: Int,
+    tax_amount_inclusive: Int,
+    tax_breakdown: Vec<TaxProductResourceTaxBreakdown>,
+    tax_date: Int
+}
+
+ApiErrors type {
+    advice_code: Str?,
+    charge: Str?,
+    code: Str?,
+    decline_code: Str?,
+    doc_url: Str?,
+    message: Str?,
+    network_advice_code: Str?,
+    network_decline_code: Str?,
+    param: Str?,
+    payment_intent: PaymentIntent?,
+    payment_method: PaymentMethod?,
+    payment_method_type: Str?,
+    request_log_url: Str?,
+    setup_intent: SetupIntent?,
+    source: Any?,
+    type: "api_error" | "card_error" | "idempotency_error" | "invalid_request_error"
+}
+
+PaymentMethodPaypal type {
+    country: Str?,
+    payer_email: Str?,
+    payer_id: Str?
+}
+
+PaymentMethodSatispay type {
+
+}
+
+PaymentMethodSofort type {
+    country: Str?
+}
+
+PaymentMethodZip type {
+
+}
+
+PaymentMethodPromptpay type {
+
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs type {
+    tax: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputsResourceTax?
+}
+
+PaymentMethodP24 type {
+    bank: "alior_bank" | "bank_millennium" | "bank_nowy_bfg_sa" | "bank_pekao_sa" | "banki_spbdzielcze" | "blik" | "bnp_paribas" | "boz" | "citi_handlowy" | "credit_agricole" | "envelobank" | "etransfer_pocztowy24" | "getin_bank" | "ideabank" | "ing" | "inteligo" | "mbank_mtransfer" | "nest_przelew" | "noble_pay" | "pbac_z_ipko" | "plus_bank" | "santander_przelew24" | "tmobile_usbugi_bankowe" | "toyota_bank" | "velobank" | "volkswagen_bank"?
+}
+
+TaxProductRegistrationsResourceCountryOptionsEuStandard type {
+    place_of_supply_scheme: "inbound_goods" | "small_seller" | "standard"
+}
+
+TaxProductRegistrationsResourceCountryOptionsThailand type {
+    type: "simplified"
+}
+
+TaxProductResourceTaxSettingsStatusDetailsResourceActive type {
+
+}
+
+PaymentMethodCardPresent type {
+    brand: Str?,
+    brand_product: Str?,
+    cardholder_name: Str?,
+    country: Str?,
+    description: Str?,
+    exp_month: Int,
+    exp_year: Int,
+    fingerprint: Str?,
+    funding: Str?,
+    issuer: Str?,
+    last4: Str?,
+    networks: Any?,
+    offline: Any?,
+    preferred_locales: Vec<Str>?,
+    read_method: "contact_emv" | "contactless_emv" | "contactless_magstripe_mode" | "magnetic_stripe_fallback" | "magnetic_stripe_track2"?,
+    wallet: PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet?
+}
+
+PaymentFlowsPrivatePaymentMethodsAlipay type {
+
+}
+
+BillingDetails type {
+    address: Any?,
+    email: Str?,
+    name: Str?,
+    phone: Str?,
+    tax_id: Str?
+}
+
+TaxProductResourceTaxBreakdown type {
+    amount: Int,
+    inclusive: Bool,
+    tax_rate_details: TaxProductResourceTaxRateDetails,
+    taxability_reason: "customer_exempt" | "not_collecting" | "not_subject_to_tax" | "not_supported" | "portion_product_exempt" | "portion_reduced_rated" | "portion_standard_rated" | "product_exempt" | "product_exempt_holiday" | "proportionally_rated" | "reduced_rated" | "reverse_charge" | "standard_rated" | "taxable_basis_reduced" | "zero_rated",
+    taxable_amount: Int
+}
+
+PaymentMethodCashapp type {
+    buyer_id: Str?,
+    cashtag: Str?
+}
+
+PaymentMethodBillie type {
+
+}
+
+PaymentMethodCustomerBalance type {
+
+}
+
+TaxProductRegistrationsResourceCountryOptionsDefaultInboundGoods type {
+    standard: TaxProductRegistrationsResourceCountryOptionsDefaultStandard?,
+    type: "standard"
+}
+
+TaxProductRegistrationsResourceCountryOptionsDefaultStandard type {
+    place_of_supply_scheme: "inbound_goods" | "standard"
+}
+
+PaymentMethodMbWay type {
+
+}
+
+PaymentMethodMultibanco type {
+
+}
+
+PaymentFlowsPaymentIntentAsyncWorkflows type {
+    inputs: PaymentFlowsPaymentIntentAsyncWorkflowsResourceInputs?
+}
+
+TaxProductRegistrationsResourceCountryOptionsUsStateSalesTaxElection type {
+    jurisdiction: Str?,
+    type: "local_use_tax" | "simplified_sellers_use_tax" | "single_local_use_tax"
+}
+
+PaymentMethodBancontact type {
+
+}
+
+PaymentMethodMobilepay type {
+
+}
+
+TaxProductResourceTaxRateDetails type {
+    country: Str?,
+    flat_amount: Any?,
+    percentage_decimal: Str,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+TaxSettings type {
+    defaults: TaxProductResourceTaxSettingsDefaults,
+    head_office: Any?,
+    livemode: Bool,
+    object: "tax.settings",
+    status: "active" | "pending",
+    status_details: TaxProductResourceTaxSettingsStatusDetails
+}
+
+PaymentMethodFpx type {
+    bank: "affin_bank" | "agrobank" | "alliance_bank" | "ambank" | "bank_islam" | "bank_muamalat" | "bank_of_china" | "bank_rakyat" | "bsn" | "cimb" | "deutsche_bank" | "hong_leong_bank" | "hsbc" | "kfh" | "maybank2e" | "maybank2u" | "ocbc" | "pb_enterprise" | "public_bank" | "rhb" | "standard_chartered" | "uob"
+}
+
+PaymentMethodKrCard type {
+    brand: "bc" | "citi" | "hana" | "hyundai" | "jeju" | "jeonbuk" | "kakaobank" | "kbank" | "kdbbank" | "kookmin" | "kwangju" | "lotte" | "mg" | "nh" | "post" | "samsung" | "savingsbank" | "shinhan" | "shinhyup" | "suhyup" | "tossbank" | "woori"?,
+    last4: Str?
+}
+
+PaymentMethodPayto type {
+    bsb_number: Str?,
+    last4: Str?,
+    pay_id: Str?
+}
+
+TaxRate type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+PaymentMethodGrabpay type {
+
+}
+
+PaymentMethodSwish type {
+
+}
+
+TaxCalculationLineItem type {
+    amount: Int,
+    amount_tax: Int,
+    id: Str,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax.calculation_line_item",
+    product: Str?,
+    quantity: Int,
+    reference: Str,
+    tax_behavior: "exclusive" | "inclusive",
+    tax_breakdown: Vec<TaxProductResourceLineItemTaxBreakdown>?,
+    tax_code: Str
+}
+
+TaxProductRegistrationsResourceCountryOptionsUsLocalLeaseTax type {
+    jurisdiction: Str
+}
+
+DeletedTaxId type {
+    deleted: Bool,
+    id: Str,
+    object: "tax_id"
+}
+
+PaymentMethodGiropay type {
+
+}
+
+TaxId type {
+    country: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "tax_id",
+    owner: Any?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str,
+    verification: Any?
+}
+
+PaymentIntent type {
+    amount: Int?,
+    amount_capturable: Int?,
+    amount_details: Any?,
+    amount_received: Int?,
+    application: Any?,
+    application_fee_amount: Int?,
+    automatic_payment_methods: Any?,
+    canceled_at: Int?,
+    cancellation_reason: "abandoned" | "automatic" | "duplicate" | "expired" | "failed_invoice" | "fraudulent" | "requested_by_customer" | "void_invoice"?,
+    capture_method: "automatic" | "automatic_async" | "manual"?,
+    client_secret: Str?,
+    confirmation_method: "automatic" | "manual"?,
+    created: Int,
+    currency: Str?,
+    customer: Any?,
+    customer_account: Str?,
+    description: Str?,
+    excluded_payment_method_types: Vec<"acss_debit" | "affirm" | "afterpay_clearpay" | "alipay" | "alma" | "amazon_pay" | "au_becs_debit" | "bacs_debit" | "bancontact" | "billie" | "blik" | "boleto" | "card" | "cashapp" | "crypto" | "customer_balance" | "eps" | "fpx" | "giropay" | "grabpay" | "ideal" | "kakao_pay" | "klarna" | "konbini" | "kr_card" | "mb_way" | "mobilepay" | "multibanco" | "naver_pay" | "nz_bank_account" | "oxxo" | "p24" | "pay_by_bank" | "payco" | "paynow" | "paypal" | "payto" | "pix" | "promptpay" | "revolut_pay" | "samsung_pay" | "satispay" | "sepa_debit" | "sofort" | "swish" | "twint" | "us_bank_account" | "wechat_pay" | "zip">?,
+    hooks: PaymentFlowsPaymentIntentAsyncWorkflows?,
+    id: Str,
+    last_payment_error: Any?,
+    latest_charge: Any?,
+    livemode: Bool,
+    metadata: Map?,
+    next_action: Any?,
+    object: "payment_intent",
+    on_behalf_of: Any?,
+    payment_details: PaymentFlowsPaymentDetails?,
+    payment_method: Any?,
+    payment_method_configuration_details: Any?,
+    payment_method_options: Any?,
+    payment_method_types: Vec<Str>?,
+    presentment_details: PaymentFlowsPaymentIntentPresentmentDetails?,
+    processing: Any?,
+    receipt_email: Str?,
+    review: Any?,
+    setup_future_usage: "off_session" | "on_session"?,
+    shipping: Any?,
+    statement_descriptor: Str?,
+    statement_descriptor_suffix: Str?,
+    status: "canceled" | "processing" | "requires_action" | "requires_capture" | "requires_confirmation" | "requires_payment_method" | "succeeded",
+    transfer_data: Any?,
+    transfer_group: Str?
+}
+
+PaymentMethodUsBankAccount type {
+    account_holder_type: "company" | "individual"?,
+    account_type: "checking" | "savings"?,
+    bank_name: Str?,
+    financial_connections_account: Str?,
+    fingerprint: Str?,
+    last4: Str?,
+    networks: Any?,
+    routing_number: Str?,
+    status_details: Any?
+}
+
+PaymentFlowsPrivatePaymentMethodsCardPresentCommonWallet type {
+    type: "apple_pay" | "google_pay" | "samsung_pay" | "unknown"
+}
+
+PaymentMethodOxxo type {
+
+}
+
+TaxProductResourceJurisdiction type {
+    country: Str,
+    display_name: Str,
+    level: "city" | "country" | "county" | "district" | "state",
+    state: Str?
+}
+
+TaxCode type {
+    description: Str,
+    id: Str,
+    name: Str,
+    object: "tax_code"
+}
+
+TaxProductRegistrationsResourceCountryOptionsDefault type {
+    type: "standard"
+}
+
+PaymentMethodNaverPay type {
+    buyer_id: Str?,
+    funding: "card" | "points"
+}
+
+TaxProductResourceTaxSettingsStatusDetailsResourcePending type {
+    missing_fields: Vec<Str>?
+}
+
+PaymentMethodAffirm type {
+
+}
+
+PaymentMethodEps type {
+    bank: "arzte_und_apotheker_bank" | "austrian_anadi_bank_ag" | "bank_austria" | "bankhaus_carl_spangler" | "bankhaus_schelhammer_und_schattera_ag" | "bawag_psk_ag" | "bks_bank_ag" | "brull_kallmus_bank_ag" | "btv_vier_lander_bank" | "capital_bank_grawe_gruppe_ag" | "deutsche_bank_ag" | "dolomitenbank" | "easybank_ag" | "erste_bank_und_sparkassen" | "hypo_alpeadriabank_international_ag" | "hypo_bank_burgenland_aktiengesellschaft" | "hypo_noe_lb_fur_niederosterreich_u_wien" | "hypo_oberosterreich_salzburg_steiermark" | "hypo_tirol_bank_ag" | "hypo_vorarlberg_bank_ag" | "marchfelder_bank" | "oberbank_ag" | "raiffeisen_bankengruppe_osterreich" | "schoellerbank_ag" | "sparda_bank_wien" | "volksbank_gruppe" | "volkskreditbank_ag" | "vr_bank_braunau"?
+}
+
+TaxProductResourceTaxAssociationTransactionAttemptsResourceCommitted type {
+    transaction: Str
+}
+
+PaymentMethodCustom type {
+    display_name: Str?,
+    logo: Any?,
+    type: Str
+}
+
+TaxProductResourceTaxSettingsStatusDetails type {
+    active: TaxProductResourceTaxSettingsStatusDetailsResourceActive?,
+    pending: TaxProductResourceTaxSettingsStatusDetailsResourcePending?
+}
+
+TaxProductResourceTaxSettingsDefaults type {
+    provider: "anrok" | "avalara" | "sphere" | "stripe",
+    tax_behavior: "exclusive" | "inclusive" | "inferred_by_currency"?,
+    tax_code: Str?
+}
+
+PaymentMethodPix type {
+
+}
+
+PaymentMethodIdeal type {
+    bank: "abn_amro" | "asn_bank" | "bunq" | "buut" | "finom" | "handelsbanken" | "ing" | "knab" | "mollie" | "moneyou" | "n26" | "nn" | "rabobank" | "regiobank" | "revolut" | "sns_bank" | "triodos_bank" | "van_lanschot" | "yoursafe"?,
+    bic: "ABNANL2A" | "ASNBNL21" | "BITSNL2A" | "BUNQNL2A" | "BUUTNL2A" | "FNOMNL22" | "FVLBNL22" | "HANDNL2A" | "INGBNL2A" | "KNABNL2H" | "MLLENL2A" | "MOYONL21" | "NNBANL2G" | "NTSBDEB1" | "RABONL2U" | "RBRBNL21" | "REVOIE23" | "REVOLT21" | "SNSBNL2A" | "TRIONL2U"?
+}
+
+PaymentFlowsPaymentDetails type {
+    customer_reference: Str?,
+    order_reference: Str?
+}
+
+PaymentMethodAuBecsDebit type {
+    bsb_number: Str?,
+    fingerprint: Str?,
+    last4: Str?
+}
+
+TaxProductRegistrationsResourceCountryOptionsUnitedStates type {
+    local_amusement_tax: TaxProductRegistrationsResourceCountryOptionsUsLocalAmusementTax?,
+    local_lease_tax: TaxProductRegistrationsResourceCountryOptionsUsLocalLeaseTax?,
+    state: Str,
+    state_sales_tax: TaxProductRegistrationsResourceCountryOptionsUsStateSalesTax?,
+    type: "local_amusement_tax" | "local_lease_tax" | "state_communications_tax" | "state_retail_delivery_fee" | "state_sales_tax"
+}
+
+PaymentMethodNzBankAccount type {
+    account_holder_name: Str?,
+    bank_code: Str,
+    bank_name: Str,
+    branch_code: Str,
+    last4: Str,
+    suffix: Str?
+}
+
+TaxTransaction type {
+    created: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    id: Str,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax.transaction",
+    posted_at: Int,
+    reference: Str,
+    reversal: Any?,
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_date: Int,
+    type: "reversal" | "transaction"
+}
+
+PaymentMethodTwint type {
+
+}
+
+PaymentMethodCrypto type {
+
+}
+
+PaymentMethodBlik type {
+
+}
+
+PaymentMethodKakaoPay type {
+
+}
+
+GetTaxRatesRequest type {
+
+}
+
+GetTaxRatesResponse type {
+    data: Vec<TaxRate>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-tax-rates
+meta {doc: """GET /v1/tax_rates - List all tax rates"""}
+fn (active: Str, created: Str, ending-before: Str, expand: Str, inclusive: Str, limit: Str, starting-after: Str, request: GetTaxRatesRequest): GetTaxRatesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax_rates?active=${active}&created=${created}&ending_before=${ending-before}&expand=${expand}&inclusive=${inclusive}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetTaxRatesResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxRatesRequest type {
+    active: Bool?,
+    country: Str?,
+    description: Str?,
+    display_name: Str,
+    expand: Vec<Str>?,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    metadata: Map?,
+    percentage: Dec,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+PostTaxRatesResponse type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+
+create-tax-rate
+meta {doc: """POST /v1/tax_rates - Create a tax rate"""}
+fn (request: PostTaxRatesRequest): PostTaxRatesResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax_rates`, {}, request)
+  if(is-ok-response(response), PostTaxRatesResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxRatesTaxRateRequest type {
+
+}
+
+GetTaxRatesTaxRateResponse type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+
+retrieve-tax-rate
+meta {doc: """GET /v1/tax_rates/{tax_rate} - Retrieve a tax rate"""}
+fn (tax-rate: Str, expand: Str, request: GetTaxRatesTaxRateRequest): GetTaxRatesTaxRateResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax_rates/${tax-rate}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxRatesTaxRateResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxRatesTaxRateRequest type {
+    active: Bool?,
+    country: Str?,
+    description: Str?,
+    display_name: Str?,
+    expand: Vec<Str>?,
+    jurisdiction: Str?,
+    metadata: Any?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+PostTaxRatesTaxRateResponse type {
+    active: Bool,
+    country: Str?,
+    created: Int,
+    description: Str?,
+    display_name: Str,
+    effective_percentage: Dec?,
+    flat_amount: Any?,
+    id: Str,
+    inclusive: Bool,
+    jurisdiction: Str?,
+    jurisdiction_level: "city" | "country" | "county" | "district" | "multiple" | "state"?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax_rate",
+    percentage: Dec,
+    rate_type: "flat_amount" | "percentage"?,
+    state: Str?,
+    tax_type: "amusement_tax" | "communications_tax" | "gst" | "hst" | "igst" | "jct" | "lease_tax" | "pst" | "qst" | "retail_delivery_fee" | "rst" | "sales_tax" | "service_tax" | "vat"?
+}
+
+
+update-tax-rate
+meta {doc: """POST /v1/tax_rates/{tax_rate} - Update a tax rate"""}
+fn (tax-rate: Str, request: PostTaxRatesTaxRateRequest): PostTaxRatesTaxRateResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax_rates/${tax-rate}`, {}, request)
+  if(is-ok-response(response), PostTaxRatesTaxRateResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxAssociationsFindRequest type {
+
+}
+
+GetTaxAssociationsFindResponse type {
+    calculation: Str,
+    id: Str,
+    object: "tax.association",
+    payment_intent: Str,
+    tax_transaction_attempts: Vec<TaxProductResourceTaxAssociationTransactionAttempts>?
+}
+
+
+find-tax-association
+meta {doc: """GET /v1/tax/associations/find - Find a Tax Association"""}
+fn (expand: Str, payment-intent: Str, request: GetTaxAssociationsFindRequest): GetTaxAssociationsFindResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/associations/find?expand=${expand}&payment_intent=${payment-intent}`, {}, request)
+  if(is-ok-response(response), GetTaxAssociationsFindResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxCalculationsRequest type {
+    currency: Str,
+    customer: Str?,
+    customer_details: Map?,
+    expand: Vec<Str>?,
+    line_items: Vec<Map>,
+    ship_from_details: Map?,
+    shipping_cost: Map?,
+    tax_date: Int?
+}
+
+PostTaxCalculationsResponse type {
+    amount_total: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    expires_at: Int?,
+    id: Str?,
+    line_items: Map?,
+    livemode: Bool,
+    object: "tax.calculation",
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_amount_exclusive: Int,
+    tax_amount_inclusive: Int,
+    tax_breakdown: Vec<TaxProductResourceTaxBreakdown>,
+    tax_date: Int
+}
+
+
+create-tax-calculation
+meta {doc: """POST /v1/tax/calculations - Create a Tax Calculation"""}
+fn (request: PostTaxCalculationsRequest): PostTaxCalculationsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax/calculations`, {}, request)
+  if(is-ok-response(response), PostTaxCalculationsResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxCalculationsCalculationRequest type {
+
+}
+
+GetTaxCalculationsCalculationResponse type {
+    amount_total: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    expires_at: Int?,
+    id: Str?,
+    line_items: Map?,
+    livemode: Bool,
+    object: "tax.calculation",
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_amount_exclusive: Int,
+    tax_amount_inclusive: Int,
+    tax_breakdown: Vec<TaxProductResourceTaxBreakdown>,
+    tax_date: Int
+}
+
+
+retrieve-tax-calculation
+meta {doc: """GET /v1/tax/calculations/{calculation} - Retrieve a Tax Calculation"""}
+fn (calculation: Str, expand: Str, request: GetTaxCalculationsCalculationRequest): GetTaxCalculationsCalculationResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/calculations/${calculation}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxCalculationsCalculationResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxCalculationsCalculationLineItemsRequest type {
+
+}
+
+GetTaxCalculationsCalculationLineItemsResponse type {
+    data: Vec<TaxCalculationLineItem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-calculations-line-items
+meta {
+    doc: """GET /v1/tax/calculations/{calculation}/line_items - Retrieve a calculation's line items"""
+}
+fn (calculation: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetTaxCalculationsCalculationLineItemsRequest): GetTaxCalculationsCalculationLineItemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/calculations/${calculation}/line_items?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetTaxCalculationsCalculationLineItemsResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxRegistrationsRequest type {
+
+}
+
+GetTaxRegistrationsResponse type {
+    data: Vec<TaxRegistration>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-registrations
+meta {doc: """GET /v1/tax/registrations - List registrations"""}
+fn (ending-before: Str, expand: Str, limit: Str, starting-after: Str, status: Str, request: GetTaxRegistrationsRequest): GetTaxRegistrationsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/registrations?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}&status=${status}`, {}, request)
+  if(is-ok-response(response), GetTaxRegistrationsResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxRegistrationsRequest type {
+    active_from: Any,
+    country: Str,
+    country_options: Map,
+    expand: Vec<Str>?,
+    expires_at: Int?
+}
+
+PostTaxRegistrationsResponse type {
+    active_from: Int,
+    country: Str,
+    country_options: TaxProductRegistrationsResourceCountryOptions,
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    object: "tax.registration",
+    status: "active" | "expired" | "scheduled"
+}
+
+
+create-registration
+meta {doc: """POST /v1/tax/registrations - Create a registration"""}
+fn (request: PostTaxRegistrationsRequest): PostTaxRegistrationsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax/registrations`, {}, request)
+  if(is-ok-response(response), PostTaxRegistrationsResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxRegistrationsIdRequest type {
+
+}
+
+GetTaxRegistrationsIdResponse type {
+    active_from: Int,
+    country: Str,
+    country_options: TaxProductRegistrationsResourceCountryOptions,
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    object: "tax.registration",
+    status: "active" | "expired" | "scheduled"
+}
+
+
+retrieve-registration
+meta {doc: """GET /v1/tax/registrations/{id} - Retrieve a registration"""}
+fn (id: Str, expand: Str, request: GetTaxRegistrationsIdRequest): GetTaxRegistrationsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/registrations/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxRegistrationsIdResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxRegistrationsIdRequest type {
+    active_from: Any?,
+    expand: Vec<Str>?,
+    expires_at: Any?
+}
+
+PostTaxRegistrationsIdResponse type {
+    active_from: Int,
+    country: Str,
+    country_options: TaxProductRegistrationsResourceCountryOptions,
+    created: Int,
+    expires_at: Int?,
+    id: Str,
+    livemode: Bool,
+    object: "tax.registration",
+    status: "active" | "expired" | "scheduled"
+}
+
+
+update-registration
+meta {doc: """POST /v1/tax/registrations/{id} - Update a registration"""}
+fn (id: Str, request: PostTaxRegistrationsIdRequest): PostTaxRegistrationsIdResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax/registrations/${id}`, {}, request)
+  if(is-ok-response(response), PostTaxRegistrationsIdResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxSettingsRequest type {
+
+}
+
+GetTaxSettingsResponse type {
+    defaults: TaxProductResourceTaxSettingsDefaults,
+    head_office: Any?,
+    livemode: Bool,
+    object: "tax.settings",
+    status: "active" | "pending",
+    status_details: TaxProductResourceTaxSettingsStatusDetails
+}
+
+
+retrieve-settings
+meta {doc: """GET /v1/tax/settings - Retrieve settings"""}
+fn (expand: Str, request: GetTaxSettingsRequest): GetTaxSettingsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/settings?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxSettingsResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxSettingsRequest type {
+    defaults: Map?,
+    expand: Vec<Str>?,
+    head_office: Map?
+}
+
+PostTaxSettingsResponse type {
+    defaults: TaxProductResourceTaxSettingsDefaults,
+    head_office: Any?,
+    livemode: Bool,
+    object: "tax.settings",
+    status: "active" | "pending",
+    status_details: TaxProductResourceTaxSettingsStatusDetails
+}
+
+
+update-settings
+meta {doc: """POST /v1/tax/settings - Update settings"""}
+fn (request: PostTaxSettingsRequest): PostTaxSettingsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax/settings`, {}, request)
+  if(is-ok-response(response), PostTaxSettingsResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxTransactionsCreateFromCalculationRequest type {
+    calculation: Str,
+    expand: Vec<Str>?,
+    metadata: Map?,
+    posted_at: Int?,
+    reference: Str
+}
+
+PostTaxTransactionsCreateFromCalculationResponse type {
+    created: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    id: Str,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax.transaction",
+    posted_at: Int,
+    reference: Str,
+    reversal: Any?,
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_date: Int,
+    type: "reversal" | "transaction"
+}
+
+
+create-transaction-from-calculation
+meta {
+    doc: """POST /v1/tax/transactions/create_from_calculation - Create a transaction from a calculation"""
+}
+fn (request: PostTaxTransactionsCreateFromCalculationRequest): PostTaxTransactionsCreateFromCalculationResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax/transactions/create_from_calculation`, {}, request)
+  if(is-ok-response(response), PostTaxTransactionsCreateFromCalculationResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxTransactionsCreateReversalRequest type {
+    expand: Vec<Str>?,
+    flat_amount: Int?,
+    line_items: Vec<Map>?,
+    metadata: Map?,
+    mode: "full" | "partial",
+    original_transaction: Str,
+    reference: Str,
+    shipping_cost: Map?
+}
+
+PostTaxTransactionsCreateReversalResponse type {
+    created: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    id: Str,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax.transaction",
+    posted_at: Int,
+    reference: Str,
+    reversal: Any?,
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_date: Int,
+    type: "reversal" | "transaction"
+}
+
+
+create-reversal-transaction
+meta {
+    doc: """POST /v1/tax/transactions/create_reversal - Create a reversal transaction"""
+}
+fn (request: PostTaxTransactionsCreateReversalRequest): PostTaxTransactionsCreateReversalResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax/transactions/create_reversal`, {}, request)
+  if(is-ok-response(response), PostTaxTransactionsCreateReversalResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxTransactionsTransactionRequest type {
+
+}
+
+GetTaxTransactionsTransactionResponse type {
+    created: Int,
+    currency: Str,
+    customer: Str?,
+    customer_details: TaxProductResourceCustomerDetails,
+    id: Str,
+    line_items: Map?,
+    livemode: Bool,
+    metadata: Map?,
+    object: "tax.transaction",
+    posted_at: Int,
+    reference: Str,
+    reversal: Any?,
+    ship_from_details: Any?,
+    shipping_cost: Any?,
+    tax_date: Int,
+    type: "reversal" | "transaction"
+}
+
+
+retrieve-transaction
+meta {doc: """GET /v1/tax/transactions/{transaction} - Retrieve a transaction"""}
+fn (transaction: Str, expand: Str, request: GetTaxTransactionsTransactionRequest): GetTaxTransactionsTransactionResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/transactions/${transaction}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxTransactionsTransactionResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxTransactionsTransactionLineItemsRequest type {
+
+}
+
+GetTaxTransactionsTransactionLineItemsResponse type {
+    data: Vec<TaxTransactionLineItem>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+retrieve-transactions-line-items
+meta {
+    doc: """GET /v1/tax/transactions/{transaction}/line_items - Retrieve a transaction's line items"""
+}
+fn (transaction: Str, ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetTaxTransactionsTransactionLineItemsRequest): GetTaxTransactionsTransactionLineItemsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax/transactions/${transaction}/line_items?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetTaxTransactionsTransactionLineItemsResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxCodesRequest type {
+
+}
+
+GetTaxCodesResponse type {
+    data: Vec<TaxCode>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-tax-codes
+meta {doc: """GET /v1/tax_codes - List all tax codes"""}
+fn (ending-before: Str, expand: Str, limit: Str, starting-after: Str, request: GetTaxCodesRequest): GetTaxCodesResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax_codes?ending_before=${ending-before}&expand=${expand}&limit=${limit}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetTaxCodesResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxCodesIdRequest type {
+
+}
+
+GetTaxCodesIdResponse type {
+    description: Str,
+    id: Str,
+    name: Str,
+    object: "tax_code"
+}
+
+
+retrieve-tax-code
+meta {doc: """GET /v1/tax_codes/{id} - Retrieve a tax code"""}
+fn (id: Str, expand: Str, request: GetTaxCodesIdRequest): GetTaxCodesIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax_codes/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxCodesIdResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxIdsRequest type {
+
+}
+
+GetTaxIdsResponse type {
+    data: Vec<TaxId>,
+    has_more: Bool,
+    object: "list",
+    url: Str
+}
+
+
+list-all-tax-ids
+meta {doc: """GET /v1/tax_ids - List all tax IDs"""}
+fn (ending-before: Str, expand: Str, limit: Str, owner: Str, starting-after: Str, request: GetTaxIdsRequest): GetTaxIdsResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax_ids?ending_before=${ending-before}&expand=${expand}&limit=${limit}&owner=${owner}&starting_after=${starting-after}`, {}, request)
+  if(is-ok-response(response), GetTaxIdsResponse(response.body), err(HttpError(response)))
+}
+
+PostTaxIdsRequest type {
+    expand: Vec<Str>?,
+    owner: Map?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str
+}
+
+PostTaxIdsResponse type {
+    country: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "tax_id",
+    owner: Any?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str,
+    verification: Any?
+}
+
+
+create-tax-id
+meta {doc: """POST /v1/tax_ids - Create a tax ID"""}
+fn (request: PostTaxIdsRequest): PostTaxIdsResponse {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/tax_ids`, {}, request)
+  if(is-ok-response(response), PostTaxIdsResponse(response.body), err(HttpError(response)))
+}
+
+GetTaxIdsIdRequest type {
+
+}
+
+GetTaxIdsIdResponse type {
+    country: Str?,
+    created: Int,
+    customer: Any?,
+    customer_account: Str?,
+    id: Str,
+    livemode: Bool,
+    object: "tax_id",
+    owner: Any?,
+    type: "ad_nrt" | "ae_trn" | "al_tin" | "am_tin" | "ao_tin" | "ar_cuit" | "au_abn" | "au_arn" | "aw_tin" | "az_tin" | "ba_tin" | "bb_tin" | "bd_bin" | "bf_ifu" | "bg_uic" | "bh_vat" | "bj_ifu" | "bo_tin" | "br_cnpj" | "br_cpf" | "bs_tin" | "by_tin" | "ca_bn" | "ca_gst_hst" | "ca_pst_bc" | "ca_pst_mb" | "ca_pst_sk" | "ca_qst" | "cd_nif" | "ch_uid" | "ch_vat" | "cl_tin" | "cm_niu" | "cn_tin" | "co_nit" | "cr_tin" | "cv_nif" | "de_stn" | "do_rcn" | "ec_ruc" | "eg_tin" | "es_cif" | "et_tin" | "eu_oss_vat" | "eu_vat" | "gb_vat" | "ge_vat" | "gn_nif" | "hk_br" | "hr_oib" | "hu_tin" | "id_npwp" | "il_vat" | "in_gst" | "is_vat" | "jp_cn" | "jp_rn" | "jp_trn" | "ke_pin" | "kg_tin" | "kh_tin" | "kr_brn" | "kz_bin" | "la_tin" | "li_uid" | "li_vat" | "ma_vat" | "md_vat" | "me_pib" | "mk_vat" | "mr_nif" | "mx_rfc" | "my_frp" | "my_itn" | "my_sst" | "ng_tin" | "no_vat" | "no_voec" | "np_pan" | "nz_gst" | "om_vat" | "pe_ruc" | "ph_tin" | "ro_tin" | "rs_pib" | "ru_inn" | "ru_kpp" | "sa_vat" | "sg_gst" | "sg_uen" | "si_tin" | "sn_ninea" | "sr_fin" | "sv_nit" | "th_vat" | "tj_tin" | "tr_tin" | "tw_vat" | "tz_vat" | "ua_vat" | "ug_tin" | "unknown" | "us_ein" | "uy_ruc" | "uz_tin" | "uz_vat" | "ve_rif" | "vn_tin" | "za_vat" | "zm_tin" | "zw_tin",
+    value: Str,
+    verification: Any?
+}
+
+
+retrieve-tax-id
+meta {doc: """GET /v1/tax_ids/{id} - Retrieve a tax ID"""}
+fn (id: Str, expand: Str, request: GetTaxIdsIdRequest): GetTaxIdsIdResponse {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/tax_ids/${id}?expand=${expand}`, {}, request)
+  if(is-ok-response(response), GetTaxIdsIdResponse(response.body), err(HttpError(response)))
+}
+
+DeleteTaxIdsIdRequest type {
+
+}
+
+DeleteTaxIdsIdResponse type {
+    deleted: Bool,
+    id: Str,
+    object: "tax_id"
+}
+
+
+delete-tax-id
+meta {doc: """DELETE /v1/tax_ids/{id} - Delete a tax ID"""}
+fn (id: Str, request: DeleteTaxIdsIdRequest): DeleteTaxIdsIdResponse {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/tax_ids/${id}`, {}, request)
+  if(is-ok-response(response), DeleteTaxIdsIdResponse(response.body), err(HttpError(response)))
+}

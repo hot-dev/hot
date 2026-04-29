@@ -1,0 +1,62 @@
+::mcp::integration::client ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests for MCP Client — Session Initialization
+// =============================================================================
+// These tests require an MCP server.
+// Set MCP_TEST_SERVER_URL in .env (e.g. http://localhost:4681/mcp/local/my-service)
+
+::mcp ::mcp::client
+::types ::mcp::types
+
+MCP_TEST_SERVER_URL ::hot::env/get("MCP_TEST_SERVER_URL", "")
+
+test-initialize-returns-session
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session ::mcp/initialize(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    null
+  )
+
+  assert(session.url, "session should have a url")
+  assert-eq(MCP_TEST_SERVER_URL, session.url, "session url should match the server url")
+  assert(session.protocol-version, "session should have a protocol version")
+  assert(session.server-info, "session should have server info")
+  assert(session.server-info.name, "server info should have a name")
+  assert(session.headers, "session should have headers")
+}
+
+test-initialize-with-capabilities
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session ::mcp/initialize(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    ::types/ClientCapabilities({roots: {listChanged: true}, sampling: {}})
+  )
+
+  assert(session.server-info, "session should have server info")
+  assert(session.server-capabilities, "session should have server capabilities")
+}
+
+test-ping
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session ::mcp/initialize(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    null
+  )
+
+  result ::mcp/ping(session)
+  assert(result, "ping should return true")
+}

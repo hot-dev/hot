@@ -1,0 +1,420 @@
+::openai::cancel ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// Run status identifier (e.g. "queued", "in_progress", "completed", "failed", "cancelled", "expired")
+RunStatus type Str
+
+FineTuneMethod type {
+    type: "supervised" | "dpo" | "reinforcement",
+    supervised: FineTuneSupervisedMethod?,
+    dpo: FineTuneDPOMethod?,
+    reinforcement: FineTuneReinforcementMethod?
+}
+
+RunCompletionUsage type {
+    completion_tokens: Int,
+    prompt_tokens: Int,
+    total_tokens: Int
+}
+
+Batch type {
+    id: Str,
+    object: "batch",
+    endpoint: Str,
+    errors: Map?,
+    input_file_id: Str,
+    completion_window: Str,
+    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    output_file_id: Str?,
+    error_file_id: Str?,
+    created_at: Int,
+    in_progress_at: Int?,
+    expires_at: Int?,
+    finalizing_at: Int?,
+    completed_at: Int?,
+    failed_at: Int?,
+    expired_at: Int?,
+    cancelling_at: Int?,
+    cancelled_at: Int?,
+    request_counts: BatchRequestCounts?,
+    metadata: Metadata?
+}
+
+// Arbitrary key-value metadata associated with an API object
+Metadata type Map
+
+FineTuneSupervisedHyperparameters type {
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?
+}
+
+FineTuneDPOHyperparameters type {
+    beta: Any?,
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?
+}
+
+FineTuneDPOMethod type {
+    hyperparameters: FineTuneDPOHyperparameters?
+}
+
+FineTuneReinforcementMethod type {
+    grader: Map,
+    hyperparameters: FineTuneReinforcementHyperparameters?
+}
+
+// Generic API response object
+Response type Map
+
+RunObject type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+FineTuneReinforcementHyperparameters type {
+    batch_size: Any?,
+    learning_rate_multiplier: Any?,
+    n_epochs: Any?,
+    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    compute_multiplier: Any?,
+    eval_interval: Any?,
+    eval_samples: Any?
+}
+
+// Tool definition for an assistant (code_interpreter, file_search, or function)
+AssistantTool type Map
+
+// Response format: "auto", or {type: "json_object"}, or {type: "json_schema", json_schema: {...}}
+AssistantsApiResponseFormatOption type Any
+
+FineTuneSupervisedMethod type {
+    hyperparameters: FineTuneSupervisedHyperparameters?
+}
+
+FineTuningJob type {
+    id: Str,
+    created_at: Int,
+    error: Map,
+    fine_tuned_model: Str,
+    finished_at: Int,
+    hyperparameters: Map,
+    model: Str,
+    object: "fine_tuning.job",
+    organization_id: Str,
+    result_files: Vec<Str>,
+    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    trained_tokens: Int,
+    training_file: Str,
+    validation_file: Str,
+    integrations: Vec?,
+    seed: Int,
+    estimated_finish: Int?,
+    method: FineTuneMethod?,
+    metadata: Metadata?
+}
+
+EvalApiError type {
+    code: Str,
+    message: Str
+}
+
+EvalRun type {
+    object: "eval.run",
+    id: Str,
+    eval_id: Str,
+    status: Str,
+    model: Str,
+    name: Str,
+    created_at: Int,
+    report_url: Str,
+    result_counts: Map,
+    per_model_usage: Vec<Map>,
+    per_testing_criteria_results: Vec<Map>,
+    data_source: Map,
+    metadata: Metadata,
+    error: EvalApiError
+}
+
+Error type {
+    code: Str,
+    message: Str,
+    param: Str,
+    type: Str
+}
+
+Upload type {
+    id: Str,
+    created_at: Int,
+    filename: Str,
+    bytes: Int,
+    purpose: Str,
+    status: "pending" | "completed" | "cancelled" | "expired",
+    expires_at: Int,
+    object: "upload",
+    file: Any?
+}
+
+// Whether to allow parallel function calls during tool use
+ParallelToolCalls type Bool
+
+BatchRequestCounts type {
+    total: Int,
+    completed: Int,
+    failed: Int
+}
+
+VectorStoreFileBatchObject type {
+    id: Str,
+    object: "vector_store.files_batch",
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    file_counts: Map
+}
+
+CancelBatchRequest type {
+  batch-id: Str
+}
+
+CancelBatchResponse type {
+    id: Str,
+    object: "batch",
+    endpoint: Str,
+    errors: Map?,
+    input_file_id: Str,
+    completion_window: Str,
+    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    output_file_id: Str?,
+    error_file_id: Str?,
+    created_at: Int,
+    in_progress_at: Int?,
+    expires_at: Int?,
+    finalizing_at: Int?,
+    completed_at: Int?,
+    failed_at: Int?,
+    expired_at: Int?,
+    cancelling_at: Int?,
+    cancelled_at: Int?,
+    request_counts: BatchRequestCounts?,
+    metadata: Metadata?
+}
+
+
+cancel-batch
+meta {
+    doc: """POST /batches/{batch_id}/cancel - Cancel an in-progress batch. The batch status will change to "cancelling"."""
+}
+fn (request: CancelBatchRequest): CancelBatchResponse {
+  response api-request("POST", `${::openai/BASE_URL}/batches/${request.batch-id}/cancel`)
+  if(is-ok-response(response), CancelBatchResponse(response.body), err(HttpError(response)))
+}
+
+CancelEvalRunRequest type {
+  eval-id: Str,
+  run-id: Str
+}
+
+CancelEvalRunResponse type {
+    object: "eval.run",
+    id: Str,
+    eval_id: Str,
+    status: Str,
+    model: Str,
+    name: Str,
+    created_at: Int,
+    report_url: Str,
+    result_counts: Map,
+    per_model_usage: Vec<Map>,
+    per_testing_criteria_results: Vec<Map>,
+    data_source: Map,
+    metadata: Metadata,
+    error: EvalApiError
+}
+
+
+cancel-eval-run
+meta {
+    doc: """POST /evals/{eval_id}/runs/{run_id} - Cancel an in-progress evaluation run."""
+}
+fn (request: CancelEvalRunRequest): CancelEvalRunResponse {
+  response api-request("POST", `${::openai/BASE_URL}/evals/${request.eval-id}/runs/${request.run-id}`)
+  if(is-ok-response(response), CancelEvalRunResponse(response.body), err(HttpError(response)))
+}
+
+CancelFineTuningJobRequest type {
+  fine-tuning-job-id: Str
+}
+
+CancelFineTuningJobResponse type {
+    id: Str,
+    created_at: Int,
+    error: Map,
+    fine_tuned_model: Str,
+    finished_at: Int,
+    hyperparameters: Map,
+    model: Str,
+    object: "fine_tuning.job",
+    organization_id: Str,
+    result_files: Vec<Str>,
+    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    trained_tokens: Int,
+    training_file: Str,
+    validation_file: Str,
+    integrations: Vec?,
+    seed: Int,
+    estimated_finish: Int?,
+    method: FineTuneMethod?,
+    metadata: Metadata?
+}
+
+
+cancel-finetuning
+meta {
+    doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/cancel - Cancel an in-progress fine-tuning job."""
+}
+fn (request: CancelFineTuningJobRequest): CancelFineTuningJobResponse {
+  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}/cancel`)
+  if(is-ok-response(response), CancelFineTuningJobResponse(response.body), err(HttpError(response)))
+}
+
+CancelResponseRequest type {
+  response-id: Str
+}
+
+// Cancelled response object
+CancelResponseResponse type Map
+
+
+cancel-response
+meta {
+    doc: """POST /responses/{response_id}/cancel - Cancel an in-progress model response."""
+}
+fn (request: CancelResponseRequest): CancelResponseResponse {
+  response api-request("POST", `${::openai/BASE_URL}/responses/${request.response-id}/cancel`)
+  if(is-ok-response(response), CancelResponseResponse(response.body), err(HttpError(response)))
+}
+
+CancelRunRequest type {
+  thread-id: Str,
+  run-id: Str
+}
+
+CancelRunResponse type {
+    id: Str,
+    object: "thread.run",
+    created_at: Int,
+    thread_id: Str,
+    assistant_id: Str,
+    status: RunStatus,
+    required_action: Map,
+    last_error: Map,
+    expires_at: Int,
+    started_at: Int,
+    cancelled_at: Int,
+    failed_at: Int,
+    completed_at: Int,
+    incomplete_details: Map,
+    model: Str,
+    instructions: Str,
+    tools: Vec<AssistantTool>,
+    metadata: Metadata,
+    usage: RunCompletionUsage,
+    temperature: Dec?,
+    top_p: Dec?,
+    max_prompt_tokens: Int,
+    max_completion_tokens: Int,
+    truncation_strategy: Any,
+    tool_choice: Any,
+    parallel_tool_calls: ParallelToolCalls,
+    response_format: AssistantsApiResponseFormatOption
+}
+
+
+cancel-run
+meta {
+    doc: """POST /threads/{thread_id}/runs/{run_id}/cancel - Cancel an in-progress assistant run."""
+}
+fn (request: CancelRunRequest): CancelRunResponse {
+  response api-request("POST", `${::openai/BASE_URL}/threads/${request.thread-id}/runs/${request.run-id}/cancel`)
+  if(is-ok-response(response), CancelRunResponse(response.body), err(HttpError(response)))
+}
+
+CancelUploadRequest type {
+  upload-id: Str
+}
+
+CancelUploadResponse type {
+    id: Str,
+    created_at: Int,
+    filename: Str,
+    bytes: Int,
+    purpose: Str,
+    status: "pending" | "completed" | "cancelled" | "expired",
+    expires_at: Int,
+    object: "upload",
+    file: Any?
+}
+
+
+cancel-upload
+meta {
+    doc: """POST /uploads/{upload_id}/cancel - Cancel an in-progress multi-part upload."""
+}
+fn (request: CancelUploadRequest): CancelUploadResponse {
+  response api-request("POST", `${::openai/BASE_URL}/uploads/${request.upload-id}/cancel`)
+  if(is-ok-response(response), CancelUploadResponse(response.body), err(HttpError(response)))
+}
+
+CancelVectorStoreFileBatchRequest type {
+  vector-store-id: Str,
+  batch-id: Str
+}
+
+CancelVectorStoreFileBatchResponse type {
+    id: Str,
+    object: "vector_store.files_batch",
+    created_at: Int,
+    vector_store_id: Str,
+    status: "in_progress" | "completed" | "cancelled" | "failed",
+    file_counts: Map
+}
+
+
+cancel-vector-store-file-batch
+meta {
+    doc: """POST /vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel - Cancel vector store file batch"""
+}
+fn (request: CancelVectorStoreFileBatchRequest): CancelVectorStoreFileBatchResponse {
+  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/cancel`)
+  if(is-ok-response(response), CancelVectorStoreFileBatchResponse(response.body), err(HttpError(response)))
+}

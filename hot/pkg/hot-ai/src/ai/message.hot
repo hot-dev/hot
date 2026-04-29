@@ -1,0 +1,121 @@
+::ai::message ns
+meta {
+    doc: "Normalized message types for AI agents. Includes Role enum, ChatMessage, Message (with session + sender), and AgentMessage for inter-agent bus."
+}
+
+Session  ::ai::session/Session
+Identity ::ai::session/Identity
+
+// ============================================================================
+// Role Enum
+// ============================================================================
+
+Role
+meta {
+    doc: """
+    The role of a message in an AI conversation. The closed variant
+    set covers the standard chat-completion roles: `User`,
+    `Assistant`, `System`, and `Tool` (for tool/function call
+    results that are fed back to the model). `Tool` is the only
+    role recognized by every modern provider beyond the original
+    three; rather than open the enum, we add it explicitly.
+    """
+}
+enum { User, Assistant, System, Tool }
+
+// ============================================================================
+// ChatMessage — lightweight role + content for AI threads
+// ============================================================================
+
+ChatMessage
+meta { doc: "A single message in an AI conversation thread." }
+type {
+    role: Role,
+    content: Str
+}
+
+user-msg
+meta { doc: "Create a ChatMessage with role User." }
+fn (content: Str): ChatMessage {
+    ChatMessage({role: Role.User, content: content})
+}
+
+assistant-msg
+meta { doc: "Create a ChatMessage with role Assistant." }
+fn (content: Str): ChatMessage {
+    ChatMessage({role: Role.Assistant, content: content})
+}
+
+system-msg
+meta { doc: "Create a ChatMessage with role System." }
+fn (content: Str): ChatMessage {
+    ChatMessage({role: Role.System, content: content})
+}
+
+tool-msg
+meta { doc: "Create a ChatMessage with role Tool — used for tool/function call results fed back into the model." }
+fn (content: Str): ChatMessage {
+    ChatMessage({role: Role.Tool, content: content})
+}
+
+// ============================================================================
+// Message — a message in a conversation with session + sender
+// ============================================================================
+
+Message
+meta { doc: "A message in a conversation, carrying session and sender context." }
+type {
+    id: Str,
+    content: Str,
+    sender: Identity,
+    session: Session,
+    timestamp: Int,
+    source: Str?,
+    metadata: Map?,
+}
+
+// ============================================================================
+// AgentMessage — routed through the inter-agent event bus
+// ============================================================================
+
+AgentMessage
+meta {
+    doc: "A message routed between agents via the event bus. Carries session + sender."
+}
+type {
+    session: Session,
+    sender: Identity,
+    from-agent: Str?,
+    to-agent: Str?,
+    content: Str,
+    reply-event: Str?,
+    correlation-id: Str?,
+    metadata: Map?,
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+format-messages
+meta { doc: "Render a Vec of Messages as [sender]: content lines for AI prompts." }
+fn (messages: Vec): Str {
+    messages
+        |> map((m) { `[${or(m.sender.name, m.sender.id)}]: ${m.content}` })
+        |> join("\n")
+}
+
+format-chat-messages
+meta { doc: "Render a Vec of ChatMessages as role: content lines." }
+fn (messages: Vec): Str {
+    messages
+        |> map((m) {
+            role-str match m.role {
+                Role.User      => { "user" }
+                Role.Assistant => { "assistant" }
+                Role.System    => { "system" }
+            }
+            `${role-str}: ${m.content}`
+        })
+        |> join("\n")
+}

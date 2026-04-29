@@ -1,0 +1,94 @@
+::ai::test::context ns
+meta ["test"]
+
+::ctx ::ai::context
+
+test-estimate-tokens
+meta ["test"] fn () {
+    assert-eq(1, ::ctx/estimate-tokens("Hi"))
+    assert-eq(3, ::ctx/estimate-tokens("Hello world!"))
+    assert(gt(::ctx/estimate-tokens("a long sentence with many words in it to test estimation"), 5))
+}
+
+test-estimate-tokens-empty
+meta ["test"] fn () {
+    assert-eq(1, ::ctx/estimate-tokens(""))
+}
+
+test-sample-bookend-no-op
+meta ["test"] fn () {
+    items [1, 2, 3]
+    result ::ctx/sample(items, {max-items: 10})
+    assert-eq(3, length(result))
+    assert-eq([1, 2, 3], result)
+}
+
+test-sample-bookend
+meta ["test"] fn () {
+    items range(0, 10)
+    result ::ctx/sample(items, {max-items: 4, strategy: "bookend"})
+    assert-eq(4, length(result))
+    assert-eq(0, first(result))
+    assert-eq(9, last(result))
+}
+
+test-sample-bookend-default
+meta ["test"] fn () {
+    items range(0, 20)
+    result ::ctx/sample(items, {max-items: 6})
+    assert-eq(6, length(result))
+    assert-eq(0, first(result))
+    assert-eq(19, last(result))
+}
+
+test-sample-recent
+meta ["test"] fn () {
+    items range(0, 10)
+    result ::ctx/sample(items, {max-items: 3, strategy: "recent"})
+    assert-eq(3, length(result))
+    assert-eq(7, first(result))
+    assert-eq(9, last(result))
+}
+
+test-sample-even
+meta ["test"] fn () {
+    items range(0, 10)
+    result ::ctx/sample(items, {max-items: 5, strategy: "even"})
+    assert-eq(5, length(result))
+    assert-eq(0, first(result))
+}
+
+test-truncate-no-op
+meta ["test"] fn () {
+    result ::ctx/truncate("Hello", 10, "...")
+    assert-eq("Hello", result)
+}
+
+test-truncate-with-suffix
+meta ["test"] fn () {
+    result ::ctx/truncate("Hello, world!", 5, "...")
+    assert-eq("Hello...", result)
+}
+
+test-truncate-no-suffix
+meta ["test"] fn () {
+    result ::ctx/truncate("Hello, world!", 5, null)
+    assert-eq("Hello", result)
+}
+
+test-fit-no-op
+meta ["test"] fn () {
+    items ["short", "also short"]
+    opts {max-tokens: 10000}
+    result ::ctx/fit(items, opts)
+    assert-eq(2, length(result))
+}
+
+test-fit-with-field
+meta ["test"] fn () {
+    items map(range(0, 100), (i) { {content: `Message number ${i} with some extra text to pad it out a bit.`} })
+    opts {max-tokens: 100, field: "content"}
+    result ::ctx/fit(items, opts)
+    assert(lt(length(result), 100), "Should have fewer items after fitting")
+    assert(gt(length(result), 0), "Should have at least some items")
+}

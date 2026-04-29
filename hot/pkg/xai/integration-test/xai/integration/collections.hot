@@ -1,0 +1,163 @@
+::xai::integration::collections ns
+meta ["test"]
+
+HttpRequest ::hot::http/HttpRequest
+
+// =============================================================================
+// Integration Tests for xAI Collections API
+// =============================================================================
+// These tests require:
+// - XAI_API_KEY for search operations
+// - XAI_MANAGEMENT_API_KEY with AddFileToCollection permission for collection management
+//
+// Note: Tests gracefully skip if management key is not available
+
+// -----------------------------------------------------------------------------
+// Collection List Test (requires management key)
+// -----------------------------------------------------------------------------
+
+test-collections-list
+meta ["test"]
+fn () {
+    // Try to list collections - this requires management API key
+    // Note: Management API uses different base URL with /v1 prefix
+    url `${::xai::collections/MANAGEMENT_BASE_URL}/v1/collections`
+
+    // Check if management key is available
+    management-key ::hot::ctx/get("xai.management.api.key")
+
+    cond {
+        or(is-null(management-key), eq(management-key, "")) => {
+            println("Management API key not configured - skipping collections test")
+            assert(true, "Skipped - no management key")
+        }
+        => {
+            headers {
+                Authorization: `Bearer ${management-key}`
+            }
+
+            response ::hot::http/request(HttpRequest({
+                method: "GET",
+                url: url,
+                headers: headers
+            }))
+
+            cond {
+                ::hot::http/is-ok-response(response) => {
+                    // Collections list should be a valid response
+                    assert(or(is-vec(response.body.collections), is-null(response.body.collections)),
+                           "Response should have collections array or null")
+                }
+
+                eq(response.status, 401) => {
+                    println("Management API key invalid or lacks permissions - skipping")
+                    assert(true, "Skipped - invalid management key")
+                }
+
+                eq(response.status, 403) => {
+                    println("Management API key lacks required permissions - skipping")
+                    assert(true, "Skipped - insufficient permissions")
+                }
+                => {
+                    println(`Unexpected status: ${response.status}`)
+                    println(`Response: ${response.body}`)
+                    assert(false, `Collections API returned unexpected status ${response.status}`)
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Search Test (uses regular API key)
+// -----------------------------------------------------------------------------
+
+test-collections-search-no-collections
+meta ["test"]
+fn () {
+    // Search with empty collections list should return error or empty results
+    url `${::xai/BASE_URL}/documents/search`
+    api-key ::hot::ctx/get("xai.api.key")
+
+    headers {
+        Authorization: `Bearer ${api-key}`,
+        Content-Type: "application/json"
+    }
+
+    body {
+        query: "test query",
+        source: {
+            collection_ids: []
+        }
+    }
+
+    response ::hot::http/request(HttpRequest({
+        method: "POST",
+        url: url,
+        headers: headers,
+        body: to-json(body)
+    }))
+
+    // Empty collection_ids should return an error (400) or empty results
+    cond {
+        eq(response.status, 400) => {
+            // Expected - empty collection_ids is invalid
+            assert(true, "Empty collection_ids correctly rejected")
+        }
+
+        ::hot::http/is-ok-response(response) => {
+            // Some APIs might return empty results instead
+            assert(true, "Search returned successfully")
+        }
+        => {
+            println(`Search response: ${response.body}`)
+            assert(false, `Unexpected search status: ${response.status}`)
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Type/Helper Tests
+// -----------------------------------------------------------------------------
+
+test-retrieval-mode-constants
+meta ["test"]
+fn () {
+    hybrid ::xai::collections/MODE_HYBRID
+    keyword ::xai::collections/MODE_KEYWORD
+    semantic ::xai::collections/MODE_SEMANTIC
+
+    assert-eq("hybrid", hybrid.type, "Hybrid mode type should be hybrid")
+    assert-eq("keyword", keyword.type, "Keyword mode type should be keyword")
+    assert-eq("semantic", semantic.type, "Semantic mode type should be semantic")
+}
+
+test-create-collection-request
+meta ["test"]
+fn () {
+    request ::xai::collections/CreateCollectionRequest({
+        name: "Test Collection",
+        description: "A test collection"
+    })
+
+    assert-eq("Test Collection", request.name, "Name should match")
+    assert-eq("A test collection", request.description, "Description should match")
+}
+
+test-search-request-creation
+meta ["test"]
+fn () {
+    semantic-mode ::xai::collections/MODE_SEMANTIC
+
+    request ::xai::collections/SearchRequest({
+        query: "test query",
+        collection_ids: ["col_1", "col_2"],
+        max_results: 10,
+        retrieval_mode: semantic-mode
+    })
+
+    assert-eq("test query", request.query, "Query should match")
+    assert-eq(2, length(request.collection_ids), "Should have 2 collection IDs")
+    assert-eq(10, request.max_results, "Max results should be 10")
+    assert-eq("semantic", request.retrieval_mode.type, "Retrieval mode should be semantic")
+}

@@ -1,0 +1,340 @@
+::hot::math ns
+meta {doc: """Mathematical operations and numeric utilities."""}
+
+is-zero
+meta {
+    core: true,
+    doc: """
+    Return true if `x` is zero.
+
+    **Example**
+
+    ```hot
+    is-zero(0)    // true
+    is-zero(1)    // false
+    is-zero(0.0)  // true
+    ```
+    """
+}
+fn (x: Int | Dec): Bool { eq(0, x) }
+
+
+is-pos
+meta {
+    core: true,
+    doc: """
+    Return true if `x` is greater than zero.
+
+    **Example**
+
+    ```hot
+    is-pos(5)    // true
+    is-pos(0)    // false
+    is-pos(-3)   // false
+    ```
+    """
+}
+fn (x: Int | Dec): Bool { gt(x, 0) }
+
+
+is-neg
+meta {
+    core: true,
+    doc: """
+    Return true if `x` is less than zero.
+
+    **Example**
+
+    ```hot
+    is-neg(-5)   // true
+    is-neg(0)    // false
+    is-neg(3)    // false
+    ```
+    """
+}
+fn (x: Int | Dec): Bool { lt(x, 0) }
+
+
+add
+meta {
+    core: true,
+    doc: """
+    Add `x` and `y`.
+
+    **Example**
+
+    ```hot
+    add(2, 3)      // 5
+    add(1.5, 2.5)  // 4.0
+    add(-1, 1)     // 0
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/add, [x, y])
+}
+
+
+sub
+meta {
+    core: true,
+    doc: """
+    Subtract `y` from `x`.
+
+    **Example**
+
+    ```hot
+    sub(5, 3)      // 2
+    sub(1, 5)      // -4
+    sub(3.5, 1.5)  // 2.0
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/sub, [x, y])
+}
+
+
+mul
+meta {
+    core: true,
+    doc: """
+    Multiply `x` by `y`.
+
+    **Example**
+
+    ```hot
+    mul(3, 4)      // 12
+    mul(2.5, 4)    // 10.0
+    mul(-2, 3)     // -6
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/mul, [x, y])
+}
+
+
+div
+meta {
+    core: true,
+    doc: """
+    Divide `x` by `y`.
+
+    **Example**
+
+    ```hot
+    div(10, 2)     // 5
+    div(7, 2)      // 3.5
+    div(1, 4)      // 0.25
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/div, [x, y])
+}
+
+
+mod
+meta {
+    core: true,
+    doc: """
+    Remainder of `x` divided by `y`.
+
+    **Example**
+
+    ```hot
+    mod(10, 3)    // 1
+    mod(7, 2)     // 1
+    mod(8, 4)     // 0
+    mod(2.5, 1)   // 0.5
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/mod, [x, y])
+}
+
+
+pow
+meta {
+    core: true,
+    doc: """
+    Raise `base` to the power `exp`.
+
+    **Example**
+
+    ```hot
+    pow(2, 3)      // 8
+    pow(10, 2)     // 100
+    pow(2, 0)      // 1
+    pow(1.5, 2)    // 2.25
+    ```
+    """
+}
+fn (base: Int | Dec, exp: Int | Dec): Int | Dec {
+    call-lib(::hot::math/pow, [base, exp])
+}
+
+
+abs
+meta {
+    core: true,
+    doc: """
+    Absolute value of `x`.
+
+    **Example**
+
+    ```hot
+    abs(-5)     // 5
+    abs(3)      // 3
+    abs(-2.5)   // 2.5
+    ```
+    """
+}
+fn (x: Int | Dec): Int | Dec {
+    call-lib(::hot::math/abs, [x])
+}
+
+
+max
+meta {
+    core: true,
+    doc: """
+    Return the larger of `x` and `y`.
+
+    **Example**
+
+    ```hot
+    max(3, 7)       // 7
+    max(-1, -5)     // -1
+    max(1.5, 1.4)   // 1.5
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/max, [x, y])
+}
+
+
+min
+meta {
+    core: true,
+    doc: """
+    Return the smaller of `x` and `y`.
+
+    **Example**
+
+    ```hot
+    min(3, 7)       // 3
+    min(-1, -5)     // -5
+    min(1.5, 1.4)   // 1.4
+    ```
+    """
+}
+fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+    call-lib(::hot::math/min, [x, y])
+}
+
+
+ceil
+meta {
+    core: true,
+    doc: """
+    Round `x` up to the nearest integer.
+
+    **Example**
+
+    ```hot
+    ceil(2.3)   // 3
+    ceil(2.0)   // 2
+    ceil(-2.3)  // -2
+    ```
+    """
+}
+fn (x: Int | Dec): Int {
+    call-lib(::hot::math/ceil, [x])
+}
+
+
+floor
+meta {
+    core: true,
+    doc: """
+    Round `x` down to the nearest integer.
+
+    **Example**
+
+    ```hot
+    floor(2.7)   // 2
+    floor(2.0)   // 2
+    floor(-2.3)  // -3
+    ```
+    """
+}
+fn (x: Int | Dec): Int {
+    call-lib(::hot::math/floor, [x])
+}
+
+
+round
+meta {
+    core: true,
+    doc: """
+    Round `x` to the nearest integer.
+
+    **Example**
+
+    ```hot
+    round(2.3)   // 2
+    round(2.5)   // 3
+    round(2.7)   // 3
+    round(-2.5)  // -2
+    ```
+    """
+}
+fn (x: Int | Dec): Int {
+    call-lib(::hot::math/round, [x])
+}
+
+
+rand
+meta {
+    core: true,
+    doc: """
+    Random decimal between 0 and 1, or 0..n when `n` provided.
+
+    **Example**
+
+    ```hot
+    rand()     // 0.7234... (random decimal 0-1)
+    rand(10)   // 7.234...  (random decimal 0-10)
+    rand(100)  // 72.34...  (random decimal 0-100)
+    ```
+    """
+}
+fn
+(): Dec { call-lib(::hot::math/rand, []) },
+(n: Int): Dec {
+    call-lib(::hot::math/rand, [n])
+}
+
+
+rand-int
+meta {
+    core: true,
+    doc: """
+    Random integer: 0 to max int, or 0 to n-1 when `n` provided.
+
+    **Example**
+
+    ```hot
+    rand-int()    // Random integer
+    rand-int(10)  // Random integer 0-9
+    rand-int(6)   // Random integer 0-5 (like a die roll minus 1)
+    ```
+    """
+}
+fn
+(): Int { call-lib(::hot::math/floor, [call-lib(::hot::math/rand, [])]) },
+(n: Int): Int { call-lib(::hot::math/floor, [call-lib(::hot::math/rand, [n])]) }

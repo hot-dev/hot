@@ -1,0 +1,560 @@
+::imagemagick ns
+meta {
+    doc: """
+    ImageMagick image processing via Hot Box containers.
+
+    Resize, convert, optimize, and identify images using `magick` and
+    `magick identify` inside isolated containers. Inputs use `hot://` storage
+    URLs; outputs are written back to `hot://` storage.
+
+    **Quick Start**
+
+    ```hot
+    meta ::imagemagick/identify("hot://uploads/photo.jpg")
+    tap(meta.width)
+
+    out ::imagemagick/resize("hot://uploads/photo.jpg", {width: 800, height: 600, fit: "cover"})
+    tap(out.url)
+
+    webp ::imagemagick/convert("hot://uploads/photo.jpg", {format: "webp", quality: 90})
+    tap(webp.url)
+
+    small ::imagemagick/optimize("hot://uploads/photo.jpg")
+    tap(small.url)
+
+    // With explicit output path
+    out ::imagemagick/resize("hot://uploads/photo.jpg", {
+        width: 800,
+        output: "hot://images/photo-800w.jpg",
+    })
+    ```
+    """
+}
+
+::box ::hot::box
+::task ::hot::task
+
+DEFAULT_IMAGE "alpine:3.21"
+INSTALL_CMD "apk add --no-cache imagemagick libwebp-tools"
+
+// ============================================================================
+// Types
+// ============================================================================
+
+ResizeOpts
+meta {
+    doc: """
+    Options for resizing an image.
+
+    **Fields**
+    - `width` — Target width in pixels
+    - `height` — Target height in pixels
+    - `fit` — `"contain"` (default), `"cover"`, or `"fill"`
+    - `quality` — Output quality for lossy formats (1–100)
+    - `format` — Output format extension, e.g. `"png"`, `"jpg"` (default: input extension)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with ImageMagick pre-installed
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    width: Int?,
+    height: Int?,
+    fit: Str?,
+    quality: Int?,
+    format: Str?,
+    output: Str?,
+    image: Str?,
+    size: Str?
+}
+
+ConvertOpts
+meta {
+    doc: """
+    Options for format conversion.
+
+    **Fields**
+    - `format` — Target format, e.g. `"png"`, `"webp"`, `"jpg"` (required)
+    - `quality` — Quality for lossy formats (1–100)
+    - `density` — DPI for vector or PDF sources
+    - `strip` — Strip metadata when `true`
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with ImageMagick
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    format: Str,
+    quality: Int?,
+    density: Int?,
+    strip: Bool?,
+    output: Str?,
+    image: Str?,
+    size: Str?
+}
+
+OptimizeOpts
+meta {
+    doc: """
+    Options for lossy optimization (strip metadata, quality).
+
+    **Fields**
+    - `quality` — JPEG/WebP quality (default: `85`)
+    - `strip` — Strip metadata (default: `true`)
+    - `format` — Output format (default: same as input)
+    - `output` — Output `hot://` URL (default: auto-generated)
+    - `image` — Custom Docker image with ImageMagick
+    - `size` — Box size override (default: `"small"`)
+    """
+}
+type {
+    quality: Int?,
+    strip: Bool?,
+    format: Str?,
+    output: Str?,
+    image: Str?,
+    size: Str?
+}
+
+// ============================================================================
+// Command Builders (internal, testable without Docker)
+// ============================================================================
+
+build-resize-args
+meta {
+    doc: "Build ImageMagick `magick` arguments for resizing."
+}
+fn (input-path: Str, output-path: Str, opts: ResizeOpts): Vec<Str> {
+    base ["magick", input-path]
+    fit if(is-null(opts.fit), "contain", opts.fit)
+    has-w is-some(opts.width)
+    has-h is-some(opts.height)
+    w-str if(has-w, Str(opts.width), "0")
+    h-str if(has-h, Str(opts.height), "0")
+    g `${w-str}x${h-str}`
+
+    resize-args cond {
+        and(has-w, has-h, eq(fit, "cover")) => {
+            ["-resize", `${g}^`, "-gravity", "center", "-extent", g]
+        }
+
+        and(has-w, has-h, eq(fit, "fill")) => {
+            ["-resize", `${g}!`]
+        }
+
+        and(has-w, has-h) => {
+            ["-resize", g]
+        }
+
+        has-w => {
+            ["-resize", `${w-str}x`]
+        }
+
+        has-h => {
+            ["-resize", `x${h-str}`]
+        }
+        => { [] }
+    }
+
+    qual-args if(is-some(opts.quality), ["-quality", Str(opts.quality)], [])
+
+    [...base, ...resize-args, ...qual-args, output-path]
+}
+
+build-convert-args
+meta {
+    doc: "Build ImageMagick `magick` arguments for format conversion."
+}
+fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
+    base ["magick", input-path]
+    dens if(is-some(opts.density), ["-density", Str(opts.density)], [])
+    qual if(is-some(opts.quality), ["-quality", Str(opts.quality)], [])
+    strip if(and(is-some(opts.strip), eq(opts.strip, true)), ["-strip"], [])
+
+    [...base, ...dens, ...qual, ...strip, output-path]
+}
+
+build-optimize-args
+meta {
+    doc: "Build ImageMagick `magick` arguments for optimization (strip, quality)."
+}
+fn (input-path: Str, output-path: Str, opts: OptimizeOpts): Vec<Str> {
+    q or(opts.quality, 85)
+    strip-on if(is-null(opts.strip), true, opts.strip)
+    strip-args if(strip-on, ["-strip"], [])
+    qual ["-quality", Str(q)]
+
+    ["magick", input-path, ...strip-args, ...qual, output-path]
+}
+
+build-identify-args
+meta {
+    doc: "Build `magick identify` arguments for verbose-style single-shot metadata (custom format lines)."
+}
+fn (input-path: Str): Vec<Str> {
+    fmt """%w
+%h
+%m
+%z
+%[colorspace]
+%b"""
+    ["identify", "-format", fmt, input-path]
+}
+
+// ============================================================================
+// Output Parsers (internal, testable without Docker)
+// ============================================================================
+
+parse-identify-output
+meta {
+    doc: "Parse `identify -format` multi-line output: width, height, format, depth, colorspace, filesize."
+}
+fn (stdout: Str?): Map {
+    lines or(stdout, "") |> trim() |> split("\n")
+    w get(lines, 0, "") |> trim()
+    h get(lines, 1, "") |> trim()
+    fmt get(lines, 2, "") |> trim()
+    depth get(lines, 3, "") |> trim()
+    cs get(lines, 4, "") |> trim()
+    fs get(lines, 5, "") |> trim()
+
+    {
+        width: Int(w),
+        height: Int(h),
+        format: fmt,
+        depth,
+        colorspace: cs,
+        filesize: fs,
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+resolve-output fn (user-output: Str?, default: Str): Str {
+    cond {
+        is-null(user-output) => { default }
+        not(starts-with(user-output, "hot://")) => {
+            fail("output must be a hot:// URL", {output: user-output})
+        }
+        => { user-output }
+    }
+}
+
+file-ext fn (path: Str): Str {
+    parts split(path, ".")
+    last(parts)
+}
+
+join-args fn (args: Vec<Str>): Str {
+    join(args, " ")
+}
+
+run-magick-box fn (script: Str, box-size: Str, image: Str?): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
+    info ::box/start({
+        image: img,
+        script: full-script,
+        timeout: 300,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+    ::task/await(info.id)
+}
+
+start-magick-box fn (script: Str, box-size: Str, image: Str?): Map {
+    img or(image, DEFAULT_IMAGE)
+    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
+    ::box/start({
+        image: img,
+        script: full-script,
+        timeout: 300,
+        size: box-size,
+        network: "internet",
+        writable: true,
+    })
+}
+
+check-box-result fn (result: Map, tool-name: Str): Map {
+    cond {
+        ne(result.status, "completed") => {
+            fail(`${tool-name} task ${result.status}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+
+        and(is-some(result.exit-code), ne(result.exit-code, 0)) => {
+            fail(`${tool-name} exited with code ${Str(result.exit-code)}`, {
+                tool: tool-name,
+                status: result.status,
+                exit-code: result.exit-code,
+                stderr: or(result.stderr, ""),
+                stdout: or(result.stdout, ""),
+            })
+        }
+        => { result }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+identify
+meta {
+    doc: """
+    Read image metadata using `identify`.
+
+    Returns a Map with `width`, `height`, `format`, `depth`, `colorspace`, and
+    `filesize` (from ImageMagick's `%b`).
+
+    **Example**
+
+    ```hot
+    meta ::imagemagick/identify("hot://uploads/photo.jpg")
+    meta.width
+    meta.format
+    ```
+    """,
+    box: {min-size: "nano"}
+}
+fn (input: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    script `hotbox cp '${input}' ${in-path} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${in-path}`
+
+    result run-magick-box(script, "nano", null)
+    checked check-box-result(result, "identify")
+    parse-identify-output(checked.stdout)
+},
+(input: Str, image: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    script `hotbox cp '${input}' ${in-path} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${in-path}`
+
+    result run-magick-box(script, "nano", image)
+    checked check-box-result(result, "identify")
+    parse-identify-output(checked.stdout)
+}
+
+resize
+meta {
+    doc: """
+    Resize an image with optional fit mode and quality.
+
+    Returns `{url: Str, format: Str}` pointing at Hot storage.
+
+    **Example**
+
+    ```hot
+    out ::imagemagick/resize("hot://uploads/huge.jpg", {width: 400, height: 300, fit: "cover"})
+    out.url
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: ResizeOpts): Map {
+    format or(opts.format, file-ext(input))
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://imagemagick/${uuid}/output.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    magick-args join-args(build-resize-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-magick-box(script, box-size, opts.image)
+    check-box-result(result, "resize")
+
+    {url: hot-output, format,}
+}
+
+convert
+meta {
+    doc: """
+    Convert an image to another format.
+
+    Returns `{url: Str, format: Str}`.
+
+    **Example**
+
+    ```hot
+    webp ::imagemagick/convert("hot://uploads/photo.png", {format: "webp", quality: 85, strip: true})
+    webp.url
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: ConvertOpts): Map {
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://imagemagick/${uuid}/output.${opts.format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${opts.format}`
+
+    magick-args join-args(build-convert-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-magick-box(script, box-size, opts.image)
+    check-box-result(result, "convert")
+
+    {url: hot-output, format: opts.format}
+}
+
+optimize
+meta {
+    doc: """
+    Optimize file size (strip metadata, adjust quality). Defaults: quality `85`, `strip` true.
+
+    Returns `{url: Str, format: Str}`.
+
+    **Example**
+
+    ```hot
+    smaller ::imagemagick/optimize("hot://uploads/photo.jpg")
+    smaller.url
+    ```
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    optimize(input, OptimizeOpts({
+        quality: null, strip: null, format: null, output: null, image: null, size: null,
+    }))
+},
+(input: Str, opts: OptimizeOpts): Map {
+    format or(opts.format, file-ext(input))
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://imagemagick/${uuid}/optimized.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    magick-args join-args(build-optimize-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    result run-magick-box(script, box-size, opts.image)
+    check-box-result(result, "optimize")
+
+    {url: hot-output, format,}
+}
+
+// ============================================================================
+// Async (start-*) API — return TaskInfo without awaiting
+// ============================================================================
+
+start-identify
+meta {
+    doc: """
+    Start an `identify` task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "nano"}
+}
+fn (input: Str): Map {
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+
+    script `hotbox cp '${input}' ${in-path} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${in-path}`
+
+    start-magick-box(script, "nano", null)
+}
+
+start-resize
+meta {
+    doc: """
+    Start a resize task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: ResizeOpts): Map {
+    format or(opts.format, file-ext(input))
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://imagemagick/${uuid}/output.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    magick-args join-args(build-resize-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-magick-box(script, box-size, opts.image)
+    assoc(info, "data", {output: hot-output})
+}
+
+start-convert
+meta {
+    doc: """
+    Start a format-conversion task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str, opts: ConvertOpts): Map {
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://imagemagick/${uuid}/output.${opts.format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${opts.format}`
+
+    magick-args join-args(build-convert-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-magick-box(script, box-size, opts.image)
+    assoc(info, "data", {output: hot-output})
+}
+
+start-optimize
+meta {
+    doc: """
+    Start an optimization task without awaiting the result.
+
+    Returns a TaskInfo map that can be passed to `::task/await` later.
+    """,
+    box: {min-size: "small"}
+}
+fn (input: Str): Map {
+    start-optimize(input, OptimizeOpts({
+        quality: null, strip: null, format: null, output: null, image: null, size: null,
+    }))
+},
+(input: Str, opts: OptimizeOpts): Map {
+    format or(opts.format, file-ext(input))
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://imagemagick/${uuid}/optimized.${format}`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-path `/data/output.${format}`
+
+    magick-args join-args(build-optimize-args(in-path, out-path, opts))
+    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+
+    box-size or(opts.size, "small")
+    info start-magick-box(script, box-size, opts.image)
+    assoc(info, "data", {output: hot-output})
+}

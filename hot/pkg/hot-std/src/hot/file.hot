@@ -1,0 +1,173 @@
+::hot::file ns
+meta {doc: """File system operations for reading, writing, and managing files."""}
+
+FileMeta
+meta {
+    doc: """
+    Metadata about a stored file.
+
+    **Example**
+
+    ```hot
+    meta file-meta("uploads/image.png")
+    meta.path          // "uploads/image.png"
+    meta.size          // 1024
+    meta.content-type  // "image/png"
+    ```
+    """
+}
+type {
+    file-id: Str,
+    path: Str,
+    size: Int,
+    etag: Str?,
+    content-type: Str?,
+    storage-backend: Str,
+    created-at: Int,
+    updated-at: Int
+}
+
+read-file
+meta {
+    core: true,
+    doc: """
+    Read the contents of a file and return them as a string.
+
+    **Example**
+
+    ```hot
+    contents read-file("config.json")
+    // "{\"debug\": true, \"port\": 8080}"
+    ```
+    """
+}
+fn (path: Str): Str {
+    call-lib(::hot::file/read-file, [path])
+}
+
+read-file-bytes
+meta {
+    core: true,
+    doc: """
+    Read the contents of a file and return them as bytes.
+
+    **Example**
+
+    ```hot
+    data read-file-bytes("image.png")
+    // [137, 80, 78, 71, ...]
+    ```
+    """
+}
+fn (path: Str): Bytes {
+    call-lib(::hot::file/read-file-bytes, [path])
+}
+
+write-file
+meta {
+    core: true,
+    doc: """
+    Write a string to a file and return file metadata.
+
+    **Example**
+
+    ```hot
+    meta write-file("output.txt", "Hello, World!")
+    // meta.path = "output.txt"
+    // meta.size = 13
+    ```
+    """
+}
+fn (path: Str, contents: Str): FileMeta {
+    call-lib(::hot::file/write-file, [path, contents])
+}
+
+write-file-bytes
+meta {
+    core: true,
+    doc: """
+    Write bytes to a file and return file metadata.
+
+    **Example**
+
+    ```hot
+    data [72, 101, 108, 108, 111]  // "Hello" as bytes
+    meta write-file-bytes("binary.dat", data)
+    ```
+    """
+}
+fn (path: Str, contents: Bytes): FileMeta {
+    call-lib(::hot::file/write-file-bytes, [path, contents])
+}
+
+delete-file
+meta {
+    core: true,
+    doc: """
+    Delete a file and return true if successful.
+
+    **Example**
+
+    ```hot
+    success delete-file("temp.txt")
+    // true
+    ```
+    """
+}
+fn (path: Str): Bool {
+    call-lib(::hot::file/delete-file, [path])
+}
+
+file-exists
+meta {
+    core: true,
+    doc: """
+    Check if a file exists.
+
+    **Example**
+
+    ```hot
+    file-exists("config.json")  // true or false
+    ```
+    """
+}
+fn (path: Str): Bool {
+    call-lib(::hot::file/file-exists, [path])
+}
+
+file-info
+meta {
+    core: true,
+    doc: """
+    Get metadata information about a file.
+
+    **Example**
+
+    ```hot
+    info file-info("data.json")
+    // info.size = 1024
+    // info.content-type = "application/json"
+    ```
+    """
+}
+fn (path: Str): FileMeta {
+    call-lib(::hot::file/file-info, [path])
+}
+
+list-files
+meta {
+    core: true,
+    doc: """
+    List all files matching a prefix path.
+
+    **Example**
+
+    ```hot
+    files list-files("uploads/")
+    // ["uploads/image1.png", "uploads/image2.jpg", ...]
+    ```
+    """
+}
+fn (prefix: Str): Vec {
+    call-lib(::hot::file/list-files, [prefix])
+}

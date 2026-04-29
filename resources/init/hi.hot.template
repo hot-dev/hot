@@ -1,0 +1,281 @@
+// Welcome to Hot!
+// Hot syntax is a series of Var-Value pairs.
+// A Var is an identifier; a Value is a literal, `fn`, `type`, `ns`, or flow.
+
+// Every Hot file starts with a namespace declaration.
+::{{PROJECT_NAME}}::hi ns
+
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// FUNCTIONS
+
+// The last expression is the return value -- there is no `return` statement.
+hello
+meta {
+  doc: """
+  Say hello from Hot.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/hello() // => "Things are heating up!"
+  ```
+  """
+}
+fn (): Str {
+  "Things are heating up!"
+}
+
+// Backticks create template strings with `${}` interpolation.
+warm-welcome
+meta {
+  doc: """
+  Give someone a warm welcome by name.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/warm-welcome("Alice") // => "Welcome to the heat, Alice!"
+  ```
+  """
+}
+fn (name: Str): Str {
+  `Welcome to the heat, ${name}!`
+}
+
+// `if` has lazy branches -- only the matching branch executes.
+// There are no infix operators in Hot, only functions like `gte`.
+is-it-hot
+meta {
+  doc: """
+  Check if a temperature is hot (>= 100).
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/is-it-hot(100) // => "It's hot!"
+  ::{{PROJECT_NAME}}::hi/is-it-hot(72)  // => "Not hot yet"
+  ```
+  """
+}
+fn (temp: Int): Str {
+  if(gte(temp, 100), "It's hot!", "Not hot yet")
+}
+
+// `cond` returns the first matching branch.
+// See also `cond-all`, which executes *all* true branches and returns a Map.
+// This function fails ~14% of the time (divisible by 7) to demo failures.
+check-heat
+meta {
+  doc: """
+  Classify a number as even or odd. Fails if divisible by 7.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/check-heat(42) // => "42 is even"
+  ::{{PROJECT_NAME}}::hi/check-heat(13) // => "13 is odd"
+  ::{{PROJECT_NAME}}::hi/check-heat(7)  // fails: "Too hot to handle!"
+  ```
+  """
+}
+fn cond (num: Int): Str {
+  is-zero(mod(num, 7)) => fail("Too hot to handle!")
+  is-zero(mod(num, 2)) => `${num} is even`
+                       => `${num} is odd`
+}
+
+// `parallel` runs all branches concurrently and returns a Map keyed by branch name.
+both-checks
+meta {
+  doc: """
+  Run even/odd check and doubling in parallel.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/both-checks(6)
+  // => {even-odd: "6 is even", doubled: 12}
+  ```
+  """
+}
+fn parallel (num: Int): Map {
+  even-odd check-heat(num)
+  doubled  mul(num, 2)
+}
+
+// The pipe operator `|>` chains functions. The piped value becomes the first argument.
+// Lambdas are written as `(param) { body }`.
+double-positives
+meta {
+  doc: """
+  Filter to positive numbers, then double each one.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/double-positives([-3, 1, -2, 4, 5])
+  // => [2, 8, 10]
+  ```
+  """
+}
+fn (nums: Vec<Int>): Vec<Int> {
+  nums
+  |> filter((n) { gt(n, 0) })
+  |> map((n) { mul(n, 2) })
+  // Shorthand: `%` creates a lambda automatically.
+  // The above is equivalent to:  filter(gt(%, 0)) |> map(mul(%, 2))
+}
+
+// Functions return `Result` implicitly. Use `match` on Result.Ok / Result.Err.
+check-positive
+meta {
+  doc: """
+  Check that a number is positive, returning a Result.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/check-positive(5)  // => "Got positive number: 5"
+  ::{{PROJECT_NAME}}::hi/check-positive(-1) // => "Error: Must be positive"
+  ```
+  """
+}
+fn (num: Int): Str {
+  result if(gt(num, 0), ok(num), err("Must be positive"))
+  match result {
+    Result.Ok  => `Got positive number: ${result}`
+    Result.Err => `Error: ${result}`
+  }
+}
+
+// SCHEDULED FUNCTIONS
+
+// Schedules use English ("every 5 minutes") or cron syntax ("*/5 * * * *"). UTC.
+spark
+meta {
+  schedule: "every 1 minute",
+  doc: """
+  Fires every minute and sends a `"hot-take"` event with a random number.
+
+  The `on-hot-take` handler below picks up the event.
+  """
+}
+fn (event) {
+  num rand-int(100)
+  send("hot-take", {num: num})
+}
+
+// EVENT HANDLERS
+
+on-hot-take
+meta {
+  on-event: "hot-take",
+  doc: """
+  Handle `"hot-take"` events from the `spark` schedule.
+
+  Each event creates a new run with a shared stream ID for tracing.
+  Trigger manually with:
+
+  ```
+  hot eval 'send("hot-take", {num: 42})'
+  ```
+  """
+}
+fn (event) {
+  check-heat(event.data.num)
+}
+
+// MCP TOOLS
+
+greet
+meta {
+  mcp: {service: "salutations"},
+  doc: """
+  Greet someone with a hot welcome.
+
+  Exposed as an MCP tool in the `salutations` service, callable by
+  AI models and agents.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/greet("World")
+  // => "Hey World, things are heating up! Welcome to the hot seat."
+  ```
+  """
+}
+fn (name: Str): Str {
+  `Hey ${name}, things are heating up! Welcome to the hot seat.`
+}
+
+farewell
+meta {
+  mcp: {
+    service: "salutations",
+    description: "Send someone off with a fiery farewell"
+  },
+  doc: """
+  Say goodbye with style. The mood controls the tone.
+
+  **Example**
+
+  ```hot
+  ::{{PROJECT_NAME}}::hi/farewell("Alice", "formal")
+  // => "Alice, it's been a blazing honor. Until we ignite again."
+
+  ::{{PROJECT_NAME}}::hi/farewell("Bob", "casual")
+  // => "Later, Bob! Don't let the flame die out."
+
+  ::{{PROJECT_NAME}}::hi/farewell("Eve", "other")
+  // => "Stay hot out there, Eve!"
+  ```
+  """
+}
+fn (name: Str, mood: Str): Str {
+  cond {
+    eq(mood, "formal") => `${name}, it's been a blazing honor. Until we ignite again.`
+    eq(mood, "casual") => `Later, ${name}! Don't let the flame die out.`
+                       => `Stay hot out there, ${name}!`
+  }
+}
+
+// With `hot dev` running, MCP clients can connect to:
+//   http://localhost:4681/mcp/local/salutations
+
+// WEBHOOKS
+
+on-hook
+meta {
+  webhook: {service: "demo", path: "/hook"},
+  doc: """
+  A webhook endpoint that echoes back the request method.
+
+  With `hot dev`, the URL is shown on the dashboard:
+
+  ```
+  curl -X POST http://localhost:4681/webhook/local/development/demo/hook/{token} -d '{"hello": "hot"}'
+  ```
+
+  When deployed:
+
+  ```
+  https://api.hot.dev/webhook/{org}/{env}/demo/hook/{token}
+  ```
+  """
+}
+fn (request: HttpRequest): HttpResponse {
+  HttpResponse({status: 200, body: {message: "Received!", method: request.method}})
+}
+
+// RUNNING YOUR CODE
+//
+// Start the dev server:            hot dev
+// Evaluate expressions directly:   hot eval '::{{PROJECT_NAME}}::hi/hello()'
+// Dashboard:                       http://localhost:4680
+
+// --- Next Steps ---
+// - Edit this file and watch Hot Dev reload automatically
+// - Check the docs: https://hot.dev/docs
+// - Explore hot-std: https://hot.dev/pkg/hot-std

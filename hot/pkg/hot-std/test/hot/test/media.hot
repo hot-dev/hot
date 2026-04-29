@@ -1,0 +1,341 @@
+::hot::test::media ns
+meta ["test"]
+
+// ============================================================================
+// Tests for ::hot::media - Unified AI-generated media types
+// ============================================================================
+
+Media ::hot::media/Media
+Image ::hot::media/Image
+Audio ::hot::media/Audio
+Video ::hot::media/Video
+MediaBatch ::hot::media/MediaBatch
+MediaError ::hot::media/MediaError
+FileMeta ::hot::file/FileMeta
+
+// Mock FileMeta for testing
+mock-file-meta fn (path: Str, size: Int): FileMeta {
+    FileMeta({
+        file-id: "test-123",
+        path: path,
+        size: size,
+        etag: null,
+        content-type: "image/png",
+        storage-backend: "local",
+        created-at: 1704067200,
+        updated-at: 1704067200
+    })
+}
+
+// ============================================================================
+// Media.Image Tests
+// ============================================================================
+
+test-image-creation
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("uploads/test.png", 12345)
+
+    image-data Image({
+        file: file-meta,
+        prompt: "A beautiful sunset",
+        revised_prompt: "A stunning sunset over mountains",
+        model: "aurora",
+        provider: "xai",
+        width: 1024,
+        height: 1024,
+        format: "png",
+        style: "vivid",
+        quality: "hd"
+    })
+
+    media Media.Image(image-data)
+
+    assert(::hot::media/is-image(media), "Should be identified as image")
+    assert(not(::hot::media/is-audio(media)), "Should not be identified as audio")
+    assert(not(::hot::media/is-video(media)), "Should not be identified as video")
+    assert(not(::hot::media/has-duration(media)), "Image should not have duration")
+}
+
+test-image-field-access
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("output/city.png", 54321)
+
+    media Media.Image({
+        file: file-meta,
+        prompt: "A futuristic city",
+        revised_prompt: null,
+        model: "dall-e-3",
+        provider: "openai",
+        width: 1792,
+        height: 1024,
+        format: "png",
+        style: "natural",
+        quality: "standard"
+    })
+
+    // Test field access via $val
+    assert-eq("output/city.png", media.$val.file.path, "Should access $val.file.path")
+    assert-eq("A futuristic city", media.$val.prompt, "Should access $val.prompt")
+    assert-eq("openai", media.$val.provider, "Should access $val.provider")
+    assert-eq("dall-e-3", media.$val.model, "Should access $val.model")
+    assert(is-null(::hot::media/duration(media)), "duration() should return null for images")
+}
+
+// ============================================================================
+// Media.Audio Tests
+// ============================================================================
+
+test-audio-creation
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("audio/speech.mp3", 98765)
+
+    audio-data Audio({
+        file: file-meta,
+        prompt: "Hello, welcome to our service.",
+        transcript: null,
+        model: "tts-1-hd",
+        provider: "openai",
+        duration_seconds: 3.5,
+        format: "mp3",
+        voice: "alloy",
+        language: "en"
+    })
+
+    media Media.Audio(audio-data)
+
+    assert(not(::hot::media/is-image(media)), "Should not be identified as image")
+    assert(::hot::media/is-audio(media), "Should be identified as audio")
+    assert(not(::hot::media/is-video(media)), "Should not be identified as video")
+    assert(::hot::media/has-duration(media), "Audio should have duration")
+}
+
+test-audio-field-access
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("audio/greeting.wav", 44100)
+
+    media Media.Audio({
+        file: file-meta,
+        prompt: "Welcome message",
+        transcript: "Hello and welcome!",
+        model: "tts-1",
+        provider: "openai",
+        duration_seconds: 2.75,
+        format: "wav",
+        voice: "nova",
+        language: "en-US"
+    })
+
+    // Test field access via $val
+    assert-eq("audio/greeting.wav", media.$val.file.path, "Should access $val.file.path")
+    assert-eq("Welcome message", media.$val.prompt, "Should access $val.prompt")
+    assert-eq("openai", media.$val.provider, "Should access $val.provider")
+    assert-eq(2.75, ::hot::media/duration(media), "duration() should return duration_seconds")
+}
+
+// ============================================================================
+// Media.Video Tests
+// ============================================================================
+
+test-video-creation
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("videos/clip.mp4", 1234567)
+
+    video-data Video({
+        file: file-meta,
+        prompt: "A timelapse of clouds",
+        revised_prompt: "A stunning timelapse of cumulus clouds moving across a blue sky",
+        model: "sora",
+        provider: "openai",
+        duration_seconds: 15.0,
+        width: 1920,
+        height: 1080,
+        format: "mp4",
+        fps: 30
+    })
+
+    media Media.Video(video-data)
+
+    assert(not(::hot::media/is-image(media)), "Should not be identified as image")
+    assert(not(::hot::media/is-audio(media)), "Should not be identified as audio")
+    assert(::hot::media/is-video(media), "Should be identified as video")
+    assert(::hot::media/has-duration(media), "Video should have duration")
+}
+
+test-video-field-access
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("videos/animation.webm", 5678901)
+
+    media Media.Video({
+        file: file-meta,
+        prompt: "An animated logo reveal",
+        revised_prompt: null,
+        model: "veo",
+        provider: "google",
+        duration_seconds: 5.0,
+        width: 1280,
+        height: 720,
+        format: "webm",
+        fps: 24
+    })
+
+    // Test field access via $val
+    assert-eq("videos/animation.webm", media.$val.file.path, "Should access $val.file.path")
+    assert-eq("An animated logo reveal", media.$val.prompt, "Should access $val.prompt")
+    assert-eq("google", media.$val.provider, "Should access $val.provider")
+    assert-eq(5.0, ::hot::media/duration(media), "duration() should return duration_seconds")
+}
+
+// ============================================================================
+// MediaBatch Tests
+// ============================================================================
+
+test-media-batch-success
+meta ["test"]
+fn () {
+    file1 mock-file-meta("batch/image-0.png", 1000)
+    file2 mock-file-meta("batch/image-1.png", 2000)
+    file3 mock-file-meta("batch/image-2.png", 3000)
+
+    items [
+        Media.Image({file: file1, prompt: "Test 1", revised_prompt: null, model: "aurora", provider: "xai", width: 512, height: 512, format: "png", style: null, quality: null}),
+        Media.Image({file: file2, prompt: "Test 2", revised_prompt: null, model: "aurora", provider: "xai", width: 512, height: 512, format: "png", style: null, quality: null}),
+        Media.Image({file: file3, prompt: "Test 3", revised_prompt: null, model: "aurora", provider: "xai", width: 512, height: 512, format: "png", style: null, quality: null})
+    ]
+
+    batch MediaBatch({
+        items: items,
+        succeeded: 3,
+        failed: 0,
+        errors: null
+    })
+
+    assert-eq(3, batch.succeeded, "Should have 3 successes")
+    assert-eq(0, batch.failed, "Should have 0 failures")
+    assert-eq(3, length(batch.items), "Should have 3 items")
+    assert(is-null(batch.errors), "Should have no errors")
+}
+
+test-media-batch-partial-failure
+meta ["test"]
+fn () {
+    file1 mock-file-meta("batch/image-0.png", 1000)
+
+    items [
+        Media.Image({file: file1, prompt: "Test 1", revised_prompt: null, model: "aurora", provider: "xai", width: 512, height: 512, format: "png", style: null, quality: null})
+    ]
+
+    errors [
+        MediaError({index: 1, message: "Rate limit exceeded"}),
+        MediaError({index: 2, message: "Content policy violation"})
+    ]
+
+    batch MediaBatch({
+        items: items,
+        succeeded: 1,
+        failed: 2,
+        errors: errors
+    })
+
+    assert-eq(1, batch.succeeded, "Should have 1 success")
+    assert-eq(2, batch.failed, "Should have 2 failures")
+    assert-eq(1, length(batch.items), "Should have 1 item")
+    assert-eq(2, length(batch.errors), "Should have 2 errors")
+    assert-eq(1, batch.errors[0].index, "First error should be at index 1")
+    assert-eq("Rate limit exceeded", batch.errors[0].message, "First error message should match")
+}
+
+// ============================================================================
+// Variant Constructor Tests (the `image`/`audio`/`video` helper
+// functions were removed in favor of using the synthesized variant
+// constructors directly — `Media.Image(data)` etc.)
+// ============================================================================
+
+test-image-variant-constructor
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("test.png", 100)
+    data Image({file: file-meta, prompt: "Test", revised_prompt: null, model: "test", provider: "test", width: 100, height: 100, format: "png", style: null, quality: null})
+
+    media Media.Image(data)
+
+    assert(::hot::media/is-image(media), "Media.Image(data) should construct an Image variant")
+}
+
+test-audio-variant-constructor
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("test.mp3", 100)
+    data Audio({file: file-meta, prompt: "Test", transcript: null, model: "test", provider: "test", duration_seconds: 1.0, format: "mp3", voice: null, language: null})
+
+    media Media.Audio(data)
+
+    assert(::hot::media/is-audio(media), "Media.Audio(data) should construct an Audio variant")
+}
+
+test-video-variant-constructor
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("test.mp4", 100)
+    data Video({file: file-meta, prompt: "Test", revised_prompt: null, model: "test", provider: "test", duration_seconds: 1.0, width: 100, height: 100, format: "mp4", fps: 30})
+
+    media Media.Video(data)
+
+    assert(::hot::media/is-video(media), "Media.Video(data) should construct a Video variant")
+}
+
+// ============================================================================
+// Pattern Matching Tests
+// ============================================================================
+
+test-match-on-media-variants
+meta ["test"]
+fn () {
+    file-meta mock-file-meta("test.png", 100)
+
+    // Test with pre-typed data (wrapping in Image type first)
+    // The variant constructor should extract the inner $val automatically
+    image-media-typed Media.Image(Image({file: file-meta, prompt: "Typed", revised_prompt: null, model: "m", provider: "p", width: 100, height: 100, format: "png", style: null, quality: null}))
+
+    // Test with struct literal directly (the simpler/preferred form)
+    image-media-literal Media.Image({file: file-meta, prompt: "Literal", revised_prompt: null, model: "m", provider: "p", width: 100, height: 100, format: "png", style: null, quality: null})
+
+    // Both forms should have the same $type
+    assert-eq(image-media-typed.$type, "::hot::media/Media.Image", "Typed form should have correct $type")
+    assert-eq(image-media-literal.$type, "::hot::media/Media.Image", "Literal form should have correct $type")
+
+    // Both should match correctly
+    result-typed match image-media-typed {
+        Media.Image => { "image" }
+        Media.Audio => { "audio" }
+        Media.Video => { "video" }
+    }
+
+    result-literal match image-media-literal {
+        Media.Image => { "image" }
+        Media.Audio => { "audio" }
+        Media.Video => { "video" }
+    }
+
+    assert-eq("image", result-typed, "Match should work with typed construction")
+    assert-eq("image", result-literal, "Match should work with literal construction")
+
+    // Both forms should have equivalent field access
+    assert-eq("Typed", image-media-typed.$val.prompt, "Typed form field access should work")
+    assert-eq("Literal", image-media-literal.$val.prompt, "Literal form field access should work")
+
+    // Test default branch in match
+    audio-media Media.Audio({file: file-meta, prompt: "Audio", revised_prompt: null, model: "m", provider: "p", duration_seconds: 60, sample_rate: 44100, channels: 2, format: "mp3", voice: null, speed: null})
+
+    result-with-default match audio-media {
+        Media.Image => { "image" }
+        => { "default" }
+    }
+
+    assert-eq("default", result-with-default, "Match default branch should work when no variant matches")
+}

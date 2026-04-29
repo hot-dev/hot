@@ -1,0 +1,157 @@
+// Documentation examples for: resources/docs/language/flows.md
+::docs::examples::flows ns
+
+// =============================================================================
+// Imports and setup (not shown in docs)
+// =============================================================================
+
+add ::hot::math/add
+mul ::hot::math/mul
+gt ::hot::math/gt
+lt ::hot::math/lt
+gte ::hot::math/gte
+eq ::hot::cmp/eq
+length ::hot::coll/length
+is-null ::hot::type/is-null
+is-empty ::hot::coll/is-empty
+ok ::hot::type/ok
+err ::hot::type/err
+assert-eq ::hot::test/assert-eq
+
+// Stub for API calls in examples
+api-get fn (path: Str): Map { {path: path, data: "stub"} }
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: serial-basic
+process fn (x: Int): Int {
+  doubled mul(x, 2)     // First
+  tripled mul(x, 3)     // Second
+  add(doubled, tripled) // Third - returned
+}
+// @end: serial-basic
+
+// @doc: parallel-function
+fetch-all fn parallel (user-id: Str): Map {
+  user api-get(`/users/${user-id}`)
+  orders api-get(`/orders/${user-id}`)
+  preferences api-get(`/prefs/${user-id}`)
+}
+// @end: parallel-function
+
+// @doc: cond-classify
+classify fn cond (x: Int): Str {
+  lt(x, 0) => { "negative" }
+  eq(x, 0) => { "zero" }
+  => { "positive" }
+}
+// @end: cond-classify
+
+// @doc: cond-grade
+grade fn cond (score: Int): Str {
+  gte(score, 90) => { "A" }
+  gte(score, 80) => { "B" }
+  gte(score, 70) => { "C" }
+  gte(score, 60) => { "D" }
+  => { "F" }
+}
+// @end: cond-grade
+
+// @doc: cond-all-discounts
+apply-discounts fn cond-all (order: Map): Map {
+  order.is-member => member { "10% member discount" }
+  gt(order.total, 100) => shipping { "Free shipping" }
+  order.has-coupon => coupon { "Coupon applied" }
+  => standard { "Standard pricing" }
+}
+// @end: cond-all-discounts
+
+// @doc: pipe-basic
+pipe-example fn (x: Int): Int {
+  x |> add(2) |> mul(3)
+}
+// @end: pipe-basic
+
+// @doc: combining-flows
+process-order fn (order: Map): Map {
+  // Validate first (conditional)
+  validation cond {
+    is-null(order.items) => { err("No items") }
+    eq(length(order.items), 0) => { err("Empty order") }
+    => { ok(order) }
+  }
+
+  // Then enrich in parallel (returns a map)
+  enriched parallel {
+    customer api-get(`/customers/${order.customer-id}`)
+    inventory api-get(`/inventory`)
+    shipping api-get(`/shipping/${order.id}`)
+  }
+
+  // Return combined result (access via enriched.*)
+  {
+    order: order,
+    customer: enriched.customer,
+    inventory: enriched.inventory,
+    shipping: enriched.shipping
+  }
+}
+// @end: combining-flows
+
+// =============================================================================
+// Tests - verify the examples actually work
+// =============================================================================
+
+test-serial-basic
+meta ["test"] fn () {
+  // process(5) = mul(5,2) + mul(5,3) = 10 + 15 = 25
+  assert-eq(process(5), 25, "serial flow returns last value")
+}
+
+test-classify
+meta ["test"] fn () {
+  assert-eq(classify(-5), "negative", "negative number")
+  assert-eq(classify(0), "zero", "zero")
+  assert-eq(classify(10), "positive", "positive number")
+}
+
+test-grade
+meta ["test"] fn () {
+  assert-eq(grade(95), "A", "95 is A")
+  assert-eq(grade(85), "B", "85 is B")
+  assert-eq(grade(75), "C", "75 is C")
+  assert-eq(grade(65), "D", "65 is D")
+  assert-eq(grade(55), "F", "55 is F")
+}
+
+test-cond-all-discounts
+meta ["test"] fn () {
+  // Member with $150 order and coupon - gets 3 discounts
+  order1 {is-member: true, total: 150, has-coupon: true}
+  result1 apply-discounts(order1)
+  assert-eq(result1.member, "10% member discount", "member discount")
+  assert-eq(result1.shipping, "Free shipping", "free shipping")
+  assert-eq(result1.coupon, "Coupon applied", "coupon applied")
+
+  // Non-member with $50 order - just standard pricing
+  order2 {is-member: false, total: 50, has-coupon: false}
+  result2 apply-discounts(order2)
+  assert-eq(result2.standard, "Standard pricing", "standard pricing")
+}
+
+test-pipe-basic
+meta ["test"] fn () {
+  // 5 |> add(2) |> mul(3) = (5 + 2) * 3 = 21
+  assert-eq(pipe-example(5), 21, "pipe chains correctly")
+}
+
+test-parallel-returns-map
+meta ["test"] fn () {
+  result fetch-all("user-123")
+  // Parallel returns a map with all results
+  assert-eq(result.user.path, "/users/user-123", "user path")
+  assert-eq(result.orders.path, "/orders/user-123", "orders path")
+  assert-eq(result.preferences.path, "/prefs/user-123", "prefs path")
+}

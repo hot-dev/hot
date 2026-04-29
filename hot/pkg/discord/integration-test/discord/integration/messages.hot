@@ -1,0 +1,142 @@
+::discord::integration::messages ns
+meta ["test"]
+
+DISCORD_TEST_CHANNEL_ID ::hot::env/get("DISCORD_TEST_CHANNEL_ID", "")
+
+test-create-edit-delete-message
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_CHANNEL_ID, "Set DISCORD_TEST_CHANNEL_ID in .env for Discord integration tests")
+
+  // Step 1: Send a message
+  create-response ::discord::messages/create-message(::discord::messages/CreateMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    content: "Hot integration test message"
+  }))
+
+  assert(create-response.id, `create-message should return message id. response=${to-json(create-response)}`)
+  assert-eq("Hot integration test message", create-response.content, "content should match")
+
+  // Step 2: Get the message
+  get-response ::discord::messages/get-message(::discord::messages/GetMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+
+  assert-eq(create-response.id, get-response.id, "get-message should return same message id")
+
+  // Step 3: Edit the message
+  edit-response ::discord::messages/edit-message(::discord::messages/EditMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id,
+    content: "Hot integration test message (updated)"
+  }))
+
+  assert-eq(create-response.id, edit-response.id, "edit-message should return same message id")
+  assert-eq("Hot integration test message (updated)", edit-response.content, "content should be updated")
+
+  // Step 4: Clean up
+  ::discord::messages/delete-message(::discord::messages/DeleteMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+}
+
+test-get-channel-messages
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_CHANNEL_ID, "Set DISCORD_TEST_CHANNEL_ID in .env for Discord integration tests")
+
+  // Post a message first
+  create-response ::discord::messages/create-message(::discord::messages/CreateMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    content: "Message list test"
+  }))
+
+  response ::discord::messages/get-channel-messages(::discord::messages/GetChannelMessagesRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    limit: 5
+  }))
+
+  assert(gt(length(response), 0), "get-channel-messages should return at least one message")
+
+  first-msg first(response)
+  assert(first-msg.id, "message should have id")
+  assert(first-msg.content, "message should have content")
+
+  // Clean up
+  ::discord::messages/delete-message(::discord::messages/DeleteMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+}
+
+test-reactions
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_CHANNEL_ID, "Set DISCORD_TEST_CHANNEL_ID in .env for Discord integration tests")
+
+  // Post a message to react to
+  create-response ::discord::messages/create-message(::discord::messages/CreateMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    content: "Reactions test message"
+  }))
+  assert(create-response.id, "create-message should return id for reaction test")
+
+  // Add a reaction (URL-encoded thumbs up)
+  ::discord::messages/create-reaction(::discord::messages/CreateReactionRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id,
+    emoji: "%F0%9F%91%8D"
+  }))
+
+  // Remove the reaction
+  ::discord::messages/delete-own-reaction(::discord::messages/DeleteOwnReactionRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id,
+    emoji: "%F0%9F%91%8D"
+  }))
+
+  // Clean up
+  ::discord::messages/delete-message(::discord::messages/DeleteMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+}
+
+test-pins
+meta ["test"]
+fn () {
+  assert(DISCORD_TEST_CHANNEL_ID, "Set DISCORD_TEST_CHANNEL_ID in .env for Discord integration tests")
+
+  // Post a message to pin
+  create-response ::discord::messages/create-message(::discord::messages/CreateMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    content: "Pin test message"
+  }))
+  assert(create-response.id, "create-message should return id for pin test")
+
+  // Pin the message
+  ::discord::messages/pin-message(::discord::messages/PinMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+
+  // List pins
+  pins ::discord::messages/get-pinned-messages(::discord::messages/GetPinnedMessagesRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID
+  }))
+  assert(some(pins, (p) { eq(p.id, create-response.id) }), "pinned messages should include our message")
+
+  // Unpin the message
+  ::discord::messages/unpin-message(::discord::messages/UnpinMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+
+  // Clean up
+  ::discord::messages/delete-message(::discord::messages/DeleteMessageRequest({
+    channel_id: DISCORD_TEST_CHANNEL_ID,
+    message_id: create-response.id
+  }))
+}

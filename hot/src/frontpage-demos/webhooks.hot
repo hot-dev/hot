@@ -1,0 +1,22 @@
+::demo::webhooks ns
+
+on-webhook
+meta {
+    webhook: {service: "demo", path: "/demo-hook"},
+    on-event: "demo:webhook"
+}
+fn (request) {
+    event-type or(request.body.type, request.data.type)
+    payload or(request.body.data.object, request.data.data.object)
+
+    cond {
+        eq(event-type, "payment_intent.succeeded") => {
+            send("payment:received", {customer: payload.customer, amount: payload.amount})
+        }
+
+        eq(event-type, "payment_intent.payment_failed") => {
+            send("payment:failed", {customer: payload.customer})
+        }
+        => { {status: "ignored", type: event-type} }
+    }
+}

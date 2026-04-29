@@ -1,0 +1,185 @@
+::mcp::tools ns
+meta {
+    doc: """MCP tool discovery and invocation. Supports single-page listing, paginated iteration, synchronous calls, and SSE streaming calls."""
+}
+
+::client ::mcp::client
+::types ::mcp::types
+
+// ============================================================================
+// Tool Listing
+// ============================================================================
+
+// List tools (first page).
+list
+meta {
+    doc: """
+List tools available on the MCP server (first page).
+
+Returns a Vec of Tool, each with `name`, `description`, and `input-schema` fields.
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+tools ::tools/list(session)
+// tools => [{name: "get_weather", description: "...", input-schema: {...}}, ...]
+first(tools).name // => "get_weather"
+```
+"""
+}
+fn (session: ::types/Session): Vec<::types/Tool> {
+  result ::client/session-request(session, "tools/list", {})
+  map(get(result, "tools", []), ::types/Tool(%))
+}
+
+// List tools with explicit cursor for manual pagination.
+list-page
+meta {
+    doc: """
+List tools with an explicit cursor for manual pagination.
+
+Returns a Map with `tools` (Vec of Tool) and `next-cursor` (Str or null).
+Pass null as the cursor for the first page.
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+page ::tools/list-page(session, null)
+page.tools // => [{name: "get_weather", ...}, ...]
+page.next-cursor // => "cursor-abc" or null
+
+// Fetch next page if available
+next-page if(is-some(page.next-cursor), ::tools/list-page(session, page.next-cursor), null)
+```
+"""
+}
+fn (session: ::types/Session, cursor: Str?): Map {
+  params {} |> assoc-some("cursor", cursor)
+  result ::client/session-request(session, "tools/list", params)
+  {
+    tools: map(get(result, "tools", []), ::types/Tool(%)),
+    next-cursor: get(result, "nextCursor", null)
+  }
+}
+
+// List ALL tools across all pages. Returns a Vec with every tool.
+// Uses collect-pages internally to follow nextCursor until exhausted.
+list-all
+meta {
+    doc: """
+List all tools across all pages, following pagination automatically.
+
+Follows `nextCursor` links until all pages are exhausted. Returns a
+single Vec containing every tool.
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+all-tools ::tools/list-all(session)
+length(all-tools) // => total number of tools across all pages
+```
+"""
+}
+fn (session: ::types/Session): Vec<::types/Tool> {
+  collect-pages(session, "tools/list", "tools", null, [])
+}
+
+// Recursive pagination helper (TCO).
+collect-pages fn cond (session: ::types/Session, method: Str, key: Str, cursor: Str?, acc: Vec): Vec {
+  => {
+    params {} |> assoc-some("cursor", cursor)
+    result ::client/session-request(session, method, params)
+    items map(get(result, key, []), ::types/Tool(%))
+    combined concat(acc, items)
+    next-cursor get(result, "nextCursor", null)
+    if(is-null(next-cursor),
+      combined,
+      collect-pages(session, method, key, next-cursor, combined))
+  }
+}
+
+// ============================================================================
+// Tool Calling
+// ============================================================================
+
+// Call a tool and wait for the full result.
+call
+meta {
+    doc: """
+Call a tool on the MCP server and wait for the result.
+
+Returns a ToolResult with `content` (Vec of ToolContent), `is-error` (Bool),
+and optional `structured-content`. Non-existent tools return err().
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+result ::tools/call(session, "get_weather", {location: "Portland"})
+result.is-error // => false
+first(result.content).text // => "Sunny, 72°F"
+
+// Call with empty arguments
+result ::tools/call(session, "list_files", {})
+```
+"""
+}
+fn (session: ::types/Session, name: Str, arguments: Map?): ::types/ToolResult {
+  result ::client/session-request(session, "tools/call", {
+    name: name,
+    arguments: or(arguments, {})
+  })
+  ::types/ToolResult({
+    content: map(get(result, "content", []), ::types/ToolContent(%)),
+    is-error: get(result, "isError", false),
+    structured-content: get(result, "structuredContent", null)
+  })
+}
+
+// Call a tool with SSE streaming. Returns an iterator of StreamEvent values.
+// The stream carries progress notifications, log messages, and the final
+// JSON-RPC response. Use for-each to process events in real time.
+call-stream
+meta {
+    doc: """
+Call a tool on the MCP server with SSE streaming.
+
+Returns an iterator of StreamEvent values. Each event contains a parsed
+JSON-RPC message — progress notifications, log messages, or the final result.
+Use `collect` to gather all events, or iterate to process them in real time.
+
+**Example**
+
+```hot
+::tools ::mcp::tools
+
+// Collect all stream events
+events collect(::tools/call-stream(session, "long_analysis", {query: "..."}))
+last-event last(events)
+last-event.data.result // => final tool result
+
+// Each event has .event (SSE type) and .data (parsed JSON-RPC message)
+// Notifications: event.data.method => "notifications/progress"
+// Final result:  event.data.result => {...}
+```
+"""
+}
+fn (session: ::types/Session, name: Str, arguments: Map?): Iter {
+  response ::client/session-request-stream(session, "tools/call", {
+    name: name,
+    arguments: or(arguments, {})
+  })
+  // response.body is an SSE-parsed iterator yielding
+  // {event: "message", data: "<json-rpc-json>", id: "..."}
+  Iter(map(collect(response.body), (frame) {
+    parsed from-json(frame.data)
+    ::types/StreamEvent({
+      event: frame.event,
+      data: parsed,
+      id: frame.id
+    })
+  }))
+}

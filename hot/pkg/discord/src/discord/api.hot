@@ -1,0 +1,71 @@
+::discord::api ns
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    ctx: {"discord.bot.token": {required: true}},
+    doc: """
+    Make an authenticated HTTP request to the Discord API. Automatically adds the Bot token from the `discord.bot.token` context variable and sets Content-Type for JSON bodies.
+
+    **Example**
+
+    ```hot
+    ::api ::discord::api
+
+    // Simple GET request
+    response ::api/request("GET", "https://discord.com/api/v10/users/@me")
+
+    // POST with JSON body
+    response ::api/request("POST", "https://discord.com/api/v10/channels/123/messages", {}, {content: "Hello"})
+
+    // With explicit token override
+    response ::api/request("POST", url, {}, body, "Bot my-token")
+    ```
+    """
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("discord.bot.token"))
+},
+(method: Str, url: Str, additional-headers: Map, body: Any, bot-token: Str): HttpResponse {
+  default-headers {
+    Authorization: `Bot ${bot-token}`
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: final-headers,
+    body: encoded-body
+  }))
+}

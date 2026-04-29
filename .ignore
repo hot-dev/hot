@@ -1,0 +1,10 @@
+# Ignore patterns for watchexec/cargo-watch
+# (in addition to .gitignore)
+
+# Generated docs JSON
+resources/web/docs/
+
+# Hot build artifacts
+.hot/
+
+

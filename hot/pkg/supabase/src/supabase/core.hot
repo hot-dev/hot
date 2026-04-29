@@ -1,0 +1,34 @@
+::supabase::core ns
+
+::ctx ::hot::ctx
+
+project-url
+meta {
+    ctx: {"supabase.url": {required: true}},
+    doc: """Return the Supabase project URL from context. Example: `https://xxxx.supabase.co`."""
+}
+fn (): Str {
+  ::ctx/get("supabase.url")
+}
+
+anon-key
+meta {
+    ctx: {"supabase.anon.key": {required: true}},
+    doc: """Return the Supabase anon/public key from context."""
+}
+fn (): Str {
+  ::ctx/get("supabase.anon.key")
+}
+
+service-key
+meta {
+    ctx: {"supabase.service.key": {required: false}},
+    doc: """Return the Supabase service role key from context. Required for admin operations."""
+}
+fn (): Str {
+  key or(::ctx/get("supabase.service.key"), "")
+  if(is-empty(key),
+    fail("supabase.service.key is not set. Add it in Context Variables for admin operations.")
+  )
+  key
+}

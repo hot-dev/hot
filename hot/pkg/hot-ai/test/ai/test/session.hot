@@ -1,0 +1,88 @@
+::ai::test::session ns
+meta ["test"]
+
+::session ::ai::session
+
+test-session-create
+meta ["test"] fn () {
+    s ::session/Session({id: "slack-C0123"})
+    assert-eq("slack-C0123", s.id)
+    assert(is-null(s.meta))
+}
+
+test-session-with-meta
+meta ["test"] fn () {
+    s ::session/Session({id: "tg-group-42", meta: {channel: "telegram", topic: "general"}})
+    assert-eq("tg-group-42", s.id)
+    assert-eq("telegram", s.meta.channel)
+}
+
+test-identity-minimal
+meta ["test"] fn () {
+    i ::session/Identity({id: "U456"})
+    assert-eq("U456", i.id)
+    assert(is-null(i.name))
+    assert(is-null(i.meta))
+}
+
+test-identity-with-name
+meta ["test"] fn () {
+    i ::session/Identity({id: "U456", name: "Alice"})
+    assert-eq("U456", i.id)
+    assert-eq("Alice", i.name)
+}
+
+test-identity-with-meta
+meta ["test"] fn () {
+    i ::session/Identity({id: "U789", name: "Bob", meta: {timezone: "US/Pacific"}})
+    assert-eq("Bob", i.name)
+    assert-eq("US/Pacific", i.meta.timezone)
+}
+
+test-session-key
+meta ["test"] fn () {
+    s ::session/Session({id: "chan-1"})
+    key ::session/session-key("my-agent", s, "memory")
+    assert-eq("agent:my-agent:session:chan-1:memory", key)
+}
+
+test-user-key
+meta ["test"] fn () {
+    i ::session/Identity({id: "U100"})
+    key ::session/user-key("my-agent", i, "profile")
+    assert-eq("agent:my-agent:user:U100:profile", key)
+}
+
+test-agent-key
+meta ["test"] fn () {
+    key ::session/agent-key("my-agent", "kb")
+    assert-eq("agent:my-agent:kb", key)
+}
+
+test-session-user-key
+meta ["test"] fn () {
+    s ::session/Session({id: "telegram:-100"})
+    i ::session/Identity({id: "U200"})
+    key ::session/session-user-key("brain", s, i, "thread")
+    assert-eq("agent:brain:session:telegram:-100:user:U200:thread", key)
+}
+
+test-session-user-key-isolation
+meta ["test"] fn () {
+    a ::session/Session({id: "telegram:-100"})
+    b ::session/Session({id: "slack:T1:C2"})
+    i ::session/Identity({id: "alice"})
+    ka ::session/session-user-key("brain", a, i, "thread")
+    kb ::session/session-user-key("brain", b, i, "thread")
+    assert(not(eq(ka, kb)))
+}
+
+test-dm-pattern
+meta ["test"] fn () {
+    sess ::session/Session({id: "dm-alice-bot"})
+    user ::session/Identity({id: "alice"})
+    sk ::session/session-key("personal", sess, "memory")
+    uk ::session/user-key("personal", user, "profile")
+    assert-eq("agent:personal:session:dm-alice-bot:memory", sk)
+    assert-eq("agent:personal:user:alice:profile", uk)
+}

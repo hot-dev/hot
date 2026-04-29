@@ -1,0 +1,222 @@
+::hot::io ns
+meta {doc: """Input/output functions for stdout and stderr."""}
+
+print
+meta {
+    core: true,
+    doc: """
+    Write `message` to stdout and return its string form.
+
+    **Example**
+
+    ```hot
+    print("Hello")    // Outputs: Hello (no newline)
+    print(42)         // Outputs: 42
+    ```
+    """
+}
+fn (message: Any): Str {
+    call-lib(::hot::io/print, [Str(message)])
+}
+
+
+println
+meta {
+    core: true,
+    doc: """
+    Write `message` to stdout with a trailing newline and return its string form.
+
+    **Example**
+
+    ```hot
+    println("Hello, World!")  // Outputs: Hello, World!\n
+    println({"a": 1})         // Outputs: {"a": 1}\n
+    ```
+    """
+}
+fn (message: Any): Str {
+    call-lib(::hot::io/println, [Str(message)])
+}
+
+
+capture-stdout
+meta {
+    core: true,
+    doc: """
+    Redirect stdout to a capture handle for later retrieval.
+
+    **Example**
+
+    ```hot
+    handle capture-stdout()
+    println("captured text")
+    content get-captured-content(handle)
+    release(handle)
+    // content = "captured text\n"
+    ```
+    """
+}
+fn () { call-lib(::hot::io/capture-stdout, []) }
+
+
+capture-stderr
+meta {
+    core: true,
+    doc: """
+    Redirect stderr to a capture handle for later retrieval.
+
+    **Example**
+
+    ```hot
+    handle capture-stderr()
+    eprintln("error message")
+    content get-captured-content(handle)
+    release(handle)
+    ```
+    """
+}
+fn () { call-lib(::hot::io/capture-stderr, []) }
+
+
+release
+meta {
+    doc: """
+    Release a capture handle and restore the original stream.
+
+    **Example**
+
+    ```hot
+    handle capture-stdout()
+    // ... do work ...
+    release(handle)  // Restores normal stdout
+    ```
+    """
+}
+fn (handle) {
+    call-lib(::hot::io/release, [handle])
+}
+
+
+discard
+meta {
+    doc: """
+    Discard a capture handle without printing captured content.
+
+    **Example**
+
+    ```hot
+    handle capture-stdout()
+    println("this will be discarded")
+    discard(handle)  // Content is lost, not printed
+    ```
+    """
+}
+fn (handle) {
+    call-lib(::hot::io/discard, [handle])
+}
+
+
+eprint
+meta {
+    core: true,
+    doc: """
+    Write `message` to stderr and return its string form.
+
+    **Example**
+
+    ```hot
+    eprint("Warning: ")  // Outputs to stderr (no newline)
+    ```
+    """
+}
+fn (message: Any): Str {
+    call-lib(::hot::io/eprint, [Str(message)])
+}
+
+
+eprintln
+meta {
+    core: true,
+    doc: """
+    Write `message` to stderr with a trailing newline and return its string form.
+
+    **Example**
+
+    ```hot
+    eprintln("Error: something went wrong")  // Outputs to stderr
+    ```
+    """
+}
+fn (message: Any): Str {
+    call-lib(::hot::io/eprintln, [Str(message)])
+}
+
+
+get-captured-content
+meta {
+    core: true,
+    doc: """
+    Get buffered output from a capture handle.
+
+    **Example**
+
+    ```hot
+    handle capture-stdout()
+    println("test output")
+    content get-captured-content(handle)
+    // content = "test output\n"
+    ```
+    """
+}
+fn (handle) {
+    call-lib(::hot::io/get-captured-content, [handle])
+}
+
+
+clear-captured-content
+meta {
+    core: true,
+    doc: """
+    Clear buffered output for a capture handle.
+
+    **Example**
+
+    ```hot
+    handle capture-stdout()
+    println("first")
+    clear-captured-content(handle)
+    println("second")
+    content get-captured-content(handle)
+    // content = "second\n" ("first" was cleared)
+    ```
+    """
+}
+fn (handle) {
+    call-lib(::hot::io/clear-captured-content, [handle])
+}
+
+
+tap
+meta {
+    core: true,
+    doc: """
+    Print a value and return it unchanged. Useful for debugging pipelines.
+
+    **Example**
+
+    ```hot
+    5 |> add(1) |> tap("after add") |> mul(2)
+    // prints "after add: 6" to stderr, returns 12
+
+    tap([1, 2, 3])
+    // prints "[1, 2, 3]" to stderr, returns [1, 2, 3]
+    ```
+    """
+}
+fn
+(value: Any): Any {
+    call-lib(::hot::io/tap, [value])
+},
+(value: Any, label: Str): Any {
+    call-lib(::hot::io/tap, [value, label])
+}

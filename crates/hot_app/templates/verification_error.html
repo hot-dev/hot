@@ -1,0 +1,32 @@
+{% extends "public_layout.html" %}
+
+{% block content %}
+<div class="flex justify-center items-center mt-10">
+    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg text-center">
+        <div class="mb-6">
+            <!-- Error Icon -->
+            <div class="mx-auto w-16 h-16 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-red-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+            </div>
+
+            <h1 class="text-xl font-bold mb-2">{{ error_title }}</h1>
+
+            <p class="text-gray-600 dark:text-gray-400">
+                {{ error_message }}
+            </p>
+        </div>
+
+        <div class="flex flex-col space-y-3 mt-6">
+            <a href="/signup" class="bg-hot-red-500 hover:bg-hot-red-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition-colors">
+                Sign up again
+            </a>
+
+            <a href="/signin" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 text-sm font-medium">
+                Already have an account? Sign in
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

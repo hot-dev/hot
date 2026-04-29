@@ -1,0 +1,116 @@
+[package]
+name = "hot_cli"
+version.workspace = true
+edition.workspace = true
+description = "Command-line interface for the Hot Dev language and platform"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "hot"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+kata = ["hot_task_worker/kata"]
+
+[dependencies]
+ahash = { workspace = true }
+hot = { workspace = true }
+hot_app = { workspace = true }
+hot_worker = { workspace = true }
+hot_task_worker = { workspace = true }
+hot_scheduler = { workspace = true }
+hot_api = { workspace = true }
+hot_lsp = { workspace = true }
+rustyline = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+is-terminal = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+notify = { workspace = true }
+clap_complete = { workspace = true }
+reqwest = { workspace = true }
+rayon = { workspace = true }
+dotenvy = { workspace = true }
+dirs = { workspace = true }
+open = { workspace = true }
+
+# ONNX Runtime (used by fastembed) has no pre-built binaries for Windows ARM64
+[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+hot = { workspace = true, features = ["local-embeddings"] }
+
+[build-dependencies]
+winres = { workspace = true }
+
+# Note: cargo-bundle should be installed globally with:
+# cargo install cargo-bundle
+
+[package.metadata.bundle]
+name = "hot"
+identifier = "dev.hot.hot"
+copyright = "Copyright (c) 2025-2026 Hot Dev, LLC"
+category = "public.app-category.developer-tools"
+short_description = "Hot Dev CLI"
+long_description = "Command-line interface for the Hot Dev language and platform."
+# Only include runtime resources (db/ for migrations, pkg/ for hot-std)
+resources = ["../../resources/db"]
+icon = ["../../resources/application/icons/hot_icon.png"]
+linux_use_terminal = true
+
+# Debian package metadata
+[package.metadata.deb]
+maintainer = "Hot Dev, LLC <support@hot.dev>"
+copyright = "2025-2026, Hot Dev, LLC <support@hot.dev>"
+depends = "libc6 (>= 2.39), libgcc-s1 (>= 3.0), libssl3t64 (>= 3.0.0)"
+maintainer-scripts = "debian"
+section = "devel"
+priority = "optional"
+# Only include runtime resources:
+# - db/ for migrations (read from disk at runtime)
+# - pkg/ for hot-std (standard library)
+# - app/ for dev server assets (CSS, JS, images)
+# - ai/ for AI AGENTS.md and skills
+# - init/ for project initialization templates
+# - bin/ for hotbox Linux binaries (container tasks)
+# - LICENSE for license display
+assets = [
+    ["target/release/hot", "usr/bin/hot", "755"],
+    ["../../resources/db/**/*", "usr/share/hot/db", "644"],
+    ["../../resources/app/**/*", "usr/share/hot/app", "644"],
+    ["../../resources/ai/**/*", "usr/share/hot/ai", "644"],
+    ["../../resources/init/**/*", "usr/share/hot/init", "644"],
+    ["../../LICENSE", "usr/share/hot/LICENSE", "644"],
+    ["../../NOTICE", "usr/share/hot/NOTICE", "644"],
+    ["pkg/**/*", "usr/share/hot/pkg", "644"],
+    ["resources/bin/hotbox-linux-arm64", "usr/share/hot/bin/hotbox-linux-arm64", "755"],
+    ["resources/bin/hotbox-linux-x86_64", "usr/share/hot/bin/hotbox-linux-x86_64", "755"],
+    ["scripts/install-completions.sh", "usr/share/hot/scripts/install-completions.sh", "755"],
+]
+
+# RPM package metadata. The Linux packaging script currently emits Debian
+# packages; RPM metadata is kept here for the release flow that will enable RPMs.
+[package.metadata.generate-rpm]
+license = "Apache-2.0"
+summary = "Hot Dev CLI - Command-line interface for the Hot Dev language and platform"
+# Only include runtime resources (db/, pkg/, app/, ai/, init/, bin/, LICENSE, NOTICE)
+assets = [
+    ["target/release/hot", "/usr/bin/hot", "755"],
+    ["../../resources/db/**/*", "/usr/share/hot/db", "644"],
+    ["../../resources/app/**/*", "/usr/share/hot/app", "644"],
+    ["../../resources/ai/**/*", "/usr/share/hot/ai", "644"],
+    ["../../resources/init/**/*", "/usr/share/hot/init", "644"],
+    ["../../LICENSE", "/usr/share/hot/LICENSE", "644"],
+    ["../../NOTICE", "/usr/share/hot/NOTICE", "644"],
+    ["pkg/**/*", "/usr/share/hot/pkg", "644"],
+    ["resources/bin/hotbox-linux-arm64", "/usr/share/hot/bin/hotbox-linux-arm64", "755"],
+    ["resources/bin/hotbox-linux-x86_64", "/usr/share/hot/bin/hotbox-linux-x86_64", "755"],
+]

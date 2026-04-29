@@ -1,0 +1,243 @@
+::ai::tokenizer ns
+meta {
+    doc: """
+    Accurate token counting for chat models, backed by `tiktoken-rs`
+    via `::hot::internal::tokenizer`. Designed to plug into
+    `::ai::chat/ChatOptions.count-tokens-fn` so pre-call budget checks
+    can refuse to send a request that would overflow the model's
+    context window.
+
+    Two-tier API:
+
+    - **Text-level** — `count(text, model)` returns the BPE token
+      count for arbitrary text, falling back to the shared
+      character-based heuristic when no encoding is known for the
+      model.
+    - **Chat-level** — `count-message(msg, model)` and
+      `count-messages(messages, model)` mirror the
+      `(messages, model) -> Int` shape that `::ai::chat` expects, with
+      a per-message overhead added so the estimate matches what the
+      provider will actually bill.
+
+    Coverage today is limited to OpenAI-family encodings
+    (`o200k_*`, `cl100k_base`, `p50k_*`, `r50k_base`/`gpt2`).
+    Anthropic, Gemini, and other providers fall through to the
+    heuristic; their adapters typically supply a provider-native
+    `count-tokens-fn` that calls the vendor API instead.
+
+    **Example**
+
+    ```hot
+    ::tokenizer ::ai::tokenizer
+
+    opts ChatOptions({
+        chat-fn: ::openai/chat-with-tools,
+        model: "gpt-4o-mini",
+        count-tokens-fn: ::tokenizer/count-messages,
+        max-context-tokens: 120_000,
+        warn-context-pct: 0.85
+    })
+    ```
+    """
+}
+
+// ============================================================================
+// Constants (mirrors ::ai::chat heuristic so the two stay in lockstep)
+// ============================================================================
+
+CHARS_PER_TOKEN_HEURISTIC 4
+PER_MESSAGE_OVERHEAD_TOKENS 4
+
+// ============================================================================
+// Model -> encoding lookup
+// ============================================================================
+
+encoding-for-model
+meta {
+    doc: """
+    Resolve `model` to a BPE encoding name. Matches by longest known
+    family prefix and returns `null` for non-OpenAI models so callers
+    can fall back to a heuristic or a provider-native counter.
+
+    Recognized families (April 2026):
+
+    | Encoding        | Models                                              |
+    |-----------------|-----------------------------------------------------|
+    | `o200k_harmony` | `gpt-oss-*`                                         |
+    | `o200k_base`    | `gpt-5*`, `gpt-4.1*`, `gpt-4o*`, `o1`/`o3`/`o4*`,   |
+    |                 | `codex-*`, `chatgpt-4o-*`                           |
+    | `cl100k_base`   | `gpt-4`, `gpt-4-32k*`, `gpt-3.5-turbo*`,            |
+    |                 | `text-embedding-ada-002`, `text-embedding-3-*`      |
+    | `p50k_base`     | `text-davinci-002`, `text-davinci-003`, `code-*`    |
+    | `p50k_edit`     | `text-davinci-edit-001`, `code-davinci-edit-001`    |
+    | `r50k_base`     | `davinci`, `curie`, `babbage`, `ada`, `gpt2`        |
+    """
+}
+fn cond (model: Str): Str? {
+    starts-with(model, "gpt-oss")               => { "o200k_harmony" }
+    starts-with(model, "gpt-5")                 => { "o200k_base" }
+    starts-with(model, "gpt-4.1")               => { "o200k_base" }
+    starts-with(model, "gpt-4o")                => { "o200k_base" }
+    starts-with(model, "chatgpt-4o")            => { "o200k_base" }
+    starts-with(model, "o1")                    => { "o200k_base" }
+    starts-with(model, "o3")                    => { "o200k_base" }
+    starts-with(model, "o4")                    => { "o200k_base" }
+    starts-with(model, "codex-")                => { "o200k_base" }
+    starts-with(model, "gpt-4")                 => { "cl100k_base" }
+    starts-with(model, "gpt-3.5")               => { "cl100k_base" }
+    starts-with(model, "text-embedding-ada-002") => { "cl100k_base" }
+    starts-with(model, "text-embedding-3")      => { "cl100k_base" }
+    starts-with(model, "text-davinci-edit")     => { "p50k_edit" }
+    starts-with(model, "code-davinci-edit")     => { "p50k_edit" }
+    starts-with(model, "text-davinci-002")      => { "p50k_base" }
+    starts-with(model, "text-davinci-003")      => { "p50k_base" }
+    starts-with(model, "code-")                 => { "p50k_base" }
+    starts-with(model, "davinci")               => { "r50k_base" }
+    starts-with(model, "curie")                 => { "r50k_base" }
+    starts-with(model, "babbage")               => { "r50k_base" }
+    starts-with(model, "ada")                   => { "r50k_base" }
+    starts-with(model, "gpt2")                  => { "r50k_base" }
+    => { null }
+}
+
+is-supported-model
+meta {
+    doc: """
+    True when `model` resolves to an encoding this runtime knows how
+    to tokenize with. Cheap probe; useful when deciding whether to
+    install `count-messages` as `count-tokens-fn` or fall back to a
+    provider-native counter.
+    """
+}
+fn (model: Str): Bool { is-some(encoding-for-model(model)) }
+
+// ============================================================================
+// Heuristic fallback (mirrors ::ai::chat/count-tokens-heuristic)
+// ============================================================================
+
+count-text-heuristic
+meta {
+    doc: """
+    Character-based token estimator (chars/4) used when no BPE
+    encoding is known for the model. Tracks BPE tokenizers to within
+    ~10% on English prose; code, JSON, and non-Latin text skew higher.
+    """
+}
+fn (text: Str): Int {
+    ceil(div(length(text), CHARS_PER_TOKEN_HEURISTIC))
+}
+
+// ============================================================================
+// Text-level counting
+// ============================================================================
+
+count
+meta {
+    doc: """
+    Count tokens in `text` for `model`. When `model` resolves to a
+    known BPE encoding, defers to the host tokenizer; otherwise falls
+    back to the chars/4 heuristic.
+
+    Pure (no IO, no allocation beyond the encode buffer); safe to call
+    inside hot loops.
+    """
+}
+fn (text: Str, model: Str): Int {
+    enc encoding-for-model(model)
+    if(is-null(enc),
+       count-text-heuristic(text),
+       ::hot::internal::tokenizer/count(text, enc))
+}
+
+count-with-encoding
+meta {
+    doc: """
+    Lower-level counterpart to `count` that takes the encoding name
+    directly (e.g. `"o200k_base"`). Errors when `encoding` is unknown
+    to the host runtime — use `::hot::internal::tokenizer/encodings`
+    to enumerate what is supported.
+    """
+}
+fn (text: Str, encoding: Str): Int {
+    ::hot::internal::tokenizer/count(text, encoding)
+}
+
+supported-encodings
+meta {
+    doc: """
+    The BPE encoding names this runtime can tokenize with. Thin
+    pass-through over `::hot::internal::tokenizer/encodings`.
+    """
+}
+fn (): Vec<Str> {
+    ::hot::internal::tokenizer/encodings()
+}
+
+// ============================================================================
+// Chat-message counting
+// ============================================================================
+
+count-message-text
+meta {
+    doc: """
+    Internal: extract the prompt-relevant text from one chat message
+    so the tokenizer sees the same byte stream the provider will. We
+    serialize structured `content` and `tool-calls` to JSON, matching
+    what most providers do over the wire.
+    """,
+    no-doc: true
+}
+fn (m: Map): Str {
+    body cond {
+        is-str(m.content)  => { m.content }
+        is-null(m.content) => { "" }
+        => { to-json(untype(m.content)) }
+    }
+    role-str or(m.role, "")
+    tool-str cond {
+        is-null(m.tool-calls) => { "" }
+        => { to-json(untype(m.tool-calls)) }
+    }
+    `${role-str}\n${body}\n${tool-str}`
+}
+
+count-message
+meta {
+    doc: """
+    Token count for a single chat-message-shaped map (`{role, content,
+    tool-calls?, tool-call-id?}`), inclusive of a fixed per-message
+    overhead. Uses the BPE tokenizer when an encoding is known for
+    `model`; falls back to the heuristic otherwise.
+    """
+}
+fn (m: Map, model: Str): Int {
+    add(count(count-message-text(m), model), PER_MESSAGE_OVERHEAD_TOKENS)
+}
+
+count-messages
+meta {
+    doc: """
+    Token count for a vec of chat messages. Matches the
+    `(messages, model) -> Int` contract expected by
+    `::ai::chat/ChatOptions.count-tokens-fn`, so this can be passed
+    directly:
+
+    ```hot
+    opts ChatOptions({
+        chat-fn: ::openai/chat-with-tools,
+        model: "gpt-4o-mini",
+        count-tokens-fn: ::ai::tokenizer/count-messages
+    })
+    ```
+
+    For OpenAI-family models the result is within a few tokens of the
+    provider-reported `prompt_tokens`; for non-OpenAI models it falls
+    through to the chars/4 heuristic and is therefore an estimate
+    only.
+    """
+}
+fn (messages: Vec, model: Str): Int {
+    reduce(messages,
+           (acc, m) { add(acc, count-message(m, model)) },
+           0)
+}

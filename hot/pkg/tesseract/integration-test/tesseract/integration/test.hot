@@ -1,0 +1,58 @@
+::tesseract::integration::test ns
+meta ["test"]
+
+// ============================================================================
+// Integration tests for ::tesseract
+// Require Docker + task worker running (e.g. via `hot dev`)
+// Run with: hot test --project pkg-integration-tesseract
+// ============================================================================
+
+
+// Create a PNG with rendered text via ImageMagick `label:`, upload to hot://
+setup-ocr-test-image fn (name: Str): Str {
+    hot-path `hot://tesseract-test/${name}`
+    cmd `apk add --no-cache imagemagick font-noto > /dev/null 2>&1 && magick -background white -fill black -pointsize 48 label:HotOCRTest /tmp/ocr-gen.png && hotbox cp /tmp/ocr-gen.png '${hot-path}'`
+    info ::hot::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", cmd],
+        timeout: 120,
+        size: "small",
+        network: "internet",
+        writable: true,
+    })
+    result ::hot::task/await(info.id)
+    assert-eq("completed", result.status, "image setup task should complete")
+    hot-path
+}
+
+test-ocr-generated-image
+meta ["test"] fn () {
+    input setup-ocr-test-image("ocr-integration.png")
+    result ::tesseract/ocr(input)
+    assert(is-some(result.url), "should return output URL")
+    assert-eq("txt", result.format)
+    assert(contains(result.text, "HotOCRTest"), "OCR text should include rendered label")
+    assert(starts-with(result.url, "hot://tesseract/"), "URL should use tesseract prefix")
+}
+
+test-ocr-with-language-opt
+meta ["test"] fn () {
+    input setup-ocr-test-image("ocr-lang.png")
+    result ::tesseract/ocr(input, {
+        language: "eng",
+        psm: 3,
+        format: "txt",
+        image: null,
+        oem: null,
+        dpi: null,
+        size: null,
+    })
+    assert(contains(result.text, "HotOCRTest"), "should read English text")
+}
+
+test-tesseract-version
+meta ["test"] fn () {
+    v ::tesseract/version()
+    assert(gt(length(v.version), 0), "version stdout should be non-empty")
+    assert(contains(lowercase(v.version), "tesseract"), "should mention tesseract")
+}

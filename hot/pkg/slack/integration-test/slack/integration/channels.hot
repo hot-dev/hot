@@ -1,0 +1,75 @@
+::slack::integration::channels ns
+meta ["test"]
+
+SLACK_TEST_CHANNEL_ID ::hot::env/get("SLACK_TEST_CHANNEL_ID", "")
+
+test-conversations-list
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  response ::slack::channels/conversations-list(::slack::channels/ConversationsListRequest({
+    exclude_archived: true,
+    types: "public_channel",
+    limit: 20
+  }))
+
+  assert(response.ok, `conversations.list should succeed. response=${to-json(response)}`)
+  assert(response.channels, "conversations.list should return channels")
+
+  if(response.ok, {
+    assert(gt(length(response.channels), 0), "conversations.list should return at least one channel")
+
+    // Verify channel structure
+    first-channel first(response.channels)
+    assert(first-channel.id, "channel should have id")
+    assert(first-channel.name, "channel should have name")
+  }, null)
+}
+
+test-conversations-info
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  response ::slack::channels/conversations-info(::slack::channels/ConversationsInfoRequest({
+    channel: SLACK_TEST_CHANNEL_ID
+  }))
+
+  assert(response.ok, `conversations.info should succeed. response=${to-json(response)}`)
+  assert(response.channel, "conversations.info should return channel object")
+  assert-eq(SLACK_TEST_CHANNEL_ID, response.channel.id, "channel id should match requested id")
+  assert(response.channel.name, "channel should have name")
+}
+
+test-conversations-history
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  response ::slack::channels/conversations-history(::slack::channels/ConversationsHistoryRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    limit: 5
+  }))
+
+  assert(response.ok, `conversations.history should succeed. response=${to-json(response)}`)
+  assert(response.messages, "conversations.history should return messages")
+}
+
+test-conversations-members
+meta ["test"]
+fn () {
+  assert(SLACK_TEST_CHANNEL_ID, "Set SLACK_TEST_CHANNEL_ID in .env for Slack integration tests")
+
+  response ::slack::channels/conversations-members(::slack::channels/ConversationsMembersRequest({
+    channel: SLACK_TEST_CHANNEL_ID,
+    limit: 100
+  }))
+
+  assert(response.ok, `conversations.members should succeed. response=${to-json(response)}`)
+  assert(response.members, "conversations.members should return members")
+
+  if(response.ok, {
+    assert(gt(length(response.members), 0), "channel should have at least one member")
+  }, null)
+}

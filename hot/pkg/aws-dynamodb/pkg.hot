@@ -1,0 +1,18 @@
+::hot::pkg ns
+
+hot.pkg.aws-dynamodb {
+  name: "hot.dev/aws-dynamodb",
+  version: "1.1.0",
+  hot-min-version: "1.2.0",
+  description: "AWS DynamoDB API bindings for NoSQL database operations.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["cloud", "database"],
+  deps: {
+    "hot.dev/hot-std": {},
+    "hot.dev/aws-core": "1.1.0"
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

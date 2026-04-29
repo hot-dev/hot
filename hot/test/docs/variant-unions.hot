@@ -1,0 +1,507 @@
+// Variant Union (Tagged Union) Tests
+// Tests for the Phase 2 enum types feature: named variant unions
+::hot::test::docs::variant-unions ns
+meta ["test"]
+
+// Note: All functions used here are core (assert-eq, ends-with, is-type, assert, length, etc.)
+
+// Helper to check variant type ends with expected suffix
+check-variant fn (val, expected-suffix: Str, msg: Str) {
+  assert(ends-with(val.$type, expected-suffix), msg)
+}
+
+// -- Basic Direction enum (unit variants only) --
+
+Direction enum {
+  Up,
+  Down,
+  Left,
+  Right
+}
+
+test-unit-variants
+meta ["test"] fn () {
+  // Unit variants return the value directly (no function call needed)
+  up Direction.Up
+  down Direction.Down
+  left Direction.Left
+  right Direction.Right
+
+  // Unit variants should have $type field ending with the variant name
+  check-variant(up, ".Up", "Up variant should have $type ending with .Up")
+  check-variant(down, ".Down", "Down variant should have $type ending with .Down")
+  check-variant(left, ".Left", "Left variant should have $type ending with .Left")
+  check-variant(right, ".Right", "Right variant should have $type ending with .Right")
+}
+
+
+// -- Shape enum with type-reference variants --
+
+Circle type {
+    radius: Dec
+}
+
+Rectangle type {
+    width: Dec,
+    height: Dec
+}
+
+Shape enum {
+  Circle(Circle),
+  Rectangle(Rectangle),
+  Point
+}
+
+test-type-reference-variants
+meta ["test"] fn () {
+  // Create a circle using the variant constructor
+  circle Shape.Circle({radius: 5.0})
+
+  // Should have $type field ending with .Circle
+  check-variant(circle, ".Circle", "Circle should have $type ending with .Circle")
+
+  // Data should be in $val
+  assert-eq(5.0, circle.$val.radius, "Circle should have $val.radius field")
+}
+
+test-unit-variant-in-mixed-enum
+meta ["test"] fn () {
+  // Point is a unit variant in Shape - no function call needed
+  point Shape.Point
+
+  check-variant(point, ".Point", "Point should have $type ending with .Point")
+}
+
+test-rectangle-variant
+meta ["test"] fn () {
+  rect Shape.Rectangle({width: 10.0, height: 20.0})
+
+  check-variant(rect, ".Rectangle", "Rectangle should have $type ending with .Rectangle")
+  assert-eq(10.0, rect.$val.width, "Rectangle should have $val.width field")
+  assert-eq(20.0, rect.$val.height, "Rectangle should have $val.height field")
+}
+
+
+// -- Result-like enum --
+
+OkVal type {
+    value: Any
+}
+
+ErrVal type {
+    message: Str,
+    code: Int?
+}
+
+Result enum {
+  OkVal(OkVal),
+  ErrVal(ErrVal)
+}
+
+test-result-ok
+meta ["test"] fn () {
+  result Result.OkVal({value: 42})
+
+  check-variant(result, ".OkVal", "OkVal result should have $type ending with .OkVal")
+  assert-eq(42, result.$val.value, "OkVal result should have $val.value field")
+}
+
+test-result-err
+meta ["test"] fn () {
+  result Result.ErrVal({message: "Something went wrong", code: 500})
+
+  check-variant(result, ".ErrVal", "ErrVal result should have $type ending with .ErrVal")
+  assert-eq("Something went wrong", result.$val.message, "ErrVal result should have $val.message field")
+  assert-eq(500, result.$val.code, "ErrVal result should have $val.code field")
+}
+
+
+// -- Option-like enum --
+
+SomeVal type {
+    value: Any
+}
+
+Option enum {
+  SomeVal(SomeVal),
+  None
+}
+
+test-option-some
+meta ["test"] fn () {
+  opt Option.SomeVal({value: "hello"})
+
+  check-variant(opt, ".SomeVal", "SomeVal option should have $type ending with .SomeVal")
+  assert-eq("hello", opt.$val.value, "SomeVal option should have $val.value field")
+}
+
+test-option-none
+meta ["test"] fn () {
+  // None is a unit variant - no function call needed
+  opt Option.None
+
+  check-variant(opt, ".None", "None option should have $type ending with .None")
+}
+
+
+// -- API Response enum --
+
+User type {
+  id: Str,
+  name: Str
+}
+
+Error type {
+  code: Int,
+  message: Str
+}
+
+ApiResponse enum {
+  User(User),
+  Error(Error),
+  Loading
+}
+
+test-api-response-user
+meta ["test"] fn () {
+  response ApiResponse.User({id: "123", name: "Alice"})
+
+  check-variant(response, ".User", "User response should have $type ending with .User")
+  assert-eq("123", response.$val.id, "User response should have $val.id field")
+  assert-eq("Alice", response.$val.name, "User response should have $val.name field")
+}
+
+test-api-response-error
+meta ["test"] fn () {
+  response ApiResponse.Error({code: 404, message: "Not found"})
+
+  check-variant(response, ".Error", "Error response should have $type ending with .Error")
+  assert-eq(404, response.$val.code, "Error response should have $val.code field")
+  assert-eq("Not found", response.$val.message, "Error response should have $val.message field")
+}
+
+test-api-response-loading
+meta ["test"] fn () {
+  // Loading is a unit variant - no function call needed
+  response ApiResponse.Loading
+
+  check-variant(response, ".Loading", "Loading response should have $type ending with .Loading")
+}
+
+// -- Test: Variant type defined inside function body --
+
+test-local-variant-type
+meta ["test"] fn () {
+  // Define a variant type inside the function body
+  LocalStatus enum {
+    Active,
+    Inactive,
+    Pending
+  }
+
+  // Use the locally defined variant type
+  status LocalStatus.Active
+
+  check-variant(status, ".Active", "Local variant should have $type ending with .Active")
+}
+
+test-local-variant-type-with-data
+meta ["test"] fn () {
+  // Define helper type and variant type inside the function body
+  LocalData type {
+    value: Int
+  }
+
+  LocalResult enum {
+    Success(LocalData),
+    Failure
+  }
+
+  // Test unit variant
+  failure LocalResult.Failure
+  check-variant(failure, ".Failure", "Local failure should have $type ending with .Failure")
+
+  // Test type-reference variant
+  success LocalResult.Success({value: 42})
+  check-variant(success, ".Success", "Local success should have $type ending with .Success")
+  assert-eq(42, success.$val.value, "Local success should have $val.value: 42")
+}
+
+
+// -- Match expression tests --
+
+test-match-simple
+meta ["test"] fn () {
+  up Direction.Up
+
+  result match up {
+    Direction.Up => "going up"
+    Direction.Down => "going down"
+    Direction.Left => "going left"
+    Direction.Right => "going right"
+  }
+
+  assert-eq("going up", result, "Match should return 'going up' for Up variant")
+}
+
+test-match-with-shape
+meta ["test"] fn () {
+  circle Shape.Circle({radius: 5.0})
+  rect Shape.Rectangle({width: 3.0, height: 4.0})
+  point Shape.Point
+
+  circle-result match circle {
+    Shape.Circle => "circle"
+    Shape.Rectangle => "rectangle"
+    Shape.Point => "point"
+  }
+
+  rect-result match rect {
+    Shape.Circle => "circle"
+    Shape.Rectangle => "rectangle"
+    Shape.Point => "point"
+  }
+
+  point-result match point {
+    Shape.Circle => "circle"
+    Shape.Rectangle => "rectangle"
+    Shape.Point => "point"
+  }
+
+  assert-eq("circle", circle-result, "Match should identify Circle")
+  assert-eq("rectangle", rect-result, "Match should identify Rectangle")
+  assert-eq("point", point-result, "Match should identify Point")
+}
+
+test-match-result-variant
+meta ["test"] fn () {
+  ok-val Result.OkVal({value: 42})
+  err-val Result.ErrVal({message: "error", code: 500})
+
+  ok-result match ok-val {
+    Result.OkVal => "success"
+    Result.ErrVal => "error"
+  }
+
+  err-result match err-val {
+    Result.OkVal => "success"
+    Result.ErrVal => "error"
+  }
+
+  assert-eq("success", ok-result, "Match should identify OkVal as success")
+  assert-eq("error", err-result, "Match should identify ErrVal as error")
+}
+
+// -- Match-all tests --
+
+// match-all returns a Map by default (like cond-all)
+// Keys are the variant pattern names (e.g., "Direction.Up")
+test-match-all-map-default
+meta ["test"] fn () {
+  up Direction.Up
+
+  // match-all returns a map with variant name as key
+  result match-all up {
+    Direction.Up => "matched up"
+    Direction.Down => "matched down"
+  }
+
+  // Only one arm should match
+  assert-eq(1, length(result), "match-all|map should have 1 entry")
+  assert-eq("matched up", get(result, "Direction.Up"), "match-all should map Direction.Up to 'matched up'")
+}
+
+// match-all|vec returns a vector of results
+test-match-all-vec
+meta ["test"] fn () {
+  up Direction.Up
+
+  result match-all|vec up {
+    Direction.Up => "matched up"
+    Direction.Down => "matched down"
+  }
+
+  assert-eq(1, length(result), "match-all|vec should have 1 element")
+  assert-eq("matched up", get(result, 0), "match-all|vec should contain 'matched up'")
+}
+
+// match-all|one returns the last matching result
+test-match-all-one
+meta ["test"] fn () {
+  up Direction.Up
+
+  result match-all|one up {
+    Direction.Up => "matched up"
+    Direction.Down => "matched down"
+  }
+
+  assert-eq("matched up", result, "match-all|one should return 'matched up'")
+}
+
+// match|map returns a map (override default |one)
+test-match-map
+meta ["test"] fn () {
+  up Direction.Up
+
+  result match|map up {
+    Direction.Up => "matched up"
+    Direction.Down => "matched down"
+  }
+
+  assert-eq(1, length(result), "match|map should have 1 entry")
+  assert-eq("matched up", get(result, "Direction.Up"), "match|map should map Direction.Up")
+}
+
+test-match-all-no-match
+meta ["test"] fn () {
+  up Direction.Up
+
+  // If no arm matches, match-all returns empty map
+  result match-all up {
+    Direction.Down => "matched down"
+    Direction.Left => "matched left"
+  }
+
+  assert-eq(0, length(result), "match-all with no matches should return empty map")
+}
+
+// Test type-level matching: match any variant of a type
+test-match-type-level
+meta ["test"] fn () {
+  up Direction.Up
+  down Direction.Down
+
+  // Type-level matching: Direction matches any variant
+  result-up match up {
+    Direction => "is a direction"
+  }
+
+  assert-eq("is a direction", result-up, "Type-level match should match Direction.Up")
+
+  result-down match down {
+    Direction => "is a direction"
+  }
+
+  assert-eq("is a direction", result-down, "Type-level match should match Direction.Down")
+}
+
+// Test type-level matching with variant-level: variant takes precedence
+test-match-type-and-variant-level
+meta ["test"] fn () {
+  up Direction.Up
+  down Direction.Down
+
+  // Variant-level matches first (match is short-circuit)
+  result-specific match up {
+    Direction.Up => "specifically up"
+    Direction => "some direction"
+  }
+
+  assert-eq("specifically up", result-specific, "Variant-level should match before type-level")
+
+  // Type-level matches if no specific variant matches
+  result-fallback match down {
+    Direction.Up => "specifically up"
+    Direction => "some direction"
+  }
+
+  assert-eq("some direction", result-fallback, "Type-level should match as fallback")
+}
+
+// Test type-level matching with Direction type
+test-match-result-type-level
+meta ["test"] fn () {
+  up Direction.Up
+  down Direction.Down
+
+  // Type-level match-all: collect all matches
+  results match-all up {
+    Direction => "any direction"
+  }
+
+  assert-eq(1, length(results), "Type-level match-all should match Direction.Up")
+}
+
+// Test is-type with type-level and variant-level matching
+test-is-type-with-variants
+meta ["test"] fn () {
+  up Direction.Up
+  down Direction.Down
+
+  // is-type with variant-level (exact match)
+  assert-eq(true, is-type(up, Direction.Up), "is-type should match Direction.Up exactly")
+  assert-eq(false, is-type(up, Direction.Down), "is-type should not match different variant")
+
+  // is-type with type-level (any variant matches)
+  assert-eq(true, is-type(up, Direction), "is-type should match any Direction variant")
+  assert-eq(true, is-type(down, Direction), "is-type should match any Direction variant")
+
+  // Preferred: use match for variant checking
+  assert-eq(true, match up { Direction.Up => true, => false }, "match is preferred for variant checking")
+}
+
+// Test is-type with core Result types (including Result.Err which requires lazy evaluation)
+// Use alias to avoid shadowing local Result enum defined above
+CoreResult ::hot::type/Result
+
+test-is-type-with-result
+meta ["test"] fn () {
+  success ok(42)
+  failure err("something went wrong")
+
+  // is-type with Result.Ok
+  assert-eq(true, is-type(success, CoreResult.Ok), "is-type should match Result.Ok exactly")
+  assert-eq(false, is-type(success, CoreResult.Err), "is-type should not match Result.Err for ok value")
+
+  // is-type with Result.Err (this requires lazy first argument to avoid auto-unwrap)
+  assert-eq(true, is-type(failure, CoreResult.Err), "is-type should match Result.Err exactly")
+  assert-eq(false, is-type(failure, CoreResult.Ok), "is-type should not match Result.Ok for err value")
+
+  // is-type with type-level matching (any Result variant)
+  assert-eq(true, is-type(success, CoreResult), "is-type should match any Result variant for ok")
+  assert-eq(true, is-type(failure, CoreResult), "is-type should match any Result variant for err")
+}
+
+// Test that pipe works with lazy first parameter functions (like is-type)
+// This verifies that piped values are wrapped in lazy thunks when the target function expects it
+test-pipe-with-lazy-first-param
+meta ["test"] fn () {
+  // Pipe Result.Ok to is-type - should work without issues
+  ok-result ok(42) |> is-type(CoreResult)
+  assert-eq(true, ok-result, "pipe with Result.Ok should work with is-type")
+
+  // Pipe Result.Err to is-type - this used to fail due to auto-unwrap, now works with lazy wrapping
+  err-result err("error") |> is-type(CoreResult)
+  assert-eq(true, err-result, "pipe with Result.Err should work with lazy is-type")
+
+  // Pipe Result.Err to is-type with variant check
+  err-variant-result err("error") |> is-type(CoreResult.Err)
+  assert-eq(true, err-variant-result, "pipe with Result.Err should match CoreResult.Err variant")
+
+  // Negative test: Result.Err should not match Result.Ok variant
+  err-not-ok err("error") |> is-type(CoreResult.Ok)
+  assert-eq(false, err-not-ok, "pipe with Result.Err should not match CoreResult.Ok variant")
+}
+
+// Test match as a flow function with additional arguments
+test-match-flow-with-extra-args
+meta ["test"] fn () {
+  // Define a match flow function with an extra argument
+  // Syntax: fn match (first-param-is-match-target, extra-args...) { arms }
+  describe-direction fn match (dir, prefix: Str) {
+    Direction.Up => concat(prefix, " going up")
+    Direction.Down => concat(prefix, " going down")
+    Direction.Left => concat(prefix, " going left")
+    Direction.Right => concat(prefix, " going right")
+  }
+
+  up Direction.Up
+  down Direction.Down
+
+  // Call with extra argument
+  result-up describe-direction(up, "We are")
+  result-down describe-direction(down, "They are")
+
+  assert-eq("We are going up", result-up, "Match flow should use extra argument")
+  assert-eq("They are going down", result-down, "Match flow should use extra argument")
+}

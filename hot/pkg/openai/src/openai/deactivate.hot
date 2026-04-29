@@ -1,0 +1,70 @@
+::openai::deactivate ns
+
+api-request ::openai::api/request
+HttpError ::openai::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+ToggleCertificatesRequest type {
+    certificate_ids: Vec<Str>
+}
+
+Certificate type {
+    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    id: Str,
+    name: Str,
+    created_at: Int,
+    certificate_details: Map,
+    active: Bool?
+}
+
+ListCertificatesResponse type {
+    data: Vec<Certificate>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool,
+    object: "list"
+}
+
+DeactivateOrganizationCertificatesRequest type {
+    certificate_ids: Vec<Str>
+}
+
+DeactivateOrganizationCertificatesResponse type {
+    data: Vec<Certificate>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool,
+    object: "list"
+}
+
+
+deactivate-certificates-organization
+meta {
+    doc: """POST /organization/certificates/deactivate - Deactivate certificates for organization"""
+}
+fn (request: DeactivateOrganizationCertificatesRequest): DeactivateOrganizationCertificatesResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/certificates/deactivate`, {}, request)
+  if(is-ok-response(response), DeactivateOrganizationCertificatesResponse(response.body), err(HttpError(response)))
+}
+
+DeactivateProjectCertificatesRequest type {
+    certificate_ids: Vec<Str>
+}
+
+DeactivateProjectCertificatesResponse type {
+    data: Vec<Certificate>,
+    first_id: Str?,
+    last_id: Str?,
+    has_more: Bool,
+    object: "list"
+}
+
+
+deactivate-certificates-project
+meta {
+    doc: """POST /organization/projects/{project_id}/certificates/deactivate - Deactivate certificates for project"""
+}
+fn (project-id: Str, request: DeactivateProjectCertificatesRequest): DeactivateProjectCertificatesResponse {
+  response api-request("POST", `${::openai/BASE_URL}/organization/projects/${project-id}/certificates/deactivate`, {}, request)
+  if(is-ok-response(response), DeactivateProjectCertificatesResponse(response.body), err(HttpError(response)))
+}

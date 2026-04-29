@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.imagemagick {
+  name: "hot.dev/imagemagick",
+  version: "1.1.0",
+  hot-min-version: "1.2.4",
+  description: "ImageMagick image processing via Hot Box containers. Resize, convert, optimize, and identify images.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["media"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

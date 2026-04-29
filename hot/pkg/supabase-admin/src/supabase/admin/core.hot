@@ -1,0 +1,3 @@
+::supabase::admin::core ns
+
+BASE_URL "https://api.supabase.com/v1"

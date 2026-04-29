@@ -1,0 +1,82 @@
+::telegram::api ns
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+TelegramError type {
+    ok: Bool,
+    error_code: Int?,
+    description: Str?
+}
+
+request
+meta {
+    ctx: {"telegram.bot.token": {required: true}},
+    doc: """
+    Call a Telegram Bot API method. The bot token is read from the `telegram.bot.token` context variable and placed in the URL path per Telegram's convention.
+
+    Returns the `result` field from the Telegram response envelope (`{ok: true, result: ...}`). Returns an error if `ok` is false or the HTTP request fails.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+
+    // GET method (no body)
+    response ::api/request("getMe")
+
+    // POST method with JSON body
+    response ::api/request("sendMessage", {chat_id: 123456, text: "Hello"})
+    ```
+    """
+}
+fn
+(method: Str): Any {
+  request(method, {}, ::ctx/get("telegram.bot.token"))
+},
+(method: Str, body: Map): Any {
+  request(method, body, ::ctx/get("telegram.bot.token"))
+},
+(method: Str, body: Map, bot-token: Str): Any {
+  url `${::telegram::core/BASE_URL}/bot${bot-token}/${method}`
+
+  has-body not(is-empty(body))
+  headers if(has-body, {Content-Type: "application/json"}, {})
+  encoded-body if(has-body, to-json(untype(body)), "")
+  http-method if(has-body, "POST", "GET")
+
+  response ::hot::http/request(HttpRequest({
+    method: http-method,
+    url: url,
+    headers: headers,
+    body: encoded-body
+  }))
+
+  cond {
+    not(is-ok-response(response)) => { err(HttpError(response)) }
+    not(response.body.ok) => { err(TelegramError({
+      ok: false,
+      error_code: response.body.error_code,
+      description: response.body.description
+    })) }
+    => { response.body.result }
+  }
+}

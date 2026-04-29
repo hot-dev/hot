@@ -1,0 +1,3 @@
+::anthropic ns
+
+BASE_URL "https://api.anthropic.com"

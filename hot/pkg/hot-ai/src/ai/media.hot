@@ -1,0 +1,280 @@
+::ai::media ns
+meta {
+    doc: """
+    Types for AI-generated media files (images, audio, video).
+
+    These types wrap pure media types from `::hot::media` with AI generation metadata
+    like prompts, models, and provider information.
+
+    **Usage**
+    ```hot
+    import ::hot::media
+    import ::ai::media
+
+    // Create AI-generated image
+    ai-image AIImage({
+        media: Image({file: file-meta, width: 1024, height: 1024, format: "png"}),
+        provider: "openai",
+        model: "dall-e-3",
+        prompt: "A sunset over mountains",
+        style: "vivid",
+        quality: "hd"
+    })
+
+    // Access the underlying media
+    pure-image ai-image.media
+    file-path ai-image.media.file.path
+    ```
+    """
+}
+
+// ============================================================================
+// Import pure media types
+// ============================================================================
+
+Image ::hot::media/Image
+Audio ::hot::media/Audio
+Video ::hot::media/Video
+
+// ============================================================================
+// AI Generation Types (wrap pure Media types)
+// ============================================================================
+
+AIImage
+meta {
+    doc: """
+    AI-generated image with generation metadata.
+
+    **Fields**
+    - `media` - Pure image data from ::hot::media
+    - `provider` - AI provider (e.g., "openai", "xai", "stability")
+    - `model` - Model identifier (e.g., "dall-e-3", "aurora")
+    - `prompt` - Original prompt used to generate
+    - `revised_prompt` - AI-revised prompt (if applicable)
+    - `style` - Style parameter (e.g., "vivid", "natural")
+    - `quality` - Quality parameter (e.g., "standard", "hd")
+    """
+}
+type {
+    media: Image,
+    provider: Str?,
+    model: Str?,
+    prompt: Str?,
+    revised_prompt: Str?,
+    style: Str?,
+    quality: Str?
+}
+
+AIAudio
+meta {
+    doc: """
+    AI-generated audio with generation metadata.
+
+    **Fields**
+    - `media` - Pure audio data from ::hot::media
+    - `provider` - AI provider (e.g., "openai", "elevenlabs")
+    - `model` - Model identifier (e.g., "tts-1", "tts-1-hd")
+    - `prompt` - Text prompt for speech synthesis
+    - `voice` - Voice identifier used (e.g., "alloy", "shimmer")
+    - `language` - Language code (e.g., "en", "es")
+    """
+}
+type {
+    media: Audio,
+    provider: Str?,
+    model: Str?,
+    prompt: Str?,
+    voice: Str?,
+    language: Str?
+}
+
+AIVideo
+meta {
+    doc: """
+    AI-generated video with generation metadata.
+
+    **Fields**
+    - `media` - Pure video data from ::hot::media
+    - `provider` - AI provider (e.g., "openai", "runway")
+    - `model` - Model identifier
+    - `prompt` - Original prompt used to generate
+    - `revised_prompt` - AI-revised prompt (if applicable)
+    """
+}
+type {
+    media: Video,
+    provider: Str?,
+    model: Str?,
+    prompt: Str?,
+    revised_prompt: Str?
+}
+
+// ============================================================================
+// AIMedia Enum (tagged union)
+// ============================================================================
+
+AIMedia
+meta {
+    doc: """
+    Unified enum for AI-generated media files.
+
+    Wraps pure media types with AI generation metadata. Declared
+    `enum open` so applications can register additional AI-generated
+    kinds (e.g., a custom `AIDocument` or `AI3DModel`) via arrow
+    enrollment without forking this type:
+
+    ```hot
+    AIDocument type { file: FileMeta, prompt: Str, model: Str }
+    AIDocument -> AIMedia.Document
+    ```
+
+    Because the variant set is open-ended, `match` on `AIMedia` MUST
+    include a `_` default arm (`open-enum-match-missing-default` otherwise).
+
+    **Usage**
+    ```hot
+    import ::ai::media
+
+    // Pattern match on AI media type
+    describe-ai-media fn (ai: AIMedia): Str {
+        match ai {
+            AIMedia.Image => { `AI Image: ${ai.prompt} via ${ai.provider}` }
+            AIMedia.Audio => { `AI Audio: ${ai.voice} voice via ${ai.provider}` }
+            AIMedia.Video => { `AI Video: ${ai.prompt} via ${ai.provider}` }
+            _ => { "unknown AI media kind" }
+        }
+    }
+
+    // Access underlying pure media
+    pure-media ai.media
+    ```
+    """
+}
+enum open {
+    Image(AIImage),
+    Audio(AIAudio),
+    Video(AIVideo)
+}
+
+// ============================================================================
+// Batch Types
+// ============================================================================
+
+AIMediaError
+meta {doc: """Error that occurred during batch AI media generation."""}
+type {
+    index: Int,
+    message: Str
+}
+
+AIMediaBatch
+meta {
+    doc: """
+    Result of batch AI media generation.
+
+    **Fields**
+    - `items` - Successfully generated AI media files
+    - `succeeded` - Count of successful generations
+    - `failed` - Count of failed generations
+    - `errors` - List of errors (if any)
+    """
+}
+type {
+    items: Vec<AIMedia>,
+    succeeded: Int,
+    failed: Int,
+    errors: Vec<AIMediaError>?
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+is-image
+meta {doc: """Check if AI media is an Image variant."""}
+fn (ai: AIMedia): Bool {
+    match ai { AIMedia.Image => true, => false }
+}
+
+is-audio
+meta {doc: """Check if AI media is an Audio variant."""}
+fn (ai: AIMedia): Bool {
+    match ai { AIMedia.Audio => true, => false }
+}
+
+is-video
+meta {doc: """Check if AI media is a Video variant."""}
+fn (ai: AIMedia): Bool {
+    match ai { AIMedia.Video => true, => false }
+}
+
+has-duration
+meta {doc: """Check if AI media has a duration (audio or video)."""}
+fn (ai: AIMedia): Bool {
+    match ai { AIMedia.Audio => true, AIMedia.Video => true, => false }
+}
+
+duration
+meta {
+    doc: """
+    Get duration in seconds for AI audio/video. Returns null for images.
+
+    **Example**
+    ```hot
+    seconds duration(ai-audio)  // 3.5
+    seconds duration(ai-image)  // null
+    ```
+    """
+}
+fn (ai: AIMedia): Dec? {
+    ai.media.duration_seconds
+}
+
+// ============================================================================
+// Constructor Helpers
+// ============================================================================
+
+image
+meta {
+    doc: """
+    Create an AIMedia.Image from AIImage data.
+
+    **Example**
+    ```hot
+    ai image(AIImage({media: img, prompt: "A sunset", provider: "xai"}))
+    ```
+    """
+}
+fn (data: AIImage): AIMedia {
+    AIMedia.Image(data)
+}
+
+audio
+meta {
+    doc: """
+    Create an AIMedia.Audio from AIAudio data.
+
+    **Example**
+    ```hot
+    ai audio(AIAudio({media: aud, voice: "alloy", provider: "openai"}))
+    ```
+    """
+}
+fn (data: AIAudio): AIMedia {
+    AIMedia.Audio(data)
+}
+
+video
+meta {
+    doc: """
+    Create an AIMedia.Video from AIVideo data.
+
+    **Example**
+    ```hot
+    ai video(AIVideo({media: vid, prompt: "A timelapse", provider: "openai"}))
+    ```
+    """
+}
+fn (data: AIVideo): AIMedia {
+    AIMedia.Video(data)
+}
