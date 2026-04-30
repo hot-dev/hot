@@ -475,9 +475,12 @@ pub async fn signup_post_handler(
             }
         }
 
-        // Full slug validation: format + reserved + existing orgs + pending verifications.
-        // On "taken", suggest an alternative so the user has a one-click retry.
-        match crate::slug::ensure_available(&db, org_slug).await {
+        // Full slug validation: format + reserved (baked-in + the
+        // deployment-supplied `hot.org.reserved-slugs` list) + existing orgs +
+        // pending verifications. On "taken", suggest an alternative so the
+        // user has a one-click retry.
+        let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
+        match crate::slug::ensure_available_with_extra(&db, org_slug, &extra_reserved).await {
             Ok(()) => {}
             Err(crate::slug::SlugError::Taken) => {
                 let suggestion = crate::slug::suggest_alternative(&db, org_slug).await;
@@ -1202,6 +1205,7 @@ pub struct ClaimHandleForm {
 /// the user's name so they have a one-click path forward.
 pub async fn claim_handle_handler(
     State(db): State<Arc<DatabasePool>>,
+    Extension(conf): Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<crate::auth::Session>,
     Query(params): Query<AHashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -1251,43 +1255,45 @@ pub async fn claim_handle_handler(
     // verify-time (see `verify_email_handler`'s graceful-degrade path), pick
     // an *alternative* to that slug so we never echo the taken one back at
     // them. Otherwise derive a fresh base from the user's name.
+    let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
     let taken = params.get("taken").map(String::as_str).unwrap_or("").trim();
-    let (error_banner, suggested) =
-        if !taken.is_empty() && crate::slug::validate_format(taken).is_ok() {
-            let alt = crate::slug::suggest_alternative(&db, taken).await;
-            (
-                format!(
-                    "\u{201c}{}\u{201d} was just taken. Try \u{201c}{}\u{201d} instead.",
-                    taken, alt
-                ),
-                alt,
-            )
+    let (error_banner, suggested) = if !taken.is_empty()
+        && crate::slug::validate_format_with_extra(taken, &extra_reserved).is_ok()
+    {
+        let alt = crate::slug::suggest_alternative(&db, taken).await;
+        (
+            format!(
+                "\u{201c}{}\u{201d} was just taken. Try \u{201c}{}\u{201d} instead.",
+                taken, alt
+            ),
+            alt,
+        )
+    } else {
+        // slugify: lowercase, replace non-alphanumeric runs with hyphens, trim hyphens.
+        let base = session
+            .user_name
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        let base: String = base
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let s = if crate::slug::validate_format_with_extra(&base, &extra_reserved).is_ok() {
+            crate::slug::suggest_available(&db, &base).await
         } else {
-            // slugify: lowercase, replace non-alphanumeric runs with hyphens, trim hyphens.
-            let base = session
-                .user_name
-                .to_lowercase()
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_lowercase() || c.is_ascii_digit() {
-                        c
-                    } else {
-                        '-'
-                    }
-                })
-                .collect::<String>();
-            let base: String = base
-                .split('-')
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("-");
-            let s = if crate::slug::validate_format(&base).is_ok() {
-                crate::slug::suggest_available(&db, &base).await
-            } else {
-                String::new()
-            };
-            (String::new(), s)
+            String::new()
         };
+        (String::new(), s)
+    };
 
     let template = templates::ClaimHandle {
         title: "Claim Your Handle",
@@ -1306,6 +1312,7 @@ pub async fn claim_handle_handler(
 /// POST /claim-handle — process handle claim and create org
 pub async fn claim_handle_post_handler(
     State(db): State<Arc<DatabasePool>>,
+    Extension(conf): Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<crate::auth::Session>,
     cookies: CookieJar,
     Query(params): Query<AHashMap<String, String>>,
@@ -1399,9 +1406,11 @@ pub async fn claim_handle_post_handler(
 
     let org_slug = form.org_slug.trim();
 
-    // Format + reserved-word validation (no DB). Must pass before we can
-    // touch the orgs table at all.
-    if let Err(e) = crate::slug::validate_format(org_slug) {
+    // Format + reserved-word validation (baked-in + the deployment-supplied
+    // `hot.org.reserved-slugs` list); no DB. Must pass before we can touch
+    // the orgs table at all.
+    let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
+    if let Err(e) = crate::slug::validate_format_with_extra(org_slug, &extra_reserved) {
         return Err(render_error(e.message()));
     }
 
