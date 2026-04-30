@@ -307,8 +307,10 @@ pub async fn orgs_create_handler(
         ));
     }
 
-    // Validate slug format + reserved-word rules before hitting the DB.
-    if let Err(e) = crate::slug::validate_format(&form.slug) {
+    // Validate slug format + reserved-word rules (baked-in + the
+    // deployment-supplied `hot.org.reserved-slugs` list) before hitting the DB.
+    let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
+    if let Err(e) = crate::slug::validate_format_with_extra(&form.slug, &extra_reserved) {
         return Err(render_orgs_new_with_error(
             &session,
             e.message(),
@@ -480,6 +482,7 @@ pub async fn orgs_create_handler(
 pub async fn orgs_update_handler(
     Path(org_slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
+    axum::extract::Extension(conf): axum::extract::Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<OrgForm>,
 ) -> Result<Redirect, Html<String>> {
@@ -515,17 +518,29 @@ pub async fn orgs_update_handler(
         ));
     }
 
-    // Check if slug already exists (but allow current slug)
-    if form.slug != org.slug
-        && hot::db::org::Org::get_org_by_slug(&db, &form.slug)
-            .await
-            .is_ok()
-    {
-        return Err(render_orgs_edit_with_error(
-            &session,
-            &org,
-            "Organization slug already exists",
-        ));
+    // If the slug is changing, run the same full validation we apply at
+    // creation time: format rules, reserved-word list, and availability
+    // (existing orgs + non-expired pending verifications). When the slug is
+    // unchanged we skip these checks so orgs grandfathered in before a name
+    // was reserved aren't blocked from editing other fields.
+    if form.slug != org.slug {
+        let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
+        if let Err(e) = crate::slug::validate_format_with_extra(&form.slug, &extra_reserved) {
+            return Err(render_orgs_edit_with_error(&session, &org, e.message()));
+        }
+
+        if !crate::slug::is_available(&db, &form.slug).await {
+            let suggestion = crate::slug::suggest_alternative(&db, &form.slug).await;
+            return Err(render_orgs_edit_with_error(
+                &session,
+                &org,
+                &format!(
+                    "{} Try \u{201c}{}\u{201d}.",
+                    crate::slug::SlugError::Taken.message(),
+                    suggestion
+                ),
+            ));
+        }
     }
 
     // Update organization

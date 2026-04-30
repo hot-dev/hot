@@ -3,18 +3,27 @@
 //! Centralizes:
 //! - Format rules (lowercase ASCII + digits + hyphens, length 2..=32)
 //! - Reserved word list (protects top-level routes, impersonation-prone names)
+//! - Deployment-supplied reserved list via the `hot.org.reserved-slugs` Hot
+//!   conf value (additive to the baked-in [`RESERVED_SLUGS`])
 //! - Availability check across existing orgs + non-expired pending verifications
 //! - Alternative-slug suggestions on conflict (`alice` → `alice-2`, `alice-3`, …)
 
 use hot::db::DatabasePool;
+use hot::val::Val;
 
 /// Reserved slugs that users are not allowed to claim.
 ///
-/// Covers:
+/// Covers protections that apply to every Hot deployment regardless of
+/// operator:
 /// - Top-level app routes (so `/@admin` and `/admin` don't feel ambiguous)
 /// - Common impersonation/phishing names
-/// - The company brand
 /// - Small set of common system paths
+///
+/// Operator-/deployment-specific protections (the operator's own brand,
+/// founder/staff handles, paid-tier names, etc.) belong in
+/// `hot.org.reserved-slugs` instead — see [`extra_reserved_from_conf`]. Hot
+/// Cloud's own brand list lives in `hot-cloud/aws/ecs/app.hot` for that
+/// reason; do not re-add those entries here.
 pub const RESERVED_SLUGS: &[&str] = &[
     // ── App routes & namespaces ─────────────────────────────────────────────
     "admin",
@@ -53,17 +62,6 @@ pub const RESERVED_SLUGS: &[&str] = &[
     "verify",
     "webhook",
     "webhooks",
-    // ── Brand / product names (us) ──────────────────────────────────────────
-    "hot",
-    "hotdev",
-    "hot-dev",
-    "hotcloud",
-    "hot-cloud",
-    "hot-cloud-free",
-    "hot-cloud-starter",
-    "hot-cloud-pro",
-    "hot-cloud-scale",
-    "hot-free",
     // ── Impersonation-prone / authority-sounding ────────────────────────────
     "official",
     "root",
@@ -186,8 +184,18 @@ impl SlugError {
 
 /// Validate slug format and reserved-word rules. Fast, no I/O.
 ///
+/// Equivalent to [`validate_format_with_extra`] with no deployment extras.
+/// Prefer the `_with_extra` variant from any handler that has a [`Val`] in
+/// scope so the `hot.org.reserved-slugs` deployment list is honored.
+///
 /// Callers should call [`ensure_available`] afterward for the DB checks.
 pub fn validate_format(slug: &str) -> Result<(), SlugError> {
+    validate_format_with_extra(slug, &[])
+}
+
+/// Validate slug format and reserved-word rules, including a deployment-
+/// supplied extra reserved list (see [`extra_reserved_from_conf`]). Fast, no I/O.
+pub fn validate_format_with_extra(slug: &str, extra_reserved: &[String]) -> Result<(), SlugError> {
     let slug = slug.trim();
     if slug.is_empty() {
         return Err(SlugError::Empty);
@@ -208,15 +216,37 @@ pub fn validate_format(slug: &str) -> Result<(), SlugError> {
     if slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
         return Err(SlugError::InvalidFormat);
     }
-    if is_reserved(slug) {
+    if is_reserved(slug) || is_extra_reserved(slug, extra_reserved) {
         return Err(SlugError::Reserved);
     }
     Ok(())
 }
 
-/// True if `slug` is in the reserved list.
+/// True if `slug` is in the baked-in [`RESERVED_SLUGS`] list.
 pub fn is_reserved(slug: &str) -> bool {
     RESERVED_SLUGS.iter().any(|r| r.eq_ignore_ascii_case(slug))
+}
+
+/// True if `slug` matches any entry in `extra_reserved` (case-insensitive).
+///
+/// Use this together with [`is_reserved`] to honor a deployment-supplied
+/// reserved list (e.g. founder names, paid-tier brand slugs that aren't in
+/// the public open-source default).
+pub fn is_extra_reserved(slug: &str, extra_reserved: &[String]) -> bool {
+    extra_reserved.iter().any(|r| r.eq_ignore_ascii_case(slug))
+}
+
+/// Read the deployment-supplied reserved-slug list from Hot conf. Empty if
+/// unset. Entries are normalized (trimmed + lowercased) and empty entries
+/// dropped, so the conf author can be sloppy about whitespace and casing.
+///
+/// Set in conf as e.g. `hot.org.reserved-slugs ["curtis", "founder", …]`.
+pub fn extra_reserved_from_conf(conf: &Val) -> Vec<String> {
+    conf.get_vec_str_or_default("org.reserved-slugs", Vec::new())
+        .into_iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Is this slug currently available? Checks:
@@ -238,8 +268,19 @@ pub async fn is_available(db: &DatabasePool, slug: &str) -> bool {
 }
 
 /// Full validation: format + reserved + availability.
+///
+/// Equivalent to [`ensure_available_with_extra`] with no deployment extras.
 pub async fn ensure_available(db: &DatabasePool, slug: &str) -> Result<(), SlugError> {
-    validate_format(slug)?;
+    ensure_available_with_extra(db, slug, &[]).await
+}
+
+/// Full validation: format + reserved (baked-in + deployment extras) + availability.
+pub async fn ensure_available_with_extra(
+    db: &DatabasePool,
+    slug: &str,
+    extra_reserved: &[String],
+) -> Result<(), SlugError> {
+    validate_format_with_extra(slug, extra_reserved)?;
     if !is_available(db, slug).await {
         return Err(SlugError::Taken);
     }
@@ -325,9 +366,6 @@ mod tests {
         assert_eq!(validate_format("admin"), Err(SlugError::Reserved));
         assert_eq!(validate_format("ADMIN"), Err(SlugError::InvalidFormat)); // uppercase fails first
         assert_eq!(validate_format("api"), Err(SlugError::Reserved));
-        assert_eq!(validate_format("hot"), Err(SlugError::Reserved));
-        assert_eq!(validate_format("hot-dev"), Err(SlugError::Reserved));
-        assert_eq!(validate_format("hotdev"), Err(SlugError::Reserved));
         assert_eq!(validate_format("acme"), Err(SlugError::Reserved));
         assert_eq!(validate_format("google"), Err(SlugError::Reserved));
         assert_eq!(validate_format("inc"), Err(SlugError::Reserved));
@@ -354,5 +392,73 @@ mod tests {
         assert!(is_reserved("ADMIN"));
         assert!(is_reserved("Admin"));
         assert!(!is_reserved("alice"));
+    }
+
+    #[test]
+    fn extra_reserved_blocks_validation() {
+        let extra = vec!["curtis".to_string(), "founder".to_string()];
+
+        // Baked-in reserved still fires.
+        assert_eq!(
+            validate_format_with_extra("admin", &extra),
+            Err(SlugError::Reserved)
+        );
+
+        // Extra-reserved fires the same Reserved error so callers get a
+        // consistent user-facing message regardless of which list matched.
+        assert_eq!(
+            validate_format_with_extra("curtis", &extra),
+            Err(SlugError::Reserved)
+        );
+        assert_eq!(
+            validate_format_with_extra("founder", &extra),
+            Err(SlugError::Reserved)
+        );
+
+        // Non-matching slug still passes when extras are present.
+        assert!(validate_format_with_extra("alice", &extra).is_ok());
+    }
+
+    #[test]
+    fn extra_reserved_is_case_insensitive() {
+        let extra = vec!["Curtis".to_string()];
+        assert!(is_extra_reserved("curtis", &extra));
+        assert!(is_extra_reserved("CURTIS", &extra));
+        assert!(!is_extra_reserved("alice", &extra));
+    }
+
+    #[test]
+    fn extra_reserved_only_matches_exact_slug_not_substring() {
+        let extra = vec!["curtis".to_string()];
+        assert!(validate_format_with_extra("curtis-co", &extra).is_ok());
+        assert!(validate_format_with_extra("not-curtis", &extra).is_ok());
+    }
+
+    #[test]
+    fn validate_format_without_extras_matches_old_behavior() {
+        // The zero-extras shorthand must behave identically to the
+        // direct-no-extras call; signup_flow.rs and other tests rely on this.
+        assert_eq!(validate_format("admin"), Err(SlugError::Reserved));
+        assert_eq!(
+            validate_format_with_extra("admin", &[]),
+            Err(SlugError::Reserved)
+        );
+        assert!(validate_format("alice").is_ok());
+        assert!(validate_format_with_extra("alice", &[]).is_ok());
+    }
+
+    #[test]
+    fn extra_reserved_from_conf_normalizes_and_drops_empty() {
+        let conf = hot::val!({
+            "org": {"reserved-slugs": ["  Curtis ", "FOUNDER", "", "   ", "ok"]},
+        });
+        let extras = extra_reserved_from_conf(&conf);
+        assert_eq!(extras, vec!["curtis", "founder", "ok"]);
+    }
+
+    #[test]
+    fn extra_reserved_from_conf_defaults_to_empty() {
+        let conf = hot::val!({});
+        assert!(extra_reserved_from_conf(&conf).is_empty());
     }
 }
