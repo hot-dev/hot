@@ -1,7 +1,7 @@
 use crate::discovery::{DiscoveryOpts, discover};
 use crate::hasher::HotHasher;
 use crate::val::{Val, val};
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -276,6 +276,93 @@ pub fn calculate_bundle_hash_with_resources(
     hasher.finalize()
 }
 
+struct ManifestSourcePathNormalizer {
+    by_path: AHashMap<String, String>,
+}
+
+impl ManifestSourcePathNormalizer {
+    fn new(files: &[BundleFile], resources: &[BundleResource]) -> Self {
+        let mut by_path = AHashMap::new();
+
+        for file in files {
+            let bundle_path = normalize_path_separators(&file.relative_path);
+            insert_manifest_source_path(&mut by_path, &file.path, bundle_path);
+        }
+
+        for resource in resources {
+            let bundle_path = normalize_path_separators(&format!(
+                "{RESOURCE_BUNDLE_PREFIX}/{}",
+                resource.rel_path
+            ));
+            insert_manifest_source_path(&mut by_path, &resource.abs_path, bundle_path);
+        }
+
+        Self { by_path }
+    }
+
+    fn normalize(&self, path: &str) -> String {
+        let normalized = normalize_path_separators(path);
+        if let Some(bundle_path) = self.by_path.get(&normalized) {
+            return bundle_path.clone();
+        }
+
+        if let Ok(canonical) = Path::new(path).canonicalize() {
+            let canonical = normalize_path_separators(&canonical.to_string_lossy());
+            if let Some(bundle_path) = self.by_path.get(&canonical) {
+                return bundle_path.clone();
+            }
+        }
+
+        path.to_string()
+    }
+}
+
+fn insert_manifest_source_path(
+    by_path: &mut AHashMap<String, String>,
+    source_path: &Path,
+    bundle_path: String,
+) {
+    by_path.insert(bundle_path.clone(), bundle_path.clone());
+    by_path.insert(
+        normalize_path_separators(&source_path.to_string_lossy()),
+        bundle_path.clone(),
+    );
+
+    if let Ok(canonical) = source_path.canonicalize() {
+        by_path.insert(
+            normalize_path_separators(&canonical.to_string_lossy()),
+            bundle_path,
+        );
+    }
+}
+
+fn normalize_path_separators(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn normalize_manifest_artifact_source_path(
+    val: &Val,
+    normalizer: &ManifestSourcePathNormalizer,
+) -> Val {
+    let mut val = val.clone();
+    if let Val::Map(map) = &mut val {
+        normalize_manifest_source_field(map, "file", normalizer);
+    }
+    val
+}
+
+fn normalize_manifest_source_field(
+    map: &mut indexmap::IndexMap<Val, Val>,
+    field: &str,
+    normalizer: &ManifestSourcePathNormalizer,
+) {
+    if let Some(value) = map.get_mut(&Val::from(field))
+        && let Val::Str(path) = value
+    {
+        *value = Val::from(normalizer.normalize(path));
+    }
+}
+
 /// Create the manifest.hot content
 #[allow(clippy::too_many_arguments)]
 pub fn create_manifest(
@@ -294,6 +381,7 @@ pub fn create_manifest(
     box_requirements: Option<&crate::lang::compiler::box_checker::ProgramBoxRequirements>,
     resources: &[BundleResource],
 ) -> Val {
+    let source_path_normalizer = ManifestSourcePathNormalizer::new(files, resources);
     let mut files_entries = Vec::new();
 
     for file in files {
@@ -311,7 +399,10 @@ pub fn create_manifest(
         let mut handler_list = Vec::new();
         for handler in handlers {
             // The event_handler field is already a Val, so we can use it directly
-            handler_list.push(handler.event_handler.clone());
+            handler_list.push(normalize_manifest_artifact_source_path(
+                &handler.event_handler,
+                &source_path_normalizer,
+            ));
         }
         handlers_map.insert(Val::from(event_type.clone()), Val::Vec(handler_list));
     }
@@ -323,7 +414,10 @@ pub fn create_manifest(
         let mut function_list = Vec::new();
         for function in functions {
             // The scheduled_function field is already a Val, so we can use it directly
-            function_list.push(function.scheduled_function.clone());
+            function_list.push(normalize_manifest_artifact_source_path(
+                &function.scheduled_function,
+                &source_path_normalizer,
+            ));
         }
         schedules_map.insert(Val::from(cron_expr.clone()), Val::Vec(function_list));
     }
@@ -334,7 +428,10 @@ pub fn create_manifest(
     for (service, tools) in mcp_tools {
         let mut tool_list = Vec::new();
         for tool in tools {
-            tool_list.push(tool.mcp_tool.clone());
+            tool_list.push(normalize_manifest_artifact_source_path(
+                &tool.mcp_tool,
+                &source_path_normalizer,
+            ));
         }
         mcp_tools_map.insert(Val::from(service.clone()), Val::Vec(tool_list));
     }
@@ -345,7 +442,10 @@ pub fn create_manifest(
     for (service, entries) in webhooks {
         let mut entry_list = Vec::new();
         for entry in entries {
-            entry_list.push(entry.webhook.clone());
+            entry_list.push(normalize_manifest_artifact_source_path(
+                &entry.webhook,
+                &source_path_normalizer,
+            ));
         }
         webhooks_map.insert(Val::from(service.clone()), Val::Vec(entry_list));
     }
@@ -369,7 +469,10 @@ pub fn create_manifest(
                     entry.insert(Val::from("key"), Val::from(k.key.as_str()));
                     entry.insert(Val::from("declared-by"), Val::from(ns.namespace.as_str()));
                     if let Some(src) = &ns.source_file {
-                        entry.insert(Val::from("source-file"), Val::from(src.as_str()));
+                        entry.insert(
+                            Val::from("source-file"),
+                            Val::from(source_path_normalizer.normalize(src)),
+                        );
                     }
                     entries.push(Val::Map(Box::new(entry)));
                 }
@@ -406,7 +509,10 @@ pub fn create_manifest(
                     entry.insert(Val::from("network"), Val::Bool(net));
                 }
                 if let Some(ref file) = r.source_file {
-                    entry.insert(Val::from("file"), Val::from(file.as_str()));
+                    entry.insert(
+                        Val::from("file"),
+                        Val::from(source_path_normalizer.normalize(file)),
+                    );
                 }
                 Val::Map(Box::new(entry))
             })
@@ -420,12 +526,25 @@ pub fn create_manifest(
     };
 
     // Convert agents to manifest format — flat Vec of agent_val maps
-    let agents_entries: Vec<Val> = agents.iter().map(|a| a.agent_val.resolve_boxes()).collect();
+    let agents_entries: Vec<Val> = agents
+        .iter()
+        .map(|a| {
+            normalize_manifest_artifact_source_path(
+                &a.agent_val.resolve_boxes(),
+                &source_path_normalizer,
+            )
+        })
+        .collect();
 
     // Convert named workflows to manifest format — flat Vec of workflow_val maps
     let workflows_entries: Vec<Val> = workflows
         .iter()
-        .map(|w| w.workflow_val.resolve_boxes())
+        .map(|w| {
+            normalize_manifest_artifact_source_path(
+                &w.workflow_val.resolve_boxes(),
+                &source_path_normalizer,
+            )
+        })
         .collect();
 
     // Convert send targets to manifest format: { "ns/var": ["event-a", "event-b"] }
@@ -1298,6 +1417,182 @@ mod tests {
         } else {
             panic!("manifest should be a map");
         }
+    }
+
+    #[test]
+    fn test_create_manifest_normalizes_artifact_source_paths_to_bundle_paths() {
+        let source_abs = std::env::temp_dir()
+            .join("hot-manifest-source-normalization")
+            .join("src")
+            .join("agent.hot");
+        let source_abs_str = source_abs.to_string_lossy().to_string();
+        let resource_abs = std::env::temp_dir()
+            .join("hot-manifest-source-normalization")
+            .join("resources")
+            .join("prompts")
+            .join("system.md");
+        let resource_abs_str = resource_abs.to_string_lossy().to_string();
+        let bundle_path = "hot/src/agent.hot";
+        let resource_bundle_path = "resources/prompts/system.md";
+        let files = vec![BundleFile {
+            path: source_abs,
+            relative_path: bundle_path.to_string(),
+            content: b"::demo ns".to_vec(),
+            hash: "test-hash".to_string(),
+            size: 9,
+        }];
+        let resources = vec![BundleResource {
+            rel_path: "prompts/system.md".to_string(),
+            abs_path: resource_abs,
+            content: b"system prompt".to_vec(),
+            hash: "resource-hash".to_string(),
+            size: 13,
+        }];
+        let source_val = || {
+            crate::val!({
+                "fn": "::demo/handler",
+                "file": source_abs_str.clone(),
+                "line": 1,
+            })
+        };
+
+        let mut event_handlers = crate::lang::compiler::EventHandlers::new();
+        event_handlers.insert(
+            "demo:event".to_string(),
+            vec![crate::lang::compiler::EventHandler {
+                event_type: "demo:event".to_string(),
+                event_handler: source_val(),
+            }],
+        );
+
+        let mut scheduled_functions = crate::lang::compiler::ScheduledFunctions::new();
+        scheduled_functions.insert(
+            "* * * * *".to_string(),
+            vec![crate::lang::compiler::ScheduledFunction {
+                cron_expression: "* * * * *".to_string(),
+                scheduled_function: source_val(),
+            }],
+        );
+
+        let mut mcp_tools = crate::lang::compiler::McpTools::new();
+        mcp_tools.insert(
+            "demo".to_string(),
+            vec![crate::lang::compiler::McpTool {
+                service: "demo".to_string(),
+                name: "tool".to_string(),
+                auth_mode: "none".to_string(),
+                mcp_tool: source_val(),
+            }],
+        );
+        mcp_tools.insert(
+            "resource".to_string(),
+            vec![crate::lang::compiler::McpTool {
+                service: "resource".to_string(),
+                name: "tool".to_string(),
+                auth_mode: "none".to_string(),
+                mcp_tool: crate::val!({
+                    "fn": "::demo/resource-tool",
+                    "file": resource_abs_str.clone(),
+                    "line": 1,
+                }),
+            }],
+        );
+
+        let mut webhooks = crate::lang::compiler::Webhooks::new();
+        webhooks.insert(
+            "demo".to_string(),
+            vec![crate::lang::compiler::Webhook {
+                service: "demo".to_string(),
+                path: "/hook".to_string(),
+                method: "POST".to_string(),
+                name: "hook".to_string(),
+                webhook: source_val(),
+            }],
+        );
+
+        let agents = vec![crate::lang::compiler::AgentDef {
+            type_name: "DemoAgent".to_string(),
+            namespace: "::demo".to_string(),
+            agent_val: source_val(),
+        }];
+        let workflows = vec![crate::lang::compiler::WorkflowDef {
+            type_name: "DemoWorkflow".to_string(),
+            namespace: "::demo".to_string(),
+            workflow_val: source_val(),
+        }];
+
+        let manifest = create_manifest(
+            "demo",
+            "demo-id",
+            &files,
+            "bundle-hash",
+            &event_handlers,
+            &scheduled_functions,
+            &mcp_tools,
+            &webhooks,
+            &agents,
+            &workflows,
+            &crate::lang::compiler::SendTargets::new(),
+            None,
+            None,
+            &resources,
+        );
+
+        let Val::Map(manifest_map) = manifest else {
+            panic!("manifest should be a map");
+        };
+        let Some(Val::Map(bundle_info)) = manifest_map.get(&Val::from("hot.bundle.demo")) else {
+            panic!("bundle info should be a map");
+        };
+
+        let event_handler = first_nested_vec_item(bundle_info, "event_handlers", "demo:event");
+        assert_manifest_file(event_handler, bundle_path);
+
+        let scheduled = first_nested_vec_item(bundle_info, "scheduled_functions", "* * * * *");
+        assert_manifest_file(scheduled, bundle_path);
+
+        let tool = first_nested_vec_item(bundle_info, "mcp_tools", "demo");
+        assert_manifest_file(tool, bundle_path);
+
+        let resource_tool = first_nested_vec_item(bundle_info, "mcp_tools", "resource");
+        assert_manifest_file(resource_tool, resource_bundle_path);
+
+        let webhook = first_nested_vec_item(bundle_info, "webhooks", "demo");
+        assert_manifest_file(webhook, bundle_path);
+
+        let agent = first_vec_item(bundle_info, "agents");
+        assert_manifest_file(agent, bundle_path);
+
+        let workflow = first_vec_item(bundle_info, "workflows");
+        assert_manifest_file(workflow, bundle_path);
+    }
+
+    fn first_nested_vec_item<'a>(
+        bundle_info: &'a indexmap::IndexMap<Val, Val>,
+        section: &str,
+        key: &str,
+    ) -> &'a Val {
+        let Some(Val::Map(section_map)) = bundle_info.get(&Val::from(section)) else {
+            panic!("{section} should be a map");
+        };
+        let Some(Val::Vec(items)) = section_map.get(&Val::from(key)) else {
+            panic!("{section}.{key} should be a vec");
+        };
+        items.first().expect("section should have an item")
+    }
+
+    fn first_vec_item<'a>(bundle_info: &'a indexmap::IndexMap<Val, Val>, section: &str) -> &'a Val {
+        let Some(Val::Vec(items)) = bundle_info.get(&Val::from(section)) else {
+            panic!("{section} should be a vec");
+        };
+        items.first().expect("section should have an item")
+    }
+
+    fn assert_manifest_file(val: &Val, expected: &str) {
+        let Val::Map(map) = val else {
+            panic!("artifact should be a map");
+        };
+        assert_eq!(map.get(&Val::from("file")), Some(&Val::from(expected)));
     }
 
     #[test]
