@@ -13,11 +13,17 @@ use hot::val::Val;
 
 /// Reserved slugs that users are not allowed to claim.
 ///
-/// Covers:
+/// Covers protections that apply to every Hot deployment regardless of
+/// operator:
 /// - Top-level app routes (so `/@admin` and `/admin` don't feel ambiguous)
 /// - Common impersonation/phishing names
-/// - The company brand
 /// - Small set of common system paths
+///
+/// Operator-/deployment-specific protections (the operator's own brand,
+/// founder/staff handles, paid-tier names, etc.) belong in
+/// `hot.org.reserved-slugs` instead — see [`extra_reserved_from_conf`]. Hot
+/// Cloud's own brand list lives in `hot-cloud/aws/ecs/app.hot` for that
+/// reason; do not re-add those entries here.
 pub const RESERVED_SLUGS: &[&str] = &[
     // ── App routes & namespaces ─────────────────────────────────────────────
     "admin",
@@ -56,17 +62,6 @@ pub const RESERVED_SLUGS: &[&str] = &[
     "verify",
     "webhook",
     "webhooks",
-    // ── Brand / product names (us) ──────────────────────────────────────────
-    "hot",
-    "hotdev",
-    "hot-dev",
-    "hotcloud",
-    "hot-cloud",
-    "hot-cloud-free",
-    "hot-cloud-starter",
-    "hot-cloud-pro",
-    "hot-cloud-scale",
-    "hot-free",
     // ── Impersonation-prone / authority-sounding ────────────────────────────
     "official",
     "root",
@@ -371,9 +366,6 @@ mod tests {
         assert_eq!(validate_format("admin"), Err(SlugError::Reserved));
         assert_eq!(validate_format("ADMIN"), Err(SlugError::InvalidFormat)); // uppercase fails first
         assert_eq!(validate_format("api"), Err(SlugError::Reserved));
-        assert_eq!(validate_format("hot"), Err(SlugError::Reserved));
-        assert_eq!(validate_format("hot-dev"), Err(SlugError::Reserved));
-        assert_eq!(validate_format("hotdev"), Err(SlugError::Reserved));
         assert_eq!(validate_format("acme"), Err(SlugError::Reserved));
         assert_eq!(validate_format("google"), Err(SlugError::Reserved));
         assert_eq!(validate_format("inc"), Err(SlugError::Reserved));
