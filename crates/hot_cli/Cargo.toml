@@ -43,6 +43,7 @@ rayon = { workspace = true }
 dotenvy = { workspace = true }
 dirs = { workspace = true }
 open = { workspace = true }
+sha2 = { workspace = true }
 
 # ONNX Runtime (used by fastembed) has no pre-built binaries for Windows ARM64
 [target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]

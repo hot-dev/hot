@@ -20,7 +20,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: '1'
+  # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
+  # strips before saving) and reduces sccache hit rates.
+  CARGO_INCREMENTAL: '0'
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
@@ -255,14 +257,35 @@ jobs:
         sudo apt-get install -y musl-tools
         rustup target add x86_64-unknown-linux-musl
 
-    - name: Cache cargo registry
+    # Compilation cache. Use a local disk cache restored/saved by actions/cache
+    # so transient cache service errors do not happen inside rustc/clippy.
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.6
+
+    - name: Configure sccache (local disk cache)
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+
+    - name: Cache sccache artifacts
       uses: actions/cache@v5
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        path: ~/.cache/sccache
+        key: sccache-${{ runner.os }}-${{ matrix.target }}-${{ github.run_id }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ matrix.target }}-
+
+    # Cargo registry/git/target caching across runs. Swatinem/rust-cache
+    # handles cross-compile target dirs and strips incremental artifacts
+    # before saving (which is why we set CARGO_INCREMENTAL=0 above).
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        # Per-target key so each matrix entry gets its own cache.
+        key: ${{ matrix.target }}
+        save-if: true
 
     - name: Setup Cargo optimizations
       shell: bash
@@ -301,7 +324,7 @@ jobs:
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
         ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
-        ENV CARGO_INCREMENTAL=1 CARGO_NET_RETRY=2
+        ENV CARGO_INCREMENTAL=0 CARGO_NET_RETRY=2
         WORKDIR /workspace
         COPY Cargo.toml Cargo.lock ./
         COPY crates/ ./crates/
@@ -314,6 +337,9 @@ jobs:
         FROM scratch
         COPY --from=builder /hotbox /hotbox
         DOCKERFILE
+
+    - name: sccache stats
+      run: sccache --show-stats || true
 
     - name: Prepare binary (Unix)
       if: matrix.platform != 'windows'
@@ -1057,7 +1083,7 @@ jobs:
 
     - name: Create GitHub Release
       if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ needs.validate-release.outputs.tag_name }}
         name: Hot v${{ steps.version.outputs.version }}

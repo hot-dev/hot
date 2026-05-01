@@ -93,26 +93,23 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
 
 /// Setup AGENTS.md with the canonical Hot section from resources/ai/AGENTS.md.
 fn setup_agents_md() -> Result<(), String> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
     const HOT_SECTION_START: &str = "<!-- HOT_LANGUAGE_SECTION_START -->";
     const HOT_SECTION_END: &str = "<!-- HOT_LANGUAGE_SECTION_END -->";
 
-    fn content_hash(content: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
-        hasher.finish()
+    fn content_hash(content: &str) -> String {
+        format!("{:x}", Sha256::digest(content.as_bytes()))[..12].to_string()
     }
 
-    fn extract_section_hash(content: &str, section_start: &str) -> Option<u64> {
+    fn extract_section_hash(content: &str, section_start: &str) -> Option<String> {
         content.find(section_start).and_then(|start| {
             let after_marker = &content[start + section_start.len()..];
             after_marker
                 .lines()
                 .next()
                 .and_then(|line| line.strip_prefix(" hash:"))
-                .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
+                .map(|hash_str| hash_str.trim().to_string())
         })
     }
 

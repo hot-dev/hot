@@ -16,6 +16,25 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@v0.0.6
+
+    - name: Configure sccache (local disk cache)
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+
+    - name: Cache sccache artifacts
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/sccache
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ github.run_id }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
+          sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
+
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:

@@ -17,15 +17,57 @@ concurrency:
 env:
   RUST_TOOLCHAIN: 1.95.0
   TAILWIND_VERSION: v4.1.18
-  CARGO_INCREMENTAL: '1'
+  # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
+  # strips before saving anyway) and reduces sccache hit rates. CI does clean
+  # builds against a shared cache, not the inner-loop edit pattern that
+  # incremental is designed for.
+  CARGO_INCREMENTAL: '0'
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
   CI: 'true'
 
 jobs:
-  lint-and-test:
-    name: Lint, Rust Tests, and Hot Tests
+  clippy-and-checks:
+    name: Clippy and Static Checks
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - uses: actions/checkout@v5
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+
+      # Clippy intentionally uses the workspace default feature set. Keeping it
+      # aligned with the workspace test feature set avoids forcing cargo to
+      # rebuild the full dependency graph between the two jobs once caches warm.
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings
+
+      - name: Verify AGENTS.md sync
+        run: bash ./scripts/check-agents-sync.sh
+
+      # `doc-snippets.sh check` runs `hot check --with-tests true`, which is a
+      # strict superset of `hot check` and additionally validates {{snippet:...}}
+      # references in docs.
+      - name: Hot check + verify doc snippet references
+        run: ./scripts/doc-snippets.sh check
+
+      - name: sccache stats
+        run: sccache --show-stats || true
+
+  rust-tests:
+    name: Rust Tests
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
@@ -49,56 +91,106 @@ jobs:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
 
-      - name: Install protobuf compiler (for containerd-client)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -j 4 -- -D warnings
-
-      - name: Verify AGENTS.md sync
-        run: bash ./scripts/check-agents-sync.sh
-
-      - name: Hot check
-        run: cargo run -- check --ctx hot/ci.ctx.hot
-
       - name: Run Rust tests
         env:
           REDIS_URL: redis://localhost:6379
+        run: cargo test --workspace --all-targets --locked -j 4
+
+      - name: sccache stats
+        run: sccache --show-stats || true
+
+  hot-tests:
+    name: Hot Tests
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - name: Free disk space
         run: |
-          cargo test --workspace --all-targets --locked -j 4
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - uses: actions/checkout@v5
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
 
       - name: Run Hot init
-        run: |
-          cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Hot tests
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
-        run: |
-          cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Hot Box tests (Docker integration)
         env:
           HOT_BOX_ENABLED: true
-        run: |
-          cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
-
-      - name: Compile Kata backend (Linux feature check)
-        run: |
-          cargo check -p hot_task_worker --features kata --locked
-
-      - name: Run hot_task_worker tests
-        run: |
-          cargo test -p hot_task_worker --locked
-          cargo test -p hot_task_worker --features kata --locked --no-run
-
-      - name: Verify doc snippet references
-        run: |
-          # Check that all {{snippet:...}} references in docs point to valid snippets
-          ./scripts/doc-snippets.sh check
+        run: cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: sccache stats
         run: sccache --show-stats || true
+
+  kata-check:
+    name: Kata Backend Compile Check
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - uses: actions/checkout@v5
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+
+      - name: Install protobuf compiler (for containerd-client)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # `cargo test --no-run --features kata` is a superset of `cargo check`.
+      # It is a Linux-only feature compile check.
+      - name: Compile Kata backend (Linux feature check)
+        run: cargo test -p hot_task_worker --features kata --locked --no-run
+
+      - name: sccache stats
+        run: sccache --show-stats || true
+
+  lint-and-test:
+    name: Lint, Rust Tests, and Hot Tests
+    runs-on: ubuntu-24.04
+    needs: [clippy-and-checks, rust-tests, hot-tests, kata-check]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    steps:
+      - name: Check split job results
+        run: |
+          failed=0
+          for result in \
+            "${{ needs.clippy-and-checks.result }}" \
+            "${{ needs.rust-tests.result }}" \
+            "${{ needs.hot-tests.result }}" \
+            "${{ needs.kata-check.result }}"; do
+            if [[ "$result" != "success" ]]; then
+              failed=1
+            fi
+          done
+
+          if [[ "$failed" -ne 0 ]]; then
+            echo "One or more split CI jobs failed."
+            exit 1
+          fi
+
+          echo "All split CI jobs passed."
 
   # build:
   #   name: Build
