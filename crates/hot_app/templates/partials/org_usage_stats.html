@@ -110,6 +110,38 @@
         {% endif %}
     </div>
 
+    <!-- Active Schedules -->
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Active Schedules</h3>
+            {% if usage.active_schedules_pct(&features) >= 100.0 %}
+            <span class="text-red-500">Limit</span>
+            {% elif usage.active_schedules_pct(&features) > 90.0 %}
+            <span class="text-yellow-500">Warning</span>
+            {% endif %}
+        </div>
+
+        {% if features.is_unlimited_active_schedules() %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">{{ hot::db::OrgUsageStats::fmt_num(usage.active_schedules) }}</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Unlimited</p>
+        {% else %}
+        <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+            {{ hot::db::OrgUsageStats::fmt_num(usage.active_schedules) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::OrgUsageStats::fmt_num(features.active_schedules_per_org()) }}</span>
+        </p>
+        {% let pct = usage.active_schedules_pct(&features).min(100.0) %}
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 mb-2">
+            <div class="h-2.5 rounded-full {% if pct >= 100.0 %}bg-red-500{% elif pct > 90.0 %}bg-yellow-500{% else %}bg-hot-red-500{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">
+            {% if usage.active_schedules_pct(&features) >= 100.0 %}
+            <span class="text-red-600 dark:text-red-400 font-medium">Limit reached - upgrade or deactivate schedules to add more</span>
+            {% else %}
+            {{ hot::db::OrgUsageStats::fmt_pct(usage.active_schedules_pct(&features)) }}% used
+            {% endif %}
+        </p>
+        {% endif %}
+    </div>
+
     <!-- Call Data Storage -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
         <div class="flex items-center justify-between mb-4">

@@ -160,6 +160,37 @@ pub fn create_schedule(
         }
     };
 
+    // Resolve org-scoped schedule policy for dynamic schedules.
+    let (org_id, policy) = match tokio::runtime::Handle::current().block_on(async {
+        let build = crate::db::Build::get_build(&db, &build_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let project = crate::db::Project::get_project(&db, &build.project_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let env = crate::db::Env::get_env(&db, &project.env_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>(env.org_id)
+    }) {
+        Ok(org_id) => {
+            let features = tokio::runtime::Handle::current()
+                .block_on(async { crate::db::Features::resolve_for_org(&db, &org_id).await });
+            (
+                Some(org_id),
+                crate::db::SchedulePolicy::from_conf(vm.get_conf()).with_features(&features),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Unable to resolve org for dynamic schedule policy on build {}: {}",
+                build_id,
+                e
+            );
+            (None, crate::db::SchedulePolicy::from_conf(vm.get_conf()))
+        }
+    };
+
     // Create the schedule
     let schedule_id = Uuid::now_v7();
     let args_json: Option<serde_json::Value> = if fn_args.is_empty() {
@@ -175,6 +206,8 @@ pub fn create_schedule(
             &schedule_id,
             &build_id,
             &schedule_type,
+            org_id.as_ref(),
+            policy,
             &ns,
             &var,
             None, // meta

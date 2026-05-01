@@ -2831,6 +2831,8 @@ pub struct SchedulesList<'a> {
     pub has_next_page: bool,
     pub has_prev_page: bool,
     pub total_schedules: i64,
+    pub org_active_schedules: i64,
+    pub org_active_schedule_limit: i64,
     pub search_query: String,
 }
 

@@ -835,6 +835,8 @@ pub struct OrgUsageStats {
     /// Total compute unit seconds (CUS) consumed this billing period.
     /// Extracted from `result."compute-units"` on completed container tasks.
     pub compute_units: i64,
+    /// Active schedules attached to active deployed builds in this org.
+    pub active_schedules: i64,
 }
 
 impl OrgUsageStats {
@@ -940,8 +942,30 @@ impl OrgUsageStats {
         .bind(period_start)
         .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, store_row, task_row) =
-            tokio::try_join!(runs_fut, file_fut, team_fut, call_fut, store_fut, task_fut)?;
+        let schedule_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*)::bigint FROM schedule s
+             JOIN build b ON s.build_id = b.build_id
+             JOIN project p ON b.project_id = p.project_id
+             JOIN env e ON p.env_id = e.env_id
+             WHERE s.active = true
+               AND b.deployed = true
+               AND b.active = true
+               AND p.active = true
+               AND e.active = true
+               AND e.org_id = $1",
+        )
+        .bind(org_id)
+        .fetch_one(pool);
+
+        let (runs_row, file_row, team_row, call_row, store_row, task_row, schedule_row) = tokio::try_join!(
+            runs_fut,
+            file_fut,
+            team_fut,
+            call_fut,
+            store_fut,
+            task_fut,
+            schedule_fut
+        )?;
 
         Ok(Self {
             runs_this_period: runs_row.0,
@@ -954,6 +978,7 @@ impl OrgUsageStats {
             tasks_this_period: task_row.0,
             task_duration_ms: task_row.1.unwrap_or(0),
             compute_units: task_row.2.unwrap_or(0),
+            active_schedules: schedule_row.0,
         })
     }
 
@@ -1035,8 +1060,29 @@ impl OrgUsageStats {
             .bind(period_start)
             .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, task_row) =
-            tokio::try_join!(runs_fut, file_fut, team_fut, call_fut, task_fut)?;
+        let schedule_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM schedule s
+             JOIN build b ON s.build_id = b.build_id
+             JOIN project p ON b.project_id = p.project_id
+             JOIN env e ON p.env_id = e.env_id
+             WHERE s.active = 1
+               AND b.deployed = 1
+               AND b.active = 1
+               AND p.active = 1
+               AND e.active = 1
+               AND e.org_id = ?",
+        )
+        .bind(org_id)
+        .fetch_one(pool);
+
+        let (runs_row, file_row, team_row, call_row, task_row, schedule_row) = tokio::try_join!(
+            runs_fut,
+            file_fut,
+            team_fut,
+            call_fut,
+            task_fut,
+            schedule_fut
+        )?;
 
         Ok(Self {
             runs_this_period: runs_row.0,
@@ -1049,6 +1095,7 @@ impl OrgUsageStats {
             tasks_this_period: task_row.0,
             task_duration_ms: task_row.1.unwrap_or(0),
             compute_units: task_row.2.unwrap_or(0),
+            active_schedules: schedule_row.0,
         })
     }
 
@@ -1116,6 +1163,14 @@ impl OrgUsageStats {
         (self.compute_units as f64 / limit as f64) * 100.0
     }
 
+    pub fn active_schedules_pct(&self, features: &super::features::Features) -> f64 {
+        let limit = features.active_schedules_per_org();
+        if limit <= 0 {
+            return 0.0;
+        }
+        (self.active_schedules as f64 / limit as f64) * 100.0
+    }
+
     /// Check if any usage is approaching limit (>90%)
     pub fn has_warning(&self, features: &super::features::Features) -> bool {
         self.runs_pct(features) > 90.0
@@ -1123,6 +1178,7 @@ impl OrgUsageStats {
             || self.call_storage_pct(features) > 90.0
             || self.store_storage_pct(features) > 90.0
             || self.compute_units_pct(features) > 90.0
+            || self.active_schedules_pct(features) > 90.0
     }
 
     /// Format a percentage as a string with one decimal place
@@ -1182,6 +1238,11 @@ impl OrgUsageStats {
         let cus_pct = self.compute_units_pct(features);
         if cus_pct > 90.0 && highest.is_none_or(|(_, pct)| cus_pct > pct) {
             highest = Some(("compute_units", cus_pct));
+        }
+
+        let schedule_pct = self.active_schedules_pct(features);
+        if schedule_pct > 90.0 && highest.is_none_or(|(_, pct)| schedule_pct > pct) {
+            highest = Some(("active_schedules", schedule_pct));
         }
 
         highest

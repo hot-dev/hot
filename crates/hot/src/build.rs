@@ -2277,6 +2277,113 @@ pub fn extract_box_requirements_from_build(
     Ok(None)
 }
 
+fn extract_scheduled_functions_from_build(
+    build_data: &[u8],
+) -> Result<crate::lang::compiler::ScheduledFunctions, String> {
+    use std::io::{Cursor, Read};
+    use zip::ZipArchive;
+
+    let cursor = Cursor::new(build_data);
+    let mut archive =
+        ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
+    let mut manifest_file = archive
+        .by_name("manifest.hot")
+        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
+    let mut manifest_content = String::new();
+    manifest_file
+        .read_to_string(&mut manifest_content)
+        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
+
+    let manifest_result = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
+        &manifest_content,
+        &[],
+        &[],
+        None,
+        None,
+    )
+    .map_err(|e| format!("Failed to evaluate manifest: {}", e))?;
+
+    let mut scheduled_functions = crate::lang::compiler::ScheduledFunctions::new();
+    if let crate::val::Val::Map(map) = manifest_result {
+        for (key, bundle_val) in map.iter() {
+            if let crate::val::Val::Str(key_str) = key
+                && key_str.starts_with("hot.bundle.")
+                && let crate::val::Val::Map(bundle_map) = bundle_val
+                && let Some(crate::val::Val::Map(schedules_map)) =
+                    bundle_map.get(&crate::val::Val::from("scheduled_functions"))
+            {
+                for (cron_expr, functions_list) in schedules_map.iter() {
+                    if let crate::val::Val::Str(cron_expr_str) = cron_expr
+                        && let crate::val::Val::Vec(functions) = functions_list
+                    {
+                        let function_entries: Vec<_> = functions
+                            .iter()
+                            .filter_map(|function_val| {
+                                val_to_scheduled_function_entry(function_val, cron_expr_str)
+                            })
+                            .collect();
+                        if !function_entries.is_empty() {
+                            scheduled_functions
+                                .insert((**cron_expr_str).to_owned(), function_entries);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(scheduled_functions)
+}
+
+pub async fn validate_schedule_requirements_for_deploy(
+    db: &DatabasePool,
+    build_id: &uuid::Uuid,
+    org_id: &uuid::Uuid,
+    env_id: &uuid::Uuid,
+    conf: &crate::val::Val,
+    storage: &dyn crate::storage::BuildStorage,
+) -> Result<(), String> {
+    let build = crate::db::Build::get_build(db, build_id)
+        .await
+        .map_err(|e| format!("Failed to get build: {}", e))?;
+
+    if !build.is_bundle() {
+        return Ok(());
+    }
+
+    let build_data = storage
+        .retrieve_build(build_id, org_id, env_id)
+        .await
+        .map_err(|e| format!("Failed to read build file: {}", e))?;
+    let scheduled_functions = extract_scheduled_functions_from_build(&build_data)?;
+    let features = crate::db::Features::resolve_for_org(db, org_id).await;
+    let policy = crate::db::SchedulePolicy::from_conf(conf).with_features(&features);
+
+    for cron_expression in scheduled_functions.keys() {
+        crate::db::validate_recurring_schedule_interval(cron_expression, policy.min_interval_secs)
+            .map_err(|e| {
+                format!(
+                    "Deploy blocked: schedule '{}' violates schedule interval policy. {}",
+                    cron_expression,
+                    e.message()
+                )
+            })?;
+    }
+
+    let new_count: i64 = scheduled_functions.values().map(|v| v.len() as i64).sum();
+    crate::db::Schedule::enforce_active_count_for_org_replacing_project(
+        db,
+        org_id,
+        &build.project_id,
+        new_count,
+        policy,
+    )
+    .await
+    .map_err(|e| format!("Deploy blocked: {}", e))?;
+
+    Ok(())
+}
+
 /// Validate that box resource requirements can be satisfied by the org's plan
 /// Returns Ok(()) if all requirements are met, or an error describing the gap
 pub async fn validate_box_requirements_for_deploy(
@@ -2789,6 +2896,196 @@ hot.pkg.demo {
             .unwrap();
         zip.write_all(manifest_body.as_bytes()).unwrap();
         zip.finish().unwrap().into_inner()
+    }
+
+    struct InMemoryBuildStorage {
+        data: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::storage::BuildStorage for InMemoryBuildStorage {
+        async fn store_build(
+            &self,
+            _build_id: &Uuid,
+            _org_id: &Uuid,
+            _env_id: &Uuid,
+            _data: Vec<u8>,
+        ) -> Result<String, String> {
+            Ok("memory".to_string())
+        }
+
+        async fn retrieve_build(
+            &self,
+            _build_id: &Uuid,
+            _org_id: &Uuid,
+            _env_id: &Uuid,
+        ) -> Result<Vec<u8>, String> {
+            Ok(self.data.clone())
+        }
+
+        async fn exists(
+            &self,
+            _build_id: &Uuid,
+            _org_id: &Uuid,
+            _env_id: &Uuid,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn delete_build(
+            &self,
+            _build_id: &Uuid,
+            _org_id: &Uuid,
+            _env_id: &Uuid,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn build_path(&self, _build_id: &Uuid, _org_id: &Uuid, _env_id: &Uuid) -> String {
+            "memory".to_string()
+        }
+
+        fn storage_type(&self) -> &str {
+            "memory"
+        }
+    }
+
+    async fn attach_test_plan(
+        db: &crate::db::DatabasePool,
+        org_id: &Uuid,
+        user_id: &Uuid,
+        features: serde_json::Value,
+    ) -> Uuid {
+        let plan_uuid = Uuid::now_v7();
+        match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO plan
+                     (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features)
+                     VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                )
+                .bind(plan_uuid)
+                .bind(format!("test-plan-{}", plan_uuid.simple()))
+                .bind("Test Plan")
+                .bind(0)
+                .bind(0)
+                .bind(1)
+                .bind(features.to_string())
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DatabasePool::Postgres(_) => unreachable!(),
+        }
+
+        crate::db::OrgPlan::create(
+            db,
+            org_id,
+            &plan_uuid,
+            crate::db::BillingPeriod::Monthly,
+            user_id,
+        )
+        .await
+        .unwrap();
+
+        plan_uuid
+    }
+
+    async fn update_test_plan_features(
+        db: &crate::db::DatabasePool,
+        plan_uuid: &Uuid,
+        features: serde_json::Value,
+    ) {
+        match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query("UPDATE plan SET features = ? WHERE plan_uuid = ?")
+                    .bind(features.to_string())
+                    .bind(plan_uuid)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            crate::db::DatabasePool::Postgres(_) => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_schedule_requirements_for_deploy_enforces_plan_interval() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let build_id = Uuid::now_v7();
+        crate::db::Build::insert_build(
+            &db,
+            &build_id,
+            &data.project_id,
+            "bundle-with-fast-schedule",
+            1,
+            crate::db::Build::BUILD_TYPE_BUNDLE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+
+        let plan_uuid = attach_test_plan(
+            &db,
+            &data.org_id,
+            &data.user_id,
+            serde_json::json!({
+                "schedule_min_interval_secs": 300,
+                "schedule_min_delay_secs": 0,
+                "active_schedules_per_org": -1
+            }),
+        )
+        .await;
+
+        let manifest = r#"{"hot.bundle.demo": {"scheduled_functions": {
+            "every second": [{"fn": "::demo/tick", "meta": {}, "file": null, "line": null, "column": null, "position": null}]
+        }}}"#;
+        let storage = InMemoryBuildStorage {
+            data: build_manifest_zip(manifest),
+        };
+        let conf = crate::val!({
+            "schedule": {
+                "min-interval-seconds": 1,
+                "min-delay-seconds": 0,
+                "max-active-per-org": -1
+            }
+        });
+
+        let err = validate_schedule_requirements_for_deploy(
+            &db,
+            &build_id,
+            &data.org_id,
+            &data.env_id,
+            &conf,
+            &storage,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("violates schedule interval policy"));
+        assert!(err.contains("minimum of 300"));
+
+        update_test_plan_features(
+            &db,
+            &plan_uuid,
+            serde_json::json!({
+                "schedule_min_interval_secs": 1,
+                "schedule_min_delay_secs": 0,
+                "active_schedules_per_org": -1
+            }),
+        )
+        .await;
+
+        validate_schedule_requirements_for_deploy(
+            &db,
+            &build_id,
+            &data.org_id,
+            &data.env_id,
+            &conf,
+            &storage,
+        )
+        .await
+        .unwrap();
     }
 
     #[test]

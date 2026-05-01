@@ -3,7 +3,7 @@ use chrono::Utc;
 use croner::Cron;
 use hot::data::msg::Message;
 use hot::data::serialization::Serialization;
-use hot::db::{DatabasePool, Schedule, ScheduleLog, SchedulerState};
+use hot::db::{DatabasePool, Schedule, ScheduleLog, SchedulePolicy, SchedulerState};
 use hot::env::is_local_dev;
 use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
 use hot::queue::{Queue, QueueType, mem::MemQueue, streams::RedisStreamQueue};
@@ -81,6 +81,7 @@ pub fn get_resolved_conf(conf: Val) -> Val {
     default_conf.merge(&conf)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     queue_type: QueueType,
     redis_uri: Option<String>,
@@ -89,8 +90,15 @@ pub async fn run(
     db: Option<DatabasePool>,
     sync_interval_seconds: Option<u64>,
     backfill_enabled: bool,
+    schedule_policy: SchedulePolicy,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: SCHEDULER starting");
+    debug!(
+        "hot.dev: SCHEDULER schedule policy: min_interval={}s, min_delay={}s, max_active_per_org={}",
+        schedule_policy.min_interval_secs,
+        schedule_policy.min_delay_secs,
+        schedule_policy.max_active_per_org
+    );
 
     // Create queue for sending scheduled events to workers
     let event_queue: Arc<dyn Queue<Message>> = match queue_type {
@@ -181,6 +189,7 @@ pub async fn run(
                             &running_jobs_clone,
                             &db_clone,
                             backfill_enabled,
+                            schedule_policy,
                         )
                         .await
                         {
@@ -413,6 +422,7 @@ async fn sync_with_database(
     running_jobs: &Arc<RwLock<AHashMap<Uuid, ScheduledJobInfo>>>,
     db: &Arc<DatabasePool>,
     backfill_enabled: bool,
+    schedule_policy: SchedulePolicy,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = Utc::now();
 
@@ -523,7 +533,9 @@ async fn sync_with_database(
                 }
 
                 // Try to add the updated job
-                match create_scheduled_job(db, scheduler, event_queue, &schedule).await {
+                match create_scheduled_job(db, scheduler, event_queue, &schedule, schedule_policy)
+                    .await
+                {
                     Ok(job_info) => {
                         jobs_map.insert(schedule.schedule_id, job_info);
                         updated_count += 1;
@@ -552,7 +564,8 @@ async fn sync_with_database(
             }
         } else {
             // Try to add new job
-            match create_scheduled_job(db, scheduler, event_queue, &schedule).await {
+            match create_scheduled_job(db, scheduler, event_queue, &schedule, schedule_policy).await
+            {
                 Ok(job_info) => {
                     jobs_map.insert(schedule.schedule_id, job_info);
                     added_count += 1;
@@ -653,6 +666,7 @@ async fn create_scheduled_job(
     scheduler: &JobScheduler,
     event_queue: &Arc<dyn Queue<Message>>,
     schedule: &Schedule,
+    base_policy: SchedulePolicy,
 ) -> Result<ScheduledJobInfo, Box<dyn std::error::Error + Send + Sync>> {
     let schedule_id = schedule.schedule_id;
     let cron = schedule.cron.clone();
@@ -668,6 +682,41 @@ async fn create_scheduled_job(
             format!(
                 "Invalid cron expression '{}' for schedule {} ({}:{}): {}",
                 cron, schedule_id, ns, var, e
+            ),
+        )));
+    }
+
+    let policy = match hot::db::Build::get_env_id_for_build(db, &build_id).await {
+        Ok(env_id) => match hot::db::Env::get_env(db, &env_id).await {
+            Ok(env) => {
+                let features = hot::db::Features::resolve_for_org(db, &env.org_id).await;
+                base_policy.with_features(&features)
+            }
+            Err(e) => {
+                warn!(
+                    "hot.dev: SCHEDULER could not resolve env {} for schedule policy: {}",
+                    env_id, e
+                );
+                base_policy
+            }
+        },
+        Err(e) => {
+            warn!(
+                "hot.dev: SCHEDULER could not resolve build {} env for schedule policy: {}",
+                build_id, e
+            );
+            base_policy
+        }
+    };
+    if let Err(e) = hot::db::validate_recurring_schedule_interval(&cron, policy.min_interval_secs) {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Schedule {} ({}:{}) violates schedule policy: {}",
+                schedule_id,
+                ns,
+                var,
+                e.message()
             ),
         )));
     }

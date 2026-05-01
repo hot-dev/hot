@@ -4490,6 +4490,11 @@
       color: var(--color-white);
     }
   }
+  .dark\:text-yellow-100 {
+    &:where(.dark, .dark *) {
+      color: var(--color-yellow-100);
+    }
+  }
   .dark\:text-yellow-200 {
     &:where(.dark, .dark *) {
       color: var(--color-yellow-200);

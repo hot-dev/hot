@@ -169,8 +169,8 @@ pub use org_note::{OrgNote, OrgNoteError};
 pub use project::{Project, ProjectError};
 pub use run::{Run, RunError, RunStatus, RunStatusParseError};
 pub use schedule::{
-    AT_SCHEDULE_PREFIX, Schedule, ScheduleError, ScheduleType, ScheduleWithProject,
-    parse_schedule_expression,
+    AT_SCHEDULE_PREFIX, Schedule, ScheduleError, SchedulePolicy, ScheduleType, ScheduleWithProject,
+    parse_schedule_expression, validate_recurring_schedule_interval,
 };
 pub use schedule_log::{ScheduleLog, ScheduleLogError};
 pub use scheduler_state::{SchedulerState, SchedulerStateError};

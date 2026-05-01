@@ -4,7 +4,7 @@ use ahash::AHashMap;
 use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect};
-use hot::db::{DatabasePool, Event, EventHandler, Schedule, ScheduleLog};
+use hot::db::{DatabasePool, Event, EventHandler, Features, Schedule, ScheduleLog};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -99,6 +99,28 @@ pub async fn schedules_list_handler(
     let start_page = std::cmp::max(1, current_page_num - 2);
     let end_page = std::cmp::min(total_pages, current_page_num + 2);
 
+    let (org_active_schedules, org_active_schedule_limit) =
+        if let Some(org) = session.current_org.as_ref() {
+            let features = if session.billing_enabled {
+                Features::resolve_for_hosted_org(&db, &org.org_id).await
+            } else {
+                Features::resolve_for_org(&db, &org.org_id).await
+            };
+            let active_count = Schedule::get_active_count_by_org(&db, &org.org_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        "Failed to count active schedules for org {}: {}",
+                        org.org_id,
+                        e
+                    );
+                    0
+                });
+            (active_count, features.active_schedules_per_org())
+        } else {
+            (0, -1)
+        };
+
     let template = templates::SchedulesList {
         title: "Scheduled Runs",
         page_context: templates::PrivatePageContext::with_breadcrumbs(
@@ -114,6 +136,8 @@ pub async fn schedules_list_handler(
         has_next_page,
         has_prev_page,
         total_schedules,
+        org_active_schedules,
+        org_active_schedule_limit,
         search_query,
     };
 
