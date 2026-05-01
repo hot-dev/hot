@@ -78,6 +78,8 @@ pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
         false
     };
 
+    let schedule_policy = hot::db::SchedulePolicy::from_conf(&conf);
+
     let server = tokio::spawn(async move {
         match hot_scheduler::server::run(
             queue_type,
@@ -87,6 +89,7 @@ pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
             db,
             sync_interval_seconds,
             backfill_enabled,
+            schedule_policy,
         )
         .await
         {

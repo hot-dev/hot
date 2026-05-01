@@ -44,6 +44,11 @@ pub mod keys {
     // Rate limit features (i64 values, -1 = unlimited)
     pub const RATE_LIMIT_RPS: &str = "rate_limit_rps";
 
+    // Schedule limits (i64 values, -1 = unlimited where applicable)
+    pub const SCHEDULE_MIN_INTERVAL_SECS: &str = "schedule_min_interval_secs";
+    pub const SCHEDULE_MIN_DELAY_SECS: &str = "schedule_min_delay_secs";
+    pub const ACTIVE_SCHEDULES_PER_ORG: &str = "active_schedules_per_org";
+
     // Per-container caps (5-tier resolution via BoxLimits)
     pub const BOX_TMP_SIZE_MB: &str = "box_tmp_size_mb";
     pub const BOX_DISK_SIZE_MB: &str = "box_disk_size_mb";
@@ -145,6 +150,18 @@ impl Features {
             JsonValue::Number((-1).into()),
         );
         inner.insert(
+            keys::SCHEDULE_MIN_INTERVAL_SECS.to_string(),
+            JsonValue::Number(1.into()),
+        );
+        inner.insert(
+            keys::SCHEDULE_MIN_DELAY_SECS.to_string(),
+            JsonValue::Number(0.into()),
+        );
+        inner.insert(
+            keys::ACTIVE_SCHEDULES_PER_ORG.to_string(),
+            JsonValue::Number((-1).into()),
+        );
+        inner.insert(
             keys::CUSTOM_DOMAINS.to_string(),
             JsonValue::Number((-1).into()),
         );
@@ -240,6 +257,18 @@ impl Features {
         m.insert(
             keys::RATE_LIMIT_RPS.to_string(),
             JsonValue::Number(10.into()),
+        );
+        m.insert(
+            keys::SCHEDULE_MIN_INTERVAL_SECS.to_string(),
+            JsonValue::Number(300.into()),
+        );
+        m.insert(
+            keys::SCHEDULE_MIN_DELAY_SECS.to_string(),
+            JsonValue::Number(0.into()),
+        );
+        m.insert(
+            keys::ACTIVE_SCHEDULES_PER_ORG.to_string(),
+            JsonValue::Number(50.into()),
         );
         m.insert(
             keys::CUSTOM_DOMAINS.to_string(),
@@ -573,6 +602,22 @@ impl Features {
 
     pub fn is_unlimited_rate_limit(&self) -> bool {
         self.is_unlimited(keys::RATE_LIMIT_RPS)
+    }
+
+    pub fn schedule_min_interval_secs(&self) -> i64 {
+        self.get_i64_or(keys::SCHEDULE_MIN_INTERVAL_SECS, 1).max(1)
+    }
+
+    pub fn schedule_min_delay_secs(&self) -> i64 {
+        self.get_i64_or(keys::SCHEDULE_MIN_DELAY_SECS, 0).max(0)
+    }
+
+    pub fn active_schedules_per_org(&self) -> i64 {
+        self.get_i64_or(keys::ACTIVE_SCHEDULES_PER_ORG, -1)
+    }
+
+    pub fn is_unlimited_active_schedules(&self) -> bool {
+        self.is_unlimited(keys::ACTIVE_SCHEDULES_PER_ORG)
     }
 
     // ── Formatting Helpers ───────────────────────────────────────────────

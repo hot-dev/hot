@@ -9,6 +9,92 @@ use uuid::Uuid;
 
 /// The prefix used for one-time "at" schedules stored in the cron field
 pub const AT_SCHEDULE_PREFIX: &str = "@at:";
+pub const TECHNICAL_MIN_RECURRING_INTERVAL_SECS: i64 = 1;
+pub const DEFAULT_MIN_DELAY_SECS: i64 = 0;
+pub const SELF_HOSTED_MAX_ACTIVE_SCHEDULES_PER_ORG: i64 = -1;
+pub const HOSTED_DEFAULT_MAX_ACTIVE_SCHEDULES_PER_ORG: i64 = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulePolicy {
+    pub min_interval_secs: i64,
+    pub min_delay_secs: i64,
+    pub max_active_per_org: i64,
+}
+
+impl SchedulePolicy {
+    pub fn self_hosted_default() -> Self {
+        Self {
+            min_interval_secs: TECHNICAL_MIN_RECURRING_INTERVAL_SECS,
+            min_delay_secs: DEFAULT_MIN_DELAY_SECS,
+            max_active_per_org: SELF_HOSTED_MAX_ACTIVE_SCHEDULES_PER_ORG,
+        }
+    }
+
+    pub fn from_conf(conf: &crate::val::Val) -> Self {
+        let conf_max = conf.get_int_or_default(
+            "schedule.max-active-per-org",
+            SELF_HOSTED_MAX_ACTIVE_SCHEDULES_PER_ORG,
+        );
+        let default_max = if crate::product::is_hot_cloud(conf) && conf_max < 0 {
+            HOSTED_DEFAULT_MAX_ACTIVE_SCHEDULES_PER_ORG
+        } else {
+            conf_max
+        };
+
+        Self {
+            min_interval_secs: conf
+                .get_int_or_default(
+                    "schedule.min-interval-seconds",
+                    TECHNICAL_MIN_RECURRING_INTERVAL_SECS,
+                )
+                .max(TECHNICAL_MIN_RECURRING_INTERVAL_SECS),
+            min_delay_secs: conf
+                .get_int_or_default("schedule.min-delay-seconds", DEFAULT_MIN_DELAY_SECS)
+                .max(0),
+            max_active_per_org: default_max,
+        }
+    }
+
+    pub fn with_features(mut self, features: &crate::db::Features) -> Self {
+        self.min_interval_secs = self
+            .min_interval_secs
+            .max(features.schedule_min_interval_secs())
+            .max(TECHNICAL_MIN_RECURRING_INTERVAL_SECS);
+        self.min_delay_secs = self.min_delay_secs.max(features.schedule_min_delay_secs());
+        self.max_active_per_org =
+            stricter_limit(self.max_active_per_org, features.active_schedules_per_org());
+        self
+    }
+}
+
+fn stricter_limit(a: i64, b: i64) -> i64 {
+    match (a < 0, b < 0) {
+        (true, true) => -1,
+        (true, false) => b,
+        (false, true) => a,
+        (false, false) => a.min(b),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduleIntervalValidation {
+    pub original: String,
+    pub normalized_cron: String,
+    pub observed_interval_secs: i64,
+    pub required_interval_secs: i64,
+}
+
+impl ScheduleIntervalValidation {
+    pub fn message(&self) -> String {
+        format!(
+            "Schedule '{}' runs every {} second(s), below the minimum of {} second(s) (normalized cron: '{}')",
+            self.original,
+            self.observed_interval_secs,
+            self.required_interval_secs,
+            self.normalized_cron
+        )
+    }
+}
 
 /// Represents the type of schedule - either a cron expression or a one-time "at" datetime
 #[derive(Debug, Clone, PartialEq)]
@@ -81,17 +167,9 @@ pub fn parse_schedule_expression(expr: &str) -> Result<ScheduleType, String> {
         return Ok(ScheduleType::At(run_at));
     }
 
-    // 3. Try as cron expression (croner)
-    if croner::Cron::from_str(expr).is_ok() {
-        return Ok(ScheduleType::Cron(expr.to_string()));
-    }
-
-    // 4. Try english-to-cron conversion
-    if let Ok(converted_cron) = english_to_cron::str_cron_syntax(expr) {
-        // Validate the converted cron expression works with croner
-        if croner::Cron::from_str(&converted_cron).is_ok() {
-            return Ok(ScheduleType::Cron(converted_cron));
-        }
+    // 3. Try recurring cron or supported English cron.
+    if let Ok(cron) = normalize_recurring_schedule_expression(expr) {
+        return Ok(ScheduleType::Cron(cron));
     }
 
     Err(format!(
@@ -105,6 +183,145 @@ pub fn parse_schedule_expression(expr: &str) -> Result<ScheduleType, String> {
         • English: \"every day at 9am\", \"every Monday at 2 PM\"",
         expr
     ))
+}
+
+fn contains_unsupported_subsecond_unit(expr: &str) -> bool {
+    let lower = expr.to_ascii_lowercase();
+    [
+        "millisecond",
+        "milliseconds",
+        "msec",
+        "msecs",
+        "ms",
+        "microsecond",
+        "microseconds",
+        "usec",
+        "usecs",
+        "nanosecond",
+        "nanoseconds",
+        "nsec",
+        "nsecs",
+    ]
+    .iter()
+    .any(|unit| {
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|t| t == *unit)
+    })
+}
+
+pub fn normalize_recurring_schedule_expression(expr: &str) -> Result<String, String> {
+    let expr = expr.trim();
+
+    if contains_unsupported_subsecond_unit(expr) {
+        return Err(
+            "Sub-second schedule intervals are not supported; use seconds or a slower interval"
+                .to_string(),
+        );
+    }
+
+    if croner::Cron::from_str(expr).is_ok() {
+        return Ok(expr.to_string());
+    }
+
+    match english_to_cron::str_cron_syntax(expr) {
+        Ok(converted_cron) => {
+            croner::Cron::from_str(&converted_cron).map_err(|e| {
+                format!(
+                    "English expression '{}' converted to invalid cron '{}': {}",
+                    expr, converted_cron, e
+                )
+            })?;
+            Ok(converted_cron)
+        }
+        Err(e) => Err(format!(
+            "Could not parse '{}' as cron or supported English schedule: {:?}",
+            expr, e
+        )),
+    }
+}
+
+pub fn validate_recurring_schedule_interval(
+    expr: &str,
+    min_interval_secs: i64,
+) -> Result<(), ScheduleIntervalValidation> {
+    let required = min_interval_secs.max(TECHNICAL_MIN_RECURRING_INTERVAL_SECS);
+    let normalized = normalize_recurring_schedule_expression(expr).map_err(|message| {
+        ScheduleIntervalValidation {
+            original: expr.to_string(),
+            normalized_cron: message,
+            observed_interval_secs: 0,
+            required_interval_secs: required,
+        }
+    })?;
+
+    let cron = croner::Cron::from_str(&normalized).map_err(|e| ScheduleIntervalValidation {
+        original: expr.to_string(),
+        normalized_cron: e.to_string(),
+        observed_interval_secs: 0,
+        required_interval_secs: required,
+    })?;
+
+    let mut prev = match cron.find_next_occurrence(&Utc::now(), false) {
+        Ok(dt) => dt,
+        Err(e) => {
+            return Err(ScheduleIntervalValidation {
+                original: expr.to_string(),
+                normalized_cron: e.to_string(),
+                observed_interval_secs: 0,
+                required_interval_secs: required,
+            });
+        }
+    };
+
+    let mut min_gap = i64::MAX;
+    for _ in 0..64 {
+        let next =
+            cron.find_next_occurrence(&prev, false)
+                .map_err(|e| ScheduleIntervalValidation {
+                    original: expr.to_string(),
+                    normalized_cron: e.to_string(),
+                    observed_interval_secs: 0,
+                    required_interval_secs: required,
+                })?;
+        let gap = (next - prev).num_seconds();
+        if gap > 0 {
+            min_gap = min_gap.min(gap);
+        }
+        prev = next;
+    }
+
+    if min_gap < required {
+        Err(ScheduleIntervalValidation {
+            original: expr.to_string(),
+            normalized_cron: normalized,
+            observed_interval_secs: min_gap,
+            required_interval_secs: required,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_one_time_schedule_delay(
+    run_at: DateTime<Utc>,
+    min_delay_secs: i64,
+) -> Result<(), String> {
+    let required = min_delay_secs.max(0);
+    if required == 0 {
+        return Ok(());
+    }
+
+    let delay = (run_at - Utc::now()).num_seconds();
+    if delay < required {
+        Err(format!(
+            "One-time schedule is {} second(s) from now, below the minimum delay of {} second(s)",
+            delay.max(0),
+            required
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Error, Debug)]
@@ -129,6 +346,8 @@ pub enum ScheduleError {
     NotFound,
     #[error("Serialization error: {0}")]
     SerializationError(String),
+    #[error("Schedule policy error: {0}")]
+    PolicyError(String),
     #[error("Cron validation error: {0}")]
     CronValidationError(#[from] Box<CronValidationErrorDetails>),
 }
@@ -725,7 +944,15 @@ impl Schedule {
     ) -> Result<(), ScheduleError> {
         // First, validate all cron expressions before inserting any schedules
         for (cron_expression, functions) in scheduled_functions {
-            if let Err(validation_error) = Self::validate_cron_expression(cron_expression) {
+            if let Err(validation_error) =
+                Self::validate_cron_expression(cron_expression).and_then(|_| {
+                    validate_recurring_schedule_interval(
+                        cron_expression,
+                        TECHNICAL_MIN_RECURRING_INTERVAL_SECS,
+                    )
+                    .map_err(|e| e.message())
+                })
+            {
                 // Include function information in the error for better debugging
                 if let Some(first_function) = functions.first()
                     && let Ok((ns, var, _, _, file, line, column, position)) =
@@ -952,40 +1179,15 @@ impl Schedule {
     /// 0 */30 9-17 * * MON-FRI   | Traditional cron (complex patterns)
     /// ```
     pub fn validate_cron_expression(cron: &str) -> Result<(), String> {
-        // First, try to parse as a traditional cron expression
-        match croner::Cron::from_str(cron) {
-            Ok(_) => Ok(()),
-            Err(cron_error) => {
-                // If traditional cron parsing fails, try English-to-cron conversion
-                if let Ok(converted_cron) = english_to_cron::str_cron_syntax(cron) {
-                    // Validate the converted cron expression
-                    match croner::Cron::from_str(&converted_cron) {
-                        Ok(_) => {
-                            tracing::debug!(
-                                "Successfully converted English '{}' to cron '{}'",
-                                cron,
-                                converted_cron
-                            );
-                            return Ok(());
-                        }
-                        Err(converted_error) => {
-                            return Err(format!(
-                                "English expression '{}' was converted to cron '{}', but validation failed: {}.\n\
-                                Try using a different English phrase or a traditional cron expression.\n\
-                                Examples: 'daily at 9 AM', 'every Monday at 2 PM', 'every 5 minutes'",
-                                cron, converted_cron, converted_error
-                            ));
-                        }
-                    }
-                }
-
-                // Neither traditional cron nor English conversion worked
-                Err(format!(
-                    "Could not parse '{}' as either a cron expression or natural language.\n\
+        normalize_recurring_schedule_expression(cron)
+            .map(|_| ())
+            .map_err(|e| {
+                format!(
+                    "Could not parse '{}' as either a cron expression or supported natural language.\n\
                     \n\
-                    If using traditional cron: {}\n\
+                    {}\n\
                     \n\
-                    If using natural language, try phrases like:\n\
+                    Try phrases like:\n\
                     • 'daily at 9 AM'\n\
                     • 'every Monday at 2:30 PM'\n\
                     • 'every 5 minutes'\n\
@@ -995,10 +1197,9 @@ impl Schedule {
                     \n\
                     Traditional cron format: 'sec min hour day month day_of_week'\n\
                     Examples: '0 30 9 * * MON' (9:30 AM Monday), '*/15 * * * * *' (every 15 seconds)",
-                    cron, cron_error
-                ))
-            }
-        }
+                    cron, e
+                )
+            })
     }
 
     /// Extract function data from a compiler ScheduledFunction
@@ -1352,6 +1553,135 @@ impl Schedule {
         }
     }
 
+    /// Count active schedules attached to active deployed builds in active projects/envs for an org.
+    pub async fn get_active_count_by_org(
+        db: &crate::db::DatabasePool,
+        org_id: &Uuid,
+    ) -> Result<i64, ScheduleError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let count = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM schedule s
+                     JOIN build b ON s.build_id = b.build_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE s.active = true
+                       AND b.deployed = true
+                       AND b.active = true
+                       AND p.active = true
+                       AND e.active = true
+                       AND e.org_id = $1",
+                )
+                .bind(org_id)
+                .fetch_one(pg_pool)
+                .await?;
+                Ok(count)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let count = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM schedule s
+                     JOIN build b ON s.build_id = b.build_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE s.active = 1
+                       AND b.deployed = 1
+                       AND b.active = 1
+                       AND p.active = 1
+                       AND e.active = 1
+                       AND e.org_id = ?",
+                )
+                .bind(org_id)
+                .fetch_one(sqlite_pool)
+                .await?;
+                Ok(count)
+            }
+        }
+    }
+
+    pub async fn get_active_count_by_project(
+        db: &crate::db::DatabasePool,
+        project_id: &Uuid,
+    ) -> Result<i64, ScheduleError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let count = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM schedule s
+                     JOIN build b ON s.build_id = b.build_id
+                     WHERE s.active = true
+                       AND b.deployed = true
+                       AND b.active = true
+                       AND b.project_id = $1",
+                )
+                .bind(project_id)
+                .fetch_one(pg_pool)
+                .await?;
+                Ok(count)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let count = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM schedule s
+                     JOIN build b ON s.build_id = b.build_id
+                     WHERE s.active = 1
+                       AND b.deployed = 1
+                       AND b.active = 1
+                       AND b.project_id = ?",
+                )
+                .bind(project_id)
+                .fetch_one(sqlite_pool)
+                .await?;
+                Ok(count)
+            }
+        }
+    }
+
+    pub async fn enforce_active_count_for_org_replacing_project(
+        db: &crate::db::DatabasePool,
+        org_id: &Uuid,
+        project_id: &Uuid,
+        new_project_schedules: i64,
+        policy: SchedulePolicy,
+    ) -> Result<(), ScheduleError> {
+        if policy.max_active_per_org < 0 {
+            return Ok(());
+        }
+
+        let current_org = Self::get_active_count_by_org(db, org_id).await?;
+        let current_project = Self::get_active_count_by_project(db, project_id).await?;
+        let projected = current_org - current_project + new_project_schedules.max(0);
+        if projected > policy.max_active_per_org {
+            return Err(ScheduleError::PolicyError(format!(
+                "Active schedule limit exceeded: deploying this build would leave {} active schedule(s), above the org limit of {}",
+                projected, policy.max_active_per_org
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub async fn enforce_active_count_for_org(
+        db: &crate::db::DatabasePool,
+        org_id: &Uuid,
+        additional_schedules: i64,
+        policy: SchedulePolicy,
+    ) -> Result<(), ScheduleError> {
+        if policy.max_active_per_org < 0 {
+            return Ok(());
+        }
+
+        let current = Self::get_active_count_by_org(db, org_id).await?;
+        let projected = current + additional_schedules.max(0);
+        if projected > policy.max_active_per_org {
+            return Err(ScheduleError::PolicyError(format!(
+                "Active schedule limit exceeded: {} active schedule(s) plus {} new schedule(s) would exceed the org limit of {}",
+                current,
+                additional_schedules.max(0),
+                policy.max_active_per_org
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Get all schedules for deployed builds (only for active projects)
     pub async fn get_schedules_for_deployed_builds(
         db: &crate::db::DatabasePool,
@@ -1601,11 +1931,28 @@ impl Schedule {
         schedule_id: &Uuid,
         build_id: &Uuid,
         schedule_type: &ScheduleType,
+        org_id: Option<&Uuid>,
+        policy: SchedulePolicy,
         ns: &str,
         var: &str,
         meta: Option<&JsonValue>,
         args: Option<&JsonValue>,
     ) -> Result<(), ScheduleError> {
+        match schedule_type {
+            ScheduleType::Cron(cron) => {
+                validate_recurring_schedule_interval(cron, policy.min_interval_secs)
+                    .map_err(|e| ScheduleError::PolicyError(e.message()))?
+            }
+            ScheduleType::At(run_at) => {
+                validate_one_time_schedule_delay(*run_at, policy.min_delay_secs)
+                    .map_err(ScheduleError::PolicyError)?
+            }
+        }
+
+        if let Some(org_id) = org_id {
+            Self::enforce_active_count_for_org(db, org_id, 1, policy).await?;
+        }
+
         let cron_field = schedule_type.to_cron_field();
 
         match db {
@@ -2134,6 +2481,281 @@ mod tests {
                 Err(e) => println!("❌ '{}' failed: {}", alt, e),
             }
         }
+    }
+
+    #[test]
+    fn test_schedule_interval_policy_rejects_too_fast_recurring_schedules() {
+        assert!(validate_recurring_schedule_interval("every 5 minutes", 300).is_ok());
+        assert!(validate_recurring_schedule_interval("0 */5 * * * *", 300).is_ok());
+
+        let err = validate_recurring_schedule_interval("every second", 300).unwrap_err();
+        assert_eq!(err.observed_interval_secs, 1);
+        assert_eq!(err.required_interval_secs, 300);
+
+        let err = validate_recurring_schedule_interval("*/1 * * * * *", 300).unwrap_err();
+        assert_eq!(err.observed_interval_secs, 1);
+        assert_eq!(err.required_interval_secs, 300);
+    }
+
+    #[test]
+    fn test_schedule_interval_policy_rejects_subsecond_english_units() {
+        let result = Schedule::validate_cron_expression("every 1 millisecond");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Sub-second"));
+
+        let result = validate_recurring_schedule_interval("every 1 millisecond", 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_schedule_policy_defaults_when_conf_values_are_missing() {
+        let empty_conf = crate::val::Val::map_empty();
+        assert_eq!(
+            SchedulePolicy::from_conf(&empty_conf),
+            SchedulePolicy {
+                min_interval_secs: 1,
+                min_delay_secs: 0,
+                max_active_per_org: -1,
+            }
+        );
+
+        let hosted_conf_without_schedule = crate::val!({
+            "product": {
+                "experience": "hot-cloud"
+            }
+        });
+        assert_eq!(
+            SchedulePolicy::from_conf(&hosted_conf_without_schedule),
+            SchedulePolicy {
+                min_interval_secs: 1,
+                min_delay_secs: 0,
+                max_active_per_org: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn test_schedule_policy_uses_feature_defaults_when_keys_are_missing() {
+        let policy = SchedulePolicy::from_conf(&crate::val::Val::map_empty())
+            .with_features(&crate::db::Features::empty());
+
+        assert_eq!(policy.min_interval_secs, 1);
+        assert_eq!(policy.min_delay_secs, 0);
+        assert_eq!(policy.max_active_per_org, -1);
+    }
+
+    fn scheduled_functions(cron: &str, count: usize) -> crate::lang::compiler::ScheduledFunctions {
+        let mut schedules = crate::lang::compiler::ScheduledFunctions::new();
+        let entries = (0..count)
+            .map(|idx| {
+                let fn_name = format!("::demo/task-{}", idx);
+                crate::lang::compiler::ScheduledFunction {
+                    cron_expression: cron.to_string(),
+                    scheduled_function: crate::val!({
+                        "fn": fn_name,
+                        "meta": {},
+                        "file": null,
+                        "line": null,
+                        "column": null,
+                        "position": null
+                    }),
+                }
+            })
+            .collect();
+        schedules.insert(cron.to_string(), entries);
+        schedules
+    }
+
+    #[tokio::test]
+    async fn test_active_schedule_limit_replaces_current_project_count() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let send_targets = crate::lang::compiler::SendTargets::new();
+
+        let old_project_build_id = Uuid::now_v7();
+        crate::db::Build::insert_build(
+            &db,
+            &old_project_build_id,
+            &data.project_id,
+            "old-project-build",
+            1,
+            crate::db::Build::BUILD_TYPE_BUNDLE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        Schedule::insert_schedules_for_build(
+            &db,
+            &old_project_build_id,
+            &scheduled_functions("0 */5 * * * *", 2),
+            &send_targets,
+        )
+        .await
+        .unwrap();
+        crate::db::Build::deploy_build(&db, &old_project_build_id, &data.user_id)
+            .await
+            .unwrap();
+
+        let other_project_id = Uuid::now_v7();
+        crate::db::Project::insert_project(
+            &db,
+            &other_project_id,
+            &data.env_id,
+            "other-project",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let other_build_id = Uuid::now_v7();
+        crate::db::Build::insert_build(
+            &db,
+            &other_build_id,
+            &other_project_id,
+            "other-build",
+            1,
+            crate::db::Build::BUILD_TYPE_BUNDLE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        Schedule::insert_schedules_for_build(
+            &db,
+            &other_build_id,
+            &scheduled_functions("0 */10 * * * *", 1),
+            &send_targets,
+        )
+        .await
+        .unwrap();
+        crate::db::Build::deploy_build(&db, &other_build_id, &data.user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            Schedule::get_active_count_by_org(&db, &data.org_id)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            Schedule::get_active_count_by_project(&db, &data.project_id)
+                .await
+                .unwrap(),
+            2
+        );
+        let usage = crate::db::OrgUsageStats::calculate(
+            &db,
+            &data.org_id,
+            chrono::Utc::now() - chrono::Duration::days(1),
+            7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(usage.active_schedules, 3);
+
+        let policy = SchedulePolicy {
+            min_interval_secs: 1,
+            min_delay_secs: 0,
+            max_active_per_org: 3,
+        };
+
+        Schedule::enforce_active_count_for_org_replacing_project(
+            &db,
+            &data.org_id,
+            &data.project_id,
+            2,
+            policy,
+        )
+        .await
+        .unwrap();
+
+        let err = Schedule::enforce_active_count_for_org_replacing_project(
+            &db,
+            &data.org_id,
+            &data.project_id,
+            3,
+            policy,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("Active schedule limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_insert_dynamic_schedule_enforces_policy() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+
+        let fast_recurring = Schedule::insert_dynamic_schedule(
+            &db,
+            &Uuid::now_v7(),
+            &data.build_id,
+            &ScheduleType::Cron("every second".to_string()),
+            Some(&data.org_id),
+            SchedulePolicy {
+                min_interval_secs: 300,
+                min_delay_secs: 0,
+                max_active_per_org: -1,
+            },
+            "::demo",
+            "tick",
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            fast_recurring
+                .unwrap_err()
+                .to_string()
+                .contains("minimum of 300")
+        );
+
+        let too_soon = Schedule::insert_dynamic_schedule(
+            &db,
+            &Uuid::now_v7(),
+            &data.build_id,
+            &ScheduleType::At(chrono::Utc::now() + chrono::Duration::seconds(5)),
+            Some(&data.org_id),
+            SchedulePolicy {
+                min_interval_secs: 1,
+                min_delay_secs: 60,
+                max_active_per_org: -1,
+            },
+            "::demo",
+            "once",
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            too_soon
+                .unwrap_err()
+                .to_string()
+                .contains("below the minimum delay of 60")
+        );
+
+        let over_quota = Schedule::insert_dynamic_schedule(
+            &db,
+            &Uuid::now_v7(),
+            &data.build_id,
+            &ScheduleType::Cron("every 5 minutes".to_string()),
+            Some(&data.org_id),
+            SchedulePolicy {
+                min_interval_secs: 1,
+                min_delay_secs: 0,
+                max_active_per_org: 0,
+            },
+            "::demo",
+            "quota",
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            over_quota
+                .unwrap_err()
+                .to_string()
+                .contains("Active schedule limit exceeded")
+        );
     }
 
     #[test]

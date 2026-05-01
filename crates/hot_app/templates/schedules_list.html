@@ -19,6 +19,28 @@
         </div>
     </div>
 
+    <!-- Org Schedule Quota -->
+    <div class="mb-6 rounded-lg border p-4 {% if org_active_schedule_limit >= 0 && org_active_schedules >= org_active_schedule_limit %}bg-red-50 border-red-300 dark:bg-red-900/20 dark:border-red-700{% elif org_active_schedule_limit >= 0 && org_active_schedules * 100 >= org_active_schedule_limit * 80 %}bg-yellow-50 border-yellow-300 dark:bg-yellow-900/20 dark:border-yellow-700{% else %}bg-white border-gray-200 dark:bg-gray-800 dark:border-gray-700{% endif %}">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <div>
+                <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Org Active Schedule Usage</h2>
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                    {% if org_active_schedule_limit < 0 %}
+                    {{ org_active_schedules }} active schedule{% if org_active_schedules != 1 %}s{% endif %} across this org. Your current plan has no active schedule cap.
+                    {% else %}
+                    {{ org_active_schedules }} / {{ org_active_schedule_limit }} active schedules across this org.
+                    {% endif %}
+                    Showing {{ total_schedules }} scheduled run{% if total_schedules != 1 %}s{% endif %} in this environment.
+                </p>
+            </div>
+            {% if org_active_schedule_limit >= 0 && org_active_schedules >= org_active_schedule_limit %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-100">Limit reached</span>
+            {% elif org_active_schedule_limit >= 0 && org_active_schedules * 100 >= org_active_schedule_limit * 80 %}
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-100">Approaching limit</span>
+            {% endif %}
+        </div>
+    </div>
+
     {% if schedules.is_empty() %}
         <div class="text-center py-12">
             <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

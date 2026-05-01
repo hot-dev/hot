@@ -915,6 +915,16 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
             storage.as_ref(),
         )
         .await?;
+
+        hot::build::validate_schedule_requirements_for_deploy(
+            &db,
+            &build_uuid,
+            &org_id,
+            &env_id,
+            conf,
+            storage.as_ref(),
+        )
+        .await?;
     }
 
     // Deploy the build

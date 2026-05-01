@@ -40,6 +40,8 @@ pub struct UsageStats {
     pub call_count: i64,
     /// Store data storage in bytes (::hot::store)
     pub store_storage_bytes: i64,
+    /// Active schedules attached to deployed builds
+    pub active_schedules: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +66,8 @@ pub struct Limits {
     pub compute_units_budget: i64,
     /// Maximum task minutes per month (-1 for unlimited)
     pub task_minutes_per_month: i32,
+    /// Maximum active schedules per org (-1 for unlimited)
+    pub active_schedules_per_org: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +82,8 @@ pub struct UsagePercent {
     pub call_storage: f64,
     /// Store storage usage percentage (0-100+)
     pub store_storage: f64,
+    /// Active schedules usage percentage (0-100+)
+    pub active_schedules: f64,
     /// True if any usage is above 90%
     pub has_warning: bool,
 }
@@ -201,6 +207,7 @@ pub async fn get_org_usage(
             call_storage_bytes: usage_stats.call_storage_bytes,
             call_count: usage_stats.call_count,
             store_storage_bytes: usage_stats.store_storage_bytes,
+            active_schedules: usage_stats.active_schedules,
         },
         limits: Limits {
             runs_per_month: features.runs_per_month(),
@@ -213,6 +220,7 @@ pub async fn get_org_usage(
             compute_units_used: usage_stats.compute_units,
             compute_units_budget: features.compute_units_budget(),
             task_minutes_per_month: features.task_minutes_per_month(),
+            active_schedules_per_org: features.active_schedules_per_org(),
         },
         usage_percent: UsagePercent {
             runs: usage_stats.runs_pct(&features),
@@ -220,6 +228,7 @@ pub async fn get_org_usage(
             team_members: usage_stats.team_members_pct(&features),
             call_storage: usage_stats.call_storage_pct(&features),
             store_storage: usage_stats.store_storage_pct(&features),
+            active_schedules: usage_stats.active_schedules_pct(&features),
             has_warning: usage_stats.has_warning(&features),
         },
         plan: PlanInfo {

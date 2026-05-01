@@ -330,6 +330,27 @@ pub async fn deploy_build(
             ));
         }
         tracing::info!("Box requirements validation passed for build {}", build_id);
+
+        if let Err(e) = hot::build::validate_schedule_requirements_for_deploy(
+            &db,
+            &build_id,
+            &org_id,
+            &api_key.env_id,
+            &_conf,
+            storage.as_ref().as_ref(),
+        )
+        .await
+        {
+            tracing::warn!("Deploy blocked due to schedule limits: {}", e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::bad_request(&e)),
+            ));
+        }
+        tracing::info!(
+            "Schedule requirements validation passed for build {}",
+            build_id
+        );
     }
 
     // Deploy the build (mark as deployed)

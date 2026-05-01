@@ -145,6 +145,16 @@ impl Engine {
             .compiler
             .extract_scheduled_functions(&program)
             .map_err(|e| e.format_error(color))?;
+        if let Some(conf) = conf {
+            let policy = crate::db::SchedulePolicy::from_conf(conf);
+            for cron_expression in engine.compiler.get_scheduled_functions().keys() {
+                crate::db::validate_recurring_schedule_interval(
+                    cron_expression,
+                    policy.min_interval_secs,
+                )
+                .map_err(|e| e.message())?;
+            }
+        }
         engine
             .compiler
             .extract_mcp_tools(&program)
@@ -870,6 +880,16 @@ impl Engine {
                     return Err(
                         String::from("Scheduled function validation errors:\n") + &formatted
                     );
+                }
+                if let Some(conf) = conf {
+                    let policy = crate::db::SchedulePolicy::from_conf(conf);
+                    for cron_expression in compiler.get_scheduled_functions().keys() {
+                        crate::db::validate_recurring_schedule_interval(
+                            cron_expression,
+                            policy.min_interval_secs,
+                        )
+                        .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
+                    }
                 }
 
                 // Build call graph once for both ctx and box requirement resolution

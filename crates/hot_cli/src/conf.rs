@@ -105,6 +105,13 @@ pub(crate) fn create_default_conf() -> Val {
         "worker-memory-mb": 8192i64,
         "worker-disk-mb": 51200i64
     });
+    let schedule_conf = val!({
+        "min-interval-seconds": 1i64,
+        "min-delay-seconds": 0i64,
+        // -1 is unlimited for self-host/local. Hot Cloud resolves this to a
+        // finite hosted fallback before plan features are applied.
+        "max-active-per-org": -1i64
+    });
     // Cache configuration removed - will be reimplemented with  bytecode caching
 
     // Merge profile defaults only (project defaults will be added later)
@@ -148,6 +155,7 @@ pub(crate) fn create_default_conf() -> Val {
         "queue": queue_conf,
         "redis": redis_conf,
         "scheduler": scheduler_conf,
+        "schedule": schedule_conf,
         "serialization": serialization_conf,
         "domain": domain_conf,
         "worker": worker_conf,
@@ -1004,6 +1012,9 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
                 "scheduler.sync-interval-seconds",
                 "scheduler.queue.type",
                 "scheduler.serialization",
+                "schedule.min-interval-seconds",
+                "schedule.min-delay-seconds",
+                "schedule.max-active-per-org",
                 "log.level",
                 "log.target",
                 "log.dir",
@@ -1433,6 +1444,24 @@ mod tests {
         assert_eq!(
             redacted.get_str("remote.hot-dev.url"),
             "https://api.hot.dev"
+        );
+    }
+
+    #[test]
+    fn test_default_conf_sets_schedule_policy_defaults() {
+        let conf = create_default_conf();
+
+        assert_eq!(
+            conf.get_int_or_default("schedule.min-interval-seconds", -999),
+            1
+        );
+        assert_eq!(
+            conf.get_int_or_default("schedule.min-delay-seconds", -999),
+            0
+        );
+        assert_eq!(
+            conf.get_int_or_default("schedule.max-active-per-org", -999),
+            -1
         );
     }
 }
