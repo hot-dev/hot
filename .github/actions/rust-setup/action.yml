@@ -16,6 +16,15 @@ runs:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@v0.0.6
+
+    - name: Configure sccache (GitHub Actions backend)
+      shell: bash
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:

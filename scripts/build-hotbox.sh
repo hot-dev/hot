@@ -52,7 +52,7 @@ RUN ARCH=$(uname -m) && \
     rustup target add $MUSL_TARGET && \
     echo "$MUSL_TARGET" > /tmp/musl-target
 
-ENV CARGO_INCREMENTAL=1 \
+ENV CARGO_INCREMENTAL=0 \
     CARGO_NET_RETRY=2
 
 WORKDIR /workspace

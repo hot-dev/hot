@@ -20,7 +20,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: '1'
+  # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
+  # strips before saving) and reduces sccache hit rates.
+  CARGO_INCREMENTAL: '0'
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
@@ -255,14 +257,26 @@ jobs:
         sudo apt-get install -y musl-tools
         rustup target add x86_64-unknown-linux-musl
 
-    - name: Cache cargo registry
-      uses: actions/cache@v5
+    # Compilation cache. The GHA backend is per-repo (10 GB total) and
+    # works on Linux/macOS/Windows runners.
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.6
+
+    - name: Configure sccache (GitHub Actions backend)
+      shell: bash
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+    # Cargo registry/git/target caching across runs. Swatinem/rust-cache
+    # handles cross-compile target dirs and strips incremental artifacts
+    # before saving (which is why we set CARGO_INCREMENTAL=0 above).
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        # Per-target key so each matrix entry gets its own cache.
+        key: ${{ matrix.target }}
+        save-if: true
 
     - name: Setup Cargo optimizations
       shell: bash
@@ -301,7 +315,7 @@ jobs:
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
         ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
-        ENV CARGO_INCREMENTAL=1 CARGO_NET_RETRY=2
+        ENV CARGO_INCREMENTAL=0 CARGO_NET_RETRY=2
         WORKDIR /workspace
         COPY Cargo.toml Cargo.lock ./
         COPY crates/ ./crates/
@@ -314,6 +328,9 @@ jobs:
         FROM scratch
         COPY --from=builder /hotbox /hotbox
         DOCKERFILE
+
+    - name: sccache stats
+      run: sccache --show-stats || true
 
     - name: Prepare binary (Unix)
       if: matrix.platform != 'windows'

@@ -17,7 +17,11 @@ concurrency:
 env:
   RUST_TOOLCHAIN: 1.95.0
   TAILWIND_VERSION: v4.1.18
-  CARGO_INCREMENTAL: '1'
+  # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
+  # strips before saving anyway) and reduces sccache hit rates. CI does clean
+  # builds against a shared cache, not the inner-loop edit pattern that
+  # incremental is designed for.
+  CARGO_INCREMENTAL: '0'
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
@@ -52,14 +56,23 @@ jobs:
       - name: Install protobuf compiler (for containerd-client)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # Clippy and `cargo test` below intentionally use the SAME feature set
+      # (workspace defaults). Mismatched feature flags here force cargo to
+      # recompile the entire dependency graph between the two steps, which is
+      # by far the largest source of CI wall time. Add per-crate clippy runs
+      # for opt-in features (e.g. `kata`) below if needed.
       - name: Cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -j 4 -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings
 
       - name: Verify AGENTS.md sync
         run: bash ./scripts/check-agents-sync.sh
 
-      - name: Hot check
-        run: cargo run -- check --ctx hot/ci.ctx.hot
+      # `doc-snippets.sh check` runs `hot check --with-tests true`, which is a
+      # strict superset of `hot check` and additionally validates {{snippet:...}}
+      # references in docs. Run it here so failures surface before the long
+      # test phases.
+      - name: Hot check + verify doc snippet references
+        run: ./scripts/doc-snippets.sh check
 
       - name: Run Rust tests
         env:
@@ -83,19 +96,11 @@ jobs:
         run: |
           cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
 
+      # `cargo test --no-run --features kata` is a superset of `cargo check`
+      # and avoids running the previous workspace-wide `hot_task_worker` tests
+      # a second time. It is still a Linux-only feature compile check.
       - name: Compile Kata backend (Linux feature check)
-        run: |
-          cargo check -p hot_task_worker --features kata --locked
-
-      - name: Run hot_task_worker tests
-        run: |
-          cargo test -p hot_task_worker --locked
-          cargo test -p hot_task_worker --features kata --locked --no-run
-
-      - name: Verify doc snippet references
-        run: |
-          # Check that all {{snippet:...}} references in docs point to valid snippets
-          ./scripts/doc-snippets.sh check
+        run: cargo test -p hot_task_worker --features kata --locked --no-run
 
       - name: sccache stats
         run: sccache --show-stats || true
