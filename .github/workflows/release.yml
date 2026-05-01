@@ -257,16 +257,25 @@ jobs:
         sudo apt-get install -y musl-tools
         rustup target add x86_64-unknown-linux-musl
 
-    # Compilation cache. The GHA backend is per-repo (10 GB total) and
-    # works on Linux/macOS/Windows runners.
+    # Compilation cache. Use a local disk cache restored/saved by actions/cache
+    # so transient cache service errors do not happen inside rustc/clippy.
     - name: Setup sccache
       uses: mozilla-actions/sccache-action@v0.0.6
 
-    - name: Configure sccache (GitHub Actions backend)
+    - name: Configure sccache (local disk cache)
       shell: bash
       run: |
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+
+    - name: Cache sccache artifacts
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/sccache
+        key: sccache-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ matrix.target }}-
 
     # Cargo registry/git/target caching across runs. Swatinem/rust-cache
     # handles cross-compile target dirs and strips incremental artifacts
