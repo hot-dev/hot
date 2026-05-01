@@ -1083,7 +1083,7 @@ jobs:
 
     - name: Create GitHub Release
       if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ needs.validate-release.outputs.tag_name }}
         name: Hot v${{ steps.version.outputs.version }}
