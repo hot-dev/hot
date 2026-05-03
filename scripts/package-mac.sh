@@ -187,6 +187,7 @@ EOF
     if [ -n "$APPLE_DEVELOPER_ID_APP" ]; then
         echo "Signing binary with Developer ID..."
         codesign --force --options runtime \
+            --entitlements "resources/installer/mac/hot.entitlements" \
             --sign "$APPLE_DEVELOPER_ID_APP" \
             --timestamp \
             "$STAGING_DIR/payload/usr/local/bin/hot"
