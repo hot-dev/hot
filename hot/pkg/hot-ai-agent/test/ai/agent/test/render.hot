@@ -1,0 +1,26 @@
+::ai::agent::test::render ns
+meta ["test"]
+
+::render ::ai::agent::render
+
+test-text-reply
+meta ["test"]
+fn () {
+    reply ::render/text-reply("hello")
+    assert-eq("hello", reply.text)
+    assert-eq("plain", reply.format)
+}
+
+test-truncate-text
+meta ["test"]
+fn () {
+    assert-eq("abc...", ::render/truncate-text("abcdef", 3, "..."))
+    assert-eq("abc", ::render/truncate-text("abc", 3, "..."))
+}
+
+test-with-sources
+meta ["test"]
+fn () {
+    reply ::render/with-sources(::render/text-reply("hello"), [{id: "s1"}])
+    assert-eq(1, length(reply.sources))
+}

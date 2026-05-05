@@ -287,7 +287,9 @@ fn (total-cap: Int): Fn {
                         }
                     }
                     => {
-                        block `<attachment name="${att.name}" type="${att.type}">\n${text}\n</attachment>`
+                        safe-name escape-attr(att.name)
+                        safe-type escape-attr(att.type)
+                        block `<attachment name="${safe-name}" type="${safe-type}">\n${text}\n</attachment>`
                         {
                             used: add(acc.used, length(text)),
                             blocks: concat(acc.blocks, [block]),
@@ -298,4 +300,14 @@ fn (total-cap: Int): Fn {
             }
         }
     }
+}
+
+escape-attr
+meta { doc: "Internal: escape a value for use in pseudo-XML attachment attributes." }
+fn (value: Str?): Str {
+    or(value, "")
+        |> replace("&", "&amp;")
+        |> replace("\"", "&quot;")
+        |> replace("<", "&lt;")
+        |> replace(">", "&gt;")
 }

@@ -468,6 +468,7 @@ fn (t: Thread, opts: Map?): Vec {
                 "user"      => { Role.User }
                 "assistant" => { Role.Assistant }
                 "system"    => { Role.System }
+                "tool"      => { Role.Tool }
                 =>          { Role.User }
             },
             content: entry.value.content,

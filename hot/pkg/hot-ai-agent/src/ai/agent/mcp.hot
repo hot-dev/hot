@@ -10,15 +10,18 @@ Session ::session/Session
 select-session
 meta {
     doc: """
-    Pick a session for an MCP tool call. `params.session_id` wins;
-    otherwise the first registered session is used. Returns null when
-    no session can be selected.
+    Pick a session for an MCP tool call. `params.session_id` may select
+    only a session already present in `registered`; otherwise the first
+    registered session is used. Returns null when no authorized session
+    can be selected.
     """
 }
 fn (params: Map, registered: Vec<Session>): Session? {
     sid or(params.session_id, "")
     cond {
-        not(is-empty(sid)) => { ::session/Session({id: sid}) }
+        not(is-empty(sid)) => {
+            find-first(registered, (s) { eq(s.id, sid) })
+        }
         is-empty(registered) => { null }
         => { first(registered) }
     }

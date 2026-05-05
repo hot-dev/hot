@@ -12,6 +12,10 @@ registry-tag fn (model: Str, messages: Any, system: Any, tools: Any): Any {
     {text: "registry", tool-calls: null}
 }
 
+stream-registry-tag fn (model: Str, messages: Any, system: Any, tools: Any, on-delta: Fn): Any {
+    {text: "stream-registry", tool-calls: null}
+}
+
 test-detect-anthropic
 meta ["test"] fn () {
     assert-eq(Provider.Anthropic, ::chat/detect-provider("claude-sonnet-4-5"))
@@ -137,6 +141,38 @@ meta ["test"] fn () {
     opts ::chat/ChatOptions({model: "gpt-4o", providers: [custom]})
     reply ::chat/dispatch-chat(opts, [], null)
     assert-eq("registry", reply.text)
+}
+
+test-run-loop-via-registry
+meta ["test"] fn () {
+    custom ::chat/ProviderRegistration({
+        variant: Provider.OpenAi,
+        detect: ::chat/prefix-detector("gpt"),
+        display-name: "Proxy",
+        chat-fn: registry-tag,
+        chat-stream-fn: null,
+        embed-fn: null,
+        meta: null,
+    })
+    opts ::chat/ChatOptions({model: "gpt-4o", providers: [custom], max-iterations: 1})
+    answer ::chat/run-loop(opts, "hello")
+    assert-eq("registry", answer)
+}
+
+test-run-loop-stream-via-registry
+meta ["test"] fn () {
+    custom ::chat/ProviderRegistration({
+        variant: Provider.OpenAi,
+        detect: ::chat/prefix-detector("gpt"),
+        display-name: "Proxy",
+        chat-fn: null,
+        chat-stream-fn: stream-registry-tag,
+        embed-fn: null,
+        meta: null,
+    })
+    opts ::chat/ChatOptions({model: "gpt-4o", providers: [custom], max-iterations: 1})
+    answer ::chat/run-loop-stream(opts, "hello")
+    assert-eq("stream-registry", answer)
 }
 
 test-resolve-registration-explicit-providers

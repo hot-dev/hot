@@ -1,0 +1,36 @@
+::ai::agent::test::mcp ns
+meta ["test"]
+
+::mcp     ::ai::agent::mcp
+::session ::ai::session
+
+test-select-session-requires-registration-for-explicit-id
+meta ["test"]
+fn () {
+    registered [
+        ::session/Session({id: "s1", meta: {label: "one"}}),
+        ::session/Session({id: "s2", meta: {label: "two"}}),
+    ]
+    selected ::mcp/select-session({session_id: "s2"}, registered)
+    assert-eq("s2", selected.id)
+    assert-eq("two", selected.meta.label)
+}
+
+test-select-session-rejects-unregistered-explicit-id
+meta ["test"]
+fn () {
+    registered [::session/Session({id: "s1"})]
+    selected ::mcp/select-session({session_id: "s-private"}, registered)
+    assert(is-null(selected), "unregistered session ids must not be trusted")
+}
+
+test-select-session-defaults-to-first-registered
+meta ["test"]
+fn () {
+    registered [
+        ::session/Session({id: "s1"}),
+        ::session/Session({id: "s2"}),
+    ]
+    selected ::mcp/select-session({}, registered)
+    assert-eq("s1", selected.id)
+}

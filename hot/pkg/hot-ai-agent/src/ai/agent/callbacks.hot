@@ -23,8 +23,8 @@ meta {
     - `CallbackOptions` — `{url, signing-secret-env?, signing-header?,
        timeout-ms?, headers?}`.
     - `post-callback(payload, opts)` — POST `payload` (JSON-encoded)
-       to `opts.url`, attaching an HMAC signature header when a
-       signing secret is configured. Returns
+       to an HTTPS `opts.url`, attaching an HMAC signature header when
+       a signing secret is configured. Returns
        `{ok, status, error?, attempt-ms}`.
     - `from-body(body)` — extract a `CallbackOptions` from the
        webhook body's `callback_url` / `callback_secret_env` fields,
@@ -116,6 +116,49 @@ fn (body-text: Str, opts: CallbackOptions): Map {
     }
 }
 
+is-url-allowed
+meta {
+    doc: """
+    Return true when a callback URL is safe for the shared helper to
+    call. The default policy is intentionally narrow: callbacks must be
+    HTTPS and must not target obvious local/private hosts, so untrusted
+    webhook bodies cannot direct the worker at internal services.
+    """
+}
+fn (url: Str?): Bool {
+    u lowercase(or(url, ""))
+    cond {
+        not(starts-with(u, "https://")) => { false }
+        => {
+            host callback-host(u)
+            not(is-private-callback-host(host))
+        }
+    }
+}
+
+callback-host
+meta { doc: "Internal: best-effort host extraction for already-lowercased HTTPS callback URLs." }
+fn (url: Str): Str {
+    without-scheme slice(url, length("https://"))
+    authority first(split(without-scheme, "/"))
+    first(split(authority, ":"))
+}
+
+is-private-callback-host
+meta { doc: "Internal: reject obvious localhost, link-local, and RFC1918 callback hosts." }
+fn (host: Str): Bool {
+    or(
+        is-empty(host),
+        eq(host, "localhost"),
+        starts-with(host, "127."),
+        starts-with(host, "10."),
+        starts-with(host, "192.168."),
+        starts-with(host, "172."),
+        starts-with(host, "169.254."),
+        starts-with(host, "[")
+    )
+}
+
 post-callback
 meta {
     doc: """
@@ -131,6 +174,7 @@ fn (payload: Any, opts: CallbackOptions): CallbackResult {
     cond {
         is-null(opts) => { CallbackResult({ok: false, status: 0, error: "no-callback-options", attempt-ms: 0}) }
         is-empty(or(opts.url, "")) => { CallbackResult({ok: false, status: 0, error: "no-callback-url", attempt-ms: 0}) }
+        not(is-url-allowed(opts.url)) => { CallbackResult({ok: false, status: 0, error: "callback-url-not-allowed", attempt-ms: 0}) }
         => {
             body-text ::json/to-json(payload)
             headers build-headers(body-text, opts)
@@ -179,7 +223,9 @@ meta {
     - `callback_signing_header` / `callback-signing-header`
 
     Convenience for transports that accept `callback_url` in the
-    inbound payload directly.
+    inbound payload directly. Non-HTTPS URLs are ignored; callers that
+    need local development callbacks should use streams or construct
+    their own stricter transport-local policy.
     """
 }
 fn (body: Map?): Any {
@@ -187,6 +233,7 @@ fn (body: Map?): Any {
     url or(get(raw, "callback_url"), get(raw, "callback-url"))
     cond {
         is-empty(or(url, "")) => { null }
+        not(is-url-allowed(url)) => { null }
         => {
             CallbackOptions({
                 url: url,

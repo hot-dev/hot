@@ -67,7 +67,7 @@ fn cond (m: ::ai-chat/Message): Map {
     }
 
     eq(m.role, "assistant") => {
-        base {role: "assistant", content: if(is-str(m.content), m.content, "")}
+        base {role: "assistant", content: ::ai-chat/message-text(m)}
         if(
             is-null(m.tool-calls),
             base,
@@ -75,7 +75,7 @@ fn cond (m: ::ai-chat/Message): Map {
         )
     }
     => {
-        {role: m.role, content: m.content}
+        {role: m.role, content: ::ai-chat/message-text(m)}
     }
 }
 

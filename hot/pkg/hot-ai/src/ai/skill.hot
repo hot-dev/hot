@@ -592,8 +592,6 @@ meta {
     """
 }
 fn (resolver: SkillResolver): ::tool/Tool {
-    search-fn resolver.search-fn
-    resolver-skills resolver.skills
     ::tool/Tool({
         name: "list_skills",
         description: "List every skill currently available to this agent.",
@@ -673,6 +671,8 @@ meta {
     """
 }
 fn (resolver: SkillResolver): ::tool/Tool {
+    search-fn resolver.search-fn
+    resolver-skills resolver.skills
     ::tool/Tool({
         name: "search_skills",
         description: "Search available skills by free-text query. \

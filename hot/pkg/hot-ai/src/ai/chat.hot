@@ -306,6 +306,35 @@ fn (opts: ChatOptions, messages: Any, tools: Any): Any {
     }
 }
 
+dispatch-chat-stream
+meta {
+    doc: """
+    Streaming counterpart to `dispatch-chat`. Honors explicit
+    `opts.chat-stream-fn` first, then `opts.providers[*].chat-stream-fn`.
+    """
+}
+fn (opts: ChatOptions, messages: Any, tools: Any, on-delta: Fn): Any {
+    cond {
+        not(is-null(opts.chat-stream-fn)) => {
+            opts.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+        }
+        => {
+            reg resolve-registration(opts)
+            cond {
+                is-null(reg) => {
+                    fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
+                }
+                is-null(reg.chat-stream-fn) => {
+                    fail(`Provider '${reg.display-name}' has no chat-stream-fn wired; pass an explicit chat-stream-fn or supply a registration with chat-stream-fn populated`)
+                }
+                => {
+                    reg.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Conversation types
 // ============================================================================
@@ -1221,7 +1250,7 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
         max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
         iteration add(sub(max-iter, remaining), 1)
         check-budget(opts, messages, tools)
-        reply opts.chat-fn(opts.model, messages, opts.system, tools)
+        reply dispatch-chat(opts, messages, tools)
         calls or(reply.tool-calls, [])
         cond {
             is-empty(calls) => {
@@ -1358,7 +1387,7 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
         max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
         iteration add(sub(max-iter, remaining), 1)
         check-budget(opts, messages, tools)
-        reply opts.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+        reply dispatch-chat-stream(opts, messages, tools, on-delta)
         calls or(reply.tool-calls, [])
         cond {
             is-empty(calls) => {

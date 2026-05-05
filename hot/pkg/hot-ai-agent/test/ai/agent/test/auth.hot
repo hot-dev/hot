@@ -90,6 +90,28 @@ fn () {
     assert(result.ok, `Expected ok, got: ${Str(result.error)}`)
 }
 
+test-verify-hmac-invalid-timestamp
+meta ["test"]
+fn () {
+    secret "shhh"
+    body "{}"
+    sig ::hmac/hmac-sha256(secret, body)
+    headers {
+        "x-hot-signature": `sha256=${sig}`,
+        "x-hot-timestamp": "not-a-number",
+    }
+    opts ::auth/HmacOptions({
+        secret: secret,
+        header: "x-hot-signature",
+        scheme: "sha256=",
+        timestamp-header: "x-hot-timestamp",
+        max-skew-seconds: 300,
+    })
+    result ::auth/verify-hmac(headers, body, opts)
+    assert(not(result.ok), "invalid timestamp should fail cleanly")
+    assert-eq("timestamp-invalid", result.error)
+}
+
 test-verify-shared-secret-success
 meta ["test"]
 fn () {
@@ -255,6 +277,20 @@ fn () {
     opts ::auth/PlatformOptions({require-service-key-id: "ck-123"})
     result ::auth/verify-platform(request, opts)
     assert(result.ok, `Expected ok for matching id, got: ${Str(result.error)}`)
+}
+
+test-verify-platform-service-key-id-ignored-for-api-key
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        auth: {type: "api-key"},
+    }
+    opts ::auth/PlatformOptions({require-service-key-id: "ck-123"})
+    result ::auth/verify-platform(request, opts)
+    assert(result.ok, `service-key pin should not reject api-key auth, got: ${Str(result.error)}`)
 }
 
 test-verify-empty-list-fails-closed

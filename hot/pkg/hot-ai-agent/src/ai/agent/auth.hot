@@ -240,12 +240,18 @@ fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
                             cond {
                                 is-null(ts-str) => { fail-result("timestamp-missing") }
                                 => {
-                                    ts Int(ts-str)
-                                    now div(::time/epoch-millis(::time/now()), 1000)
-                                    delta ::math/abs(sub(now, ts))
-                                    if(gt(delta, skew),
-                                        fail-result("timestamp-stale"),
-                                        ok-result())
+                                    ts-attempt ::hot::lang/try-call(Int, [ts-str])
+                                    cond {
+                                        not(ts-attempt.ok) => { fail-result("timestamp-invalid") }
+                                        => {
+                                            ts ts-attempt.value
+                                            now div(::time/epoch-millis(::time/now()), 1000)
+                                            delta ::math/abs(sub(now, ts))
+                                            if(gt(delta, skew),
+                                                fail-result("timestamp-stale"),
+                                                ok-result())
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -293,7 +299,7 @@ fn (headers: Map?, opts: BearerOptions): AuthResult {
                 is-null(raw) => { fail-result("token-missing") }
                 => {
                     presented strip-prefix(raw, "Bearer ")
-                    if(eq(presented, expected),
+                    if(secure-compare(presented, expected),
                         ok-result(),
                         fail-result("token-mismatch"))
                 }
@@ -337,7 +343,7 @@ fn (request: Any, opts: PlatformOptions): AuthResult {
             }
             cond {
                 not(type-ok) => { fail-result(`platform-auth-type-rejected:${kind}`) }
-                not(is-null(opts.require-service-key-id)) => {
+                and(eq(kind, "service-key"), not(is-null(opts.require-service-key-id))) => {
                     sk get(auth-ctx, "service-key", {})
                     id Str(or(get(sk, "id"), ""))
                     if(eq(id, opts.require-service-key-id),
@@ -356,10 +362,10 @@ meta {
     Try multiple verifiers in order, returning the first `ok` result or
     the **last** failure if none succeed. Useful when a webhook
     endpoint accepts either an HMAC signature OR a shared-secret
-    bearer token OR a platform-issued API key.
+    bearer token. For platform-issued API keys, use `verify` with
+    `platform-verifier()` so the full request auth context is available.
 
     Each entry is `{kind, options}` where `kind` is one of:
-    - `"platform"` (options: `PlatformOptions`)
     - `"hmac"` (options: `HmacOptions`)
     - `"shared-secret"` (options: `BearerOptions`)
 

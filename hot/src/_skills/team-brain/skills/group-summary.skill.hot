@@ -5,9 +5,7 @@
 
 ::skills::team-brain::skills ns
 
-::skill ::ai::skill
-
-group-summary ::skill/Skill({
+group-summary ::ai::skill/Skill({
     name: "group-summary",
     description: "How TeamBrain should structure /summary and /decisions output for a chat session.",
     when: ["summarize the group", "generate digest", "extract decisions"],

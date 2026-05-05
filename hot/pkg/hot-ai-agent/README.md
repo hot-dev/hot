@@ -27,5 +27,5 @@ types.
 ## Testing
 
 ```bash
-hot test --project pkg-test-hot-ai-agent
+hot test --project hot-ai-agent-tests
 ```

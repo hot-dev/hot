@@ -122,6 +122,17 @@ fn () {
     assert(contains(out, "# Plan"))
 }
 
+test-weave-into-prompt-escapes-attachment-attrs
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [
+        text-att("evil\" name <x>", "text/plain\" onload=\"bad", "hello"),
+    ]})
+    out ::att/weave-into-prompt("prompt", atts)
+    assert(contains(out, "evil&quot; name &lt;x&gt;"), "filename escaped")
+    assert(not(contains(out, "onload=\"bad")), "raw attribute injection not present")
+}
+
 test-weave-into-prompt-skips-binary
 meta ["test"]
 fn () {

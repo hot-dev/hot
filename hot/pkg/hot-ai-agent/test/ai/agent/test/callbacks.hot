@@ -18,6 +18,20 @@ fn () {
     assert(is-null(opts))
 }
 
+test-from-body-rejects-non-https-callback
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "http://127.0.0.1/internal"})
+    assert(is-null(opts), "non-HTTPS callback URLs should be ignored")
+}
+
+test-from-body-rejects-private-host-callback
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "https://127.0.0.1/internal"})
+    assert(is-null(opts), "private callback hosts should be ignored")
+}
+
 test-from-body-snake-and-kebab-case
 meta ["test"]
 fn () {
@@ -33,6 +47,20 @@ fn () {
     assert-eq("MY_SECRET", snake.signing-secret-env)
     assert-eq("https://example.com/cb2", kebab.url)
     assert-eq("MY_SECRET", kebab.signing-secret-env)
+}
+
+test-build-headers-adds-signature
+meta ["test"]
+fn () {
+    opts ::cb/CallbackOptions({
+        url: "https://example.com/cb",
+        signing-secret: "shhh",
+        signing-header: "x-custom-signature",
+    })
+    headers ::cb/build-headers("{\"ok\":true}", opts)
+    sig get(headers, "x-custom-signature")
+    assert(starts-with(sig, "sha256="), `expected sha256 signature, got: ${Str(sig)}`)
+    assert-eq("application/json", get(headers, "content-type"))
 }
 
 test-post-callback-no-options-fails-cleanly
@@ -52,12 +80,12 @@ fn () {
     assert-eq("no-callback-url", result.error)
 }
 
-test-post-callback-network-error-captured
+test-post-callback-rejects-non-https-url
 meta ["test"]
 fn () {
     opts ::cb/CallbackOptions({url: "http://127.0.0.1:1/no-such-port"})
     result ::cb/post-callback({hi: "x"}, opts)
-    assert(not(result.ok), "Connection to dead port should fail")
-    assert(not(is-null(result.error)), `Error should be captured, got: ${Str(result)}`)
-    assert(gte(result.attempt-ms, 0))
+    assert(not(result.ok), "non-HTTPS callback URL should fail")
+    assert-eq("callback-url-not-allowed", result.error)
+    assert-eq(0, result.attempt-ms)
 }

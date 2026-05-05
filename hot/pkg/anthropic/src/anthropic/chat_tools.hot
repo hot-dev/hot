@@ -66,9 +66,10 @@ fn cond (m: ::ai-chat/Message): Map {
     }
 
     eq(m.role, "assistant") => {
+        text ::ai-chat/message-text(m)
         text-block if(
-            and(is-str(m.content), not(is-empty(m.content))),
-            [{type: "text", text: m.content}],
+            not(is-empty(text)),
+            [{type: "text", text: text}],
             []
         )
         tool-blocks if(
@@ -79,7 +80,7 @@ fn cond (m: ::ai-chat/Message): Map {
         {role: "assistant", content: concat(text-block, tool-blocks)}
     }
     => {
-        {role: m.role, content: m.content}
+        {role: m.role, content: ::ai-chat/message-text(m)}
     }
 }
 
@@ -157,7 +158,7 @@ chat-with-tools
 meta {
     ai-provider: {
         variant: "Anthropic",
-        detect-prefix: "claude",
+        detect-prefixes: ["claude"],
         display-name: "Anthropic",
         capabilities: ["tools", "streaming", "vision", "system-prompt"],
     },

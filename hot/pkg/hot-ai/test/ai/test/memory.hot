@@ -8,6 +8,7 @@ meta ["test"]
 Session ::session/Session
 Identity ::session/Identity
 Message ::msg/Message
+Role ::msg/Role
 
 test-memory fn (): ::mem/AgentMemory {
     run-id Str(Uuid())
@@ -99,4 +100,17 @@ fn () {
     assert-eq(1, counts.edges)
     neighbors ::mem/neighbor-edges(mem, "project:hot")
     assert-eq(1, length(neighbors))
+}
+
+test-thread-tool-role-roundtrips
+meta ["test"]
+fn () {
+    run-id Str(Uuid())
+    s Session({id: `thread:${run-id}`})
+    i Identity({id: `user:${run-id}`, name: "Tester"})
+    t ::mem/thread("test-agent", s, i, {max-turns: 10})
+    ::mem/thread-add(t, Role.Tool, "{\"ok\":true}")
+    history ::mem/thread-history(t, {})
+    assert-eq(1, length(history))
+    assert-eq(Role.Tool, first(history).role)
 }
