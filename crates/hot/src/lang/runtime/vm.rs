@@ -5227,7 +5227,13 @@ impl VirtualMachine {
         // Inspect without stringifying so lambdas and refs are preserved
         let mut function_val = self.get_register(function_register as RegisterId)?.clone();
 
-        // Unwrap typed Fn maps: {"$type": "::hot::type/Fn", "$val": inner}
+        // Unwrap typed Fn maps: `{$type: "::hot::type/Fn", $val: <callable>}`.
+        // These appear when a function value is stored in an `Fn`/`Fn?`-typed struct
+        // field or constructor slot. The downstream resolver below only knows how to
+        // extract a name from `Val::Str` / `Val::Box(FunctionRef)`, so without this
+        // unwrap a typed-Fn value reaches the `_ => return Ok(Val::Null)` arm and
+        // silently produces a null result. (`call_function_value` performs the same
+        // unwrap for the lexical-scope path; this one covers direct-Call dispatch.)
         if let Val::Map(m) = &function_val
             && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
             && &**tn == "::hot::type/Fn"
@@ -5730,15 +5736,12 @@ impl VirtualMachine {
                 }
             }
             Val::Map(map) => {
-                // Check if this is a function alias
+                // FunctionAlias: `{$type: "::hot::type/FunctionAlias", $target: <name>}`
                 if let Some(Val::Str(type_name)) = map.get(&Val::from("$type"))
                     && &**type_name == "::hot::type/FunctionAlias"
                     && let Some(Val::Str(target_function)) = map.get(&Val::from("$target"))
                 {
                     tracing::trace!("VM: Calling function alias -> {}", target_function);
-
-                    // Lazy parameters are handled at compile time via lazy_params_registry,
-                    // so all function aliases can be called uniformly here
                     if target_function.starts_with("::") && target_function.contains('/') {
                         return self.execute_function_call_by_qualified_name(target_function, args);
                     } else {
@@ -5746,7 +5749,23 @@ impl VirtualMachine {
                     }
                 }
 
-                // Not a function alias, fall through to default behavior
+                // Typed `Fn` value: `{$type: "::hot::type/Fn", $val: <callable>}`. This is the
+                // shape produced when a function value is stored in a struct field declared
+                // `Fn` / `Fn?` (or any `Fn`-typed slot). Without this branch, calling a local
+                // that was loaded from such a field — e.g. `f h.body; f(args)` where `body:
+                // Fn?` — fell through to the "non-callable" default and returned `Val::Null`,
+                // which presented to the user as a function silently producing null.
+                if let Some(Val::Str(type_name)) = map.get(&Val::from("$type"))
+                    && &**type_name == "::hot::type/Fn"
+                    && let Some(inner) = map.get(&Val::from("$val"))
+                {
+                    tracing::trace!("VM: Unwrapping typed Fn value and recursing");
+                    return self.call_function_value(&inner.clone(), args);
+                }
+
+                // Not a callable wrapper. Single-arg "construction" sugar: a non-callable
+                // map called with one arg yields that arg unchanged. Multi-arg calls on a
+                // non-callable map are a no-op returning Null.
                 if args.len() == 1 {
                     tracing::trace!(
                         "VM: Non-callable map value with single arg - returning arg as constructed value"
@@ -6144,7 +6163,9 @@ impl VirtualMachine {
                     tracing::trace!("VM: Calling hotlib overload: {}", type_signature_key);
                     match func(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
-                        crate::lang::hot::r#type::HotResult::Err(err) => Ok(Val::err(err)),
+                        crate::lang::hot::r#type::HotResult::Err(err) => {
+                            self.dispatch_hotlib_err(err)
+                        }
                     }
                 }
                 crate::lang::hot::HotLibFn::VmAwareFn(func) => {
@@ -6154,7 +6175,9 @@ impl VirtualMachine {
                     );
                     match func(self, args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
-                        crate::lang::hot::r#type::HotResult::Err(err) => Ok(Val::err(err)),
+                        crate::lang::hot::r#type::HotResult::Err(err) => {
+                            self.dispatch_hotlib_err(err)
+                        }
                     }
                 }
             };
@@ -6167,14 +6190,18 @@ impl VirtualMachine {
                     tracing::trace!("VM: Calling hotlib arity overload: {}", arity_key);
                     match func(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
-                        crate::lang::hot::r#type::HotResult::Err(err) => Ok(Val::err(err)),
+                        crate::lang::hot::r#type::HotResult::Err(err) => {
+                            self.dispatch_hotlib_err(err)
+                        }
                     }
                 }
                 crate::lang::hot::HotLibFn::VmAwareFn(func) => {
                     tracing::trace!("VM: Calling VM-aware hotlib arity overload: {}", arity_key);
                     match func(self, args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
-                        crate::lang::hot::r#type::HotResult::Err(err) => Ok(Val::err(err)),
+                        crate::lang::hot::r#type::HotResult::Err(err) => {
+                            self.dispatch_hotlib_err(err)
+                        }
                     }
                 }
             };
@@ -6187,8 +6214,7 @@ impl VirtualMachine {
                     match func(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err) => {
-                            // Always surface hotlib errors as Result-style maps
-                            Ok(Val::err(err))
+                            self.dispatch_hotlib_err(err)
                         }
                     }
                 }
@@ -6196,7 +6222,9 @@ impl VirtualMachine {
                     tracing::trace!("VM: Calling VM-aware hotlib function: {}", qualified_name);
                     match func(self, args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
-                        crate::lang::hot::r#type::HotResult::Err(err) => Ok(Val::err(err)),
+                        crate::lang::hot::r#type::HotResult::Err(err) => {
+                            self.dispatch_hotlib_err(err)
+                        }
                     }
                 }
             }
@@ -8612,6 +8640,44 @@ impl VirtualMachine {
         }
     }
 
+    /// Convert a hotlib `HotResult::Err` payload into a `VmResult` honoring
+    /// fail/cancel halting semantics.
+    ///
+    /// - If the VM has entered fail or cancel state (i.e. `::hot::exec/fail`
+    ///   or `::hot::exec/cancel` was just called), halt execution by
+    ///   returning `Err(VmError)`. The state is left set so the top-level
+    ///   run-loop sees `has_failed()`/`has_cancelled()` and avoids emitting
+    ///   a duplicate `run:fail`/`run:cancel` event (the primitive already
+    ///   emitted it). Boundary helpers like `::hot::lang/try-call` and
+    ///   tool dispatch reset the state when they catch the halt.
+    /// - Otherwise wrap the error as a `Result.Err` value so user code can
+    ///   inspect it via `is-err`/`match`. This preserves the existing
+    ///   contract for non-halting hotlib errors (e.g. parse errors, HTTP
+    ///   non-2xx, etc.).
+    fn dispatch_hotlib_err(&mut self, err: Val) -> VmResult<Val> {
+        if self.has_failed() {
+            let msg = self
+                .get_failure()
+                .map(|f| f.msg)
+                .unwrap_or_else(|| match &err {
+                    Val::Str(s) => (**s).to_owned(),
+                    other => format!("{:?}", other),
+                });
+            return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
+        }
+        if self.has_cancelled() {
+            let msg = self
+                .get_cancellation()
+                .map(|c| c.msg)
+                .unwrap_or_else(|| match &err {
+                    Val::Str(s) => (**s).to_owned(),
+                    other => format!("{:?}", other),
+                });
+            return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
+        }
+        Ok(Val::err(err))
+    }
+
     /// Execute a call-lib instruction using the new enum-based hotlib system
     pub fn execute_call_lib(&mut self, function_name: &str, args: &[Val]) -> VmResult<Val> {
         tracing::trace!(
@@ -8665,14 +8731,7 @@ impl VirtualMachine {
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);
-
-                    // The error has been handled (converted to a value).
-                    // Clear failure/cancellation state so it doesn't leak.
-                    self.reset_failure_state();
-                    self.reset_cancellation_state();
-
-                    // Always wrap hotlib errors as proper Result types
-                    return Ok(Val::err(err));
+                    return self.dispatch_hotlib_err(err);
                 }
             }
         }

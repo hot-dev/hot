@@ -3903,19 +3903,54 @@ impl Compiler {
                     self.collect_free_variables_from_value(v, free_vars);
                 }
             }
-            Value::MapWithSpread { spread_entries, .. } => {
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                for v in base_entries.values() {
+                    self.collect_free_variables_in_val_for_value(v, free_vars);
+                }
                 for (_, spread_val) in spread_entries {
                     self.collect_free_variables_from_value(spread_val, free_vars);
                 }
             }
+            // Map / Vec literals: parser embeds non-literal entry values as
+            // `Val::Box(AstNode(inner_value))`. Recurse through these so refs
+            // inside literals are visible to thunk free-variable analysis.
+            Value::Val(val, _) => {
+                self.collect_free_variables_in_val_for_value(val, free_vars);
+            }
             // These don't contain free variables
-            Value::Val(_, _)
-            | Value::TypeDef(_)
+            Value::TypeDef(_)
             | Value::TypeImplementation(_)
             | Value::Fn(_)
             | Value::Unbound(_)
             | Value::VariadicExpansion(_)
             | Value::Placeholder(_) => {}
+        }
+    }
+
+    /// Walk a `Val` looking for embedded `AstNode` boxes (used inside Map/Vec
+    /// literals for non-literal entry values) and recurse back into the
+    /// thunk-side AST walker.
+    fn collect_free_variables_in_val_for_value(&self, val: &Val, free_vars: &mut Vec<String>) {
+        match val {
+            Val::Box(boxed) => {
+                if let Some(ast_node) = boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                    self.collect_free_variables_from_value(&ast_node.0, free_vars);
+                }
+            }
+            Val::Map(map) => {
+                for v in map.values() {
+                    self.collect_free_variables_in_val_for_value(v, free_vars);
+                }
+            }
+            Val::Vec(vec) => {
+                for v in vec {
+                    self.collect_free_variables_in_val_for_value(v, free_vars);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5799,25 +5834,40 @@ impl Compiler {
                 }
             }
             Value::Flow(flow) => {
-                // Handle flow expressions, detecting variable assignment pattern
-                // Pattern: Ref::Var(name) followed by expression = variable definition
+                // Handle flow expressions, detecting variable assignment pattern.
+                // Two encodings of `name expr` exist in the AST:
+                //   1) Two adjacent Flow expressions: `[Ref(name), expr]`
+                //   2) A single `MultipleValues([Ref(name), expr, ...])` element
+                //      (this is how the parser emits same-line bindings like
+                //      `s find-skill(skills, name)`).
+                // Both must add `name` to bound_vars BEFORE analyzing the rhs.
                 let mut i = 0;
                 while i < flow.expressions.len() {
-                    // Check for variable assignment pattern: Ref(Var(name)) followed by expression
+                    // Encoding 2: MultipleValues([Ref(name), ...rhs])
+                    if let Value::MultipleValues(values) = &flow.expressions[i]
+                        && values.len() >= 2
+                        && let Value::Ref(Ref::Var(var_ref)) = &values[0]
+                    {
+                        let var_name = var_ref.var.sym.name();
+                        bound_vars.insert(var_name.to_string());
+                        for v in &values[1..] {
+                            self.collect_free_variables(v, free_vars, bound_vars);
+                        }
+                        i += 1;
+                        continue;
+                    }
+
+                    // Encoding 1: [Ref(name), rhs] across adjacent Flow expressions
                     if i + 1 < flow.expressions.len()
                         && let Value::Ref(Ref::Var(var_ref)) = &flow.expressions[i]
                     {
                         let var_name = var_ref.var.sym.name();
                         let value_expr = &flow.expressions[i + 1];
 
-                        // This is a variable DEFINITION - add to bound_vars BEFORE
-                        // analyzing the value expression (so self-references work)
                         bound_vars.insert(var_name.to_string());
-
-                        // Analyze the value expression (uses the variable references)
                         self.collect_free_variables(value_expr, free_vars, bound_vars);
 
-                        i += 2; // Skip both expressions
+                        i += 2;
                         continue;
                     }
 
@@ -5866,7 +5916,60 @@ impl Compiler {
                     }
                 }
             }
+            // Map / Vec literals: parser stores entries that are not pure literals
+            // as `Val::Box(AstNode(inner_value))`. Without descending into these, any
+            // refs inside (e.g. `{label: or(label, "default")}`) are invisible to
+            // closure capture analysis.
+            Value::Val(val, _) => {
+                self.collect_free_variables_in_val(val, free_vars, bound_vars);
+            }
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                for v in base_entries.values() {
+                    self.collect_free_variables_in_val(v, free_vars, bound_vars);
+                }
+                for (_, spread_val) in spread_entries {
+                    self.collect_free_variables(spread_val, free_vars, bound_vars);
+                }
+            }
+            Value::Raw(inner) | Value::Do(inner) => {
+                self.collect_free_variables(inner, free_vars, bound_vars);
+            }
+            Value::MatchArm(arm) => {
+                self.collect_free_variables(&arm.body, free_vars, bound_vars);
+            }
             // Other value types don't contain variable references
+            _ => {}
+        }
+    }
+
+    /// Walk a `Val` looking for embedded `AstNode` boxes (used inside Map/Vec
+    /// literals for non-literal entry values) and recurse back into the AST
+    /// walker. Pure literals (Int, Str, etc.) are no-ops.
+    fn collect_free_variables_in_val(
+        &self,
+        val: &Val,
+        free_vars: &mut AHashSet<String>,
+        bound_vars: &mut AHashSet<String>,
+    ) {
+        match val {
+            Val::Box(boxed) => {
+                if let Some(ast_node) = boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                    self.collect_free_variables(&ast_node.0, free_vars, bound_vars);
+                }
+            }
+            Val::Map(map) => {
+                for v in map.values() {
+                    self.collect_free_variables_in_val(v, free_vars, bound_vars);
+                }
+            }
+            Val::Vec(vec) => {
+                for v in vec {
+                    self.collect_free_variables_in_val(v, free_vars, bound_vars);
+                }
+            }
             _ => {}
         }
     }
