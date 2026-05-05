@@ -1,0 +1,1589 @@
+::team-brain::agent ns
+meta {
+    doc: """
+    Team Brain agent core — transport-agnostic.
+
+    Every public handler takes a `Session` + `Identity` and replies
+    via `::transport/reply`. The two transport adapters
+    (`telegram_adapter.hot`, `slack_adapter.hot`) are responsible for:
+
+    - converting their native message format to `::transport/IncomingMessage`
+    - calling `process-incoming(im)` to feed the agent
+    - implementing `reply-impl` / `show-typing-impl` / `message-link`
+
+    Add a transport by adding an adapter file. Nothing in this file
+    needs to change.
+    """
+}
+
+// ============================================================================
+// Namespace Aliases
+// ============================================================================
+
+::store ::hot::store
+::ctx   ::hot::ctx
+::time  ::hot::time
+
+::anthropic-chat       ::anthropic::messages
+::anthropic-chat-tools ::anthropic::chat-tools
+::openai-chat          ::openai::chat
+::openai-chat-tools    ::openai::chat-tools
+
+// AI agent library
+::session   ::ai::session
+::msg       ::ai::message
+::chat      ::ai::chat
+::mem       ::ai::memory
+::rag       ::ai::rag
+::aictx     ::ai::context
+::bus       ::ai::bus
+::skill     ::ai::skill
+::tool      ::ai::tool
+
+// Reusable agent harness primitives.
+::agent-runtime ::ai::agent::runtime
+::agent-command ::ai::agent::command
+::agent-mcp     ::ai::agent::mcp
+::agent-memory  ::ai::agent::memory
+::agent-life    ::ai::agent::lifecycle
+::agent-stream  ::ai::agent::stream
+
+// Cross-cutting transport surface (reply, show-typing, format-source-link).
+::transport ::team-brain::transport
+
+// Transport adapters. These expose pure callable functions for inbound
+// dispatch (polling, webhooks, voice download). The agentic wiring
+// (schedule / on-event / webhook annotations) lives on the wrappers
+// below — see "Transport wiring" near the end of this file. Keeping
+// the meta out of the adapters prevents duplicate scheduled-function
+// and webhook registrations when those library files are compiled by
+// more than one project in the same worker (e.g. dev meta-project +
+// the demo).
+::tg-adapter    ::team-brain::telegram-adapter
+::slack-adapter ::team-brain::slack-adapter
+::web-adapter   ::team-brain::web-adapter
+
+// Skills authored in this project. `telegram-tone` and `coach-on-stats`
+// are inline-bodied skills declared in skills.hot. `group-summary` is
+// the codegen'd stub for resources/team-brain/skills/group-summary.skill.md.
+::own-skills        ::team-brain::skills
+::generated-skills  ::skills::team-brain::skills
+
+Session     ::session/Session
+Identity    ::session/Identity
+Provider    ::chat/Provider
+ChatOptions ::chat/ChatOptions
+AgentMemory ::mem/AgentMemory
+Message     ::chat/Message
+Role        ::msg/Role
+
+// ============================================================================
+// Agent Definition
+// ============================================================================
+
+TeamBrain
+meta {
+    doc: """
+    Multi-transport AI agent that gives a chat (Telegram group, Slack
+    channel, …) a searchable, summarizable memory. Records every
+    message, enables semantic search over history, generates
+    digests, and answers questions using AI + RAG.
+    """,
+    agent: {
+        name: "Team Brain",
+        description: "Multi-transport group memory agent with semantic search, AI summaries, and digests",
+        tags: ["telegram", "slack", "ai", "memory", "rag"],
+    },
+}
+type {
+  model: Str,
+  service: Str,
+  system-prompt: Str,
+}
+
+AGENT_NAME "brain"
+
+SYSTEM_PROMPT """
+  You are Team Brain, an AI assistant embedded in a group chat.
+  You have access to the group's message history.
+  Be concise, helpful, and cite who said what.
+  Use HTML formatting (<b>bold</b>, <i>italic</i>, <code>code</code>)
+  unless the active skill tells you otherwise.
+"""
+
+brain TeamBrain({
+  model: ::ctx/get("brain.model", "claude-sonnet-4-5"),
+  service: ::ctx/get("brain.service", "Anthropic"),
+  system-prompt: ::ctx/get("brain.system", SYSTEM_PROMPT),
+})
+
+// Reusable runtime stores from `hot-ai-agent`: agent state, per-session
+// stats, and a rolling error log. TeamBrain keeps the existing public
+// bindings because adapters and skills read them directly.
+agent-runtime ::agent-runtime/create-runtime(AGENT_NAME, {store-prefix: "brain", max-errors: 5})
+agent-state  agent-runtime.state-store
+brain-stats  agent-runtime.stats-store
+brain-errors agent-runtime.errors-store
+
+// ============================================================================
+// Stats / Error tracking
+// ============================================================================
+// Bucket by day-since-epoch so per-day keys sort naturally and don't depend
+// on local timezone formatting. Translate to YYYY-MM-DD only when rendering.
+
+now-epoch-secs fn (): Int { ::agent-runtime/now-epoch-secs() }
+
+today-bucket fn (): Int { ::agent-runtime/today-bucket() }
+
+bump-counter fn (key: Str, delta: Int): Int {
+  ::agent-runtime/bump-counter(brain-stats, key, delta)
+}
+
+track-ai-call fn (session: Session, model: Str, prompt: Str, system: Str, answer: Str) {
+  bucket ::transport/session-bucket(session)
+  day today-bucket()
+  bump-counter(`${bucket}:calls:${day}`, 1)
+  tokens ::aictx/estimate-tokens(concat(or(system, ""), or(prompt, ""), or(answer, "")))
+  bump-counter(`${bucket}:tokens:${day}`, tokens)
+  ::store/put(brain-stats, `${bucket}:last-call`, now-epoch-secs())
+  ::store/put(brain-stats, `${bucket}:last-model`, model)
+}
+
+record-error fn (where: Str, msg: Str) {
+  ::agent-runtime/record-error(agent-runtime, where, msg)
+}
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+MODEL_ALIASES {
+  "claude":   "claude-sonnet-4-5",
+  "sonnet":   "claude-sonnet-4-5",
+  "opus":     "claude-opus-4-6",
+  "gpt":      "gpt-5.2",
+  "gpt-mini": "gpt-5-mini",
+}
+
+DEFAULT_MODEL "claude-sonnet-4-5"
+
+// Synthetic identity for scheduled/agent actions (digests, MCP, etc.).
+// Used when no human is "asking", but ::ai::memory still wants an
+// `Identity` for keying purposes. The shared agent-wide stores
+// (`session-store`, `kb-store`) don't depend on this identity, but
+// `user-store` does, so we keep it stable.
+system-identity ::session/Identity({id: "system", name: "system"})
+
+make-memory
+meta {
+    doc: """
+    Build the agent's three-store memory triple for `(session, identity)`.
+    Thin wrapper around `::ai::memory/create-memory` that fixes the
+    agent-name to `brain`.
+    """
+}
+fn (session: Session, identity: Identity): AgentMemory {
+  ::mem/create-memory(AGENT_NAME, session, identity)
+}
+
+// ============================================================================
+// AI Dispatch (via ::ai::chat)
+// ============================================================================
+
+get-current-model fn (): Str {
+  or(::store/get(agent-state, "ai-model"), DEFAULT_MODEL)
+}
+
+// `::ai::message/Role` is an enum; `::ai::chat/Message.role` is a Str.
+// Map between them when bridging thread history into run-loop messages.
+role-name fn match (role: Role): Str {
+  Role.User      => { "user" }
+  Role.Assistant => { "assistant" }
+  Role.System    => { "system" }
+  Role.Tool      => { "tool" }
+}
+
+provider-to-chat-fn fn match (provider: Provider): Fn {
+  Provider.Anthropic => { ::anthropic-chat/chat }
+  Provider.OpenAi    => { ::openai-chat/chat }
+  =>                    { ::anthropic-chat/chat }
+}
+
+// Tools-aware counterpart used by `::ai::chat/run-loop`. Each provider
+// package exposes a `chat-with-tools` function matching the contract
+// `(model, messages, system, tools?) -> ChatReply` that run-loop drives.
+provider-to-chat-with-tools-fn fn match (provider: Provider): Fn {
+  Provider.Anthropic => { ::anthropic-chat-tools/chat-with-tools }
+  Provider.OpenAi    => { ::openai-chat-tools/chat-with-tools }
+  =>                    { ::anthropic-chat-tools/chat-with-tools }
+}
+
+get-chat-opts fn (session: Session): ChatOptions {
+  model    get-current-model()
+  provider ::chat/detect-provider(model)
+  base-fn  provider-to-chat-fn(provider)
+  ChatOptions({
+    chat-fn: (m, p, s) {
+      answer base-fn(m, p, s)
+      track-ai-call(session, m, p, or(s, ""), or(answer, ""))
+      answer
+    },
+    model: model,
+    system: brain.system-prompt,
+  })
+}
+
+// Skills attached to every `run-loop`-driven chat the agent runs.
+// Order matters only for human readability — the resolver index in the
+// system prompt lists them in this order. The transport-aware
+// resolver below filters tone skills by the active session's
+// transport tag.
+agent-skills ::skill/for-agent([
+  ::own-skills/telegram-tone,
+  ::own-skills/slack-tone,
+  ::own-skills/coach-on-stats,
+  ::own-skills/decision-ledger,
+  ::own-skills/action-followup,
+  ::own-skills/meeting-brief,
+  ::own-skills/incident-postmortem,
+  ::own-skills/launch-readiness,
+  ::own-skills/stakeholder-update,
+  ::own-skills/open-questions,
+  ::own-skills/handoff-note,
+  ::generated-skills/group-summary,
+])
+
+// ----------------------------------------------------------------------------
+// Transport-aware skill filter
+// ----------------------------------------------------------------------------
+//
+// Skills carrying a `transport:*` token in their `when:` list are
+// considered transport-specific. We hide skills whose declared
+// transport doesn't match the active session — this is what keeps
+// `telegram-tone` out of Slack conversations and vice versa. Skills
+// with no `transport:*` token are always visible (the common case).
+
+skill-transports
+meta {
+  doc: """
+  Pull the set of `transport:*` tokens out of a skill's `when:` list.
+  Returns `[]` for skills that don't declare any transport tag —
+  those count as transport-agnostic.
+  """
+}
+fn (skill: ::skill/Skill): Vec<Str> {
+  triggers or(skill.when, [])
+  hits     filter(triggers, starts-with(%, "transport:"))
+  map(hits, (s) { slice(s, length("transport:")) })
+}
+
+skill-matches-transport
+meta {
+  doc: """
+  True if `skill` is either transport-agnostic (no `transport:*`
+  tag) or one of its declared transports matches `transport`.
+  """
+}
+fn (skill: ::skill/Skill, transport: Str): Bool {
+  ts skill-transports(skill)
+  cond {
+    is-empty(ts) => { true }
+    => { not(is-empty(filter(ts, eq(%, transport)))) }
+  }
+}
+
+skills-for-session
+meta {
+  doc: """
+  Filter `agent-skills` down to the ones the LLM should see for a
+  given session. Lets the model pick the right tone skill without
+  burning a turn re-reading the wrong one.
+  """
+}
+fn (session: Session): Vec<::skill/Skill> {
+  t ::transport/session-transport(session)
+  filter(agent-skills, skill-matches-transport(%, t))
+}
+
+session-skill-resolver
+meta {
+  doc: """
+  Build a `SkillResolver` that lists only the skills appropriate to
+  `session`'s transport, but lets `read_skill` reach any registered
+  skill (so a model that names a hidden skill explicitly still gets
+  served — useful for debugging).
+  """
+}
+fn (session: Session): ::skill/SkillResolver {
+  visible skills-for-session(session)
+  ::skill/SkillResolver({
+    list-fn:   (ctx: Map): Vec<::skill/Skill>   { visible },
+    read-fn:   (name: Str): ::skill/Skill?      { ::skill/find-skill(agent-skills, name) },
+    search-fn: null,
+  })
+}
+
+// Tools the agent always exposes alongside the skill builtins. We
+// publish `lookup-recent-stats` here (instead of bundling it inside
+// `coach-on-stats`'s `meta {skill: …}` map) because Hot meta literals
+// can't yet round-trip a `::ai::tool/Tool({…})` constructor through
+// `Skill({tools: …})` — see notes in `skills.hot`. Once that's fixed
+// this list can shrink and skills can carry their own tool kits.
+//
+// IMPORTANT: pass an explicit `name:` override. `from-fn` defaults to
+// the function's fully qualified name (`::team-brain::skills/lookup-recent-stats`),
+// which contains `:` and `/`. Anthropic's tools API rejects any name that
+// doesn't match `^[a-zA-Z0-9_-]{1,64}$`. The rejection silently turns
+// the response into `text=null, tool-calls=null, stop-reason=end_turn`
+// (no error surface), which is the source of the empty `/ask` reply we
+// hit during dry-run smoke testing. Keep tool names provider-portable.
+agent-tools [
+  ::tool/from-fn(::own-skills/lookup-recent-stats, {name: "lookup_recent_stats"}),
+]
+
+// Tools-aware variant of `get-chat-opts` for callers that drive the
+// conversation through `::ai::chat/run-loop` (multi-turn, tool-using).
+// The chat-fn is wrapped to record stats off `reply.text`; we count
+// once per LLM round-trip (`run-loop` may call `chat-fn` several times
+// per user turn when the model invokes tools).
+get-chat-opts-tools fn (session: Session): ChatOptions {
+  model    get-current-model()
+  provider ::chat/detect-provider(model)
+  base-fn  provider-to-chat-with-tools-fn(provider)
+  ChatOptions({
+    chat-fn: (m, msgs, s, tools) {
+      reply base-fn(m, msgs, s, tools)
+      // Approximate prompt by joining message bodies; cheap and good
+      // enough for the per-day token estimate /stats reports.
+      prompt-text join(map(or(msgs, []), (msg) { or(msg.content, "") }), "\n")
+      track-ai-call(session, m, prompt-text, or(s, ""), or(reply.text, ""))
+      reply
+    },
+    model: model,
+    system: brain.system-prompt,
+    // skill-resolver wins over `skills:` (see `::ai::skill/effective-resolver`),
+    // so the visible-skill list adapts to the session's transport
+    // while `read_skill` still serves any registered skill by name.
+    skill-resolver: session-skill-resolver(session),
+    tools: agent-tools,
+  })
+}
+
+// ============================================================================
+// Cross-tenant primitive: registered-sessions index
+// ============================================================================
+// Adapters call `register-session` whenever they see a session for the
+// first time so the digest scheduler can enumerate them. Without this,
+// digests would be Telegram-only (the original code keyed everything
+// off a single `telegram.chat.id` ctx var).
+
+register-session
+meta {
+    doc: """
+    Add `session` to the registered-sessions index. Idempotent.
+    Delegates to the shared `hot-ai-agent` runtime helper.
+    """
+}
+fn (session: Session) {
+  ::agent-runtime/register-session(agent-runtime, session)
+}
+
+list-registered-sessions
+meta { doc: "Materialize the registered sessions back as `Session` records." }
+fn (): Vec {
+  ::agent-runtime/list-registered-sessions(agent-runtime)
+}
+
+// ============================================================================
+// Common helpers
+// ============================================================================
+
+extract-command-arg fn (text: Str): Str { ::agent-command/arg(text) }
+
+// Render up to 3 high-confidence sources as a transport-aware footer.
+// The deep-link format is delegated to `::transport/format-source-link`
+// so Telegram gets `https://t.me/c/…` and Slack gets a permalink, with
+// no transport-specific code leaking into the agent.
+format-sources fn (sources: Vec, session: Session): Str {
+  top sources
+    |> filter((r) { gte(r.score, 0.4) })
+    |> slice(0, 3)
+  cond {
+    is-empty(top) => { "" }
+    =>            {
+      lines map(top, (r) {
+        score    round(mul(r.score, 100))
+        sender   or(r.value.sender-name, "unknown")
+        msg-id   get(or(r.value.metadata, {}), "message_id")
+        snippet  if(gt(length(r.value.content), 80),
+                   concat(slice(r.value.content, 0, 80), "..."),
+                   r.value.content)
+        link     ::transport/format-source-link(session, msg-id)
+        cond {
+          is-empty(link) => { `• <b>${sender}</b>: ${snippet} <i>(${score}%)</i>` }
+          =>                { `• <a href="${link}">${sender}</a>: ${snippet} <i>(${score}%)</i>` }
+        }
+      })
+      concat("\n\n<b>Sources:</b>\n", join(lines, "\n"))
+    }
+  }
+}
+
+is-voice-enabled
+meta {
+    doc: """
+    Voice transcription is opt-in. Off by default so casual deployments
+    don't burn Hot Box minutes on every voice note that lands in chat.
+    Currently honored by the Telegram adapter only — Slack v1 doesn't
+    process voice files.
+    """
+}
+fn (): Bool {
+  val ::ctx/get("brain.voice.enabled", false)
+  cond {
+    eq(val, true)    => { true }
+    eq(val, "true")  => { true }
+    =>                  { false }
+  }
+}
+
+// ============================================================================
+// Message Recording — transport-agnostic
+// ============================================================================
+// Adapters fan in here via `process-incoming`, which sends `brain:record`
+// with a normalized payload. The handler is transport-blind: it just
+// writes to memory.
+
+record-message
+meta {
+    doc: """
+    Persist a message into the session-scoped store via
+    `::ai::memory/remember`. Event payload:
+
+      { session, sender, content, timestamp, message-id, source, metadata? }
+
+    `source` is the transport name ("telegram"/"slack") so consumers
+    of the recall results can tell where it came from. `metadata`
+    carries transport-native ids the adapter wants to preserve (e.g.
+    `message_id` for Telegram deep links, `ts` + `thread_ts` for
+    Slack permalinks).
+    """,
+    agent: TeamBrain,
+    on-event: "brain:record",
+}
+fn (event) {
+  d event.data
+  mem make-memory(d.session, d.sender)
+  message ::msg/Message({
+    id: d.message-id,
+    content: or(d.content, ""),
+    sender: d.sender,
+    session: d.session,
+    timestamp: d.timestamp,
+    source: d.source,
+    metadata: or(d.metadata, {}),
+  })
+  ::mem/remember(mem, message)
+}
+
+// ============================================================================
+// Command: /ask <question> — Semantic search + RAG answer (multi-turn)
+// ============================================================================
+
+// Heuristic: does the question seem to be about this group's history,
+// or a general fact lookup? "Memory" cues win when present (this chat
+// has more signal about itself than Researcher does); otherwise fall
+// back to a memory check, and only route to Researcher if there's truly
+// nothing in the chat that looks relevant.
+
+MEMORY_CUES [
+  "we ", "we'", "us ", "our ", "this chat", "this group",
+  "earlier", "yesterday", "today", "decided", "agreed",
+  "said", "mentioned", "talked about",
+]
+
+EXTERNAL_CUES [
+  "what is", "who is", "when did", "how does", "explain ",
+  "define ", "what are", "how do", "what's the difference",
+]
+
+classify-question fn (question: Str): Str {
+  q lowercase(question)
+  cond {
+    some(MEMORY_CUES, (cue) { contains(q, cue) })  => { "memory" }
+    some(EXTERNAL_CUES, (cue) { starts-with(q, cue) }) => { "external" }
+    => { "memory" }
+  }
+}
+
+handle-ask
+meta {
+    doc: "Routes /ask: memory questions answered via RAG, external questions delegated to Researcher over ::ai::bus.",
+    agent: TeamBrain,
+    on-event: "brain:ask",
+    sends: [
+        {
+            event: "agents:collaborate",
+            doc: "External/general questions are delegated to Researcher over the shared agent bus.",
+        },
+    ],
+}
+fn (event) {
+  session  event.data.session
+  question event.data.question
+  sender   event.data.sender
+  reply-to event.data.reply-to
+
+  ::transport/show-typing(session)
+
+  mem make-memory(session, sender)
+  initial-class classify-question(question)
+
+  // For memory-classified questions, do a quick recall to confirm we
+  // actually have something relevant. If we don't, fall back to external.
+  hits cond {
+    eq(initial-class, "memory") => { ::mem/recall(mem, question, {limit: 5, min-score: 0.5}) }
+    => { [] }
+  }
+
+  route cond {
+    eq(initial-class, "external") => { "external" }
+    is-empty(hits) => { "external" }
+    => { "memory" }
+  }
+
+  tap(route, `[/ask route: ${route}]`)
+
+  cond {
+    eq(route, "external") => {
+      ::bus/collaborate(::bus/CollaborationRequest({
+        session: session,
+        sender: sender,
+        from-agent: "Team Brain",
+        question: question,
+        reply-event: "brain:ask-response",
+        correlation-id: or(reply-to, ""),
+        context: {session: session, reply-to: reply-to},
+      }))
+    }
+    => {
+      // Drive the answer through ::ai::chat/run-loop so skills (and any
+      // bundled tools like `lookup-recent-stats`) are actually wired in.
+      // We build the message vec ourselves: thread history + a final
+      // user turn whose content embeds the RAG-pulled context.
+      t       ::mem/thread(AGENT_NAME, session, sender, {max-turns: 10})
+      history ::mem/thread-history(t, null)
+      context ::rag/build-context(mem, question, {limit: 15, min-score: 0.3})
+
+      // Reuse rag's prompt builder so the tone matches the legacy
+      // /ask path. History is already passed as Vec<Message>, so we
+      // suppress the textual history block.
+      user-prompt ::rag/build-rag-prompt("", context, question)
+
+      messages concat(
+        map(history, (m) { ::chat/Message({role: role-name(m.role), content: m.content}) }),
+        [::chat/user-message(user-prompt)]
+      )
+
+      answer ::chat/run-loop-messages(get-chat-opts-tools(session), messages)
+
+      // Mirror ask-with-thread's bookkeeping: keep the per-(session, user)
+      // thread up to date so multi-turn /ask still works.
+      ::mem/thread-add(t, Role.User,      question)
+      ::mem/thread-add(t, Role.Assistant, answer)
+
+      sources ::mem/recall(mem, question, {limit: 15, min-score: 0.3})
+
+      cond {
+        is-empty(sources) => {
+          // Either the model produced an answer purely from skills /
+          // tools (e.g. coach-on-stats) or memory was empty. Send the
+          // answer through without a sources footer so we don't claim
+          // citations we don't have.
+          ::transport/reply(session, answer, reply-to)
+        }
+        => {
+          footer format-sources(sources, session)
+          ::transport/reply(session, concat(answer, footer), reply-to)
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Receives Researcher's reply over the bus and posts it back to the chat.
+// ============================================================================
+
+handle-ask-response
+meta {
+    doc: "Receives an answer from Researcher (via ::ai::bus/respond) and posts it back through the originating transport.",
+    agent: TeamBrain,
+    on-event: "brain:ask-response",
+}
+fn (event) {
+  payload event.data
+  ctx     or(get(payload, "context"), {})
+  session get(ctx, "session")
+  reply-to get(ctx, "reply-to")
+  answer  or(get(payload, "answer"), "(no answer)")
+  from-agent or(get(payload, "from-agent"), "Researcher")
+  cond {
+    is-null(session) => { record-error("handle-ask-response", "missing session in context") }
+    => {
+      ::transport/reply(session, concat(`<i>Asked ${from-agent}…</i>\n\n`, answer), reply-to)
+    }
+  }
+}
+
+// ============================================================================
+// Command: /summary [hours] — Summarize recent conversation
+// ============================================================================
+
+handle-summarize
+meta {
+    doc: "Generates an AI summary via ::ai::rag/summarize",
+    agent: TeamBrain,
+    on-event: "brain:summarize",
+}
+fn (event) {
+  session  event.data.session
+  hours    or(event.data.hours, 24)
+  reply-to event.data.reply-to
+
+  ::transport/show-typing(session)
+
+  mem make-memory(session, system-identity)
+  opts get-chat-opts(session)
+
+  recent-msgs ::mem/recent(mem, {hours: hours, limit: 500})
+
+  cond {
+    is-empty(recent-msgs) => {
+      ::transport/reply(session, `No messages in the last ${hours} hours.`, reply-to)
+    }
+    => {
+      summary ::rag/summarize(mem, opts, {
+        hours: hours,
+        limit: 500,
+        instruction: "Summarize this conversation. Organize by topic. Highlight decisions, action items, and important links.",
+      })
+      header `<b>Summary</b> (last ${hours}h, ${length(recent-msgs)} messages)\n\n`
+      ::transport/reply(session, concat(header, summary), reply-to)
+    }
+  }
+}
+
+// ============================================================================
+// Command: /decisions [hours] — Extract decisions & action items
+// ============================================================================
+
+handle-decisions
+meta {
+    doc: "Extracts decisions, action items, and open questions via ::ai::rag/summarize with a custom instruction",
+    agent: TeamBrain,
+    on-event: "brain:decisions",
+}
+fn (event) {
+  session  event.data.session
+  hours    or(event.data.hours, 48)
+  reply-to event.data.reply-to
+
+  ::transport/show-typing(session)
+
+  mem make-memory(session, system-identity)
+  opts get-chat-opts(session)
+
+  recent-msgs ::mem/recent(mem, {hours: hours, limit: 500})
+
+  cond {
+    is-empty(recent-msgs) => {
+      ::transport/reply(session, `No messages in the last ${hours} hours.`, reply-to)
+    }
+    => {
+      answer ::rag/summarize(mem, opts, {
+        hours: hours,
+        limit: 500,
+        instruction: """
+          Extract from this conversation:
+          1. <b>Decisions made</b> — what was agreed on, and by whom
+          2. <b>Action items</b> — tasks assigned or volunteered for, with who owns them
+          3. <b>Open questions</b> — unresolved topics that need follow-up
+
+          If none exist in a category, say "None found." Be specific and cite who said what.
+        """,
+      })
+      header `<b>Decisions &amp; Action Items</b> (last ${hours}h)\n\n`
+      ::transport/reply(session, concat(header, answer), reply-to)
+    }
+  }
+}
+
+// ============================================================================
+// Command: /search <query> — Raw semantic search results
+// ============================================================================
+
+handle-search
+meta {
+    doc: "Semantic search via ::ai::memory/recall",
+    agent: TeamBrain,
+    on-event: "brain:search",
+}
+fn (event) {
+  session  event.data.session
+  query    event.data.query
+  reply-to event.data.reply-to
+
+  mem make-memory(session, system-identity)
+  results ::mem/recall(mem, query, {limit: 10, min-score: 0.3})
+
+  cond {
+    is-empty(results) => {
+      ::transport/reply(session, `No results for "<i>${query}</i>"`, reply-to)
+    }
+    => {
+      formatted results
+        |> map((r) {
+          score round(mul(r.score, 100))
+          `• <b>${or(r.value.sender-name, "unknown")}</b>: ${r.value.content}\n  <i>${score}% match</i>`
+        })
+        |> join("\n\n")
+
+      header `<b>Search</b> "<i>${query}</i>" — ${length(results)} results\n\n`
+      ::transport/reply(session, concat(header, formatted), reply-to)
+    }
+  }
+}
+
+// ============================================================================
+// Commands: memory lifecycle controls
+// ============================================================================
+
+memory-inspection-text fn (session: Session): Str {
+  mem make-memory(session, system-identity)
+  bundle ::mem/export-memory(mem)
+  inspection ::agent-memory/inspect-export(bundle, {
+    capsule-count: length(::mem/list-capsules(mem)),
+    graph-node-count: length(::mem/list-nodes(mem)),
+    graph-edge-count: length(::mem/list-edges(mem)),
+  })
+  ::agent-memory/render-inspection(inspection)
+}
+
+handle-memory-command fn (session: Session, reply-to: Str?) {
+  ::transport/reply(session, memory-inspection-text(session), reply-to)
+}
+
+handle-export-command fn (session: Session, reply-to: Str?) {
+  ::agent-stream/emit-memory-start(AGENT_NAME, "export", {session-id: session.id})
+  mem make-memory(session, system-identity)
+  bundle ::mem/export-memory(mem)
+  summary ::agent-memory/render-export-summary(bundle)
+  ::agent-stream/emit-memory-end(AGENT_NAME, "export", {session-id: session.id, records: add(add(length(bundle.session), length(bundle.user)), length(bundle.kb))})
+  ::transport/reply(session, concat("<b>Memory Export</b>\n\n", summary, "\n\nUse the MCP/export API for the full JSON bundle."), reply-to)
+}
+
+handle-forget-command fn (session: Session, sender: Identity, arg: Str, reply-to: Str?) {
+  req ::agent-memory/parse-forget-request(arg)
+  mem make-memory(session, sender)
+  ::agent-stream/emit-memory-start(AGENT_NAME, "forget", {session-id: session.id, scope: req.scope})
+  deleted cond {
+    or(eq(req.scope, "session"), eq(req.scope, "all")) => {
+      before ::store/length(mem.session-store)
+      ::mem/forget-session(mem)
+      before
+    }
+    eq(req.scope, "source") => {
+      if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector))
+    }
+    eq(req.scope, "user") => {
+      if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0))
+    }
+    eq(req.scope, "kb") => {
+      if(is-empty(req.selector), 0, if(::mem/forget-kb-key(mem, req.selector), 1, 0))
+    }
+    => { 0 }
+  }
+  ::agent-stream/emit-memory-end(AGENT_NAME, "forget", {
+    session-id: session.id,
+    scope: req.scope,
+    deleted: deleted,
+  })
+  cond {
+    is-empty(req.raw) => {
+      ::transport/reply(session, "Usage: /forget session | /forget source &lt;message-id&gt; | /forget user &lt;key&gt; | /forget kb &lt;key&gt;", reply-to)
+    }
+    => {
+      ::transport/reply(session, `<b>Forget complete</b>\nDeleted ${deleted} record(s) for scope <code>${req.scope}</code>.`, reply-to)
+    }
+  }
+}
+
+compact-teambrain-session fn (session: Session, hours: Int): Map {
+  mem make-memory(session, system-identity)
+  opts get-chat-opts(session)
+  capsule ::rag/compact-window(mem, opts, {
+    hours: hours,
+    limit: 800,
+    id: `teambrain:${session.id}:${today-bucket()}:${hours}h`,
+    instruction: """
+      Compact this TeamBrain chat window into a durable capsule.
+      Preserve decisions, tasks, links, open questions, owners, and source ids.
+      Keep the summary short enough to use as retrieval context later.
+    """,
+    metadata: {agent: "teambrain", session-id: session.id},
+    emit-stream: true,
+  })
+  {capsule-id: capsule.id, source-count: length(capsule.source-ids)}
+}
+
+handle-compact-command fn (session: Session, arg: Str, reply-to: Str?) {
+  hours if(is-empty(trim(or(arg, ""))), 168, Int(trim(arg)))
+  ::agent-stream/emit-memory-start(AGENT_NAME, "compact", {session-id: session.id, hours: hours})
+  result ::hot::lang/try-call(() { compact-teambrain-session(session, hours) })
+  cond {
+    result.ok => {
+      ::agent-stream/emit-memory-end(AGENT_NAME, "compact", {session-id: session.id, result: result.value})
+      capsule-id get(result.value, "capsule-id")
+      source-count get(result.value, "source-count")
+      ::transport/reply(session, `<b>Compaction complete</b>\nCapsule <code>${capsule-id}</code> captured ${source-count} source record(s).`, reply-to)
+    }
+    => {
+      record-error("compact", `${session.id}: ${result.error}`)
+      ::agent-stream/emit-memory-error(AGENT_NAME, "compact", {session-id: session.id, error: result.error})
+      ::transport/reply(session, `<b>Compaction failed</b>\n<code>${result.error}</code>`, reply-to)
+    }
+  }
+}
+
+handle-why-command fn (session: Session, arg: Str, reply-to: Str?) {
+  query trim(or(arg, ""))
+  cond {
+    is-empty(query) => {
+      ::transport/reply(session, "Usage: /why &lt;question or topic&gt; — shows memory citations that would influence an answer.", reply-to)
+    }
+    => {
+      mem make-memory(session, system-identity)
+      result ::mem/hybrid-recall(mem, query, {limit: 8})
+      citations result.citations
+      body cond {
+        is-empty(citations) => { "No matching memory sources found." }
+        => {
+          citations
+            |> slice(0, 8)
+            |> map((c) { `• <b>${or(c.label, c.id)}</b>: ${or(c.excerpt, "")}` })
+            |> join("\n")
+        }
+      }
+      ::transport/reply(session, concat("<b>Why / Sources</b>\n\n", body), reply-to)
+    }
+  }
+}
+
+// ============================================================================
+// Stats / Diag rendering
+// ============================================================================
+
+format-ts fn (ts: Any): Str {
+  cond {
+    is-null(ts) => { "never" }
+    eq(ts, 0)   => { "never" }
+    =>             { Str(::time/Instant(::time/Millisecond(mul(Int(ts), 1000)))) }
+  }
+}
+
+top-contributors fn (recent-msgs: Vec, n: Int): Str {
+  cond {
+    is-empty(recent-msgs) => { "—" }
+    =>                       {
+      counts frequencies(map(recent-msgs, %(%.value.sender-name)))
+      pairs map(keys(counts), (name) { [get(counts, name), name] })
+      top   pairs |> sort |> reverse |> slice(0, n)
+      top |> map((p) { `${p[1]} (${p[0]})` }) |> join(", ")
+    }
+  }
+}
+
+active-days-7 fn (session: Session): Int {
+  bucket ::transport/session-bucket(session)
+  today today-bucket()
+  start sub(today, 6)
+  range(start, add(today, 1))
+    |> filter((d) { gt(or(::store/get(brain-stats, `${bucket}:calls:${d}`), 0), 0) })
+    |> length
+}
+
+stats-text fn (session: Session): Str {
+  bucket ::transport/session-bucket(session)
+  mem make-memory(session, system-identity)
+  total ::store/length(mem.session-store)
+  recent-week ::mem/recent(mem, {hours: 168, limit: 1000})
+  contributors top-contributors(recent-week, 3)
+  day today-bucket()
+  calls or(::store/get(brain-stats, `${bucket}:calls:${day}`), 0)
+  tokens or(::store/get(brain-stats, `${bucket}:tokens:${day}`), 0)
+  active active-days-7(session)
+  last-call format-ts(::store/get(brain-stats, `${bucket}:last-call`))
+  last-msg cond {
+    is-empty(recent-week) => { "no messages in the last 7d" }
+    =>                       { format-ts(last(recent-week).value.timestamp) }
+  }
+
+  concat(
+    "<b>Team Brain — Stats</b>\n\n",
+    `<b>Messages recorded:</b> ${total}\n`,
+    `<b>Top contributors (7d):</b> ${contributors}\n`,
+    `<b>AI calls today:</b> ${calls}\n`,
+    `<b>Tokens today (est.):</b> ${tokens}\n`,
+    `<b>Active days (7d):</b> ${active}/7\n`,
+    `<b>Last AI call:</b> ${last-call}\n`,
+    `<b>Last message:</b> ${last-msg}`
+  )
+}
+
+last-errors-text fn (): Str {
+  errors ::store/list(brain-errors)
+  cond {
+    is-empty(errors) => { "none" }
+    =>                  {
+      lines map(errors, (e) {
+        `  • <i>${format-ts(e.value.ts)}</i> [${e.value.where}] ${e.value.msg}`
+      })
+      concat("\n", join(lines, "\n"))
+    }
+  }
+}
+
+diag-text fn (session: Session): Str {
+  model get-current-model()
+  provider-label ::chat/provider-name(::chat/detect-provider(model))
+  voice if(is-voice-enabled(), "enabled", "disabled")
+  voice-model ::ctx/get("brain.voice.model", "base")
+  mem make-memory(session, system-identity)
+  session-size ::store/length(mem.session-store)
+  kb-size ::store/length(mem.kb-store)
+  registered length(list-registered-sessions())
+  t ::transport/session-transport(session)
+  transport-label cond {
+    eq(t, "telegram") => { "Telegram" }
+    eq(t, "slack")    => { "Slack" }
+    =>                   { t }
+  }
+  concat(
+    "<b>Team Brain — Diagnostics</b>\n\n",
+    `<b>Transport:</b> ${transport-label}\n`,
+    `<b>Session:</b> <code>${session.id}</code>\n`,
+    `<b>AI model:</b> ${provider-label} <code>${model}</code>\n`,
+    `<b>Voice:</b> ${voice} (model: <code>${voice-model}</code>)\n`,
+    `<b>Memory:</b> session=${session-size}, kb=${kb-size}\n`,
+    `<b>Registered sessions:</b> ${registered}\n`,
+    `<b>Recent errors:</b>${last-errors-text()}`
+  )
+}
+
+// ============================================================================
+// Welcome / Help text
+// ============================================================================
+
+welcome-message
+"""
+  <b>Hi there! I'm Team Brain 🧠</b>
+
+  I quietly record this chat's messages and help you make sense of them:
+
+  • Ask a question about what's been discussed: <code>/ask when did we decide to ship?</code>
+  • Summarize recent activity: <code>/summary</code> or <code>/summary 12h</code>
+  • Extract decisions &amp; action items: <code>/decisions</code>
+  • Semantic search: <code>/search launch plan</code>
+  • Memory controls: <code>/memory</code>, <code>/compact</code>, <code>/export</code>, <code>/forget</code>
+  • Group stats: <code>/stats</code>  •  Diagnostics: <code>/diag</code>
+  • See &amp; switch AI model: <code>/ai</code>
+  • Help: <code>/brain</code>
+
+  I only store messages sent after I joined. Type <code>/brain</code> any time to see commands.
+"""
+
+help-message fn (): Str {
+  model get-current-model()
+  provider ::chat/detect-provider(model)
+  provider-label ::chat/provider-name(provider)
+  concat(
+    "<b>Team Brain</b>\n\n",
+    `AI model: <b>${provider-label}</b> <code>${model}</code>\n\n`,
+    "<b>Commands:</b>\n",
+    "/ask &lt;question&gt; — Ask about chat history\n",
+    "/summary — Summarize last 24h\n",
+    "/summary &lt;hours&gt; — Summarize last N hours\n",
+    "/decisions — Extract decisions &amp; action items\n",
+    "/search &lt;query&gt; — Search message history\n",
+    "/memory — Show memory counts\n",
+    "/compact [hours] — Compact raw memory into a capsule\n",
+    "/export — Summarize exportable memory bundle\n",
+    "/forget &lt;scope&gt; &lt;selector&gt; — Forget session/source/user/KB memory\n",
+    "/why &lt;topic&gt; — Show memory citations for a topic\n",
+    "/stats — Activity &amp; AI usage\n",
+    "/diag — Diagnostics &amp; configuration\n",
+    "/ai — Show or switch AI model\n",
+    "/start, /brain — Show this help message"
+  )
+}
+
+// ============================================================================
+// /ai command — show or switch AI model
+// ============================================================================
+
+handle-ai-command fn (session: Session, arg: Str, reply-to: Str?) {
+  cond {
+    is-empty(arg) => {
+      current get-current-model()
+      current-provider ::chat/provider-name(::chat/detect-provider(current))
+      options MODEL_ALIASES
+        |> keys
+        |> map((name) {
+          model get(MODEL_ALIASES, name)
+          provider-label ::chat/provider-name(::chat/detect-provider(model))
+          marker if(eq(model, current), " ✓", "")
+          `  <code>/ai ${name}</code> → ${provider-label} ${model}${marker}`
+        })
+        |> join("\n")
+      ::transport/reply(session, concat(
+        `<b>AI Model:</b> ${current-provider} <code>${current}</code>\n\n`,
+        options
+      ), reply-to)
+    }
+    => {
+      selection get(MODEL_ALIASES, arg)
+      cond {
+        is-null(selection) => {
+          ::transport/reply(session, `Unknown model "<code>${arg}</code>". Type /ai to see options.`, reply-to)
+        }
+        => {
+          ::store/put(agent-state, "ai-model", selection)
+          provider-label ::chat/provider-name(::chat/detect-provider(selection))
+          ::transport/reply(session, `Switched to <b>${provider-label}</b> <code>${selection}</code>`, reply-to)
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// process-incoming — the single fan-in for adapters
+// ============================================================================
+// Adapters convert their native message format to `IncomingMessage`
+// and call this. The dispatcher only knows about `IncomingMessage`
+// fields and emits transport-blind events whose handlers (above) take
+// `session` + `sender` from the event payload.
+//
+// Voice messages are NOT routed here; transports that handle voice
+// (Telegram today) intercept those before constructing `IncomingMessage`
+// and send their own `brain:record-voice` events directly. Keeps
+// agent-core blissfully unaware of file-id vocabularies.
+
+process-incoming
+meta {
+    doc: """
+    Top-level inbound dispatcher. Adapters call this once per message.
+    Side effects: registers the session (so digests find it) and
+    either replies inline (commands that don't need the bus) or emits
+    one of `brain:ask` / `brain:summarize` / `brain:decisions` /
+    `brain:search` / `brain:record` events (commands and ambient
+    recording).
+    """
+}
+fn (im: ::transport/IncomingMessage) {
+  register-session(im.session)
+
+  text     im.text
+  session  im.session
+  sender   im.sender
+  msg-id   im.message-id
+  lowered  lowercase(trim(text))
+
+  cond {
+    or(starts-with(lowered, "/start"), starts-with(lowered, "/help")) => {
+      ::transport/reply(session, welcome-message, msg-id)
+    }
+
+    starts-with(lowered, "/brain") => {
+      ::transport/reply(session, help-message(), msg-id)
+    }
+
+    starts-with(lowered, "/ai") => {
+      arg extract-command-arg(text) |> lowercase |> trim
+      handle-ai-command(session, arg, msg-id)
+    }
+
+    starts-with(lowered, "/ask") => {
+      question extract-command-arg(text)
+      cond {
+        is-empty(question) => { ::transport/reply(session, "Usage: /ask &lt;your question&gt;", msg-id) }
+        => {
+          send("brain:ask", {
+            session: session,
+            question: question,
+            sender: sender,
+            reply-to: msg-id,
+          })
+        }
+      }
+    }
+
+    starts-with(lowered, "/summary") => {
+      arg extract-command-arg(text) |> replace("h", "") |> replace("hours", "") |> trim
+      hours if(is-empty(arg), 24, Int(arg))
+      send("brain:summarize", {
+        session: session,
+        hours: hours,
+        reply-to: msg-id,
+      })
+    }
+
+    starts-with(lowered, "/decisions") => {
+      arg extract-command-arg(text) |> replace("h", "") |> replace("hours", "") |> trim
+      hours if(is-empty(arg), 48, Int(arg))
+      send("brain:decisions", {
+        session: session,
+        hours: hours,
+        reply-to: msg-id,
+      })
+    }
+
+    starts-with(lowered, "/search") => {
+      query extract-command-arg(text)
+      cond {
+        is-empty(query) => { ::transport/reply(session, "Usage: /search &lt;query&gt;", msg-id) }
+        => {
+          send("brain:search", {
+            session: session,
+            query: query,
+            reply-to: msg-id,
+          })
+        }
+      }
+    }
+
+    starts-with(lowered, "/memory") => {
+      handle-memory-command(session, msg-id)
+    }
+
+    starts-with(lowered, "/export") => {
+      handle-export-command(session, msg-id)
+    }
+
+    starts-with(lowered, "/forget") => {
+      handle-forget-command(session, sender, extract-command-arg(text), msg-id)
+    }
+
+    starts-with(lowered, "/compact") => {
+      handle-compact-command(session, extract-command-arg(text), msg-id)
+    }
+
+    starts-with(lowered, "/why") => {
+      handle-why-command(session, extract-command-arg(text), msg-id)
+    }
+
+    starts-with(lowered, "/stats") => {
+      ::transport/reply(session, stats-text(session), msg-id)
+    }
+
+    starts-with(lowered, "/diag") => {
+      ::transport/reply(session, diag-text(session), msg-id)
+    }
+
+    // Regular text message — record it
+    not(is-empty(text)) => {
+      send("brain:record", {
+        session: session,
+        sender: sender,
+        content: text,
+        timestamp: im.timestamp,
+        message-id: msg-id,
+        source: ::transport/transport-name(::transport/session-transport(session)),
+        metadata: {message_id: msg-id},
+      })
+    }
+
+    // Anything else (sticker, photo without caption, etc.) — ignore.
+    // Adapters that want voice handling intercept those before calling
+    // `process-incoming`.
+    => { "unhandled message type" }
+  }
+}
+
+// ============================================================================
+// Schedule: Daily Digest
+// ============================================================================
+// Iterates every registered session and posts a per-session digest.
+// Adapters keep the index in sync via `register-session`. Falls back
+// to legacy single-chat (`telegram.chat.id`) if the index is empty so
+// fresh installs still get a digest the first day.
+
+DIGEST_INSTRUCTION """
+  Generate a morning digest:
+  1. Key topics discussed
+  2. Decisions made
+  3. Action items (who needs to do what)
+  4. Notable links or resources shared
+
+  Keep it concise and scannable. Use HTML formatting.
+"""
+
+run-digest-for-session fn (session: Session) {
+  mem make-memory(session, system-identity)
+  opts get-chat-opts(session)
+
+  recent-msgs ::mem/recent(mem, {hours: 24, limit: 500})
+
+  cond {
+    lte(length(recent-msgs), 3) => { "too few messages for a digest" }
+    => {
+      ::transport/show-typing(session)
+      digest ::rag/summarize(mem, opts, {
+        hours: 24,
+        limit: 500,
+        instruction: DIGEST_INSTRUCTION,
+      })
+      ::transport/reply(session, concat("<b>Daily Digest</b>\n\n", digest), null)
+      compact-teambrain-session(session, 24)
+    }
+  }
+}
+
+daily-digest
+meta {
+    doc: "Iterates every registered session and posts a morning summary of the prior 24h.",
+    agent: TeamBrain,
+    schedule: "every day at 9am",
+    on-event: "brain:daily-digest",
+}
+fn (event) {
+  sessions list-registered-sessions()
+  for-each(sessions, (s) {
+    // Don't let one session's failure (e.g. revoked token) take out the
+    // whole loop — record and continue. `::hot::lang/try-call` returns
+    // `{ok: Bool, value | error}` so we can fan-out without aborting.
+    result ::hot::lang/try-call(() { run-digest-for-session(s) })
+    cond {
+      not(result.ok) => { record-error("daily-digest", `${s.id}: ${result.error}`) }
+    }
+  })
+}
+
+// ============================================================================
+// Schedule: Weekly Summary
+// ============================================================================
+
+WEEKLY_INSTRUCTION """
+  Generate a weekly summary:
+  1. Top topics and themes
+  2. Key decisions and outcomes
+  3. Open items and follow-ups
+  4. Most active contributors
+  5. Notable wins or milestones
+
+  Keep it concise. Use HTML formatting.
+"""
+
+run-weekly-for-session fn (session: Session) {
+  mem make-memory(session, system-identity)
+  opts get-chat-opts(session)
+
+  recent-msgs ::mem/recent(mem, {hours: 168, limit: 2000})
+
+  cond {
+    lte(length(recent-msgs), 5) => { "too few messages for a weekly summary" }
+    => {
+      ::transport/show-typing(session)
+      // Sample down to 300 to stay within AI context limits (bookend sampling)
+      sampled ::aictx/sample(recent-msgs, {max-items: 300, strategy: "bookend"})
+
+      summary ::rag/summarize(mem, opts, {
+        hours: 168,
+        limit: length(sampled),
+        instruction: WEEKLY_INSTRUCTION,
+      })
+      ::transport/reply(session, concat("<b>Weekly Summary</b>\n\n", summary), null)
+      compact-teambrain-session(session, 168)
+    }
+  }
+}
+
+weekly-summary
+meta {
+    doc: "Iterates every registered session and posts a Monday morning weekly summary.",
+    agent: TeamBrain,
+    schedule: "every monday at 9am",
+    on-event: "brain:weekly-summary",
+}
+fn (event) {
+  sessions list-registered-sessions()
+  for-each(sessions, (s) {
+    result ::hot::lang/try-call(() { run-weekly-for-session(s) })
+    cond {
+      not(result.ok) => { record-error("weekly-summary", `${s.id}: ${result.error}`) }
+    }
+  })
+}
+
+teambrain-compact-stale-memory
+meta {
+    doc: "Scheduled reusable lifecycle compaction for registered TeamBrain sessions.",
+    agent: TeamBrain,
+    schedule: "every day at 2am",
+    on-event: "brain:compact-stale-memory",
+}
+fn (event) {
+  ::agent-life/compact-stale-sessions(agent-runtime, (session) {
+    compact-teambrain-session(session, 168)
+  })
+}
+
+// ============================================================================
+// Transport wiring — agentic aliases over library adapter functions
+// ============================================================================
+// The library adapters (`telegram_adapter.hot`, `slack_adapter.hot`) expose
+// pure callable functions with no agentic meta; we attach the agentic
+// registration here so that:
+//
+//   1. The library files can be reused (or compiled into more than one
+//      project) without each project re-registering the same schedule,
+//      webhook, or event handler.
+//   2. Project-specific tuning (retry counts, webhook service names,
+//      cron tweaks) lives next to the rest of the agent assembly.
+//   3. Disabling a transport is a one-line edit here, not a library
+//      change.
+//
+// Each entry below is a meta-bearing alias (`name meta {…} target` —
+// `name target meta {…}` is also accepted). The library function's own
+// `doc:` flows through via meta merging, with these alias keys winning
+// on collision. If you need transport-specific behaviour beyond
+// registration (e.g. wrapping the call in `try-call` for fault
+// isolation), upgrade the alias to a full `fn (event) { … }` wrapper.
+
+tg-record-voice
+meta {
+    agent: TeamBrain,
+    on-event: "telegram:record-voice",
+    retry: 2,
+}
+::tg-adapter/record-voice
+
+tg-check-updates
+meta {
+    agent: TeamBrain,
+    schedule: "every 30 seconds",
+    on-event: "telegram:check-updates",
+    sends: [
+        {
+            event: "telegram:record-voice",
+            doc: "Voice messages are delegated to the Telegram voice-recording handler when voice is enabled.",
+        },
+        {
+            event: "brain:ask",
+            doc: "Incoming /ask commands are normalized by the Telegram adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:summarize",
+            doc: "Incoming /summary commands are normalized by the Telegram adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:decisions",
+            doc: "Incoming /decisions commands are normalized by the Telegram adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:search",
+            doc: "Incoming /search commands are normalized by the Telegram adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:record",
+            doc: "Regular Telegram text messages are normalized and stored in TeamBrain memory.",
+        },
+    ],
+}
+::tg-adapter/check-updates
+
+tg-on-update
+meta {
+    agent: TeamBrain,
+    webhook: {
+        service: "team-brain",
+        path: "/updates",
+        method: "POST",
+        description: "Receive Telegram bot updates",
+    },
+    sends: [
+        {
+            event: "telegram:record-voice",
+            doc: "Voice messages are delegated to the Telegram voice-recording handler when voice is enabled.",
+        },
+        {
+            event: "brain:ask",
+            doc: "Incoming /ask commands are normalized by the Telegram webhook and routed through TeamBrain.",
+        },
+        {
+            event: "brain:summarize",
+            doc: "Incoming /summary commands are normalized by the Telegram webhook and routed through TeamBrain.",
+        },
+        {
+            event: "brain:decisions",
+            doc: "Incoming /decisions commands are normalized by the Telegram webhook and routed through TeamBrain.",
+        },
+        {
+            event: "brain:search",
+            doc: "Incoming /search commands are normalized by the Telegram webhook and routed through TeamBrain.",
+        },
+        {
+            event: "brain:record",
+            doc: "Regular Telegram text messages are normalized and stored in TeamBrain memory.",
+        },
+    ],
+}
+::tg-adapter/on-telegram-update
+
+slack-on-event
+meta {
+    agent: TeamBrain,
+    webhook: {
+        service: "team-brain",
+        path: "/slack/events",
+        method: "POST",
+        description: "Receive Slack Events API callbacks",
+    },
+    sends: [
+        {
+            event: "brain:ask",
+            doc: "Incoming /ask commands are normalized by the Slack adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:summarize",
+            doc: "Incoming /summary commands are normalized by the Slack adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:decisions",
+            doc: "Incoming /decisions commands are normalized by the Slack adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:search",
+            doc: "Incoming /search commands are normalized by the Slack adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:record",
+            doc: "Regular Slack messages are normalized and stored in TeamBrain memory.",
+        },
+    ],
+}
+::slack-adapter/on-slack-event
+
+web-on-message
+meta {
+    agent: TeamBrain,
+    webhook: {
+        service: "team-brain",
+        path: "/web/messages",
+        method: "POST",
+        description: "Receive custom TeamBrain chat messages",
+    },
+    sends: [
+        {
+            event: "brain:ask",
+            doc: "Incoming /ask commands are normalized by the web adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:summarize",
+            doc: "Incoming /summary commands are normalized by the web adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:decisions",
+            doc: "Incoming /decisions commands are normalized by the web adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:search",
+            doc: "Incoming /search commands are normalized by the web adapter and routed through TeamBrain.",
+        },
+        {
+            event: "brain:record",
+            doc: "Regular web messages are normalized and stored in TeamBrain memory.",
+        },
+    ],
+}
+::web-adapter/on-web-message
+
+// ============================================================================
+// MCP Tool: Let external AI agents search any registered session's brain
+// ============================================================================
+
+search-brain
+meta {
+    doc: "Search a registered session's history using semantic search. Pass session_id to target a specific chat; defaults to the first registered session.",
+    agent: TeamBrain,
+    mcp: {
+        service: "team-brain",
+        name: "search_team_brain",
+        description: "Search a chat's message history by meaning. Returns relevant messages with sender and relevance score.",
+    },
+}
+fn (params) {
+  query or(params.query, "")
+  limit or(params.limit, 10)
+
+  // Pick the target session: explicit session_id wins; otherwise fall
+  // back to the first registered session (most installs only have one).
+  registered list-registered-sessions()
+  session ::agent-mcp/select-session(params, registered)
+
+  cond {
+    is-empty(query)   => { err("query is required") }
+    is-null(session)  => { err("no registered sessions; pass session_id explicitly or send a message to the bot first") }
+    => {
+      mem make-memory(session, system-identity)
+      results ::mem/recall(mem, query, {limit: limit, min-score: 0.3})
+      map(results, (r) {
+        {
+          user: or(r.value.sender-name, "unknown"),
+          message: r.value.content,
+          timestamp: r.value.timestamp,
+          relevance: round(mul(r.score, 100)),
+        }
+      })
+    }
+  }
+}
+
+query-teambrain-graph
+meta {
+    doc: "Hybrid vector plus graph retrieval over a registered TeamBrain session.",
+    agent: TeamBrain,
+    mcp: {
+        service: "team-brain",
+        name: "query_team_brain_graph",
+        description: "Query TeamBrain graph memory for decisions, blockers, launch readiness, incidents, or unresolved questions.",
+    },
+}
+fn (params) {
+  query or(params.query, "")
+  registered list-registered-sessions()
+  session ::agent-mcp/select-session(params, registered)
+  cond {
+    is-empty(query)  => { err("query is required") }
+    is-null(session) => { err("no registered sessions; pass session_id explicitly or send a message to the bot first") }
+    => {
+      mem make-memory(session, system-identity)
+      result ::mem/hybrid-recall(mem, query, {
+        limit: or(params.limit, 10),
+        seed-node-ids: or(params.seed_node_ids, []),
+      })
+      {
+        citations: map(result.citations, (c) {
+          {
+            id: c.id,
+            label: c.label,
+            excerpt: c.excerpt,
+            score: c.score,
+          }
+        }),
+        graph_edges: map(result.graph.edges, (e) { e.value }),
+      }
+    }
+  }
+}

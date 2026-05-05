@@ -6,6 +6,7 @@ meta {
 ChatOptions ::ai::chat/ChatOptions
 AgentMemory ::ai::memory/AgentMemory
 Thread      ::ai::memory/Thread
+MemoryCapsule ::ai::memory/MemoryCapsule
 Role        ::ai::message/Role
 
 // ============================================================================
@@ -167,4 +168,82 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Str {
             chat-opts.chat-fn(chat-opts.model, prompt, system)
         }
     }
+}
+
+compact-window
+meta {
+    doc: "Summarize a recent memory window into a durable MemoryCapsule and store it in the KB. Options: hours, limit, id, instruction, metadata, emit-stream."
+}
+fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): MemoryCapsule {
+    o or(opts, {})
+    capsule-id get(o, "id", `capsule:${Uuid()}`)
+    emit-stream-on get(o, "emit-stream", false)
+
+    if(emit-stream-on, {
+        if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_START, {
+            agent-name: mem.agent-name,
+            capsule-id: capsule-id,
+            opts: o,
+        }), null)
+    })
+
+    messages ::ai::memory/recent(mem, o)
+    summary summarize(mem, chat-opts, o)
+    capsule ::ai::memory/capsule-from-window(capsule-id, summary, messages, o)
+    ::ai::memory/store-capsule(mem, capsule)
+
+    if(emit-stream-on, {
+        if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_END, {
+            agent-name: mem.agent-name,
+            capsule-id: capsule-id,
+            source-count: length(messages),
+        }), null)
+    })
+
+    capsule
+}
+
+compact-window-safe
+meta {
+    doc: "Like `compact-window`, returning `{ok, capsule, error}` and emitting compaction errors when requested."
+}
+fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Map {
+    res if-err(compact-window(mem, chat-opts, opts), (err) {
+        o or(opts, {})
+        if(get(o, "emit-stream", false), {
+            if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_ERROR, {
+                agent-name: mem.agent-name,
+                error: Str(err),
+            }), null)
+        })
+        {
+            ok: false,
+            capsule: null,
+            error: Str(err),
+        }
+    })
+    cond {
+        and(is-map(res), contains(keys(res), "ok")) => { res }
+        => {
+            {
+                ok: true,
+                capsule: res,
+                error: null,
+            }
+        }
+    }
+}
+
+build-hybrid-context
+meta {
+    doc: "Build a citation-preserving context string from hybrid vector + graph retrieval."
+}
+fn (mem: AgentMemory, query: Str, opts: Map?): Str {
+    result ::ai::memory/hybrid-recall(mem, query, opts)
+    lines map(result.citations, (c) {
+        label or(c.label, c.id)
+        excerpt or(c.excerpt, "")
+        `[${label}] ${excerpt}`
+    })
+    join(lines, "\n")
 }

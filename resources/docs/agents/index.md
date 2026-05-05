@@ -4,6 +4,13 @@ Agents are typed groups of event handlers, schedules, and webhooks that share id
 
 Agents group handlers by type reference, giving you compile-time validation and structured config fields.
 
+For complete runnable examples, see the [Demos](/docs/demos) section. The
+[TeamBrain demo](/docs/demos/team-brain) shows a multi-transport team memory
+agent, the [PersonalAgent demo](/docs/demos/personal-agent) shows an
+identity-first personal memory agent, and [Hot Chat](/docs/demos/hot-chat)
+shows a reusable web chat client over the same wire contract used by
+Telegram and Slack adapters.
+
 ## Defining an Agent
 
 An agent starts with a type definition that has `agent` in its metadata. The type's struct fields become the agent's configuration, and the `doc` or `agent.description` provides a human-readable summary.

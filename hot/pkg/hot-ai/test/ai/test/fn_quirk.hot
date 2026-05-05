@@ -1,0 +1,93 @@
+::ai::test::fn-quirk ns
+meta ["test"]
+
+// Reproductions for the "Fn? in struct" quirk that drove `dispatch-chat`'s
+// shape. Goal: pin the exact behavior so we can either fix the runtime
+// bug or document the constraint precisely.
+
+::lang ::hot::lang
+
+// A trivial test fn whose semantics are unambiguous: it ignores its
+// arguments and returns a fixed string. If our struct-stored fn is
+// being silently turned into identity-on-first-arg, calling it with
+// `42` will return `42` instead of `"called!"`.
+fixed-string fn (a: Any, b: Any): Str {
+    "called!"
+}
+
+// === Baseline: a bare Fn local works as expected. ===
+
+test-bare-fn-local-call
+meta ["test"] fn () {
+    f fixed-string
+    out f(42, "hi")
+    assert-eq("called!", out)
+}
+
+// === Through a struct field typed as `Fn?`. ===
+
+Holder type {
+    label: Str,
+    body: Fn?,
+}
+
+test-fn-in-struct-direct-call
+meta ["test"] fn () {
+    h Holder({label: "x", body: fixed-string})
+    out h.body(42, "hi")
+    assert-eq("called!", out, "Calling fn-typed field directly on the struct")
+}
+
+test-fn-in-struct-extract-then-call
+meta ["test"] fn () {
+    h Holder({label: "x", body: fixed-string})
+    f h.body
+    out f(42, "hi")
+    assert-eq("called!", out, `Extracting Fn? field to a local then calling: f as Str = ${Str(f)}, out = ${Str(out)}`)
+}
+
+extract-body fn (h: Holder): Fn? {
+    h.body
+}
+
+test-fn-extracted-via-helper
+meta ["test"] fn () {
+    h Holder({label: "x", body: fixed-string})
+    f extract-body(h)
+    out f(42, "hi")
+    assert-eq("called!", out, "Extracting Fn? via a helper that returns Fn?")
+}
+
+// === Through a struct field typed as `Any`. ===
+
+AnyHolder type {
+    label: Str,
+    body: Any,
+}
+
+test-any-in-struct-direct-call
+meta ["test"] fn () {
+    h AnyHolder({label: "x", body: fixed-string})
+    out h.body(42, "hi")
+    assert-eq("called!", out, "Calling Any-typed field directly on the struct")
+}
+
+test-any-in-struct-extract-then-call
+meta ["test"] fn () {
+    h AnyHolder({label: "x", body: fixed-string})
+    f h.body
+    out f(42, "hi")
+    assert-eq("called!", out, "Extracting Any field to a local then calling")
+}
+
+// Diagnostic — capture what `Fn?` extraction actually produces.
+// Not a real "test", just a probe whose output we can inspect.
+// What does an Fn? field hold when stored as a string vs as an actual fn?
+test-fn-quirk-stored-as-string
+meta ["test"] fn () {
+    h Holder({label: "x", body: "fixed-string"})
+    f h.body
+    out f(42, "hi")
+    assert-eq("called!", out, `body: \"fixed-string\" → f=${Str(f)} out=${Str(out)}`)
+}
+

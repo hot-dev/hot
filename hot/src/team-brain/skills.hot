@@ -1,0 +1,342 @@
+::team-brain::skills ns
+meta {
+    doc: """
+    Example skills for the TeamBrain multi-transport agent. Demonstrates the
+    three flavors of skill authoring used by the resolver:
+
+    1. **Inline-body Hot skill** (`telegram-tone`) — the body is a
+       triple-quoted string literal directly on the `meta {skill: …}`
+       map. Shortest form, best for tight, agent-specific guidance.
+
+    2. **Bundled-tool skill** (`coach-on-stats`) — same inline body,
+       plus a `tools:` entry that ships a callable `lookup-recent-stats`
+       tool to the model whenever the skill is read. The tool reads
+       directly from `::team-brain::agent/brain-stats`.
+
+    3. **Markdown-bodied skill** — see
+       `resources/team-brain/skills/group-summary.skill.md`. The
+       skill-stub codegen turns it into a generated `.skill.hot` file
+       under `hot/src/_skills/team-brain/skills/` containing a
+       prompt-only `Skill` value with the Markdown body wired in.
+
+    To make these live for a chat-loop based command (e.g. a future
+    `/coach` handler), add them to the chat options' `skills:` list:
+
+    ```hot
+    ::skill ::ai::skill
+    skills ::skill/for-agent([
+        telegram-tone,
+        coach-on-stats,
+        ::skills::team-brain::skills::group-summary/group-summary,
+    ])
+    ::chat/run-loop(messages, ChatOptions({…, skills: skills}))
+    ```
+    """
+}
+
+::store ::hot::store
+::tool  ::ai::tool
+
+// ============================================================================
+// 1. Inline-body Hot skill
+// ============================================================================
+
+telegram-tone
+meta {
+    skill: {
+        name: "telegram-tone",
+        description: "Voice and formatting rules for Team Brain replies in Telegram chats.",
+        // The `transport:telegram` tag is read by
+        // `::team-brain::agent/skills-for-session`: skills carrying
+        // a `transport:*` token are hidden from the LLM whenever the
+        // active session uses a different transport. Drop the tag if
+        // you want this skill always-on.
+        when: ["reply to user", "format chat message", "summarize for telegram", "transport:telegram"],
+        body: """
+            # Telegram reply tone
+
+            - Keep it tight: one to three short paragraphs unless the user
+            asked for detail. Telegram clips long messages on mobile.
+            - Use the lightweight HTML the bot already renders — `<b>`,
+            `<i>`, `<code>`, and `<a href="…">…</a>`. Skip Markdown
+            headers (`#`, `##`) and triple-backtick code fences; they
+            render as raw text.
+            - Cite teammates as `<b>${name}</b>` when summarizing what
+            someone said, so the attribution stands out at a glance.
+            - Never use exclamation marks except when celebrating an
+            explicit user achievement (a shipped feature, a closed
+            incident, etc.). The Telegram chat is a working space, not
+            a marketing channel.
+            - When you don't have enough memory to answer, say so plainly
+            in one line and suggest what the user could ask instead.
+            """,
+    }
+}
+fn () { {} }
+
+// ----------------------------------------------------------------------------
+// Slack tone — counterpart to telegram-tone, applied when the active
+// session is a Slack channel. The skill resolver picks one or the
+// other based on the `transport:` cue the dispatcher passes; both
+// stay registered globally so a single bot serving both transports
+// can reach for whichever fits the active conversation.
+// ----------------------------------------------------------------------------
+
+slack-tone
+meta {
+    skill: {
+        name: "slack-tone",
+        description: "Voice and formatting rules for Team Brain replies in Slack channels.",
+        // See `telegram-tone` above for how the `transport:*` tag is
+        // consumed by the per-session skill resolver.
+        when: ["reply to user", "format chat message", "summarize for slack", "transport:slack"],
+        body: """
+            # Slack reply tone
+
+            - Use Slack's mrkdwn, NOT HTML. `*bold*`, `_italic_`,
+            `` `code` ``, ```` ``` ```` for fences, `<https://example.com|label>`
+            for links. HTML tags (`<b>`, `<i>`, `<a href>`) render as
+            raw text and look broken.
+            - Lead with one short sentence summarizing the answer, then
+            optional bullets. Slack threads expect skim-ability.
+            - Cite teammates as `<@USERID>` when you have the Slack id
+            in metadata, otherwise plain `*name*`. Avoid `@channel` /
+            `@here` — Team Brain shouldn't be paging the whole channel.
+            - Never lead with greetings ("Hi everyone!") or sign-offs
+            ("Hope this helps!"). Channels are noisy; every line should
+            carry information.
+            - When you don't have enough memory to answer, say so in
+            one line and suggest a follow-up the user could try.
+            """,
+    }
+}
+fn () { {} }
+
+// ============================================================================
+// 2. Bundled-tool skill
+// ============================================================================
+//
+// `coach-on-stats` ships a `lookup-recent-stats` tool alongside its
+// instructions. When the model reads this skill via `read_skill`, the
+// tool becomes callable so the LLM can ground its advice in real
+// numbers (today's call count, today's token estimate, last model
+// used) instead of guessing.
+
+lookup-recent-stats
+meta {
+    doc: """
+    Bundled tool for `coach-on-stats`. Reads today's AI-call counter,
+    today's estimated token total, and the most-recent model name from
+    `::team-brain::agent/brain-stats` for a given chat.
+
+    Stats are keyed by `${session.id}:...` (transport-prefixed, e.g.
+    `telegram:-100…` or `slack:T1:C2`). The model can pass an explicit
+    `session_id` if it knows one, otherwise the tool defaults to the
+    first registered session — handy for single-tenant installs and
+    keeps the tool callable even when the LLM hasn't been told which
+    session is active.
+
+    Returns a `{calls, tokens, last-model}` map; missing keys default
+    to zero / "(none)" so the tool always returns a populated shape
+    the model can summarize.
+    """,
+}
+fn (session-id: Str?): Map {
+    day  ::team-brain::agent/today-bucket()
+    stats ::team-brain::agent/brain-stats
+    raw-sid or(session-id, "")
+    bucket cond {
+        not(is-empty(raw-sid)) => { raw-sid }
+        => {
+            registered ::team-brain::agent/list-registered-sessions()
+            cond {
+                is-empty(registered) => { "" }
+                => { first(registered).id }
+            }
+        }
+    }
+    {
+        session-id: bucket,
+        calls:      or(::store/get(stats, `${bucket}:calls:${day}`), 0),
+        tokens:     or(::store/get(stats, `${bucket}:tokens:${day}`), 0),
+        last-model: or(::store/get(stats, `${bucket}:last-model`), "(none)"),
+    }
+}
+
+// NOTE: `coach-on-stats` originally bundled `lookup-recent-stats` via
+// `meta {skill: {tools: [::ai::tool/Tool({...})]}}`. That blew up at
+// runtime because Hot's meta literals serialize the constructor call
+// as a deferred AST node — when the skill machinery later coerces
+// `Vec<::ai::tool/Tool>?` it tries to execute the AST as a lambda and
+// loses the namespace alias context (the lookup falls back to a bare
+// `::tool/Tool` and 404s). Until `::ai::skill/from-fn` learns to
+// materialize a `tool-fns:` (Vec<Fn>) field via `::ai::tool/from-fn`,
+// the workaround is to list the helper as a top-level agent tool in
+// `::team-brain::agent/agent-tools` so it's still callable when
+// the model decides to coach.
+coach-on-stats
+meta {
+    skill: {
+        name: "coach-on-stats",
+        description: "Suggest next actions for a Team Brain chat based on today's usage.",
+        when: ["coach the team", "review usage", "suggest next steps"],
+        body: """
+            # Coaching from today's usage
+
+            When a user asks how the chat is doing, call
+            `lookup_recent_stats` (no arguments needed — it defaults to
+            the active session) and use the returned
+            `{calls, tokens, last-model}` to ground your advice:
+
+            - Zero `calls` so far today → suggest one or two concrete
+            prompts the user can try (`/summary 6h`, `/decisions`,
+            `/ask what blocked us yesterday?`).
+            - High `tokens` (over ~50k) → mention they can switch to a
+            smaller model with `/ai gpt-mini` for cheaper follow-ups.
+            - `last-model` differs from what the user asked about → call
+            that out so the user notices the active model.
+
+            Always quote the actual numbers in your reply so the
+            recommendation is auditable.
+            """,
+    }
+}
+fn () { {} }
+
+decision-ledger
+meta {
+    skill: {
+        name: "decision-ledger",
+        description: "Extract a durable decision log from chat history.",
+        when: ["extract decisions", "decision ledger", "what did we decide"],
+        body: """
+            # Decision ledger
+
+            Return decisions as: Decision, owner/DRI, rationale, alternatives
+            rejected, date or time window, confidence, and source speakers.
+            Separate firm decisions from proposals or preferences. Preserve
+            unresolved dependencies as open questions instead of inflating them
+            into decisions.
+            """,
+    }
+}
+fn () { {} }
+
+action-followup
+meta {
+    skill: {
+        name: "action-followup",
+        description: "Find commitments, owners, due dates, and follow-up risk.",
+        when: ["action items", "follow up", "tasks", "commitments"],
+        body: """
+            # Action follow-up
+
+            Extract only explicit or strongly implied commitments. For each item,
+            include owner, due date or cadence, current status, blocker, and next
+            follow-up question. Mark missing owners or dates as gaps.
+            """,
+    }
+}
+fn () { {} }
+
+meeting-brief
+meta {
+    skill: {
+        name: "meeting-brief",
+        description: "Prepare a briefing from recent discussion before a meeting.",
+        when: ["meeting brief", "prep for meeting", "standup", "agenda"],
+        body: """
+            # Meeting brief
+
+            Produce a short pre-meeting brief: context, decisions needed, open
+            questions, recent progress, risks, and suggested agenda. Keep it
+            readable aloud and avoid stale items that were later resolved.
+            """,
+    }
+}
+fn () { {} }
+
+incident-postmortem
+meta {
+    skill: {
+        name: "incident-postmortem",
+        description: "Turn incident chatter into a timeline and postmortem draft.",
+        when: ["incident", "postmortem", "outage", "timeline", "root cause"],
+        body: """
+            # Incident postmortem
+
+            Build a timeline with timestamps when available, impact, detection,
+            mitigation, root-cause hypotheses, confirmed cause, follow-ups, and
+            owners. Distinguish facts from speculation and call out missing data.
+            """,
+    }
+}
+fn () { {} }
+
+launch-readiness
+meta {
+    skill: {
+        name: "launch-readiness",
+        description: "Assess launch readiness using decisions, tasks, blockers, and risks.",
+        when: ["launch readiness", "ship readiness", "go/no-go", "release"],
+        body: """
+            # Launch readiness
+
+            Summarize the launch goal, ready signals, blockers, unresolved risks,
+            required approvals, rollback plan, and a clear go/no-go recommendation.
+            Use cautious language when evidence is weak.
+            """,
+    }
+}
+fn () { {} }
+
+stakeholder-update
+meta {
+    skill: {
+        name: "stakeholder-update",
+        description: "Draft an exec or stakeholder update from chat memory.",
+        when: ["stakeholder update", "status update", "exec update", "weekly update"],
+        body: """
+            # Stakeholder update
+
+            Lead with the outcome and current state. Then include progress,
+            decisions, risks, asks, and next milestones. Remove internal chatter
+            unless it explains a decision or risk.
+            """,
+    }
+}
+fn () { {} }
+
+open-questions
+meta {
+    skill: {
+        name: "open-questions",
+        description: "Collect unresolved questions and the context needed to answer them.",
+        when: ["open questions", "unresolved", "what is unclear", "unknowns"],
+        body: """
+            # Open questions
+
+            List unresolved questions, why each matters, likely owner, evidence
+            already available, and the smallest next step to answer it. Exclude
+            questions that the chat later resolved.
+            """,
+    }
+}
+fn () { {} }
+
+handoff-note
+meta {
+    skill: {
+        name: "handoff-note",
+        description: "Create a concise handoff note for someone joining later.",
+        when: ["handoff", "onboarding", "catch up", "handover"],
+        body: """
+            # Handoff note
+
+            Write for someone who was not in the room: goal, current state,
+            decisions, active tasks, blockers, important links, people to ask,
+            and the next best action. Prefer clear ownership over narrative.
+            """,
+    }
+}
+fn () { {} }

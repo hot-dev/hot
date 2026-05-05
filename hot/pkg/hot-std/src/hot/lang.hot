@@ -73,17 +73,45 @@ try-call
 meta {
     core: true,
     doc: """
-    Call function `f` with `args`, catching ALL errors including runtime errors.
-    Returns a plain Map (not a Result) so the return value won't be auto-unwrapped.
+    Call function `f` with `args`, catching **all** errors — including
+    runtime panics — and returning a plain Map (not a Result, so the
+    return value won't be auto-unwrapped).
 
-    On success: `{ok: true, value: <result>}`
-    On failure: `{ok: false, error: "error message"}`
+    - On success: `{ok: true, value: <result>}`
+    - On failure: `{ok: false, error: "error message"}`
 
-    **Example**
+    **Use this only when you need a non-`Result` escape hatch:**
+
+    1. **Fault isolation across independent units of work** —
+       scheduled fan-out where one item's failure must not kill the
+       loop, e.g. `for-each(sessions, (s) { try-call(...) })`.
+    2. **Dynamic dispatch** where you don't trust the function
+       reference (built from `resolve(...)` or pulled from config).
+    3. **Defensive boundaries** for built-ins that don't yet have
+       `Result`-returning siblings.
+
+    **Prefer `Result` for known-error APIs.** If a stdlib function
+    can fail in a structured way, it should return `Result<T, E>` and
+    callers should branch on `is-err`. Reach for `try-call` only when
+    no `Result` form is available, or when you genuinely need to
+    catch arbitrary runtime errors (depth-limit overflow, type
+    mismatches, etc.) that `Result` doesn't model.
+
+    Common `Result`-returning siblings to use *instead*:
+
+    - `::hot::http/try-request(...)` — for outbound HTTP calls.
+    - `::hot::base64/is-valid(s)` followed by `::hot::base64/decode(s)`
+      — for guarding malformed input.
+
+    **Example (fault isolation across sessions)**
 
     ```hot
-    result try-call(some-function, [arg1, arg2])
-    if(result.ok, result.value, println(result.error))
+    for-each(sessions, (s) {
+        result try-call(() { run-digest-for-session(s) })
+        cond {
+            not(result.ok) => { record-error("digest", `${s.id}: ${result.error}`) }
+        }
+    })
     ```
     """
 }

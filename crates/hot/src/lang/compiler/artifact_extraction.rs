@@ -35,7 +35,7 @@ const MAX_ALIAS_DEPTH: usize = 16;
 ///
 /// Cross-namespace refs are matched after walking the containing
 /// namespace's aliases (so `::tg-adapter/record-voice` ultimately
-/// finds `::telegram-agent::telegram-adapter/record-voice`).
+/// finds `::team-brain::telegram-adapter/record-voice`).
 fn resolve_alias_target<'a>(
     program: &'a Program,
     current_ns: &str,

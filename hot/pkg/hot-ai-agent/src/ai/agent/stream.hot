@@ -1,0 +1,70 @@
+::ai::agent::stream ns
+meta {
+    doc: """
+    Agent-level stream labels and helpers.
+
+    These labels sit above raw `::ai::chat` deltas. A concrete agent can
+    expose stable product events to custom UIs while still using
+    provider-level streaming internally.
+    """
+}
+
+REPLY_START "ai:agent:reply:start"
+REPLY_DELTA "ai:agent:reply:delta"
+REPLY_SOURCES "ai:agent:reply:sources"
+REPLY_END "ai:agent:reply:end"
+REPLY_ERROR "ai:agent:reply:error"
+MEMORY_FORGET_START "ai:agent:memory:forget:start"
+MEMORY_FORGET_END "ai:agent:memory:forget:end"
+MEMORY_FORGET_ERROR "ai:agent:memory:forget:error"
+MEMORY_COMPACT_START "ai:agent:memory:compact:start"
+MEMORY_COMPACT_END "ai:agent:memory:compact:end"
+MEMORY_COMPACT_ERROR "ai:agent:memory:compact:error"
+MEMORY_EXPORT_START "ai:agent:memory:export:start"
+MEMORY_EXPORT_END "ai:agent:memory:export:end"
+MEMORY_EXPORT_ERROR "ai:agent:memory:export:error"
+
+label
+meta { doc: "Build an agent-specific stream label, e.g. `teambrain:reply:delta`." }
+fn (agent-name: Str, topic: Str, verb: Str): Str {
+    `${agent-name}:${topic}:${verb}`
+}
+
+emit
+meta { doc: "Emit a stream event, swallowing missing-stream-context errors." }
+fn (data-type: Str, payload: Any): Null {
+    if-err(::hot::stream/data(data-type, payload), null)
+    null
+}
+
+emit-reply-start fn (agent-name: Str, payload: Map): Null {
+    emit(label(agent-name, "reply", "start"), payload)
+}
+
+emit-reply-delta fn (agent-name: Str, payload: Map): Null {
+    emit(label(agent-name, "reply", "delta"), payload)
+}
+
+emit-reply-sources fn (agent-name: Str, payload: Map): Null {
+    emit(label(agent-name, "reply", "sources"), payload)
+}
+
+emit-reply-end fn (agent-name: Str, payload: Map): Null {
+    emit(label(agent-name, "reply", "end"), payload)
+}
+
+emit-reply-error fn (agent-name: Str, payload: Map): Null {
+    emit(label(agent-name, "reply", "error"), payload)
+}
+
+emit-memory-start fn (agent-name: Str, action: Str, payload: Map): Null {
+    emit(label(agent-name, "memory", `${action}:start`), payload)
+}
+
+emit-memory-end fn (agent-name: Str, action: Str, payload: Map): Null {
+    emit(label(agent-name, "memory", `${action}:end`), payload)
+}
+
+emit-memory-error fn (agent-name: Str, action: Str, payload: Map): Null {
+    emit(label(agent-name, "memory", `${action}:error`), payload)
+}

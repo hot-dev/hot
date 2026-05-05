@@ -1,0 +1,109 @@
+::ai::agent::transport ns
+meta {
+    doc: """
+    Transport-neutral shapes for chat-style AI agents.
+
+    Adapters turn native payloads (Slack Events API, Telegram updates,
+    custom webhooks, etc.) into `IncomingMessage`. Agent code can then
+    reason in terms of `Session`, `Identity`, text, message id, and a
+    transport tag carried in `session.meta.transport`.
+    """
+}
+
+::session ::ai::session
+
+Session  ::session/Session
+Identity ::session/Identity
+
+TransportCapabilities
+meta {
+    doc: """
+    Capability description for a transport implementation.
+
+    `markup` is an application-level hint such as `html`, `mrkdwn`,
+    `plain`, or `json`. `reply-mode` can describe whether the adapter
+    posts, threads, returns a webhook response, or streams.
+    """
+}
+type {
+    name: Str,
+    markup: Str?,
+    supports-typing: Bool?,
+    supports-deeplink: Bool?,
+    supports-streaming: Bool?,
+    max-message-size: Int?,
+    reply-mode: Str?,
+    meta: Map?,
+}
+
+IncomingMessage
+meta { doc: "Normalized inbound message shape produced by transport adapters." }
+type {
+    session: Session,
+    sender: Identity,
+    text: Str,
+    message-id: Str,
+    timestamp: Int,
+    voice: Map?,
+    raw: Any?,
+}
+
+OutboundMessage
+meta { doc: "Normalized outbound message request before a transport adapter renders or sends it." }
+type {
+    session: Session,
+    text: Str,
+    reply-to: Str?,
+    metadata: Map?,
+}
+
+session-with-transport
+meta { doc: "Stamp a Session with a transport tag in `session.meta.transport`." }
+fn (session: Session, transport: Str): Session {
+    existing-meta or(session.meta, {})
+    ::session/Session({
+        id: session.id,
+        meta: assoc(existing-meta, "transport", transport),
+    })
+}
+
+session-transport
+meta { doc: "Read `session.meta.transport`, defaulting to `unknown` unless a caller supplies another default." }
+fn
+(session: Session): Str {
+    session-transport(session, "unknown")
+},
+(session: Session, default-transport: Str): Str {
+    or(get(or(session.meta, {}), "transport"), default-transport)
+}
+
+transport-name
+meta { doc: "Return a stable, lower-case transport label for storage and source metadata." }
+fn (transport: Str): Str {
+    lowercase(or(transport, "unknown"))
+}
+
+session-bucket
+meta {
+    doc: """
+    Store bucket key for per-session counters and state. Session ids
+    should already be transport-prefixed, so the id is sufficient.
+    """
+}
+fn (session: Session): Str { session.id }
+
+capabilities
+meta { doc: "Build a TransportCapabilities record with sensible defaults." }
+fn (name: Str, opts: Map?): TransportCapabilities {
+    data or(opts, {})
+    TransportCapabilities({
+        name: name,
+        markup: get(data, "markup", "plain"),
+        supports-typing: get(data, "supports-typing", false),
+        supports-deeplink: get(data, "supports-deeplink", false),
+        supports-streaming: get(data, "supports-streaming", false),
+        max-message-size: get(data, "max-message-size"),
+        reply-mode: get(data, "reply-mode", "post"),
+        meta: get(data, "meta"),
+    })
+}

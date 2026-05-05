@@ -5,6 +5,7 @@ Welcome to the Hot documentation. Hot is a backend workflow automation platform 
 ## Overview
 
 - **[Getting Started](/docs/getting-started)** - Install Hot and run your first workflow
+- **[Demos](/docs/demos)** - Run complete tutorial projects, including TeamBrain and PersonalAgent
 - **[Hot Language](/docs/language)** - Learn the Hot programming language
 - **[Migrations and Upgrades](/docs/migrations)** - Update Hot and move databases between release lines
 - **[Hot Packages](/pkg)** - Standard library and integrations

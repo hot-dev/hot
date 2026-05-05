@@ -1,0 +1,252 @@
+::personal-agent::agent ns
+meta { doc: "Identity-first PersonalAgent demo built on hot-ai and hot-ai-agent." }
+
+::ctx ::hot::ctx
+::store ::hot::store
+::http ::hot::http
+
+::session ::ai::session
+::msg ::ai::message
+::mem ::ai::memory
+::rag ::ai::rag
+::chat ::ai::chat
+::skill ::ai::skill
+::agent-runtime ::ai::agent::runtime
+::agent-command ::ai::agent::command
+::agent-memory ::ai::agent::memory
+::agent-stream ::ai::agent::stream
+
+::own-skills ::personal-agent::skills
+
+Session ::session/Session
+Identity ::session/Identity
+AgentMemory ::mem/AgentMemory
+ChatOptions ::chat/ChatOptions
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+PersonalAgent
+meta {
+    doc: "A personal, identity-scoped memory agent. Session/thread memory is contextual; user memory is primary.",
+    agent: {
+        name: "PersonalAgent",
+        description: "Identity-first personal memory assistant demo",
+        tags: ["ai", "memory", "personal-agent", "privacy"],
+    },
+}
+type {
+    model: Str,
+    system-prompt: Str,
+}
+
+AGENT_NAME "personal"
+
+SYSTEM_PROMPT """
+You are PersonalAgent, an assistant for one person's memory, tasks, and preferences.
+Treat identity-scoped memory as primary and session history as context.
+Be concise, privacy-aware, and explicit when forgetting or exporting memory.
+"""
+
+agent PersonalAgent({
+    model: ::ctx/get("personal.model", "claude-sonnet-4-5"),
+    system-prompt: ::ctx/get("personal.system", SYSTEM_PROMPT),
+})
+
+runtime ::agent-runtime/create-runtime(AGENT_NAME, {store-prefix: "personal", max-errors: 5})
+
+agent-skills ::skill/for-agent([
+    ::own-skills/daily-brief,
+    ::own-skills/personal-memory,
+    ::own-skills/task-capture,
+    ::own-skills/weekly-review,
+    ::own-skills/privacy-guard,
+    ::own-skills/context-switch,
+])
+
+now-epoch-secs fn (): Int { ::agent-runtime/now-epoch-secs() }
+
+identity-session
+meta { doc: "Create the stable primary memory session for an identity." }
+fn (identity: Identity): Session {
+    ::session/Session({id: `personal:${identity.id}`, meta: {transport: "web", identity-primary: true}})
+}
+
+make-memory
+meta { doc: "Build identity-first memory. Caller sessions remain contextual; user/profile store keys by identity session." }
+fn (identity: Identity): AgentMemory {
+    ::mem/create-memory(AGENT_NAME, identity-session(identity), identity)
+}
+
+identity-from-body fn (body: Map): Identity {
+    user or(body.user, {})
+    id Str(or(body.user_id, user.id, "personal-user"))
+    ::session/Identity({
+        id: id,
+        name: or(body.user_name, user.name, id),
+        meta: user,
+    })
+}
+
+get-chat-opts fn (): ChatOptions {
+    ChatOptions({
+        chat-fn: (model, prompt, system) {
+            // Demo-safe default: callers can swap this with a provider package.
+            concat("PersonalAgent draft:\n\n", prompt)
+        },
+        model: agent.model,
+        system: agent.system-prompt,
+        skills: agent-skills,
+    })
+}
+
+remember-text
+meta { doc: "Remember a personal fact/task as both raw memory and identity profile data." }
+fn (identity: Identity, text: Str, metadata: Map?): Str {
+    mem make-memory(identity)
+    id `personal:${Uuid()}`
+    ts now-epoch-secs()
+    ::mem/remember(mem, ::msg/Message({
+        id: id,
+        content: text,
+        sender: identity,
+        session: identity-session(identity),
+        timestamp: ts,
+        source: "personal-agent",
+        metadata: or(metadata, {}),
+    }))
+    ::mem/set-user-data(mem, id, {content: text, timestamp: ts, metadata: or(metadata, {})})
+    id
+}
+
+recall-text fn (identity: Identity, query: Str): Vec {
+    ::mem/recall(make-memory(identity), query, {limit: 10, min-score: 0.25})
+}
+
+memory-summary fn (identity: Identity): Str {
+    mem make-memory(identity)
+    bundle ::mem/export-memory(mem)
+    inspection ::agent-memory/inspect-export(bundle, {
+        capsule-count: length(::mem/list-capsules(mem)),
+        graph-node-count: length(::mem/list-nodes(mem)),
+        graph-edge-count: length(::mem/list-edges(mem)),
+    })
+    ::agent-memory/render-inspection(inspection)
+}
+
+forget-personal fn (identity: Identity, arg: Str): Int {
+    req ::agent-memory/parse-forget-request(arg)
+    mem make-memory(identity)
+    cond {
+        or(eq(req.scope, "session"), eq(req.scope, "all")) => {
+            before ::store/length(mem.session-store)
+            ::mem/forget-session(mem)
+            before
+        }
+        eq(req.scope, "source") => { if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector)) }
+        eq(req.scope, "user") => { if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0)) }
+        => { 0 }
+    }
+}
+
+compact-personal fn (identity: Identity, hours: Int): Map {
+    capsule ::rag/compact-window(make-memory(identity), get-chat-opts(), {
+        hours: hours,
+        limit: 500,
+        id: `personal:${identity.id}:${::agent-runtime/today-bucket()}:${hours}h`,
+        instruction: "Compact this person's memory into preferences, tasks, commitments, and recurring context with source ids.",
+        metadata: {agent: "personal", identity-id: identity.id},
+        emit-stream: true,
+    })
+    {capsule-id: capsule.id, source-count: length(capsule.source-ids)}
+}
+
+reply fn (identity: Identity, text: Str): Any {
+    ::agent-stream/emit-reply-start("personal", {identity_id: identity.id})
+    ::agent-stream/emit-reply-delta("personal", {identity_id: identity.id, delta: text})
+    ::agent-stream/emit-reply-end("personal", {identity_id: identity.id, text: text})
+    {ok: true, text: text}
+}
+
+process-command
+meta { doc: "Process PersonalAgent web commands." }
+fn (identity: Identity, text: Str): Str {
+    parsed ::agent-command/parse(text)
+    arg parsed.arg
+    cond {
+        not(parsed.is-command) => {
+            id remember-text(identity, text, {kind: "note"})
+            `Remembered <code>${id}</code>.`
+        }
+        eq(parsed.name, "remember") => {
+            id remember-text(identity, arg, {kind: "remember"})
+            `Remembered <code>${id}</code>.`
+        }
+        eq(parsed.name, "recall") => {
+            hits recall-text(identity, arg)
+            if(is-empty(hits), "No matching personal memory found.", hits |> map((r) { `• ${r.value.content}` }) |> join("\n"))
+        }
+        eq(parsed.name, "memory") => { memory-summary(identity) }
+        eq(parsed.name, "forget") => {
+            deleted forget-personal(identity, arg)
+            `Forgot ${deleted} personal memory record(s).`
+        }
+        eq(parsed.name, "export") => {
+            ::agent-memory/render-export-summary(::mem/export-memory(make-memory(identity)))
+        }
+        eq(parsed.name, "brief") => {
+            ::rag/summarize(make-memory(identity), get-chat-opts(), {
+                hours: 24,
+                limit: 200,
+                instruction: "Create a short personal brief for today.",
+            })
+        }
+        eq(parsed.name, "tasks") => {
+            ::rag/summarize(make-memory(identity), get-chat-opts(), {
+                hours: 168,
+                limit: 300,
+                instruction: "Extract active personal tasks, due dates, and next actions.",
+            })
+        }
+        eq(parsed.name, "prefs") => {
+            ::rag/summarize(make-memory(identity), get-chat-opts(), {
+                hours: 720,
+                limit: 300,
+                instruction: "Summarize durable preferences and recurring working style facts.",
+            })
+        }
+        eq(parsed.name, "compact") => {
+            hours if(is-empty(arg), 168, Int(arg))
+            result compact-personal(identity, hours)
+            `Compacted ${get(result, "source-count")} record(s) into <code>${get(result, "capsule-id")}</code>.`
+        }
+        => { "Commands: /remember, /recall, /forget, /export, /brief, /tasks, /prefs, /compact, /memory" }
+    }
+}
+
+on-web-message
+meta {
+    doc: "Custom web transport entry point for the PersonalAgent demo.",
+    agent: PersonalAgent,
+    webhook: {
+        service: "personal-agent",
+        path: "/web/messages",
+        method: "POST",
+        description: "Receive PersonalAgent web chat messages",
+    },
+}
+fn (request: HttpRequest): HttpResponse {
+    body or(request.body, request.data, {})
+    identity identity-from-body(body)
+    text or(body.text, body.message, "")
+    ::agent-runtime/register-session(runtime, identity-session(identity))
+    response process-command(identity, text)
+    reply(identity, response)
+    ::hot::http/HttpResponse({
+        status: 200,
+        body: {
+            ok: true,
+            identity_id: identity.id,
+            text: response,
+        },
+    })
+}

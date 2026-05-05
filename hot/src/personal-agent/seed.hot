@@ -1,0 +1,16 @@
+::personal-agent::seed ns
+meta { doc: "Seed sample PersonalAgent memories for local demos." }
+
+::agent ::personal-agent::agent
+::session ::ai::session
+
+seed-local
+meta { doc: "Create a few sample identity-scoped memories." }
+fn (): Vec<Str> {
+    identity ::session/Identity({id: "demo-user", name: "Demo User"})
+    [
+        ::agent/remember-text(identity, "Prefers concise morning briefs with tasks grouped by project.", {kind: "preference"}),
+        ::agent/remember-text(identity, "Follow up on launch checklist before Friday.", {kind: "task", project: "launch"}),
+        ::agent/remember-text(identity, "Context switching is easier with a next-action list.", {kind: "preference"}),
+    ]
+}

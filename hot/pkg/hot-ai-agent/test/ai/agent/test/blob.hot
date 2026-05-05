@@ -1,0 +1,70 @@
+::ai::agent::test::blob ns
+meta ["test"]
+
+::blob   ::ai::agent::blob
+::att    ::ai::agent::attachments
+::base64 ::hot::base64
+
+test-put-text-and-get-back
+meta ["test"]
+fn () {
+    ref ::blob/put-text("Hello, blob!")
+    assert(not(is-null(ref.id)), "ref.id should be set")
+    assert(eq(64, length(ref.sha256)), `sha256 should be 64 hex chars, got: ${ref.sha256}`)
+    out ::blob/get-text(ref)
+    assert-eq("Hello, blob!", out)
+}
+
+test-put-bytes-roundtrip
+meta ["test"]
+fn () {
+    bytes Bytes("binary-payload-here")
+    ref ::blob/put-bytes(bytes, ::blob/PutOptions({mime: "application/octet-stream", name: "data.bin"}))
+    assert-eq("application/octet-stream", ref.mime)
+    assert-eq("data.bin", ref.name)
+    out ::blob/get-bytes(ref)
+    assert-eq(bytes, out)
+}
+
+test-put-bytes-content-addressed-dedup
+meta ["test"]
+fn () {
+    a ::blob/put-text("dedup-me")
+    b ::blob/put-text("dedup-me")
+    assert-eq(a.sha256, b.sha256)
+}
+
+test-delete-removes-blob
+meta ["test"]
+fn () {
+    ref ::blob/put-text("temp")
+    assert-eq("temp", ::blob/get-text(ref))
+    ::blob/delete(ref)
+    assert(is-null(::blob/get-text(ref)), "deleted blob should be gone")
+}
+
+test-attach-from-base64-promotes-bytes
+meta ["test"]
+fn () {
+    raw {
+        name: "notes.md",
+        type: "text/markdown",
+        content_base64: ::base64/encode("# Hello"),
+        size: 7,
+    }
+    a ::att/from-map(raw)
+    promoted ::blob/attach-from-base64(a)
+    assert(is-null(promoted.content-base64), "content-base64 should be cleared")
+    ref get(promoted.meta, "blob-ref")
+    assert(not(is-null(ref)), "blob-ref should be in meta")
+    assert-eq("# Hello", ::blob/get-text(ref))
+}
+
+test-attach-from-base64-passthrough-when-no-base64
+meta ["test"]
+fn () {
+    a ::att/from-map({name: "url-only.png", type: "image/png", url: "https://example.com/x.png"})
+    out ::blob/attach-from-base64(a)
+    assert-eq(a.name, out.name)
+    assert(is-null(out.content-base64))
+}

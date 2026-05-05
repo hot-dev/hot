@@ -4,6 +4,14 @@ meta ["test"]
 ::chat    ::ai::chat
 Provider  ::chat/Provider
 
+explicit-tag fn (model: Str, messages: Any, system: Any, tools: Any): Any {
+    {text: "explicit", tool-calls: null}
+}
+
+registry-tag fn (model: Str, messages: Any, system: Any, tools: Any): Any {
+    {text: "registry", tool-calls: null}
+}
+
 test-detect-anthropic
 meta ["test"] fn () {
     assert-eq(Provider.Anthropic, ::chat/detect-provider("claude-sonnet-4-5"))
@@ -58,4 +66,200 @@ meta ["test"] fn () {
     assert-eq("claude-sonnet-4-5", opts.model)
     assert-eq("Be helpful.", opts.system)
     assert-eq("mock response", opts.chat-fn("x", "y", "z"))
+}
+
+test-builtin-providers-shape
+meta ["test"] fn () {
+    builtins ::chat/builtin-providers()
+    assert-eq(4, length(builtins))
+    names map(builtins, (p) { p.display-name })
+    has-name fn (target: Str): Bool {
+        not(is-null(find-first(names, (n) { eq(n, target) })))
+    }
+    assert(has-name("Anthropic"), "Anthropic builtin present")
+    assert(has-name("OpenAI"), "OpenAI builtin present")
+    assert(has-name("xAI"), "xAI builtin present")
+    assert(has-name("Google Gemini"), "Gemini builtin present")
+}
+
+test-detect-provider-from-builtins
+meta ["test"] fn () {
+    builtins ::chat/builtin-providers()
+    found ::chat/detect-provider-from(builtins, "claude-sonnet-4-5")
+    assert-eq(Provider.Anthropic, found.variant)
+    assert-eq("Anthropic", found.display-name)
+
+    miss ::chat/detect-provider-from(builtins, "llama-3-70b")
+    assert(is-null(miss), "Unknown model should not match a built-in")
+}
+
+test-with-providers-extends-and-overrides
+meta ["test"] fn () {
+    fake-fn fn (model: Str, messages: Vec<Map>, system: Str?, tools: Vec<Map>?): Map {
+        {text: `fake:${model}`, tool-calls: null}
+    }
+    custom ::chat/ProviderRegistration({
+        variant: Provider.OpenAi,
+        detect: ::chat/prefix-detector("gpt"),
+        display-name: "OpenAI Proxy",
+        chat-fn: fake-fn,
+        chat-stream-fn: null,
+        embed-fn: null,
+        meta: null,
+    })
+    registry ::chat/with-providers([custom])
+    found ::chat/detect-provider-from(registry, "gpt-4o")
+    assert-eq("OpenAI Proxy", found.display-name)
+    assert(not(is-null(found.chat-fn)), "Custom chat-fn should be present")
+
+    untouched ::chat/detect-provider-from(registry, "claude-sonnet-4-5")
+    assert-eq("Anthropic", untouched.display-name)
+}
+
+test-dispatch-chat-with-explicit-fn
+meta ["test"] fn () {
+    opts ::chat/ChatOptions({chat-fn: explicit-tag, model: "gpt-4o"})
+    reply ::chat/dispatch-chat(opts, [], null)
+    assert-eq("explicit", reply.text)
+}
+
+test-dispatch-chat-via-registry
+meta ["test"] fn () {
+    custom ::chat/ProviderRegistration({
+        variant: Provider.OpenAi,
+        detect: ::chat/prefix-detector("gpt"),
+        display-name: "Proxy",
+        chat-fn: registry-tag,
+        chat-stream-fn: null,
+        embed-fn: null,
+        meta: null,
+    })
+    opts ::chat/ChatOptions({model: "gpt-4o", providers: [custom]})
+    reply ::chat/dispatch-chat(opts, [], null)
+    assert-eq("registry", reply.text)
+}
+
+test-resolve-registration-explicit-providers
+meta ["test"] fn () {
+    custom ::chat/ProviderRegistration({
+        variant: Provider.OpenAi,
+        detect: ::chat/prefix-detector("ollama/"),
+        display-name: "Ollama",
+        chat-fn: registry-tag,
+        chat-stream-fn: null,
+        embed-fn: null,
+        meta: null,
+    })
+    opts ::chat/ChatOptions({model: "ollama/llama3", providers: [custom]})
+    reg ::chat/resolve-registration(opts)
+    assert(not(is-null(reg)), "Custom provider should resolve")
+    assert-eq("Ollama", reg.display-name)
+}
+
+test-resolve-registration-falls-back-to-builtins
+meta ["test"] fn () {
+    opts ::chat/ChatOptions({model: "claude-sonnet-4-5"})
+    reg ::chat/resolve-registration(opts)
+    assert(not(is-null(reg)), "Built-in should resolve")
+    assert-eq("Anthropic", reg.display-name)
+}
+
+test-dispatch-chat-fails-on-unknown-model
+meta ["test"] fn () {
+    opts ::chat/ChatOptions({model: "fake-llama-99"})
+    reg ::chat/resolve-registration(opts)
+    assert(is-null(reg), "resolve-registration should be null for unknown model")
+    // `dispatch-chat` halts via `fail(...)` on misconfiguration (correct
+    // behavior: an unknown model is a programmer error, not a normal
+    // control-flow path). `try-call` is the right tool for *testing* that
+    // halt — there is no `Result`-shaped equivalent. This is one of the
+    // few legitimate try-call usages; see `::hot::lang/try-call` doc for
+    // the full guidance.
+    attempt ::hot::lang/try-call(::chat/dispatch-chat, [opts, [], null])
+    assert-eq(false, attempt.ok, "dispatch-chat should halt for unknown model")
+}
+
+test-make-usage-from-anthropic-shape
+meta ["test"] fn () {
+    raw {input_tokens: 120, output_tokens: 84, latency_ms: 1280}
+    usage ::chat/make-usage(raw, "Anthropic", "claude-sonnet-4-5")
+    assert-eq(120, usage.input-tokens)
+    assert-eq(84, usage.output-tokens)
+    assert-eq(204, usage.total-tokens)
+    assert-eq(1280, usage.latency-ms)
+    assert-eq("Anthropic", usage.provider)
+    assert-eq("claude-sonnet-4-5", usage.model)
+}
+
+test-make-usage-from-openai-shape
+meta ["test"] fn () {
+    raw {prompt_tokens: 200, completion_tokens: 50, total_tokens: 250}
+    usage ::chat/make-usage(raw, "OpenAI", "gpt-4o")
+    assert-eq(200, usage.input-tokens)
+    assert-eq(50, usage.output-tokens)
+    assert-eq(250, usage.total-tokens)
+    assert(is-null(usage.cost-usd), "cost not provided")
+}
+
+test-make-usage-handles-null-raw
+meta ["test"] fn () {
+    usage ::chat/make-usage(null, "Anthropic", "claude-sonnet-4-5")
+    assert(is-null(usage.input-tokens), "no token data when raw is null")
+    assert-eq("Anthropic", usage.provider)
+}
+
+test-text-part-and-flatten
+meta ["test"] fn () {
+    parts [
+        ::chat/text-part("Hello"),
+        ::chat/text-part("World"),
+    ]
+    assert-eq("Hello\n\nWorld", ::chat/flatten-parts(parts))
+}
+
+test-flatten-image-and-text
+meta ["test"] fn () {
+    parts [
+        ::chat/text-part("Describe this:"),
+        ::chat/image-part("https://example.com/cat.png"),
+    ]
+    out ::chat/flatten-parts(parts)
+    assert(contains(out, "Describe this:"))
+    assert(contains(out, "[image:image (https://example.com/cat.png)]"))
+}
+
+test-flatten-empty
+meta ["test"] fn () {
+    assert-eq("", ::chat/flatten-parts([]))
+    assert-eq("", ::chat/flatten-parts(null))
+}
+
+test-message-text-from-content
+meta ["test"] fn () {
+    msg ::chat/Message({role: "user", content: "Hello"})
+    assert-eq("Hello", ::chat/message-text(msg))
+}
+
+test-message-text-from-parts
+meta ["test"] fn () {
+    msg ::chat/Message({
+        role: "user",
+        content: "",
+        parts: [::chat/text-part("Multi"), ::chat/text-part("Part")],
+    })
+    assert-eq("Multi\n\nPart", ::chat/message-text(msg))
+}
+
+test-message-with-parts-still-builds
+meta ["test"] fn () {
+    msg ::chat/Message({
+        role: "user",
+        content: "What's in this image?",
+        parts: [
+            ::chat/text-part("What's in this image?"),
+            ::chat/image-part("https://example.com/x.png"),
+        ],
+    })
+    assert-eq(2, length(msg.parts))
+    assert-eq("image", msg.parts[1].kind)
 }

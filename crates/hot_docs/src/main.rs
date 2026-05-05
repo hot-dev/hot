@@ -11,7 +11,11 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind hot_docs preview server");
-    tracing::info!("hot_docs preview listening on http://{addr}");
+    let port = listener
+        .local_addr()
+        .expect("failed to read hot_docs preview server address")
+        .port();
+    println!("Listening on http://localhost:{port}");
 
     axum::serve(listener, hot_docs::preview_router())
         .await

@@ -155,6 +155,12 @@ fn (u: Any): Map? {
 
 chat-with-tools
 meta {
+    ai-provider: {
+        variant: "Anthropic",
+        detect-prefix: "claude",
+        display-name: "Anthropic",
+        capabilities: ["tools", "streaming", "vision", "system-prompt"],
+    },
     doc: """
     Tools-aware chat function compatible with `::ai::chat/run-loop`.
 

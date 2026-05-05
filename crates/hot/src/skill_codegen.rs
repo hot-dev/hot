@@ -699,9 +699,8 @@ fn format_stub(
     out.push('\n');
     out.push_str(namespace);
     out.push_str(" ns\n\n");
-    out.push_str("::skill ::ai::skill\n\n");
     out.push_str(fn_name);
-    out.push_str(" ::skill/Skill(");
+    out.push_str(" ::ai::skill/Skill(");
     out.push_str(&format_skill_meta(frontmatter, fn_name, body));
     out.push_str(")\n");
     out
@@ -1033,8 +1032,7 @@ mod tests {
         let stub = fs::read_to_string(&stub_path).unwrap();
         assert!(stub.starts_with(MARKER_PREFIX));
         assert!(stub.contains("::skills::skills ns"));
-        assert!(stub.contains("::skill ::ai::skill"));
-        assert!(stub.contains("foo ::skill/Skill({"));
+        assert!(stub.contains("foo ::ai::skill/Skill({"));
         assert!(stub.contains("description: \"Demo skill foo\""));
         assert!(stub.contains("when: [\"reply\", \"copy\"]"));
         assert!(stub.contains("# Heading"));
@@ -1321,8 +1319,7 @@ mod tests {
 
         let stub_path = out_dir.join("skills/customer-tone.skill.hot");
         let source = fs::read_to_string(&stub_path).unwrap();
-        assert!(source.contains("::skill ::ai::skill"));
-        assert!(source.contains("customer-tone ::skill/Skill({"));
+        assert!(source.contains("customer-tone ::ai::skill/Skill({"));
 
         let mut parser = Parser::new();
         parser

@@ -162,6 +162,12 @@ fn (u: Any): Map? {
 
 chat-with-tools
 meta {
+    ai-provider: {
+        variant: "OpenAi",
+        detect-prefixes: ["gpt", "o1", "o3", "o4"],
+        display-name: "OpenAI",
+        capabilities: ["tools", "streaming", "vision", "audio", "json-mode"],
+    },
     doc: """
     Tools-aware chat function compatible with `::ai::chat/run-loop`.
 

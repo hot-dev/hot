@@ -1,0 +1,160 @@
+::ai::agent::memory ns
+meta {
+    doc: """
+    Reusable memory lifecycle command declarations and response shapes.
+
+    Concrete agents own policy, authorization, and execution hooks. This
+    namespace keeps the common command surface and neutral formatting in one
+    place.
+    """
+}
+
+::command ::ai::agent::command
+
+Command ::command/Command
+MemoryExport ::ai::memory/MemoryExport
+
+RetentionPolicy
+meta { doc: "Reusable retention policy shape for agent memory lifecycle jobs." }
+type {
+    name: Str,
+    raw-retention-secs: Int?,
+    capsule-retention-secs: Int?,
+    compact-after-secs: Int?,
+    export-allowed: Bool?,
+    forget-allowed: Bool?,
+    metadata: Map?,
+}
+
+MemoryInspection
+meta { doc: "Neutral memory-inspection response shape for agents." }
+type {
+    session-count: Int,
+    user-count: Int,
+    kb-count: Int,
+    capsule-count: Int,
+    graph-node-count: Int,
+    graph-edge-count: Int,
+    metadata: Map?,
+}
+
+ForgetRequest
+meta { doc: "Parsed forget request from a command argument." }
+type {
+    scope: Str,
+    selector: Str,
+    raw: Str,
+}
+
+DEFAULT_RETENTION RetentionPolicy({
+    name: "default",
+    raw-retention-secs: 2592000,
+    capsule-retention-secs: null,
+    compact-after-secs: 604800,
+    export-allowed: true,
+    forget-allowed: true,
+    metadata: {},
+})
+
+common-memory-commands
+meta { doc: "Command declarations for common memory lifecycle controls." }
+fn (): Vec<Command> {
+    [
+        Command({
+            name: "memory",
+            aliases: ["mem"],
+            description: "Show what memory is stored for this chat or identity.",
+            usage: "/memory",
+        }),
+        Command({
+            name: "forget",
+            aliases: [],
+            description: "Forget memory by scope and selector.",
+            usage: "/forget <session|user|kb|source> <selector>",
+        }),
+        Command({
+            name: "export",
+            aliases: [],
+            description: "Export remembered data for review or portability.",
+            usage: "/export [session|user|all]",
+        }),
+        Command({
+            name: "compact",
+            aliases: [],
+            description: "Compact older raw memory into a durable capsule.",
+            usage: "/compact [hours]",
+        }),
+        Command({
+            name: "why",
+            aliases: [],
+            description: "Explain which memory sources influenced the last answer.",
+            usage: "/why",
+        }),
+    ]
+}
+
+parse-forget-request
+meta { doc: "Parse `/forget` arguments into `{scope, selector, raw}`." }
+fn (arg: Str): ForgetRequest {
+    cleaned trim(or(arg, ""))
+    parts split(cleaned, " ")
+    scope cond {
+        is-empty(cleaned) => { "session" }
+        => { lowercase(first(parts)) }
+    }
+    selector cond {
+        lte(length(parts), 1) => { "" }
+        => { rest(parts) |> join(" ") |> trim }
+    }
+    ForgetRequest({
+        scope: scope,
+        selector: selector,
+        raw: cleaned,
+    })
+}
+
+inspect-export
+meta { doc: "Build a MemoryInspection from an exported memory bundle plus optional capsule/graph counts." }
+fn (bundle: MemoryExport, opts: Map?): MemoryInspection {
+    o or(opts, {})
+    MemoryInspection({
+        session-count: length(bundle.session),
+        user-count: length(bundle.user),
+        kb-count: length(bundle.kb),
+        capsule-count: get(o, "capsule-count", 0),
+        graph-node-count: get(o, "graph-node-count", 0),
+        graph-edge-count: get(o, "graph-edge-count", 0),
+        metadata: get(o, "metadata", {}),
+    })
+}
+
+render-inspection
+meta { doc: "Render MemoryInspection as concise user-facing text." }
+fn (inspection: MemoryInspection): Str {
+    ```
+    Memory snapshot:
+    - Session records: ${inspection.session-count}
+    - User records: ${inspection.user-count}
+    - KB records: ${inspection.kb-count}
+    - Capsules: ${inspection.capsule-count}
+    - Graph nodes: ${inspection.graph-node-count}
+    - Graph edges: ${inspection.graph-edge-count}
+    ```
+}
+
+render-export-summary
+meta { doc: "Render a concise summary of a memory export bundle." }
+fn (bundle: MemoryExport): Str {
+    total add(add(length(bundle.session), length(bundle.user)), length(bundle.kb))
+    `Export bundle contains ${total} records: ${length(bundle.session)} session, ${length(bundle.user)} user, ${length(bundle.kb)} KB.`
+}
+
+select-policy
+meta { doc: "Select a retention policy by name, defaulting to the first policy or DEFAULT_RETENTION." }
+fn (policies: Vec<RetentionPolicy>, name: Str?): RetentionPolicy {
+    cond {
+        is-empty(policies) => { DEFAULT_RETENTION }
+        is-null(name) => { first(policies) }
+        => { or(find-first(policies, (p) { eq(p.name, name) }), first(policies)) }
+    }
+}

@@ -1,0 +1,363 @@
+::ai::agent::test::auth ns
+meta ["test"]
+
+::auth ::ai::agent::auth
+::hmac ::hot::hmac
+
+build-headers fn (sig: Str): Map {
+    {
+        "x-hot-signature": sig,
+        "content-type": "application/json",
+    }
+}
+
+test-verify-hmac-success
+meta ["test"]
+fn () {
+    secret "shhh"
+    body "{\"event\":\"ping\"}"
+    sig ::hmac/hmac-sha256(secret, body)
+    headers build-headers(`sha256=${sig}`)
+    opts ::auth/HmacOptions({
+        secret: secret,
+        header: "x-hot-signature",
+        scheme: "sha256=",
+    })
+    result ::auth/verify-hmac(headers, body, opts)
+    assert(result.ok, `Expected ok, got: ${Str(result.error)}`)
+}
+
+test-verify-hmac-rejects-tampered-body
+meta ["test"]
+fn () {
+    secret "shhh"
+    body "{\"event\":\"ping\"}"
+    sig ::hmac/hmac-sha256(secret, body)
+    headers build-headers(`sha256=${sig}`)
+    opts ::auth/HmacOptions({
+        secret: secret,
+        header: "x-hot-signature",
+        scheme: "sha256=",
+    })
+    result ::auth/verify-hmac(headers, "{\"event\":\"DIFFERENT\"}", opts)
+    assert(not(result.ok), "Tampered body must fail")
+    assert-eq("signature-mismatch", result.error)
+}
+
+test-verify-hmac-missing-signature
+meta ["test"]
+fn () {
+    opts ::auth/HmacOptions({
+        secret: "shhh",
+        header: "x-hot-signature",
+    })
+    result ::auth/verify-hmac({}, "body", opts)
+    assert(not(result.ok), "Missing header must fail")
+    assert-eq("signature-missing", result.error)
+}
+
+test-verify-hmac-no-secret
+meta ["test"]
+fn () {
+    opts ::auth/HmacOptions({
+        secret-env: "DEFINITELY_DOES_NOT_EXIST_42",
+        header: "x-hot-signature",
+    })
+    result ::auth/verify-hmac({"x-hot-signature": "abc"}, "body", opts)
+    assert(not(result.ok), "Missing secret must fail")
+    assert-eq("secret-not-set", result.error)
+}
+
+test-verify-hmac-prefixed-body
+meta ["test"]
+fn () {
+    secret "slack-shhh"
+    body "token=abc&team_id=T123"
+    timestamp "1700000000"
+    prefix `v0:${timestamp}:`
+    sig ::hmac/hmac-sha256(secret, `${prefix}${body}`)
+    headers {
+        "x-slack-signature": `v0=${sig}`,
+        "x-slack-request-timestamp": timestamp,
+    }
+    opts ::auth/HmacOptions({
+        secret: secret,
+        header: "x-slack-signature",
+        scheme: "v0=",
+        prefix-body: prefix,
+    })
+    result ::auth/verify-hmac(headers, body, opts)
+    assert(result.ok, `Expected ok, got: ${Str(result.error)}`)
+}
+
+test-verify-shared-secret-success
+meta ["test"]
+fn () {
+    opts ::auth/BearerOptions({token: "supersecret", header: null, token-env: null})
+    result ::auth/verify-shared-secret({"authorization": "Bearer supersecret"}, opts)
+    assert(result.ok, `Expected ok, got: ${Str(result.error)}`)
+}
+
+test-verify-shared-secret-without-prefix
+meta ["test"]
+fn () {
+    opts ::auth/BearerOptions({token: "supersecret"})
+    result ::auth/verify-shared-secret({"authorization": "supersecret"}, opts)
+    assert(result.ok, "Bare token without 'Bearer ' prefix should still match")
+}
+
+test-verify-shared-secret-mismatch
+meta ["test"]
+fn () {
+    opts ::auth/BearerOptions({token: "supersecret"})
+    result ::auth/verify-shared-secret({"authorization": "Bearer wrong"}, opts)
+    assert(not(result.ok), "Wrong token must fail")
+    assert-eq("token-mismatch", result.error)
+}
+
+test-verify-shared-secret-custom-header
+meta ["test"]
+fn () {
+    opts ::auth/BearerOptions({token: "k1", header: "x-api-key"})
+    result ::auth/verify-shared-secret({"x-api-key": "k1"}, opts)
+    assert(result.ok, "Custom header should match")
+}
+
+test-verify-shared-secret-missing
+meta ["test"]
+fn () {
+    opts ::auth/BearerOptions({token: "supersecret"})
+    result ::auth/verify-shared-secret({}, opts)
+    assert(not(result.ok), "Missing header should fail")
+    assert-eq("token-missing", result.error)
+}
+
+test-verify-any-shared-secret-then-hmac
+meta ["test"]
+fn () {
+    secret "shhh"
+    body "{}"
+    sig ::hmac/hmac-sha256(secret, body)
+    headers {
+        "authorization": "Bearer wrong",
+        "x-hot-signature": `sha256=${sig}`,
+    }
+    direct-secret ::auth/verify-shared-secret(headers, ::auth/BearerOptions({token: "right"}))
+    assert(not(direct-secret.ok), `shared-secret should fail directly: ${Str(direct-secret)}`)
+    direct-hmac ::auth/verify-hmac(headers, body, ::auth/HmacOptions({
+        secret: secret,
+        header: "x-hot-signature",
+        scheme: "sha256=",
+    }))
+    assert(direct-hmac.ok, `hmac should succeed directly: ${Str(direct-hmac)}`)
+
+    candidates [
+        {
+            kind: "shared-secret",
+            options: ::auth/BearerOptions({token: "right"}),
+        },
+        {
+            kind: "hmac",
+            options: ::auth/HmacOptions({
+                secret: secret,
+                header: "x-hot-signature",
+                scheme: "sha256=",
+            }),
+        },
+    ]
+    result ::auth/verify-any(headers, body, candidates)
+    assert(result.ok, `verify-any should fall through to HMAC, got result: ${Str(result)}`)
+}
+
+test-unauthorized-builds-401
+meta ["test"]
+fn () {
+    response ::auth/unauthorized("signature-mismatch")
+    assert-eq(401, response.status)
+    assert-eq("application/json", get(response.headers, "content-type"))
+}
+
+test-verify-platform-missing-auth
+meta ["test"]
+fn () {
+    request {method: "POST", url: "/x", headers: {}}
+    result ::auth/verify-platform(request, ::auth/PlatformOptions({}))
+    assert(not(result.ok), "missing auth should fail")
+    assert-eq("platform-auth-missing", result.error)
+}
+
+test-verify-platform-accepts-any-authenticated
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        auth: {type: "api-key"},
+    }
+    result ::auth/verify-platform(request, ::auth/PlatformOptions({}))
+    assert(result.ok, `Expected ok, got: ${Str(result.error)}`)
+}
+
+test-verify-platform-rejects-wrong-type
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        auth: {type: "session"},
+    }
+    opts ::auth/PlatformOptions({require-types: ["api-key", "service-key"]})
+    result ::auth/verify-platform(request, opts)
+    assert(not(result.ok), "wrong auth.type should fail")
+    assert-eq("platform-auth-type-rejected:session", result.error)
+}
+
+test-verify-platform-allows-listed-type
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        auth: {type: "service-key", "service-key": {id: "ck-123"}},
+    }
+    opts ::auth/PlatformOptions({require-types: ["service-key"]})
+    result ::auth/verify-platform(request, opts)
+    assert(result.ok, `Expected ok for allowed type, got: ${Str(result.error)}`)
+}
+
+test-verify-platform-service-key-id-mismatch
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        auth: {type: "service-key", "service-key": {id: "ck-123"}},
+    }
+    opts ::auth/PlatformOptions({require-service-key-id: "ck-EXPECTED"})
+    result ::auth/verify-platform(request, opts)
+    assert(not(result.ok), "wrong service-key id must fail")
+    assert-eq("platform-auth-service-key-id-mismatch", result.error)
+}
+
+test-verify-platform-service-key-id-match
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        auth: {type: "service-key", "service-key": {id: "ck-123"}},
+    }
+    opts ::auth/PlatformOptions({require-service-key-id: "ck-123"})
+    result ::auth/verify-platform(request, opts)
+    assert(result.ok, `Expected ok for matching id, got: ${Str(result.error)}`)
+}
+
+test-verify-empty-list-fails-closed
+meta ["test"]
+fn () {
+    request {method: "POST", url: "/x", headers: {}, "body-raw": ""}
+    result ::auth/verify(request, [])
+    assert(not(result.ok), "verify([]) must fail closed")
+    assert-eq("no-verifiers", result.error)
+}
+
+test-verify-anonymous-allows
+meta ["test"]
+fn () {
+    request {method: "POST", url: "/x", headers: {}, "body-raw": ""}
+    result ::auth/verify(request, [::auth/anonymous()])
+    assert(result.ok, `anonymous verifier should pass, got: ${Str(result.error)}`)
+}
+
+test-verify-runs-platform-verifier
+meta ["test"]
+fn () {
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {},
+        "body-raw": "",
+        auth: {type: "api-key"},
+    }
+    result ::auth/verify(request, [::auth/platform-verifier()])
+    assert(result.ok, `platform verifier should pass on authenticated request: ${Str(result.error)}`)
+}
+
+test-verify-falls-through-to-hmac
+meta ["test"]
+fn () {
+    secret "shhh"
+    body "{\"event\":\"ping\"}"
+    sig ::hmac/hmac-sha256(secret, body)
+    request {
+        method: "POST",
+        url: "/x",
+        headers: {"x-hot-signature": `sha256=${sig}`},
+        "body-raw": body,
+    }
+    verifiers [
+        ::auth/platform-verifier(),
+        ::auth/hmac-verifier(::auth/HmacOptions({
+            secret: secret,
+            header: "x-hot-signature",
+            scheme: "sha256=",
+        })),
+    ]
+    result ::auth/verify(request, verifiers)
+    assert(result.ok, `should fall through to HMAC, got: ${Str(result.error)}`)
+}
+
+protected-handler fn (request: Any): Any {
+    {handled: true, url: get(request, "url")}
+}
+
+test-protect-empty-verifiers-returns-401
+meta ["test"]
+fn () {
+    request {method: "POST", url: "/x", headers: {}, "body-raw": ""}
+    response ::auth/protect(request, [], protected-handler)
+    assert-eq(401, response.status)
+}
+
+test-protect-anonymous-runs-handler
+meta ["test"]
+fn () {
+    request {method: "POST", url: "/x", headers: {}, "body-raw": ""}
+    response ::auth/protect(request, [::auth/anonymous()], protected-handler)
+    assert(response.handled, `anonymous should let handler run, got: ${Str(response)}`)
+    assert-eq("/x", response.url)
+}
+
+test-protect-platform-rejects-then-401
+meta ["test"]
+fn () {
+    request {method: "POST", url: "/x", headers: {}, "body-raw": ""}
+    response ::auth/protect(request, [::auth/platform-verifier()], protected-handler)
+    assert-eq(401, response.status)
+}
+
+test-protect-hmac-success-runs-handler
+meta ["test"]
+fn () {
+    secret "shhh"
+    body "{}"
+    sig ::hmac/hmac-sha256(secret, body)
+    request {
+        method: "POST",
+        url: "/agent",
+        headers: {"x-hot-signature": `sha256=${sig}`},
+        "body-raw": body,
+    }
+    verifiers [::auth/hmac-verifier(::auth/HmacOptions({
+        secret: secret,
+        header: "x-hot-signature",
+        scheme: "sha256=",
+    }))]
+    response ::auth/protect(request, verifiers, protected-handler)
+    assert(response.handled, `valid HMAC should run handler, got: ${Str(response)}`)
+}

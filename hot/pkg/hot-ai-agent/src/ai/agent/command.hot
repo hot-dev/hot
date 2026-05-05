@@ -1,0 +1,105 @@
+::ai::agent::command ns
+meta {
+    doc: """
+    Command helpers for chat-style agents.
+
+    This module intentionally keeps command execution policy out of the
+    primitive parser. Concrete agents decide whether a command replies
+    inline, emits an event, calls a handler directly, or streams.
+    """
+}
+
+Command
+meta { doc: "Declarative command metadata for docs, help text, and dispatch tables." }
+type {
+    name: Str,
+    aliases: Vec<Str>?,
+    description: Str?,
+    usage: Str?,
+    route: Str?,
+    is-async: Bool?,
+    handler: Fn?,
+    meta: Map?,
+}
+
+ParsedCommand
+meta { doc: "Result of parsing a slash-style command from text." }
+type {
+    is-command: Bool,
+    name: Str,
+    arg: Str,
+    raw: Str,
+}
+
+strip-bot-suffix fn (token: Str): Str {
+    parts split(token, "@")
+    first(parts)
+}
+
+parse
+meta {
+    doc: """
+    Parse `/command rest of text` into `{is-command, name, arg, raw}`.
+    The leading slash is removed, the command name is lowercased, and
+    bot suffixes like `/ask@MyBot` become `ask`.
+    """
+}
+fn (text: Str): ParsedCommand {
+    cleaned trim(or(text, ""))
+    cond {
+        not(starts-with(cleaned, "/")) => {
+            ParsedCommand({
+                is-command: false,
+                name: "",
+                arg: cleaned,
+                raw: cleaned,
+            })
+        }
+        => {
+            parts split(cleaned, " ")
+            token first(parts)
+            without-slash slice(token, 1)
+            name lowercase(strip-bot-suffix(without-slash))
+            arg cond {
+                lte(length(parts), 1) => { "" }
+                => { parts |> rest |> join(" ") |> trim }
+            }
+            ParsedCommand({
+                is-command: true,
+                name: name,
+                arg: arg,
+                raw: cleaned,
+            })
+        }
+    }
+}
+
+arg
+meta { doc: "Return only the parsed command argument." }
+fn (text: Str): Str {
+    parse(text).arg
+}
+
+matches
+meta { doc: "True when parsed command `parsed` matches a command's name or aliases." }
+fn (parsed: ParsedCommand, command: Command): Bool {
+    aliases or(command.aliases, [])
+    or(eq(parsed.name, command.name), in(parsed.name, aliases))
+}
+
+find
+meta { doc: "Find the first command matching parsed input, or null." }
+fn (commands: Vec<Command>, parsed: ParsedCommand): Command? {
+    find-first(commands, (cmd) { matches(parsed, cmd) })
+}
+
+usage-line
+meta { doc: "Render one command as a concise help line." }
+fn (command: Command): Str {
+    usage or(command.usage, concat("/", command.name))
+    desc or(command.description, "")
+    cond {
+        is-empty(desc) => { usage }
+        => { `${usage} — ${desc}` }
+    }
+}

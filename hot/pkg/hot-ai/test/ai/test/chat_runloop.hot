@@ -228,8 +228,11 @@ fn () {
         tools: [::tool/from-fn(add-fn)],
         max-iterations: 3
     })
-    result ::chat/run-loop(opts, "loop forever")
-    assert(is-err(result), "max-iterations exceeded should return Err")
+    // `run-loop` halts via `fail(...)` when max-iterations is exceeded;
+    // try-call captures that halt so the test can inspect it.
+    attempt ::hot::lang/try-call(::chat/run-loop, [opts, "loop forever"])
+    assert-eq(false, attempt.ok, `expected halt, got ${Str(attempt)}`)
+    assert(contains(attempt.error, "max-iterations"), "error mentions max-iterations")
 }
 
 test-run-loop-tool-error-recovery
@@ -601,7 +604,9 @@ fn () {
         max-context-tokens: 100,
         count-tokens-fn: mock-counter-large
     })
-    assert(is-err(::chat/run-loop(opts, "anything")))
+    // Budget overflow halts via `fail(...)`; try-call captures the halt.
+    attempt ::hot::lang/try-call(::chat/run-loop, [opts, "anything"])
+    assert-eq(false, attempt.ok, `expected halt, got ${Str(attempt)}`)
 }
 
 test-budget-passes-when-under-limit
@@ -638,7 +643,8 @@ fn () {
         max-context-tokens: 100,
         count-tokens-fn: mock-counter-large
     })
-    assert(is-err(::chat/run-loop-stream(opts, "anything")))
+    attempt ::hot::lang/try-call(::chat/run-loop-stream, [opts, "anything"])
+    assert-eq(false, attempt.ok, `expected halt, got ${Str(attempt)}`)
 }
 
 test-message-helpers

@@ -34,6 +34,59 @@ meta {
         body: "Use this body directly."
     })
     ```
+
+    Modalities
+    ----------
+
+    A skill may declare the input kinds it can act on via
+    `modalities` (e.g. `["image", "pdf"]`). The resolver index
+    surfaces this hint so the model picks skills appropriate to the
+    turn — a vision-only skill is unlikely to be the right pick on a
+    pure-text turn, and vice versa. `null` ≡ `["text"]`. Modalities
+    are advisory: the field does not gate dispatch, the model still
+    decides.
+
+    Per-turn context (attachments, sender, transport)
+    -------------------------------------------------
+
+    `body-fn(ctx: Map)` skills receive a `ctx` argument that the
+    model populates at the `apply_skill(name, ctx)` call site. The
+    harness can also inject per-turn data via
+    `ChatOptions.skill-context`, which is merged into `ctx` **with
+    harness keys winning** — so the model cannot spoof harness-owned
+    values like `attachments`.
+
+    The conventional reserved key is `attachments`: when the agent
+    runtime normalizes an inbound message it stamps the inbound
+    attachments into `opts.skill-context.attachments`. A skill that
+    wants to see them simply declares an `attachments` parameter on
+    its `body-fn` — the framework destructures `ctx` by parameter
+    name (`::hot::internal::mcp/invoke-with-input` semantics), so a
+    skill never has to do its own `get(ctx, "attachments")`.
+
+    Static `body` strings are returned verbatim — the harness does
+    not interpolate `${...}` placeholders into them. If you want
+    attachment-aware logic, write a `body-fn`.
+
+    ```hot
+    receipt-analyzer
+    meta {skill: {
+        description: "Extract line items from a receipt",
+        when: ["receipt", "expense"],
+        modalities: ["image", "pdf"],
+    }}
+    fn (attachments: Vec?): Str {
+        atts or(attachments, [])
+        cond {
+            is-empty(atts) => { "Ask the user to attach a receipt." }
+            => {
+                count length(atts)
+                `Use any vision tools available to extract line items
+                 from the ${count} attached file(s).`
+            }
+        }
+    }
+    ```
     """
 }
 
@@ -54,10 +107,17 @@ meta {
       pull the skill. Required for any useful skill.
     - `when` — trigger phrases that hint when this skill applies.
       Joined into the resolver index injected into the system prompt.
+    - `modalities` — input kinds this skill can act on, e.g.
+      `["text"]`, `["image", "pdf"]`. Surfaced in the resolver index so
+      the model can pick the right skill for a non-text turn. Default
+      `null` ≡ `["text"]`. See "Modalities" in the module doc.
     - `body` — inline instructions returned by `read_skill`. May be
-      loaded from a resource via `::hot::resource/load-str`.
+      loaded from a resource via `::hot::resource/load-str`. Returned
+      verbatim — static bodies are not interpolated.
     - `body-fn` — alternative to `body`: a function `(ctx: Map) -> Str`
-      that produces context-aware instructions.
+      that produces context-aware instructions. The harness merges
+      per-turn data (e.g. inbound attachments) into `ctx` before
+      calling — see "Per-turn context" in the module doc.
     - `tools` — bundled tools that become available to the model
       whenever the skill is read.
     - `requires` — names of other skills this one depends on.
@@ -71,6 +131,7 @@ type {
     name: Str,
     description: Str,
     when: Vec<Str>?,
+    modalities: Vec<Str>?,
     body: Str?,
     body-fn: Fn?,
     tools: Vec<::tool/Tool>?,
@@ -108,6 +169,7 @@ fn (f: Fn): Skill {
         name: or(get(raw, "name"), raw.fn-name),
         description: or(get(raw, "description"), ""),
         when: or(get(raw, "when"), []),
+        modalities: get(raw, "modalities"),
         body: get(raw, "body"),
         body-fn: get(raw, "body-fn"),
         tools: get(raw, "tools"),
@@ -182,7 +244,10 @@ meta {
     doc: """
     Render a single skill as one line in the resolver index, e.g.
     `"  - customer-tone: Apply our voice (when: reply, marketing)"`.
-    Trigger phrases are comma-joined; missing fields are omitted.
+    Trigger phrases and modalities are comma-joined; missing fields
+    are omitted. Modalities (when set and non-default) are appended
+    in their own bracketed clause so the model can choose skills
+    appropriate to the turn's input kind.
     """
 }
 fn (skill: Skill): Str {
@@ -191,7 +256,12 @@ fn (skill: Skill): Str {
         is-empty(skill.when) => { "" }
         => { ` (when: ${join(skill.when, ", ")})` }
     }
-    `  - ${skill.name}: ${skill.description}${when-str}`
+    mods-str cond {
+        is-null(skill.modalities) => { "" }
+        is-empty(skill.modalities) => { "" }
+        => { ` (modalities: ${join(skill.modalities, ", ")})` }
+    }
+    `  - ${skill.name}: ${skill.description}${when-str}${mods-str}`
 }
 
 build-index
@@ -301,9 +371,16 @@ meta {
     Construct the `apply_skill` built-in tool over the given skill
     set. Like `read_skill` but lets the model pass a `ctx` map that
     reaches the skill's `body-fn` (when present).
+
+    The arity-2 form takes a `skill-context: Map?` whose keys are
+    merged into the model-supplied ctx **with harness keys winning**.
+    The harness uses this to thread per-turn data (e.g. `attachments`)
+    into skill activation without trusting the model to populate it.
     """
 }
-fn (skills: Vec<Skill>): ::tool/Tool {
+fn
+(skills: Vec<Skill>): ::tool/Tool { builtin-apply-skill(skills, null) },
+(skills: Vec<Skill>, skill-context: Map?): ::tool/Tool {
     ::tool/Tool({
         name: "apply_skill",
         description: "Resolve a skill against an optional context map and return its body.",
@@ -318,7 +395,8 @@ fn (skills: Vec<Skill>): ::tool/Tool {
         output-schema: null,
         fn: (name: Str, ctx: Map): Str {
             s find-skill(skills, name)
-            if(is-null(s), `Unknown skill: ${name}`, load-body(s, or(ctx, {})))
+            enriched merge(or(ctx, {}), or(skill-context, {}))
+            if(is-null(s), `Unknown skill: ${name}`, load-body(s, enriched))
         }
     })
 }
@@ -331,16 +409,22 @@ meta {
     `tools` list by `::ai::chat/run-loop` whenever the agent declares
     one or more skills.
 
+    The arity-2 form forwards `skill-context` to `builtin-apply-skill`
+    so per-turn harness data flows into skill activation. See
+    `ChatOptions.skill-context` for the conventional usage.
+
     Equivalent to `builtins-with-resolver(in-memory-resolver(skills))`
     minus the optional `search_skills` tool. Kept for backwards
     compatibility with callers that wire skill toolsets directly.
     """
 }
-fn (skills: Vec<Skill>): Vec<::tool/Tool> {
+fn
+(skills: Vec<Skill>): Vec<::tool/Tool> { builtins(skills, null) },
+(skills: Vec<Skill>, skill-context: Map?): Vec<::tool/Tool> {
     [
         builtin-list-skills(skills),
         builtin-read-skill(skills),
-        builtin-apply-skill(skills)
+        builtin-apply-skill(skills, skill-context)
     ]
 }
 
@@ -386,7 +470,8 @@ meta {
 type {
     list-fn: Fn,
     read-fn: Fn,
-    search-fn: Fn?
+    search-fn: Fn?,
+    skills: Vec<Skill>?
 }
 
 // ----------------------------------------------------------------------------
@@ -460,7 +545,8 @@ fn (skills: Vec<Skill>): SkillResolver {
     SkillResolver({
         list-fn: (ctx: Map): Vec<Skill> { skills },
         read-fn: (name: Str): Skill? { find-skill(skills, name) },
-        search-fn: null
+        search-fn: null,
+        skills: skills
     })
 }
 
@@ -486,7 +572,8 @@ fn (skills: Vec<Skill>, opts: Map): SkillResolver {
         read-fn: (name: Str): Skill? { find-skill(skills, name) },
         search-fn: (query: Str, search-opts: Map): Vec<Skill> {
             search-skills-of(skills, query, or(search-opts, {}))
-        }
+        },
+        skills: skills
     })
 }
 
@@ -505,6 +592,8 @@ meta {
     """
 }
 fn (resolver: SkillResolver): ::tool/Tool {
+    search-fn resolver.search-fn
+    resolver-skills resolver.skills
     ::tool/Tool({
         name: "list_skills",
         description: "List every skill currently available to this agent.",
@@ -545,9 +634,15 @@ meta {
     Resolver-aware variant of `builtin-apply-skill`. Like
     `builtin-read-skill-r` but lets the model pass a `ctx` map that
     reaches the skill's `body-fn` (when present).
+
+    The arity-2 form takes a `skill-context: Map?` whose keys are
+    merged into the model-supplied ctx with harness keys winning.
+    See `ChatOptions.skill-context`.
     """
 }
-fn (resolver: SkillResolver): ::tool/Tool {
+fn
+(resolver: SkillResolver): ::tool/Tool { builtin-apply-skill-r(resolver, null) },
+(resolver: SkillResolver, skill-context: Map?): ::tool/Tool {
     ::tool/Tool({
         name: "apply_skill",
         description: "Resolve a skill against an optional context map and return its body.",
@@ -562,7 +657,8 @@ fn (resolver: SkillResolver): ::tool/Tool {
         output-schema: null,
         fn: (name: Str, ctx: Map): Str {
             s resolver.read-fn(name)
-            if(is-null(s), `Unknown skill: ${name}`, load-body(s, or(ctx, {})))
+            enriched merge(or(ctx, {}), or(skill-context, {}))
+            if(is-null(s), `Unknown skill: ${name}`, load-body(s, enriched))
         }
     })
 }
@@ -594,7 +690,10 @@ fn (resolver: SkillResolver): ::tool/Tool {
         output-schema: null,
         fn: (query: Str, limit: Int?): Vec<Map> {
             opts if(is-null(limit), {}, {limit: limit})
-            hits resolver.search-fn(query, opts)
+            hits cond {
+                not(is-null(resolver-skills)) => { search-skills-of(resolver-skills, query, opts) }
+                => { search-fn(query, opts) }
+            }
             list-skills-of(hits)
         }
     })
@@ -608,13 +707,19 @@ meta {
     fourth `search_skills` tool when the resolver provides a
     `search-fn`. Used by `::ai::chat/run-loop` whenever an agent
     declares either `opts.skills` or `opts.skill-resolver`.
+
+    The arity-2 form forwards `skill-context` to `builtin-apply-skill-r`
+    so per-turn harness data flows into skill activation. See
+    `ChatOptions.skill-context` for the conventional usage.
     """
 }
-fn (resolver: SkillResolver): Vec<::tool/Tool> {
+fn
+(resolver: SkillResolver): Vec<::tool/Tool> { builtins-with-resolver(resolver, null) },
+(resolver: SkillResolver, skill-context: Map?): Vec<::tool/Tool> {
     base [
         builtin-list-skills-r(resolver),
         builtin-read-skill-r(resolver),
-        builtin-apply-skill-r(resolver)
+        builtin-apply-skill-r(resolver, skill-context)
     ]
     if(is-null(resolver.search-fn),
        base,

@@ -1,0 +1,50 @@
+::ai::agent::test::lifecycle ns
+meta ["test"]
+
+::runtime ::ai::agent::runtime
+::lifecycle ::ai::agent::lifecycle
+::agent-memory ::ai::agent::memory
+::session ::ai::session
+::mem ::ai::memory
+::msg ::ai::message
+
+test-run-session-job
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-life:${Uuid()}`)
+    s ::session/Session({id: `s:${Uuid()}`})
+    ::runtime/register-session(rt, s)
+    jobs ::lifecycle/run-session-job(rt, "noop", (session) { {id: session.id} })
+    assert-eq(1, length(jobs))
+    assert(first(jobs).ok)
+    assert-eq("noop", first(jobs).action)
+}
+
+test-prune-raw-memory
+meta ["test"]
+fn () {
+    run-id Str(Uuid())
+    s ::session/Session({id: `s:${run-id}`})
+    i ::session/Identity({id: `u:${run-id}`})
+    memory ::mem/create-memory(`agent:${run-id}`, s, i)
+    ::mem/remember(memory, ::msg/Message({
+        id: "old",
+        content: "old content",
+        sender: i,
+        session: s,
+        timestamp: 1,
+        source: "test",
+        metadata: {message_id: "old"},
+    }))
+    policy ::agent-memory/RetentionPolicy({
+        name: "short",
+        raw-retention-secs: 1,
+        capsule-retention-secs: null,
+        compact-after-secs: null,
+        export-allowed: true,
+        forget-allowed: true,
+        metadata: {},
+    })
+    deleted ::lifecycle/prune-raw-memory(memory, policy)
+    assert-eq(1, deleted)
+}

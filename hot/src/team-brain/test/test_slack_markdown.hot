@@ -1,0 +1,116 @@
+::team-brain::test::test_slack_markdown ns
+meta ["test"]
+
+::sl ::team-brain::slack-adapter
+
+// ============================================================================
+// to-slack-markdown — adapter-side HTML → Slack mrkdwn translator
+// ============================================================================
+//
+// These tests pin the conversion table documented on
+// `slack-adapter/to-slack-markdown`. The function is the only thing
+// keeping the agent's HTML-flavored static templates (welcome, /help,
+// /stats, /diag, /ask citation footer) from rendering as raw tags in
+// Slack, so each conversion is a regression a reader of the blog
+// post would notice immediately.
+
+test-bold
+meta ["test"]
+fn () {
+    assert-eq("*hello*", ::sl/to-slack-markdown("<b>hello</b>"),
+        "<b>...</b> should become *...*")
+}
+
+test-italic
+meta ["test"]
+fn () {
+    assert-eq("_hello_", ::sl/to-slack-markdown("<i>hello</i>"),
+        "<i>...</i> should become _..._")
+}
+
+test-code
+meta ["test"]
+fn () {
+    assert-eq("`hello`", ::sl/to-slack-markdown("<code>hello</code>"),
+        "<code>...</code> should become `...`")
+}
+
+test-link
+meta ["test"]
+fn () {
+    assert-eq("<https://hot.dev|Hot Dev>",
+        ::sl/to-slack-markdown("<a href=\"https://hot.dev\">Hot Dev</a>"),
+        "anchor should become Slack <url|label> form")
+}
+
+test-entities
+meta ["test"]
+fn () {
+    assert-eq("a & b < c > d \" e ' f",
+        ::sl/to-slack-markdown("a &amp; b &lt; c &gt; d &quot; e &#39; f"),
+        "common HTML entities should be decoded")
+}
+
+test-mixed-tags-and-entities
+meta ["test"]
+fn () {
+    // Mirrors the shape of /help — bold heading + literal angle brackets
+    // inside a code span (currently entity-encoded).
+    input    "<b>Commands:</b>\n/ask &lt;question&gt; — Ask"
+    expected "*Commands:*\n/ask <question> — Ask"
+    assert-eq(expected, ::sl/to-slack-markdown(input),
+        "/help-style template should translate cleanly")
+}
+
+test-format-sources-shape
+meta ["test"]
+fn () {
+    // Mirrors what `format-sources` emits for one cited message: bold
+    // sender name in a link, then the snippet, then italic score.
+    input    "• <a href=\"https://example.com/p1\"><b>maya</b></a>: shipped on time <i>(82%)</i>"
+    expected "• <https://example.com/p1|*maya*>: shipped on time _(82%)_"
+    // NOTE: the inner `<b>maya</b>` gets translated to `*maya*`
+    // independently of the surrounding anchor — Slack doesn't render
+    // markdown inside `<URL|label>` link labels, so the visible name
+    // ends up as the literal string `*maya*`. The agent's production
+    // format-sources doesn't depend on this rendering correctly. If
+    // that changes (e.g. we move to Block Kit `mrkdwn` sections
+    // instead of inline labels), revisit `to-slack-markdown` so nested
+    // bold inside labels survives untouched.
+    assert-eq(expected, ::sl/to-slack-markdown(input),
+        "format-sources line shape should translate cleanly")
+}
+
+test-clean-mrkdwn-passes-through
+meta ["test"]
+fn () {
+    // The slack-tone skill steers the LLM toward emitting mrkdwn
+    // directly. Make sure the translator doesn't double-process it.
+    clean "*bold* and _italic_ and `code` and <https://hot.dev|Hot Dev>"
+    assert-eq(clean, ::sl/to-slack-markdown(clean),
+        "well-formed mrkdwn should pass through untouched")
+}
+
+test-multiple-tags-in-one-string
+meta ["test"]
+fn () {
+    input    "<b>A</b> and <b>B</b> and <i>C</i>"
+    expected "*A* and *B* and _C_"
+    assert-eq(expected, ::sl/to-slack-markdown(input),
+        "replace-all should hit every match, not just the first")
+}
+
+test-empty-string
+meta ["test"]
+fn () {
+    assert-eq("", ::sl/to-slack-markdown(""),
+        "empty input should round-trip")
+}
+
+test-plain-text-untouched
+meta ["test"]
+fn () {
+    plain "Hello, this is just text with no formatting at all."
+    assert-eq(plain, ::sl/to-slack-markdown(plain),
+        "plain text should pass through unchanged")
+}

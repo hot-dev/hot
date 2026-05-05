@@ -1,0 +1,44 @@
+::ai::agent::render ns
+meta {
+    doc: """
+    Neutral rendering helpers for agent replies.
+
+    Concrete transports can render `Reply` into HTML, mrkdwn, plain
+    text, JSON cards, or another surface-specific format.
+    """
+}
+
+Reply
+meta { doc: "Neutral reply record before transport-specific rendering." }
+type {
+    text: Str,
+    format: Str?,
+    sources: Vec?,
+    metadata: Map?,
+}
+
+text-reply
+meta { doc: "Build a plain text Reply." }
+fn (text: Str): Reply {
+    Reply({
+        text: text,
+        format: "plain",
+        sources: null,
+        metadata: null,
+    })
+}
+
+truncate-text
+meta { doc: "Truncate text to `max-chars`, appending `suffix` when truncation occurs." }
+fn (text: Str, max-chars: Int, suffix: Str): Str {
+    cond {
+        gt(length(text), max-chars) => { concat(slice(text, 0, max-chars), suffix) }
+        => { text }
+    }
+}
+
+with-sources
+meta { doc: "Attach source records to a Reply." }
+fn (reply: Reply, sources: Vec): Reply {
+    Reply({...untype(reply), sources: sources})
+}

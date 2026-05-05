@@ -1,0 +1,35 @@
+::ai::agent::mcp ns
+meta {
+    doc: "Helpers for agent-scoped MCP tools."
+}
+
+::session ::ai::session
+
+Session ::session/Session
+
+select-session
+meta {
+    doc: """
+    Pick a session for an MCP tool call. `params.session_id` wins;
+    otherwise the first registered session is used. Returns null when
+    no session can be selected.
+    """
+}
+fn (params: Map, registered: Vec<Session>): Session? {
+    sid or(params.session_id, "")
+    cond {
+        not(is-empty(sid)) => { ::session/Session({id: sid}) }
+        is-empty(registered) => { null }
+        => { first(registered) }
+    }
+}
+
+required-param
+meta { doc: "Return a required string parameter or an Err with a helpful message." }
+fn (params: Map, name: Str): Str {
+    value or(get(params, name), "")
+    cond {
+        is-empty(value) => { err(`${name} is required`) }
+        => { value }
+    }
+}

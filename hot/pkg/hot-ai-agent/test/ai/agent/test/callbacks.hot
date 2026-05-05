@@ -1,0 +1,63 @@
+::ai::agent::test::callbacks ns
+meta ["test"]
+
+::cb ::ai::agent::callbacks
+
+test-from-body-when-callback-url-set
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "https://example.com/cb"})
+    assert(not(is-null(opts)))
+    assert-eq("https://example.com/cb", opts.url)
+}
+
+test-from-body-when-no-callback
+meta ["test"]
+fn () {
+    opts ::cb/from-body({some_other: "field"})
+    assert(is-null(opts))
+}
+
+test-from-body-snake-and-kebab-case
+meta ["test"]
+fn () {
+    snake ::cb/from-body({
+        callback_url: "https://example.com/cb",
+        callback_secret_env: "MY_SECRET",
+    })
+    kebab ::cb/from-body({
+        "callback-url": "https://example.com/cb2",
+        "callback-secret-env": "MY_SECRET",
+    })
+    assert-eq("https://example.com/cb", snake.url)
+    assert-eq("MY_SECRET", snake.signing-secret-env)
+    assert-eq("https://example.com/cb2", kebab.url)
+    assert-eq("MY_SECRET", kebab.signing-secret-env)
+}
+
+test-post-callback-no-options-fails-cleanly
+meta ["test"]
+fn () {
+    result ::cb/post-callback({hi: "x"}, null)
+    assert(not(result.ok))
+    assert-eq("no-callback-options", result.error)
+}
+
+test-post-callback-empty-url-fails-cleanly
+meta ["test"]
+fn () {
+    opts ::cb/CallbackOptions({url: ""})
+    result ::cb/post-callback({hi: "x"}, opts)
+    assert(not(result.ok))
+    assert-eq("no-callback-url", result.error)
+}
+
+test-post-callback-network-error-captured
+meta ["test"]
+fn () {
+    opts ::cb/CallbackOptions({url: "http://127.0.0.1:1/no-such-port"})
+    result ::cb/post-callback({hi: "x"}, opts)
+    assert(not(result.ok), "Connection to dead port should fail")
+    assert(not(is-null(result.error)), `Error should be captured, got: ${Str(result)}`)
+    assert(gte(result.attempt-ms, 0))
+}

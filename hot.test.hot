@@ -11,22 +11,25 @@ hot.project.hot-dev.src.paths ["./hot/src"]
 // Note: ./hot/pkg/hot-ai/test and ./hot/pkg/mcp/test are intentionally NOT
 // included here — running them inside the fully-loaded hot-dev process
 // produces cross-test contamination (skill registries, MCP globals, etc.).
-// They run instead via the isolated pkg-test-hot-ai / pkg-test-mcp projects
-// defined below, mirroring the layout in hot.hot.
-hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/telegram-agent/test"]
+// They run instead via the isolated pkg-test-hot-ai /
+// pkg-test-hot-ai-agent / pkg-test-mcp projects defined below,
+// mirroring the layout in hot.hot.
+hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/team-brain/test", "./hot/src/personal-agent/test"]
 hot.project.hot-dev.test.capture true
 hot.project.hot-dev.resources.paths [
-    "./hot/src/telegram-agent/resources",
+    "./hot/src/team-brain/resources",
+    "./hot/src/personal-agent/resources",
     "./hot/pkg/hot-std/test/fixtures/resources",
 ]
 // Keep codegen scoped to Team Brain resources so the hot-std customer-tone
 // fixture stays a resource fixture rather than generated project source.
 hot.project.hot-dev.skills.codegen.enabled true
-hot.project.hot-dev.skills.codegen.paths ["./hot/src/telegram-agent/resources"]
+hot.project.hot-dev.skills.codegen.paths ["./hot/src/team-brain/resources", "./hot/src/personal-agent/resources"]
 hot.project.hot-dev.deps {
 
     // AI types package
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
 
     // MCP packages
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
@@ -109,6 +112,14 @@ hot.project.pkg-test-hot-ai.deps {
     "hot.dev/hot-std": { "local": "./hot/pkg/hot-std" }
 }
 
+// hot-ai-agent unit tests
+hot.project.pkg-test-hot-ai-agent.src.paths ["./hot/pkg/hot-ai-agent/src"]
+hot.project.pkg-test-hot-ai-agent.test.paths ["./hot/pkg/hot-ai-agent/test"]
+hot.project.pkg-test-hot-ai-agent.test.capture true
+hot.project.pkg-test-hot-ai-agent.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
 // mcp unit tests (pure-Hot, no network required)
 hot.project.pkg-test-mcp.src.paths ["./hot/pkg/mcp/src"]
 hot.project.pkg-test-mcp.test.paths ["./hot/pkg/mcp/test"]
@@ -116,4 +127,20 @@ hot.project.pkg-test-mcp.test.capture true
 hot.project.pkg-test-mcp.deps {
     "hot.dev/hot-ai":   { "local": "./hot/pkg/hot-ai" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" }
+}
+
+// PersonalAgent demo tests
+hot.project.demo-personal-agent.src.paths [
+    "./hot/src/personal-agent",
+    "./hot/src/_skills/personal-agent",
+]
+hot.project.demo-personal-agent.test.paths ["./hot/src/personal-agent/test"]
+hot.project.demo-personal-agent.test.capture true
+hot.project.demo-personal-agent.resources.paths [
+    "./hot/src/personal-agent/resources",
+]
+hot.project.demo-personal-agent.skills.codegen.enabled true
+hot.project.demo-personal-agent.deps {
+    "hot.dev/hot-ai":       { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
 }

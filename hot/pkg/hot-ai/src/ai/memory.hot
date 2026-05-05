@@ -30,6 +30,131 @@ type {
     kb-store: ::hot::store/Map,
 }
 
+MemoryProvenance
+meta { doc: "Evidence pointer for remembered, compacted, or graph-extracted memory." }
+type {
+    source: Str?,
+    source-id: Str?,
+    session-id: Str?,
+    user-id: Str?,
+    message-id: Str?,
+    key: Str?,
+    timestamp: Int?,
+    score: Dec?,
+    metadata: Map?,
+}
+
+MemoryRecord
+meta { doc: "Stable export shape for one memory store entry." }
+type {
+    id: Str,
+    kind: Str,
+    content: Str?,
+    timestamp: Int?,
+    metadata: Map?,
+    provenance: MemoryProvenance?,
+}
+
+MemoryFact
+meta { doc: "Structured long-term fact extracted from raw memory or a capsule." }
+type {
+    id: Str,
+    subject: Str,
+    predicate: Str,
+    object: Str,
+    confidence: Dec?,
+    provenance: Vec<MemoryProvenance>?,
+    metadata: Map?,
+}
+
+MemoryDecision
+meta { doc: "Structured decision extracted from team or personal memory." }
+type {
+    id: Str,
+    decision: Str,
+    owner: Str?,
+    rationale: Str?,
+    decided-at: Int?,
+    confidence: Dec?,
+    provenance: Vec<MemoryProvenance>?,
+    metadata: Map?,
+}
+
+MemoryTask
+meta { doc: "Structured task or commitment extracted from memory." }
+type {
+    id: Str,
+    title: Str,
+    owner: Str?,
+    due-at: Int?,
+    status: Str?,
+    confidence: Dec?,
+    provenance: Vec<MemoryProvenance>?,
+    metadata: Map?,
+}
+
+MemoryCapsule
+meta { doc: "Durable compacted summary of a source memory window." }
+type {
+    id: Str,
+    summary: Str,
+    start-ts: Int?,
+    end-ts: Int?,
+    source-ids: Vec<Str>,
+    facts: Vec<MemoryFact>?,
+    decisions: Vec<MemoryDecision>?,
+    tasks: Vec<MemoryTask>?,
+    open-questions: Vec<Str>?,
+    provenance: Vec<MemoryProvenance>?,
+    metadata: Map?,
+}
+
+MemoryNode
+meta { doc: "Graph-RAG node persisted in a memory graph." }
+type {
+    id: Str,
+    kind: Str,
+    label: Str,
+    summary: Str?,
+    confidence: Dec?,
+    provenance: Vec<MemoryProvenance>?,
+    metadata: Map?,
+}
+
+MemoryEdge
+meta { doc: "Graph-RAG edge persisted in a memory graph." }
+type {
+    id: Str,
+    from: Str,
+    to: Str,
+    relation: Str,
+    weight: Dec?,
+    confidence: Dec?,
+    provenance: Vec<MemoryProvenance>?,
+    metadata: Map?,
+}
+
+Citation
+meta { doc: "Normalized citation returned by retrieval and graph expansion." }
+type {
+    id: Str,
+    label: Str?,
+    excerpt: Str?,
+    score: Dec?,
+    provenance: MemoryProvenance?,
+}
+
+MemoryExport
+meta { doc: "Portable export bundle for an AgentMemory scope." }
+type {
+    agent-name: Str,
+    session: Vec<MemoryRecord>,
+    user: Vec<MemoryRecord>,
+    kb: Vec<MemoryRecord>,
+    thread: Vec?,
+    metadata: Map?,
+}
+
 create-memory
 meta { doc: "Build an AgentMemory with all three scoped stores." }
 fn (agent-name: Str, session: Session, identity: Identity): AgentMemory {
@@ -113,6 +238,119 @@ forget-session
 meta { doc: "Clear all entries in session memory." }
 fn (mem: AgentMemory): Bool {
     ::store/clear(mem.session-store)
+}
+
+memory-provenance
+meta { doc: "Build provenance for a store entry returned by `::hot::store/list`, `filter`, or `search`." }
+fn (entry: Map, kind: Str): MemoryProvenance {
+    v entry.value
+    md or(v.metadata, {})
+    MemoryProvenance({
+        source: or(v.source, kind),
+        source-id: or(get(md, "source_id"), get(md, "message_id"), entry.key),
+        session-id: get(md, "session_id"),
+        user-id: v.sender-id,
+        message-id: get(md, "message_id"),
+        key: entry.key,
+        timestamp: v.timestamp,
+        score: entry.score,
+        metadata: md,
+    })
+}
+
+entry-record
+meta { doc: "Convert a store entry to a stable MemoryRecord export shape." }
+fn (entry: Map, kind: Str): MemoryRecord {
+    v entry.value
+    MemoryRecord({
+        id: entry.key,
+        kind: kind,
+        content: or(v.content, v.summary, v.label, to-json(v)),
+        timestamp: v.timestamp,
+        metadata: v.metadata,
+        provenance: memory-provenance(entry, kind),
+    })
+}
+
+list-session-records
+meta { doc: "Export session memory entries as MemoryRecord values." }
+fn (mem: AgentMemory): Vec<MemoryRecord> {
+    map(::store/list(mem.session-store), (entry) { entry-record(entry, "session") })
+}
+
+list-user-records
+meta { doc: "Export user-profile entries as MemoryRecord values." }
+fn (mem: AgentMemory): Vec<MemoryRecord> {
+    map(::store/list(mem.user-store), (entry) { entry-record(entry, "user") })
+}
+
+list-kb-records
+meta { doc: "Export KB entries as MemoryRecord values." }
+fn (mem: AgentMemory): Vec<MemoryRecord> {
+    map(::store/list(mem.kb-store), (entry) { entry-record(entry, "kb") })
+}
+
+delete-entries
+meta { doc: "Delete store entries and return the count deleted." }
+fn (store: ::hot::store/Map, entries: Vec): Int {
+    map(entries, (entry) { ::store/delete(store, entry.key) })
+    length(entries)
+}
+
+forget-session-range
+meta { doc: "Delete session memory entries whose `timestamp` is within the inclusive range." }
+fn (mem: AgentMemory, start-ts: Int, end-ts: Int): Int {
+    entries ::store/filter(mem.session-store, (k, v) {
+        and(gte(or(v.timestamp, 0), start-ts), lte(or(v.timestamp, 0), end-ts))
+    })
+    delete-entries(mem.session-store, entries)
+}
+
+forget-session-where
+meta { doc: "Delete session memory entries matching a predicate `(key, value) -> Bool`." }
+fn (mem: AgentMemory, predicate: Fn): Int {
+    entries ::store/filter(mem.session-store, predicate)
+    delete-entries(mem.session-store, entries)
+}
+
+forget-by-source-id
+meta { doc: "Delete session memory entries with matching key, `metadata.source_id`, or `metadata.message_id`." }
+fn (mem: AgentMemory, source-id: Str): Int {
+    entries ::store/filter(mem.session-store, (k, v) {
+        md or(v.metadata, {})
+        or(eq(k, source-id), eq(Str(or(get(md, "source_id"), "")), source-id), eq(Str(or(get(md, "message_id"), "")), source-id))
+    })
+    delete-entries(mem.session-store, entries)
+}
+
+forget-user-key
+meta { doc: "Delete one key from user memory." }
+fn (mem: AgentMemory, key: Str): Bool {
+    ::store/delete(mem.user-store, key)
+}
+
+forget-kb-key
+meta { doc: "Delete one key from the shared KB." }
+fn (mem: AgentMemory, key: Str): Bool {
+    ::store/delete(mem.kb-store, key)
+}
+
+export-memory
+meta { doc: "Export session, user, and KB records for this memory scope." }
+fn
+(mem: AgentMemory): MemoryExport {
+    export-memory(mem, null)
+},
+(mem: AgentMemory, t: Thread?): MemoryExport {
+    thread-data if(is-null(t), [], ::store/list(t.store))
+    MemoryExport({
+        agent-name: mem.agent-name,
+        session: list-session-records(mem),
+        user: list-user-records(mem),
+        kb: list-kb-records(mem),
+        thread: thread-data,
+        metadata: {exported-at: div(::time/epoch-millis(::time/now()), 1000)},
+    })
 }
 
 // ============================================================================
@@ -241,4 +479,243 @@ thread-clear
 meta { doc: "Reset a conversation thread." }
 fn (t: Thread): Bool {
     ::store/clear(t.store)
+}
+
+// ============================================================================
+// Capsules — durable compacted memory
+// ============================================================================
+
+capsule-key
+meta { doc: "Return the KB key used for a memory capsule." }
+fn (id: Str): Str {
+    `capsule:${id}`
+}
+
+capsule-from-window
+meta { doc: "Build a MemoryCapsule from a summary and source store entries." }
+fn (id: Str, summary: Str, entries: Vec, opts: Map?): MemoryCapsule {
+    timestamps map(entries, (entry) { or(entry.value.timestamp, 0) })
+    source-ids map(entries, (entry) {
+        md or(entry.value.metadata, {})
+        or(get(md, "source_id"), get(md, "message_id"), entry.key)
+    })
+    provenance map(entries, (entry) { memory-provenance(entry, "session") })
+    MemoryCapsule({
+        id: id,
+        summary: summary,
+        start-ts: get(or(opts, {}), "start-ts", first(timestamps)),
+        end-ts: get(or(opts, {}), "end-ts", last(timestamps)),
+        source-ids: source-ids,
+        facts: get(or(opts, {}), "facts", []),
+        decisions: get(or(opts, {}), "decisions", []),
+        tasks: get(or(opts, {}), "tasks", []),
+        open-questions: get(or(opts, {}), "open-questions", []),
+        provenance: provenance,
+        metadata: get(or(opts, {}), "metadata", {}),
+    })
+}
+
+store-capsule
+meta { doc: "Persist a MemoryCapsule in the KB store with provenance and embedding-friendly content." }
+fn (mem: AgentMemory, capsule: MemoryCapsule): Any {
+    ::store/put(mem.kb-store, capsule-key(capsule.id), {
+        kind: "memory-capsule",
+        id: capsule.id,
+        content: capsule.summary,
+        summary: capsule.summary,
+        start-ts: capsule.start-ts,
+        end-ts: capsule.end-ts,
+        source-ids: capsule.source-ids,
+        facts: capsule.facts,
+        decisions: capsule.decisions,
+        tasks: capsule.tasks,
+        open-questions: capsule.open-questions,
+        provenance: capsule.provenance,
+        metadata: capsule.metadata,
+    })
+}
+
+get-capsule
+meta { doc: "Load a stored MemoryCapsule by id." }
+fn (mem: AgentMemory, id: Str): Any {
+    ::store/get(mem.kb-store, capsule-key(id))
+}
+
+list-capsules
+meta { doc: "List all memory capsule KB entries." }
+fn (mem: AgentMemory): Vec {
+    ::store/filter(mem.kb-store, (k, v) { eq(v.kind, "memory-capsule") })
+}
+
+recall-with-capsules
+meta { doc: "Retrieve raw session memory plus compacted capsules for a query." }
+fn (mem: AgentMemory, query: Str, opts: Map?): Map {
+    limit get(or(opts, {}), "limit", 10)
+    raw recall(mem, query, opts)
+    capsules ::store/search(mem.kb-store, query, {limit: limit, kind: "memory-capsule"})
+    {raw: raw, capsules: capsules}
+}
+
+// ============================================================================
+// Graph memory — store-backed graph-RAG primitives
+// ============================================================================
+
+graph-node-key
+meta { doc: "Return the KB key used for a graph node." }
+fn (id: Str): Str {
+    `graph:node:${id}`
+}
+
+graph-edge-key
+meta { doc: "Return the KB key used for a graph edge." }
+fn (id: Str): Str {
+    `graph:edge:${id}`
+}
+
+candidate-node
+meta { doc: "Build a graph node candidate with provenance and confidence." }
+fn (kind: Str, label: Str, provenance: Vec<MemoryProvenance>, opts: Map?): MemoryNode {
+    fallback-id `${kind}:${replace(lowercase(label), " ", "-")}`
+    id get(or(opts, {}), "id", fallback-id)
+    MemoryNode({
+        id: id,
+        kind: kind,
+        label: label,
+        summary: get(or(opts, {}), "summary", label),
+        confidence: get(or(opts, {}), "confidence", 0.7),
+        provenance: provenance,
+        metadata: get(or(opts, {}), "metadata", {}),
+    })
+}
+
+candidate-edge
+meta { doc: "Build a graph edge candidate with provenance and confidence." }
+fn (from: Str, relation: Str, to: Str, provenance: Vec<MemoryProvenance>, opts: Map?): MemoryEdge {
+    id get(or(opts, {}), "id", `${from}:${relation}:${to}`)
+    MemoryEdge({
+        id: id,
+        from: from,
+        to: to,
+        relation: relation,
+        weight: get(or(opts, {}), "weight", 1.0),
+        confidence: get(or(opts, {}), "confidence", 0.7),
+        provenance: provenance,
+        metadata: get(or(opts, {}), "metadata", {}),
+    })
+}
+
+extract-graph-candidates
+meta {
+    doc: """
+    Convert structured extraction output into graph node/edge candidates.
+    Expected shape: `{nodes: [{kind,label,...}], edges: [{from,relation,to,...}]}`.
+    """
+}
+fn (structured: Map, provenance: Vec<MemoryProvenance>): Map {
+    nodes map(or(structured.nodes, []), (n) {
+        candidate-node(or(n.kind, "topic"), n.label, provenance, n)
+    })
+    edges map(or(structured.edges, []), (e) {
+        candidate-edge(e.from, e.relation, e.to, provenance, e)
+    })
+    {nodes: nodes, edges: edges}
+}
+
+store-graph-candidates
+meta { doc: "Persist graph node and edge candidates into memory stores." }
+fn (mem: AgentMemory, candidates: Map): Map {
+    nodes or(candidates.nodes, [])
+    edges or(candidates.edges, [])
+    map(nodes, (node) { store-node(mem, node) })
+    map(edges, (edge) { store-edge(mem, edge) })
+    {nodes: length(nodes), edges: length(edges)}
+}
+
+store-node
+meta { doc: "Persist a graph-RAG node in the KB store." }
+fn (mem: AgentMemory, node: MemoryNode): Any {
+    ::store/put(mem.kb-store, graph-node-key(node.id), {
+        kind: "graph-node",
+        id: node.id,
+        node-kind: node.kind,
+        label: node.label,
+        content: or(node.summary, node.label),
+        summary: node.summary,
+        confidence: node.confidence,
+        provenance: node.provenance,
+        metadata: node.metadata,
+    })
+}
+
+store-edge
+meta { doc: "Persist a graph-RAG edge in the KB store." }
+fn (mem: AgentMemory, edge: MemoryEdge): Any {
+    ::store/put(mem.kb-store, graph-edge-key(edge.id), {
+        kind: "graph-edge",
+        id: edge.id,
+        from: edge.from,
+        to: edge.to,
+        relation: edge.relation,
+        content: `${edge.from} ${edge.relation} ${edge.to}`,
+        weight: edge.weight,
+        confidence: edge.confidence,
+        provenance: edge.provenance,
+        metadata: edge.metadata,
+    })
+}
+
+list-nodes
+meta { doc: "List all graph-RAG nodes in this memory scope." }
+fn (mem: AgentMemory): Vec {
+    ::store/filter(mem.kb-store, (k, v) { eq(v.kind, "graph-node") })
+}
+
+list-edges
+meta { doc: "List all graph-RAG edges in this memory scope." }
+fn (mem: AgentMemory): Vec {
+    ::store/filter(mem.kb-store, (k, v) { eq(v.kind, "graph-edge") })
+}
+
+neighbor-edges
+meta { doc: "Find graph edges touching a node id." }
+fn (mem: AgentMemory, node-id: Str): Vec {
+    ::store/filter(mem.kb-store, (k, v) {
+        and(eq(v.kind, "graph-edge"), or(eq(v.from, node-id), eq(v.to, node-id)))
+    })
+}
+
+citation-from-result
+meta { doc: "Build a normalized Citation from a search/list result." }
+fn (result: Map): Citation {
+    v result.value
+    Citation({
+        id: or(v.id, result.key),
+        label: or(v.label, v.kind),
+        excerpt: or(v.content, v.summary),
+        score: result.score,
+        provenance: if(is-some(v.provenance), first(v.provenance), memory-provenance(result, or(v.kind, "memory"))),
+    })
+}
+
+graph-expand
+meta { doc: "Expand seed node ids into neighboring graph edges and citations." }
+fn (mem: AgentMemory, seed-node-ids: Vec): Map {
+    edges flatten(map(seed-node-ids, (id) { neighbor-edges(mem, id) }))
+    citations map(edges, citation-from-result)
+    {edges: edges, citations: citations}
+}
+
+hybrid-recall
+meta { doc: "Hybrid retrieval: vector recall over raw/capsule/graph text plus graph expansion from explicit seed node ids." }
+fn (mem: AgentMemory, query: Str, opts: Map?): Map {
+    limit get(or(opts, {}), "limit", 10)
+    vector concat(recall(mem, query, opts), ::store/search(mem.kb-store, query, {limit: limit}))
+    seed-node-ids get(or(opts, {}), "seed-node-ids", [])
+    graph graph-expand(mem, seed-node-ids)
+    citations concat(map(vector, citation-from-result), graph.citations)
+    {
+        vector: vector,
+        graph: graph,
+        citations: citations,
+    }
 }

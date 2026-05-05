@@ -43,6 +43,27 @@ minimal-skill
 meta {skill: {description: "Just a description."}}
 fn () { {} }
 
+vision-skill
+meta {
+    skill: {
+        description: "Analyze attached images.",
+        when: ["receipt", "screenshot"],
+        modalities: ["image", "pdf"]
+    }
+}
+fn () { {} }
+
+attachment-aware-skill
+meta {
+    skill: {
+        description: "Branches on inbound attachments.",
+        modalities: ["image"]
+    }
+}
+fn (attachments: Vec?): Str {
+    `attachment-count=${length(or(attachments, []))}`
+}
+
 // Note: dynamic-skill's body-fn must be wired post-hoc, since
 // `meta {skill: {body-fn: dynamic-skill}}` is a forward reference
 // the parser cannot resolve. `from-fn` therefore picks up
@@ -516,4 +537,114 @@ meta ["test"]
 fn () {
     assert(is-null(::skill/effective-resolver(null, null)), "null -> null")
     assert(is-null(::skill/effective-resolver(null, [])), "empty -> null")
+}
+
+// ---------------------------------------------------------------------------
+// Modalities — harvested + rendered
+// ---------------------------------------------------------------------------
+
+test-from-fn-modalities-default-null
+meta ["test"]
+fn () {
+    s ::skill/from-fn(customer-tone)
+    assert(is-null(s.modalities), "skills without explicit modalities default to null")
+}
+
+test-from-fn-modalities-harvested
+meta ["test"]
+fn () {
+    s ::skill/from-fn(vision-skill)
+    assert-eq(2, length(s.modalities))
+    assert(in("image", s.modalities), "image modality harvested")
+    assert(in("pdf", s.modalities), "pdf modality harvested")
+}
+
+test-index-line-renders-modalities
+meta ["test"]
+fn () {
+    s ::skill/from-fn(vision-skill)
+    line ::skill/index-line(s)
+    assert(contains(line, "(modalities: image, pdf)"),
+        `expected modalities clause in: ${line}`)
+}
+
+test-index-line-no-modalities-when-null
+meta ["test"]
+fn () {
+    s ::skill/from-fn(customer-tone)
+    line ::skill/index-line(s)
+    assert(not(contains(line, "(modalities:")), "no modalities clause when null")
+}
+
+// ---------------------------------------------------------------------------
+// Skill-context: per-turn data merged into apply_skill ctx
+// ---------------------------------------------------------------------------
+
+attachment-aware ::skill/Skill({
+    name: "attachment-aware",
+    description: "Sees ctx.attachments",
+    when: [],
+    modalities: ["image"],
+    body: null,
+    body-fn: attachment-aware-skill,
+    tools: null,
+    requires: null,
+    fn: null
+})
+
+test-apply-skill-without-skill-context
+meta ["test"]
+fn () {
+    skills [attachment-aware]
+    tools ::skill/builtins(skills)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    out apply-tool.fn("attachment-aware", {})
+    assert-eq("attachment-count=0", out)
+}
+
+test-apply-skill-merges-skill-context
+meta ["test"]
+fn () {
+    skills [attachment-aware]
+    skill-ctx {attachments: [{name: "a.png"}, {name: "b.png"}]}
+    tools ::skill/builtins(skills, skill-ctx)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    out apply-tool.fn("attachment-aware", {})
+    assert-eq("attachment-count=2", out)
+}
+
+test-apply-skill-harness-wins-over-model-ctx
+meta ["test"]
+fn () {
+    skills [attachment-aware]
+    skill-ctx {attachments: [{name: "real.png"}]}
+    tools ::skill/builtins(skills, skill-ctx)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    model-ctx {attachments: [{name: "fake1.png"}, {name: "fake2.png"}, {name: "fake3.png"}]}
+    out apply-tool.fn("attachment-aware", model-ctx)
+    assert-eq("attachment-count=1", out, "harness skill-context.attachments must override model-supplied attachments")
+}
+
+test-apply-skill-r-merges-skill-context
+meta ["test"]
+fn () {
+    skills [attachment-aware]
+    r ::skill/in-memory-resolver(skills)
+    skill-ctx {attachments: [{name: "x.pdf"}]}
+    tools ::skill/builtins-with-resolver(r, skill-ctx)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    out apply-tool.fn("attachment-aware", {})
+    assert-eq("attachment-count=1", out)
+}
+
+test-apply-skill-r-harness-wins
+meta ["test"]
+fn () {
+    skills [attachment-aware]
+    r ::skill/in-memory-resolver(skills)
+    skill-ctx {attachments: [{name: "real.png"}]}
+    tools ::skill/builtins-with-resolver(r, skill-ctx)
+    apply-tool ::tool/find-by-name(tools, "apply_skill")
+    out apply-tool.fn("attachment-aware", {attachments: [{name: "fake.png"}, {name: "fake2.png"}]})
+    assert-eq("attachment-count=1", out)
 }

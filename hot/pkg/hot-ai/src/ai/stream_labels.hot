@@ -61,6 +61,19 @@ meta {
 }
 "ai:chat:delta"
 
+CHAT_USAGE
+meta {
+    doc: """
+    Stream label for normalized provider usage and cost events. Payload
+    is a `::ai::chat/ChatUsage` value: `{input-tokens, output-tokens,
+    total-tokens, cost-usd, latency-ms, provider, model}`. Adapters
+    SHOULD emit this after each chat call so observers (dashboards,
+    rate limiters, cost guards) can react without parsing
+    provider-specific shapes.
+    """
+}
+"ai:chat:usage"
+
 TOOL_START
 meta {
     doc: """
@@ -105,6 +118,33 @@ meta {
     """
 }
 "ai:rag:answer"
+
+RAG_COMPACTION_START
+meta {
+    doc: """
+    Stream label for RAG/memory compaction start events. Payload SHOULD
+    include `{agent-name, session-id, window}`.
+    """
+}
+"ai:rag:compaction:start"
+
+RAG_COMPACTION_END
+meta {
+    doc: """
+    Stream label for RAG/memory compaction completion events. Payload SHOULD
+    include `{agent-name, capsule-id, source-count}`.
+    """
+}
+"ai:rag:compaction:end"
+
+RAG_COMPACTION_ERROR
+meta {
+    doc: """
+    Stream label for RAG/memory compaction failures. Payload SHOULD include
+    `{agent-name, session-id, error}`.
+    """
+}
+"ai:rag:compaction:error"
 
 SKILL_ACTIVATE
 meta {
