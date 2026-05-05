@@ -1,48 +1,74 @@
 ::hot::test::exec ns
 meta ["test"]
 
-// fail and cancel halt execution by producing errors.
-// is-err receives a lazy argument, suppressing auto-unwrap so we can inspect them.
+// fail and cancel halt execution. try-call is the halt boundary used here so
+// tests can inspect the captured runtime error without aborting the whole suite.
+
+call-fail-1 fn (): Any {
+    fail("something went wrong")
+}
+
+call-fail-with-data fn (): Any {
+    fail("validation failed", {field: "email", reason: "invalid"})
+}
+
+call-cancel-1 fn (): Any {
+    cancel("user cancelled")
+}
+
+call-cancel-with-data fn (): Any {
+    cancel("timeout exceeded", {elapsed: 30000})
+}
+
+call-fail-then-marker fn (): Any {
+    fail("halt here")
+    "continued"
+}
+
+call-temporary-fail fn (): Any {
+    fail("temporary failure")
+}
 
 test-fail-produces-error
 meta ["test"] fn () {
-    result fail("something went wrong")
-    assert(is-err(result), "fail produces an error result")
+    attempt ::hot::lang/try-call(call-fail-1, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "something went wrong"))
 }
 
 test-fail-with-data
 meta ["test"] fn () {
-    result fail("validation failed", {field: "email", reason: "invalid"})
-    assert(is-err(result), "fail with data produces an error result")
+    attempt ::hot::lang/try-call(call-fail-with-data, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "validation failed"))
 }
 
 test-cancel-produces-error
 meta ["test"] fn () {
-    result cancel("user cancelled")
-    assert(is-err(result), "cancel produces an error result")
+    attempt ::hot::lang/try-call(call-cancel-1, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "user cancelled"))
 }
 
 test-cancel-with-data
 meta ["test"] fn () {
-    result cancel("timeout exceeded", {elapsed: 30000})
-    assert(is-err(result), "cancel with data produces an error result")
+    attempt ::hot::lang/try-call(call-cancel-with-data, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "timeout exceeded"))
 }
 
 test-fail-does-not-continue
 meta ["test"] fn () {
-    // After fail, subsequent code should not execute
-    // We test this by assigning fail, then checking is-err
-    // If fail didn't halt, the is-err would be false
-    x fail("halt here")
-    assert(is-err(x), "fail halts — variable holds error")
+    attempt ::hot::lang/try-call(call-fail-then-marker, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "halt here"))
 }
 
 test-fail-state-does-not-leak
 meta ["test"] fn () {
-    // After fail(), VmFailureState must be reset so that subsequent
-    // parallel flows do not see a stale failure.
-    err-result fail("temporary failure")
-    assert(is-err(err-result), "fail produces error")
+    attempt ::hot::lang/try-call(call-temporary-fail, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "temporary failure"))
 
     // This parallel flow must succeed — it should NOT see the failure above.
     data parallel|map {

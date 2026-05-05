@@ -227,4 +227,9 @@ fn (): Any {
     }
 }
 
-run-driver()
+// Only run the driver when invoked as an entrypoint. Project tests load
+// source files without dev ctx, and fail() now correctly halts execution.
+cond {
+    not(is-null(::ctx/get("dev.cmd"))) => { run-driver() }
+    => { null }
+}
