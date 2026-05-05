@@ -507,6 +507,11 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
                 HotResult::Ok(Val::Map(Box::new(result)))
             }
             Err(err) => {
+                // try-call is a halt boundary: if the inner call halted via
+                // fail() or cancel(), reset that state so subsequent code
+                // outside the boundary can run normally.
+                vm.reset_failure_state();
+                vm.reset_cancellation_state();
                 let mut result = indexmap::IndexMap::new();
                 result.insert(Val::from("ok"), Val::Bool(false));
                 result.insert(Val::from("error"), Val::from(err.to_string()));

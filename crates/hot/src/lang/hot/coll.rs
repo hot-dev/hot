@@ -1521,9 +1521,22 @@ pub fn pmap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     // Check if we're in a tokio runtime
     let has_runtime = tokio::runtime::Handle::try_current().is_ok();
 
+    // pmap is a per-item halt boundary regardless of which path runs.
+    // When no tokio runtime is available we fall back to the sequential
+    // halt-boundary helpers so per-item `fail()` / `cancel()` still
+    // surface as `Result.Err` entries in the output instead of bringing
+    // down the caller.
     if !has_runtime {
-        tracing::warn!("pmap: No tokio runtime available, falling back to sequential map");
-        return map(vm, args);
+        tracing::debug!("pmap: No tokio runtime available, using sequential halt boundary");
+        return match collection {
+            Val::Vec(items) => map_vec_sequential(vm, function_val, items),
+            Val::Map(map_val) => pmap_map(vm, function_val, map_val, thread_count),
+            Val::Str(s) => pmap_str(vm, function_val, s, thread_count),
+            _ => HotResult::Err(Val::from(format!(
+                "::hot::coll/pmap expects collection (Vec, Map, or Str), got {:?}",
+                collection
+            ))),
+        };
     }
 
     match collection {
@@ -1569,8 +1582,12 @@ fn pmap_vec(
     // Get current namespace variables to pass to spawned tasks
     let current_namespace_vars = vm.get_namespace_vars(None).cloned().unwrap_or_default();
 
-    // Share the failure state across threads for first-failure-wins behavior
-    let shared_failure_state = vm.get_failure_state_arc();
+    // pmap is a per-item halt boundary: each worker catches `fail()` /
+    // `cancel()` for the item it is processing, captures the structured
+    // failure as a `Result.Err` value in the output, resets its task-VM
+    // state, and continues with the next item. This matches Hot's
+    // batch-processing intent — one bad item should not abort the whole
+    // pmap (use a sequential `map` if you want fail-fast semantics).
 
     // Spawn parallel threads (using std::thread for true CPU parallelism).
     // We use parking_lot::Mutex so a panic inside a worker thread can't poison
@@ -1600,14 +1617,15 @@ fn pmap_vec(
         let namespace_vars_clone = current_namespace_vars.clone();
         let results_clone = results_mutex.clone();
         let error_clone = error_mutex.clone();
-        let failure_state_clone = shared_failure_state.clone();
         let tokio_handle_clone = tokio_handle.clone();
 
         let handle = thread::spawn(move || {
             // Enter Tokio runtime context so async functions work on spawned threads
             let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
 
-            // Create a new VM for this thread, sharing the failure state
+            // Create a new VM for this thread with its own private failure
+            // state — each worker's halts are scoped to the item it is
+            // currently processing.
             let mut task_vm = crate::lang::runtime::vm::VirtualMachine::new(
                 program_clone,
                 hot_ast_clone,
@@ -1623,33 +1641,37 @@ fn pmap_vec(
                 task_vm.store_variable_public(&var_name, var_val).ok();
             }
 
-            // Map over this chunk
+            // Map over this chunk, treating each item as an independent
+            // halt boundary.
             let mut chunk_results = Vec::new();
             for item in chunk_vec {
-                // Check if another thread has already failed (early exit)
-                if failure_state_clone
-                    .failed
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    tracing::debug!("pmap: Early exit due to failure in another thread");
-                    return;
-                }
-
                 match call_function_with_vm(&mut task_vm, &function_clone, &item) {
                     Ok(val) => chunk_results.push(val),
                     Err(err) => {
-                        // Check if this VM has a failure state (from fail() call)
                         if task_vm.has_failed() {
-                            // Task called fail() - the failure is already recorded
-                            tracing::error!("pmap: Task VM failed with fail() call");
+                            let failure_val = task_vm
+                                .get_failure()
+                                .map(|f| f.data)
+                                .unwrap_or_else(|| Val::from("pmap item halted"));
+                            task_vm.reset_failure_state();
+                            chunk_results.push(Val::err(failure_val));
+                        } else if task_vm.has_cancelled() {
+                            let cancel_val = task_vm
+                                .get_cancellation()
+                                .map(|c| c.data)
+                                .unwrap_or_else(|| Val::from("pmap item cancelled"));
+                            task_vm.reset_cancellation_state();
+                            chunk_results.push(Val::err(cancel_val));
                         } else {
-                            // Regular error - record it
+                            // Non-halt error — record once and abort the
+                            // whole pmap by leaving the chunk results
+                            // empty.
                             let mut error = error_clone.lock();
                             if error.is_none() {
                                 *error = Some(format!("pmap function call failed: {}", err));
                             }
+                            return;
                         }
-                        return;
                     }
                 }
             }
@@ -1667,12 +1689,7 @@ fn pmap_vec(
         handle.join().ok();
     }
 
-    // Check for VM failure first (from fail() call)
-    if let Some(failure) = vm.get_failure() {
-        return HotResult::Err(Val::from(format!("Execution failed: {}", failure.msg)));
-    }
-
-    // Check for errors
+    // Check for non-halt errors (a worker bailed mid-chunk)
     if let Some(error_msg) = error_mutex.lock().as_ref() {
         return HotResult::Err(Val::from(error_msg.clone()));
     }
@@ -1687,7 +1704,12 @@ fn pmap_vec(
     HotResult::Ok(Val::Vec(flattened))
 }
 
-/// Sequential map over vector (helper for small collections)
+/// Sequential map over vector (helper for small collections).
+///
+/// Acts as a per-item halt boundary: if a per-item call halts via
+/// `fail()` or `cancel()`, the structured failure is captured as a
+/// `Result.Err` value in the result vector and processing continues
+/// with the next item. Non-halting errors still abort the map.
 fn map_vec_sequential(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function_val: &Val,
@@ -1698,7 +1720,26 @@ fn map_vec_sequential(
         match call_function_with_vm(vm, function_val, item) {
             Ok(val) => results.push(val),
             Err(err) => {
-                return HotResult::Err(Val::from(format!("pmap function call failed: {}", err)));
+                if vm.has_failed() {
+                    let failure_val = vm
+                        .get_failure()
+                        .map(|f| f.data)
+                        .unwrap_or_else(|| Val::from("pmap item halted"));
+                    vm.reset_failure_state();
+                    results.push(Val::err(failure_val));
+                } else if vm.has_cancelled() {
+                    let cancel_val = vm
+                        .get_cancellation()
+                        .map(|c| c.data)
+                        .unwrap_or_else(|| Val::from("pmap item cancelled"));
+                    vm.reset_cancellation_state();
+                    results.push(Val::err(cancel_val));
+                } else {
+                    return HotResult::Err(Val::from(format!(
+                        "pmap function call failed: {}",
+                        err
+                    )));
+                }
             }
         }
     }
