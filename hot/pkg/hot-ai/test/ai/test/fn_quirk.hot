@@ -90,4 +90,3 @@ meta ["test"] fn () {
     out f(42, "hi")
     assert-eq("called!", out, `body: \"fixed-string\" → f=${Str(f)} out=${Str(out)}`)
 }
-

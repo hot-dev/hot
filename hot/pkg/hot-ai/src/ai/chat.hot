@@ -96,7 +96,9 @@ type {
 }
 
 prefix-detector
-meta { doc: "Build a `detect` function that matches when the model starts with `prefix` (case-insensitive)." }
+meta {
+    doc: "Build a `detect` function that matches when the model starts with `prefix` (case-insensitive)."
+}
 fn (prefix: Str): Fn {
     p lowercase(prefix)
     (model) { starts-with(lowercase(model), p) }
@@ -295,6 +297,7 @@ fn (opts: ChatOptions, messages: Any, tools: Any): Any {
                 is-null(reg) => {
                     fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
                 }
+
                 is-null(reg.chat-fn) => {
                     fail(`Provider '${reg.display-name}' has no chat-fn wired; pass an explicit chat-fn or supply a registration with chat-fn populated`)
                 }
@@ -324,6 +327,7 @@ fn (opts: ChatOptions, messages: Any, tools: Any, on-delta: Fn): Any {
                 is-null(reg) => {
                     fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
                 }
+
                 is-null(reg.chat-stream-fn) => {
                     fail(`Provider '${reg.display-name}' has no chat-stream-fn wired; pass an explicit chat-stream-fn or supply a registration with chat-stream-fn populated`)
                 }
@@ -457,16 +461,19 @@ fn (p: MessagePart): Str {
             location or(p.url, if(is-null(p.data), "inline", "inline-data"))
             `[image:${label} (${location})]`
         }
+
         eq(p.kind, "audio") => {
             label or(p.name, "audio")
             location or(p.url, "inline-data")
             `[audio:${label} (${location})]`
         }
+
         eq(p.kind, "file") => {
             label or(p.name, "file")
             mime or(p.mime, "application/octet-stream")
             `[file:${label} (${mime})]`
         }
+
         eq(p.kind, "tool-result") => { or(p.text, "[tool-result]") }
         => { `[${p.kind}]` }
     }
@@ -606,6 +613,7 @@ fn (raw: Map?, provider-name: Str?, model: Str?): ChatUsage {
         and(not(is-null(input-tokens)), not(is-null(output-tokens))) => { add(input-tokens, output-tokens) }
         => { or(get(src, "total-tokens"), get(src, "total_tokens"), null) }
     }
+
     cost-usd or(get(src, "cost-usd"), get(src, "cost_usd"), null)
     latency-ms or(get(src, "latency-ms"), get(src, "latency_ms"), null)
     ChatUsage({

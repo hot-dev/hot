@@ -102,10 +102,12 @@ fn (arg: Str): ForgetRequest {
         is-empty(cleaned) => { "session" }
         => { lowercase(first(parts)) }
     }
+
     selector cond {
         lte(length(parts), 1) => { "" }
         => { rest(parts) |> join(" ") |> trim }
     }
+
     ForgetRequest({
         scope: scope,
         selector: selector,
@@ -114,7 +116,9 @@ fn (arg: Str): ForgetRequest {
 }
 
 inspect-export
-meta { doc: "Build a MemoryInspection from an exported memory bundle plus optional capsule/graph counts." }
+meta {
+    doc: "Build a MemoryInspection from an exported memory bundle plus optional capsule/graph counts."
+}
 fn (bundle: MemoryExport, opts: Map?): MemoryInspection {
     o or(opts, {})
     MemoryInspection({
@@ -150,7 +154,9 @@ fn (bundle: MemoryExport): Str {
 }
 
 select-policy
-meta { doc: "Select a retention policy by name, defaulting to the first policy or DEFAULT_RETENTION." }
+meta {
+    doc: "Select a retention policy by name, defaulting to the first policy or DEFAULT_RETENTION."
+}
 fn (policies: Vec<RetentionPolicy>, name: Str?): RetentionPolicy {
     cond {
         is-empty(policies) => { DEFAULT_RETENTION }

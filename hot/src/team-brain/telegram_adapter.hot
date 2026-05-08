@@ -151,7 +151,9 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
 }
 
 show-typing-impl
-meta { doc: "Telegram `sendChatAction` with `action: typing`. Best-effort; errors swallowed by the caller." }
+meta {
+    doc: "Telegram `sendChatAction` with `action: typing`. Best-effort; errors swallowed by the caller."
+}
 fn (session: Session): Any {
     ::tg-messages/send-chat-action(::tg-messages/SendChatActionRequest({
         chat_id: chat-id-from-session(session),
@@ -209,6 +211,7 @@ fn (msg: Map): Any {
                 timestamp: msg.date,
             })
         }
+
         is-some(voice) => { "voice ignored" }
         => { ::agent/process-incoming(to-incoming(msg)) }
     }
@@ -268,6 +271,7 @@ meta {
         on-event: "telegram:record-voice",
         retry: 2,
     }
+
     ::tg-adapter/record-voice
     ```
 
@@ -403,6 +407,7 @@ meta {
         schedule: "every 30 seconds",
         on-event: "telegram:check-updates",
     }
+
     ::tg-adapter/check-updates
     ```
 
@@ -434,6 +439,7 @@ fn (event) {
                                 dispatch-update(msg)
                             }
                         }
+
                         ::store/put(::agent/agent-state, "last-offset", update.update_id)
                     })
                 }
@@ -480,6 +486,7 @@ meta {
             description: "Receive Telegram bot updates",
         },
     }
+
     ::tg-adapter/on-telegram-update
     ```
 

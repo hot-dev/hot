@@ -29,7 +29,9 @@ fn (text: Str): Reply {
 }
 
 truncate-text
-meta { doc: "Truncate text to `max-chars`, appending `suffix` when truncation occurs." }
+meta {
+    doc: "Truncate text to `max-chars`, appending `suffix` when truncation occurs."
+}
 fn (text: Str, max-chars: Int, suffix: Str): Str {
     cond {
         gt(length(text), max-chars) => { concat(slice(text, 0, max-chars), suffix) }

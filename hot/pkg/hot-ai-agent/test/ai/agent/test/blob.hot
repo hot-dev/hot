@@ -52,6 +52,7 @@ fn () {
         content_base64: ::base64/encode("# Hello"),
         size: 7,
     }
+
     a ::att/from-map(raw)
     promoted ::blob/attach-from-base64(a)
     assert(is-null(promoted.content-base64), "content-base64 should be cleared")

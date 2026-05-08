@@ -31,6 +31,7 @@ fn () {
             {filename: "b.json", content_type: "application/json", bytes: 9, content_base64: "eyJhIjoxfQ=="},
         ],
     }
+
     atts ::att/from-body(body)
     assert-eq(2, length(atts))
     assert-eq("a.txt", atts[0].name)

@@ -6,7 +6,9 @@ meta { doc: "Small local driver for the PersonalAgent demo." }
 ::session ::ai::session
 
 run
-meta { doc: "Run one PersonalAgent command from ctx: personal.user_id, personal.user_name, personal.text." }
+meta {
+    doc: "Run one PersonalAgent command from ctx: personal.user_id, personal.user_name, personal.text."
+}
 fn (): Str {
     id ::ctx/get("personal.user_id", "local-user")
     name ::ctx/get("personal.user_name", id)

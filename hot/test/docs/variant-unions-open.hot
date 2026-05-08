@@ -23,6 +23,7 @@ meta ["test"] fn () {
       _ => { "unknown plugin" }
     }
   }
+
   assert(true, "open enum declares without errors")
 }
 
@@ -57,6 +58,7 @@ meta ["test"] fn () {
     Animal.Cat => "cat"
     _ => "unknown"
   }
+
   assert-eq("dog", result, "Match on open enum dispatches by variant tag")
 }
 
@@ -90,6 +92,7 @@ meta ["test"] fn () {
     Animal.Bird => "bird"
     _ => "other"
   }
+
   assert-eq("bird", result, "Open enum match handles arrow-enrolled variants")
 }
 
@@ -99,7 +102,9 @@ meta ["test"] fn () {
 // function. The user gets the same call-site experience as if they'd
 // written the wrap function explicitly.
 
-Fish type { species: Str }
+Fish type {
+    species: Str
+}
 Fish -> Animal.Fish
 
 test-bodyless-arrow-synthesizes-wrap
@@ -112,7 +117,9 @@ meta ["test"] fn () {
 
 // -- Role-shaped variants: variant name differs from source type --
 
-Lizard type { length-cm: Dec }
+Lizard type {
+    length-cm: Dec
+}
 
 // `Source -> Enum.Variant` lets the variant name differ from the source
 // type name. Useful when you want a domain-specific variant label that
@@ -145,6 +152,7 @@ meta ["test"] fn () {
     Status.Active => "active"
     Status.Closed => "closed"
   }
+
   assert-eq("active", result, "Closed enum exhaustive match dispatches correctly")
 }
 
@@ -158,5 +166,6 @@ meta ["test"] fn () {
     Status.Pending => "waiting"
     _ => "other"
   }
+
   assert-eq("waiting", result, "Default arm satisfies closed-enum exhaustiveness")
 }

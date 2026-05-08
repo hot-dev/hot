@@ -78,6 +78,7 @@ meta ["test"] fn () {
       if(eq(f, "kiwi"), "added later",
         "another fruit"))
   }
+
   assert-eq("the original", describe-fruit("apple"), "seed describe")
   assert-eq("added later", describe-fruit("kiwi"), "extension describe")
 }

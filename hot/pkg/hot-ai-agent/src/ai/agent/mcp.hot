@@ -22,6 +22,7 @@ fn (params: Map, registered: Vec<Session>): Session? {
         not(is-empty(sid)) => {
             find-first(registered, (s) { eq(s.id, sid) })
         }
+
         is-empty(registered) => { null }
         => { first(registered) }
     }

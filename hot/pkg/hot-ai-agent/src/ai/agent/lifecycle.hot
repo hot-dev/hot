@@ -41,7 +41,9 @@ fn (session: Session, action: Str, result: Any?): LifecycleJob {
 }
 
 job-error
-meta { doc: "Build a failed LifecycleJob result and record it in the runtime error log." }
+meta {
+    doc: "Build a failed LifecycleJob result and record it in the runtime error log."
+}
 fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
     msg Str(error)
     ::runtime/record-error(rt, action, msg)
@@ -55,7 +57,9 @@ fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
 }
 
 run-session-job
-meta { doc: "Run an app-provided handler for each registered session with lifecycle error capture." }
+meta {
+    doc: "Run an app-provided handler for each registered session with lifecycle error capture."
+}
 fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
     sessions ::runtime/list-registered-sessions(rt)
     map(sessions, (session) {
@@ -74,7 +78,9 @@ fn (rt: AgentRuntime, handler: Fn): Vec<LifecycleJob> {
 }
 
 prune-raw-memory
-meta { doc: "Prune raw session memory older than `policy.raw-retention-secs`; returns deleted count." }
+meta {
+    doc: "Prune raw session memory older than `policy.raw-retention-secs`; returns deleted count."
+}
 fn (mem: AgentMemory, policy: RetentionPolicy): Int {
     retention or(policy.raw-retention-secs, 0)
     cond {
@@ -87,7 +93,9 @@ fn (mem: AgentMemory, policy: RetentionPolicy): Int {
 }
 
 prune-sessions
-meta { doc: "Run an app-provided memory factory and prune handler for all registered sessions." }
+meta {
+    doc: "Run an app-provided memory factory and prune handler for all registered sessions."
+}
 fn (rt: AgentRuntime, policy: RetentionPolicy, memory-for-session: Fn): Vec<LifecycleJob> {
     run-session-job(rt, "prune-raw-memory", (session) {
         mem memory-for-session(session)
@@ -96,7 +104,9 @@ fn (rt: AgentRuntime, policy: RetentionPolicy, memory-for-session: Fn): Vec<Life
 }
 
 schedule-descriptor
-meta { doc: "Return a neutral descriptor agents can attach to scheduled lifecycle functions." }
+meta {
+    doc: "Return a neutral descriptor agents can attach to scheduled lifecycle functions."
+}
 fn (name: Str, cron: Str, action: Str): Map {
     {
         name: name,

@@ -326,6 +326,7 @@ meta {
             description: "Receive Slack Events API callbacks",
         },
     }
+
     ::slack-adapter/on-slack-event
     ```
 
@@ -341,6 +342,7 @@ fn (request: HttpRequest): HttpResponse {
         eq(or(body.type, ""), "url_verification") => {
             ::hot::http/HttpResponse({status: 200, body: {challenge: body.challenge}})
         }
+
         eq(or(body.type, ""), "event_callback") => {
             inner or(body.event, {})
             team-id or(body.team_id, "")

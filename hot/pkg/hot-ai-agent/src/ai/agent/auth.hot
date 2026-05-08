@@ -175,7 +175,9 @@ fn (literal: Str?, env-name: Str?): Str? {
 }
 
 header-lookup
-meta { doc: "Internal: case-insensitive header lookup; returns `null` if missing or empty." }
+meta {
+    doc: "Internal: case-insensitive header lookup; returns `null` if missing or empty."
+}
 fn (headers: Map?, name: Str): Str? {
     src or(headers, {})
     target lowercase(name)
@@ -191,7 +193,9 @@ fn (headers: Map?, name: Str): Str? {
 }
 
 strip-prefix
-meta { doc: "Internal: remove `prefix` from the start of `s` if present, otherwise return `s` unchanged." }
+meta {
+    doc: "Internal: remove `prefix` from the start of `s` if present, otherwise return `s` unchanged."
+}
 fn (s: Str, prefix: Str?): Str {
     cond {
         is-null(prefix) => { s }
@@ -256,6 +260,7 @@ fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
                             }
                         }
                     }
+
                     cond {
                         not(skew-check.ok) => { skew-check }
                         => {
@@ -341,6 +346,7 @@ fn (request: Any, opts: PlatformOptions): AuthResult {
                 is-empty(allowed) => { true }
                 => { not(is-null(find-first(allowed, (t) { eq(t, kind) }))) }
             }
+
             cond {
                 not(type-ok) => { fail-result(`platform-auth-type-rejected:${kind}`) }
                 and(eq(kind, "service-key"), not(is-null(opts.require-service-key-id))) => {
@@ -388,6 +394,7 @@ fn (headers: Map?, body: Str, candidates: Vec<Map>): AuthResult {
             }
         }
     }
+
     reduce(candidates, fold-result, fail-result("no-verifiers"))
 }
 
@@ -440,7 +447,9 @@ fn (opts: HmacOptions): Verifier {
 }
 
 shared-secret-verifier
-meta { doc: "Build a `Verifier` for a shared-secret bearer token. See `BearerOptions`." }
+meta {
+    doc: "Build a `Verifier` for a shared-secret bearer token. See `BearerOptions`."
+}
 fn (opts: BearerOptions): Verifier {
     Verifier({kind: "shared-secret", options: opts})
 }
@@ -493,6 +502,7 @@ fn (request: Any, verifiers: Vec<Verifier>): AuthResult {
             => { run-verifier(request, body, v) }
         }
     }
+
     reduce(verifiers, fold-result, fail-result("no-verifiers"))
 }
 
@@ -542,6 +552,7 @@ fn (reason: Str?): ::http/HttpResponse {
         error: "unauthorized",
         reason: or(reason, "unauthorized"),
     }
+
     ::http/HttpResponse({
         status: 401,
         headers: {"content-type": "application/json"},

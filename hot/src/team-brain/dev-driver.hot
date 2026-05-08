@@ -138,6 +138,7 @@ dispatch-direct fn (cmd: Str, session: ::session/Session, sender: ::session/Iden
                 }
             }
         }
+
         eq(cmd, "summary") => {
             hours if(is-empty(arg), 24, Int(arg))
             {
@@ -146,6 +147,7 @@ dispatch-direct fn (cmd: Str, session: ::session/Session, sender: ::session/Iden
                 reply-to: msg-id,
             }
         }
+
         eq(cmd, "decisions") => {
             hours if(is-empty(arg), 48, Int(arg))
             {
@@ -154,6 +156,7 @@ dispatch-direct fn (cmd: Str, session: ::session/Session, sender: ::session/Iden
                 reply-to: msg-id,
             }
         }
+
         eq(cmd, "search") => {
             cond {
                 is-empty(arg) => { fail("search requires dev.text") }
@@ -168,6 +171,7 @@ dispatch-direct fn (cmd: Str, session: ::session/Session, sender: ::session/Iden
         }
         => { null }
     }
+
     cond {
         eq(cmd, "ask")       => { ::agent/handle-ask({data: ev-data}) }
         eq(cmd, "summary")   => { ::agent/handle-summarize({data: ev-data}) }

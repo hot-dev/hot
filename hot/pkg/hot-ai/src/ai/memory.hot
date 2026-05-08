@@ -241,7 +241,9 @@ fn (mem: AgentMemory): Bool {
 }
 
 memory-provenance
-meta { doc: "Build provenance for a store entry returned by `::hot::store/list`, `filter`, or `search`." }
+meta {
+    doc: "Build provenance for a store entry returned by `::hot::store/list`, `filter`, or `search`."
+}
 fn (entry: Map, kind: Str): MemoryProvenance {
     v entry.value
     md or(v.metadata, {})
@@ -298,7 +300,9 @@ fn (store: ::hot::store/Map, entries: Vec): Int {
 }
 
 forget-session-range
-meta { doc: "Delete session memory entries whose `timestamp` is within the inclusive range." }
+meta {
+    doc: "Delete session memory entries whose `timestamp` is within the inclusive range."
+}
 fn (mem: AgentMemory, start-ts: Int, end-ts: Int): Int {
     entries ::store/filter(mem.session-store, (k, v) {
         and(gte(or(v.timestamp, 0), start-ts), lte(or(v.timestamp, 0), end-ts))
@@ -307,14 +311,18 @@ fn (mem: AgentMemory, start-ts: Int, end-ts: Int): Int {
 }
 
 forget-session-where
-meta { doc: "Delete session memory entries matching a predicate `(key, value) -> Bool`." }
+meta {
+    doc: "Delete session memory entries matching a predicate `(key, value) -> Bool`."
+}
 fn (mem: AgentMemory, predicate: Fn): Int {
     entries ::store/filter(mem.session-store, predicate)
     delete-entries(mem.session-store, entries)
 }
 
 forget-by-source-id
-meta { doc: "Delete session memory entries with matching key, `metadata.source_id`, or `metadata.message_id`." }
+meta {
+    doc: "Delete session memory entries with matching key, `metadata.source_id`, or `metadata.message_id`."
+}
 fn (mem: AgentMemory, source-id: Str): Int {
     entries ::store/filter(mem.session-store, (k, v) {
         md or(v.metadata, {})
@@ -517,7 +525,9 @@ fn (id: Str, summary: Str, entries: Vec, opts: Map?): MemoryCapsule {
 }
 
 store-capsule
-meta { doc: "Persist a MemoryCapsule in the KB store with provenance and embedding-friendly content." }
+meta {
+    doc: "Persist a MemoryCapsule in the KB store with provenance and embedding-friendly content."
+}
 fn (mem: AgentMemory, capsule: MemoryCapsule): Any {
     ::store/put(mem.kb-store, capsule-key(capsule.id), {
         kind: "memory-capsule",
@@ -707,7 +717,9 @@ fn (mem: AgentMemory, seed-node-ids: Vec): Map {
 }
 
 hybrid-recall
-meta { doc: "Hybrid retrieval: vector recall over raw/capsule/graph text plus graph expansion from explicit seed node ids." }
+meta {
+    doc: "Hybrid retrieval: vector recall over raw/capsule/graph text plus graph expansion from explicit seed node ids."
+}
 fn (mem: AgentMemory, query: Str, opts: Map?): Map {
     limit get(or(opts, {}), "limit", 10)
     vector concat(recall(mem, query, opts), ::store/search(mem.kb-store, query, {limit: limit}))

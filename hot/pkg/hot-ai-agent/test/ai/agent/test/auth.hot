@@ -80,6 +80,7 @@ fn () {
         "x-slack-signature": `v0=${sig}`,
         "x-slack-request-timestamp": timestamp,
     }
+
     opts ::auth/HmacOptions({
         secret: secret,
         header: "x-slack-signature",
@@ -100,6 +101,7 @@ fn () {
         "x-hot-signature": `sha256=${sig}`,
         "x-hot-timestamp": "not-a-number",
     }
+
     opts ::auth/HmacOptions({
         secret: secret,
         header: "x-hot-signature",
@@ -164,6 +166,7 @@ fn () {
         "authorization": "Bearer wrong",
         "x-hot-signature": `sha256=${sig}`,
     }
+
     direct-secret ::auth/verify-shared-secret(headers, ::auth/BearerOptions({token: "right"}))
     assert(not(direct-secret.ok), `shared-secret should fail directly: ${Str(direct-secret)}`)
     direct-hmac ::auth/verify-hmac(headers, body, ::auth/HmacOptions({
@@ -217,6 +220,7 @@ fn () {
         headers: {},
         auth: {type: "api-key"},
     }
+
     result ::auth/verify-platform(request, ::auth/PlatformOptions({}))
     assert(result.ok, `Expected ok, got: ${Str(result.error)}`)
 }
@@ -230,6 +234,7 @@ fn () {
         headers: {},
         auth: {type: "session"},
     }
+
     opts ::auth/PlatformOptions({require-types: ["api-key", "service-key"]})
     result ::auth/verify-platform(request, opts)
     assert(not(result.ok), "wrong auth.type should fail")
@@ -245,6 +250,7 @@ fn () {
         headers: {},
         auth: {type: "service-key", "service-key": {id: "ck-123"}},
     }
+
     opts ::auth/PlatformOptions({require-types: ["service-key"]})
     result ::auth/verify-platform(request, opts)
     assert(result.ok, `Expected ok for allowed type, got: ${Str(result.error)}`)
@@ -259,6 +265,7 @@ fn () {
         headers: {},
         auth: {type: "service-key", "service-key": {id: "ck-123"}},
     }
+
     opts ::auth/PlatformOptions({require-service-key-id: "ck-EXPECTED"})
     result ::auth/verify-platform(request, opts)
     assert(not(result.ok), "wrong service-key id must fail")
@@ -274,6 +281,7 @@ fn () {
         headers: {},
         auth: {type: "service-key", "service-key": {id: "ck-123"}},
     }
+
     opts ::auth/PlatformOptions({require-service-key-id: "ck-123"})
     result ::auth/verify-platform(request, opts)
     assert(result.ok, `Expected ok for matching id, got: ${Str(result.error)}`)
@@ -288,6 +296,7 @@ fn () {
         headers: {},
         auth: {type: "api-key"},
     }
+
     opts ::auth/PlatformOptions({require-service-key-id: "ck-123"})
     result ::auth/verify-platform(request, opts)
     assert(result.ok, `service-key pin should not reject api-key auth, got: ${Str(result.error)}`)
@@ -320,6 +329,7 @@ fn () {
         "body-raw": "",
         auth: {type: "api-key"},
     }
+
     result ::auth/verify(request, [::auth/platform-verifier()])
     assert(result.ok, `platform verifier should pass on authenticated request: ${Str(result.error)}`)
 }
@@ -336,6 +346,7 @@ fn () {
         headers: {"x-hot-signature": `sha256=${sig}`},
         "body-raw": body,
     }
+
     verifiers [
         ::auth/platform-verifier(),
         ::auth/hmac-verifier(::auth/HmacOptions({
@@ -389,6 +400,7 @@ fn () {
         headers: {"x-hot-signature": `sha256=${sig}`},
         "body-raw": body,
     }
+
     verifiers [::auth/hmac-verifier(::auth/HmacOptions({
         secret: secret,
         header: "x-hot-signature",

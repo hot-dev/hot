@@ -72,7 +72,9 @@ fn (identity: Identity): Session {
 }
 
 make-memory
-meta { doc: "Build identity-first memory. Caller sessions remain contextual; user/profile store keys by identity session." }
+meta {
+    doc: "Build identity-first memory. Caller sessions remain contextual; user/profile store keys by identity session."
+}
 fn (identity: Identity): AgentMemory {
     ::mem/create-memory(AGENT_NAME, identity-session(identity), identity)
 }
@@ -100,7 +102,9 @@ get-chat-opts fn (): ChatOptions {
 }
 
 remember-text
-meta { doc: "Remember a personal fact/task as both raw memory and identity profile data." }
+meta {
+    doc: "Remember a personal fact/task as both raw memory and identity profile data."
+}
 fn (identity: Identity, text: Str, metadata: Map?): Str {
     mem make-memory(identity)
     id `personal:${Uuid()}`
@@ -142,6 +146,7 @@ forget-personal fn (identity: Identity, arg: Str): Int {
             ::mem/forget-session(mem)
             before
         }
+
         eq(req.scope, "source") => { if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector)) }
         eq(req.scope, "user") => { if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0)) }
         => { 0 }
@@ -177,22 +182,27 @@ fn (identity: Identity, text: Str): Str {
             id remember-text(identity, text, {kind: "note"})
             `Remembered <code>${id}</code>.`
         }
+
         eq(parsed.name, "remember") => {
             id remember-text(identity, arg, {kind: "remember"})
             `Remembered <code>${id}</code>.`
         }
+
         eq(parsed.name, "recall") => {
             hits recall-text(identity, arg)
             if(is-empty(hits), "No matching personal memory found.", hits |> map((r) { `• ${r.value.content}` }) |> join("\n"))
         }
+
         eq(parsed.name, "memory") => { memory-summary(identity) }
         eq(parsed.name, "forget") => {
             deleted forget-personal(identity, arg)
             `Forgot ${deleted} personal memory record(s).`
         }
+
         eq(parsed.name, "export") => {
             ::agent-memory/render-export-summary(::mem/export-memory(make-memory(identity)))
         }
+
         eq(parsed.name, "brief") => {
             ::rag/summarize(make-memory(identity), get-chat-opts(), {
                 hours: 24,
@@ -200,6 +210,7 @@ fn (identity: Identity, text: Str): Str {
                 instruction: "Create a short personal brief for today.",
             })
         }
+
         eq(parsed.name, "tasks") => {
             ::rag/summarize(make-memory(identity), get-chat-opts(), {
                 hours: 168,
@@ -207,6 +218,7 @@ fn (identity: Identity, text: Str): Str {
                 instruction: "Extract active personal tasks, due dates, and next actions.",
             })
         }
+
         eq(parsed.name, "prefs") => {
             ::rag/summarize(make-memory(identity), get-chat-opts(), {
                 hours: 720,
@@ -214,6 +226,7 @@ fn (identity: Identity, text: Str): Str {
                 instruction: "Summarize durable preferences and recurring working style facts.",
             })
         }
+
         eq(parsed.name, "compact") => {
             hours if(is-empty(arg), 168, Int(arg))
             result compact-personal(identity, hours)

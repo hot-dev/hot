@@ -45,8 +45,7 @@ telegram-tone
 meta {
     skill: {
         name: "telegram-tone",
-        description: "Voice and formatting rules for Team Brain replies in Telegram chats.",
-        // The `transport:telegram` tag is read by
+        description: "Voice and formatting rules for Team Brain replies in Telegram chats.",  // The `transport:telegram` tag is read by
         // `::team-brain::agent/skills-for-session`: skills carrying
         // a `transport:*` token are hidden from the LLM whenever the
         // active session uses a different transport. Drop the tag if
@@ -86,8 +85,7 @@ slack-tone
 meta {
     skill: {
         name: "slack-tone",
-        description: "Voice and formatting rules for Team Brain replies in Slack channels.",
-        // See `telegram-tone` above for how the `transport:*` tag is
+        description: "Voice and formatting rules for Team Brain replies in Slack channels.",  // See `telegram-tone` above for how the `transport:*` tag is
         // consumed by the per-session skill resolver.
         when: ["reply to user", "format chat message", "summarize for slack", "transport:slack"],
         body: """

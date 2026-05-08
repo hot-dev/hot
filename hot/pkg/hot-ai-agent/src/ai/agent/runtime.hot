@@ -49,7 +49,9 @@ fn (): Int {
 }
 
 today-bucket
-meta { doc: "Day number since Unix epoch, useful for naturally sortable daily counters." }
+meta {
+    doc: "Day number since Unix epoch, useful for naturally sortable daily counters."
+}
 fn (): Int {
     floor(div(now-epoch-secs(), 86400))
 }

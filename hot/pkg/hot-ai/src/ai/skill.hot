@@ -256,6 +256,7 @@ fn (skill: Skill): Str {
         is-empty(skill.when) => { "" }
         => { ` (when: ${join(skill.when, ", ")})` }
     }
+
     mods-str cond {
         is-null(skill.modalities) => { "" }
         is-empty(skill.modalities) => { "" }
@@ -501,6 +502,7 @@ fn (skill: Skill, query: Str): Int {
                     length(matched)
                 }
             }
+
             add(add(name-hits, desc-hits), when-hits)
         }
     }
@@ -694,6 +696,7 @@ fn (resolver: SkillResolver): ::tool/Tool {
                 not(is-null(resolver-skills)) => { search-skills-of(resolver-skills, query, opts) }
                 => { search-fn(query, opts) }
             }
+
             list-skills-of(hits)
         }
     })

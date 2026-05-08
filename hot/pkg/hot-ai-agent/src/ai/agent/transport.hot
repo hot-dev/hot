@@ -49,7 +49,9 @@ type {
 }
 
 OutboundMessage
-meta { doc: "Normalized outbound message request before a transport adapter renders or sends it." }
+meta {
+    doc: "Normalized outbound message request before a transport adapter renders or sends it."
+}
 type {
     session: Session,
     text: Str,
@@ -68,7 +70,9 @@ fn (session: Session, transport: Str): Session {
 }
 
 session-transport
-meta { doc: "Read `session.meta.transport`, defaulting to `unknown` unless a caller supplies another default." }
+meta {
+    doc: "Read `session.meta.transport`, defaulting to `unknown` unless a caller supplies another default."
+}
 fn
 (session: Session): Str {
     session-transport(session, "unknown")
@@ -78,7 +82,9 @@ fn
 }
 
 transport-name
-meta { doc: "Return a stable, lower-case transport label for storage and source metadata." }
+meta {
+    doc: "Return a stable, lower-case transport label for storage and source metadata."
+}
 fn (transport: Str): Str {
     lowercase(or(transport, "unknown"))
 }

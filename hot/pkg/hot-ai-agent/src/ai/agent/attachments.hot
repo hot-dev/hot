@@ -62,7 +62,9 @@ meta {
 ]
 
 is-text-type
-meta { doc: "Return true when `mime` is in `text-extractable-types`. Case-insensitive, ignores any `;charset=…` suffix." }
+meta {
+    doc: "Return true when `mime` is in `text-extractable-types`. Case-insensitive, ignores any `;charset=…` suffix."
+}
 fn (mime: Str?): Bool {
     cond {
         is-null(mime) => { false }
@@ -130,7 +132,9 @@ fn (raw: Any): Attachment? {
 }
 
 get-text-content
-meta { doc: "Internal: dig out an explicit text payload from raw, supporting kebab- and snake-case." }
+meta {
+    doc: "Internal: dig out an explicit text payload from raw, supporting kebab- and snake-case."
+}
 fn (raw: Map): Str? {
     or(get(raw, "content-text"), get(raw, "content_text"), get(raw, "text"))
 }
@@ -150,6 +154,7 @@ fn (body: Any): Vec<Attachment> {
         is-map(body) => { or(get(body, "attachments"), []) }
         => { [] }
     }
+
     list if(is-vec(raw), raw, [])
     coerced map(list, from-map)
     filter(coerced, (a) { not(is-null(a)) })
@@ -180,7 +185,9 @@ fn (att: Attachment, max-bytes: Int): Str? {
 }
 
 truncate-text
-meta { doc: "Internal: hard-truncate `text` to `max-bytes` characters. Appends an ellipsis marker when the cap was hit." }
+meta {
+    doc: "Internal: hard-truncate `text` to `max-bytes` characters. Appends an ellipsis marker when the cap was hit."
+}
 fn (text: Str, max-bytes: Int): Str {
     cond {
         lte(length(text), max-bytes) => { text }
@@ -257,13 +264,16 @@ fn
                 is-empty(folded.skipped) => { "" }
                 => { concat("\nReferenced (not inlined): ", join(folded.skipped, ", ")) }
             }
+
             concat(prompt, "\n\n", blocks-text, skipped-line)
         }
     }
 }
 
 weave-folder
-meta { doc: "Internal: builds the reducer used by weave-into-prompt to honor a total byte cap." }
+meta {
+    doc: "Internal: builds the reducer used by weave-into-prompt to honor a total byte cap."
+}
 fn (total-cap: Int): Fn {
     (acc, att) {
         remaining sub(total-cap, acc.used)

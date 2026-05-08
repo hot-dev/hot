@@ -53,7 +53,9 @@ fn (content: Str): ChatMessage {
 }
 
 tool-msg
-meta { doc: "Create a ChatMessage with role Tool — used for tool/function call results fed back into the model." }
+meta {
+    doc: "Create a ChatMessage with role Tool — used for tool/function call results fed back into the model."
+}
 fn (content: Str): ChatMessage {
     ChatMessage({role: Role.Tool, content: content})
 }

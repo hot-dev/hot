@@ -88,7 +88,9 @@ type {
 }
 
 resolve-secret
-meta { doc: "Internal: resolve a literal-or-env signing secret. Returns `null` when neither is set." }
+meta {
+    doc: "Internal: resolve a literal-or-env signing secret. Returns `null` when neither is set."
+}
 fn (literal: Str?, env-name: Str?): Str? {
     cond {
         not(is-null(literal)) => { literal }
@@ -101,7 +103,9 @@ fn (literal: Str?, env-name: Str?): Str? {
 }
 
 build-headers
-meta { doc: "Internal: assemble the headers dictionary for a callback POST. Adds the signature header when a secret is configured." }
+meta {
+    doc: "Internal: assemble the headers dictionary for a callback POST. Adds the signature header when a secret is configured."
+}
 fn (body-text: Str, opts: CallbackOptions): Map {
     base or(opts.headers, {})
     with-content-type assoc(base, "content-type", "application/json")
@@ -137,7 +141,9 @@ fn (url: Str?): Bool {
 }
 
 callback-host
-meta { doc: "Internal: best-effort host extraction for already-lowercased HTTPS callback URLs." }
+meta {
+    doc: "Internal: best-effort host extraction for already-lowercased HTTPS callback URLs."
+}
 fn (url: Str): Str {
     without-scheme slice(url, length("https://"))
     authority first(split(without-scheme, "/"))
@@ -145,7 +151,9 @@ fn (url: Str): Str {
 }
 
 is-private-callback-host
-meta { doc: "Internal: reject obvious localhost, link-local, and RFC1918 callback hosts." }
+meta {
+    doc: "Internal: reject obvious localhost, link-local, and RFC1918 callback hosts."
+}
 fn (host: Str): Bool {
     or(
         is-empty(host),

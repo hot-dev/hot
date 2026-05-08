@@ -265,7 +265,7 @@ agent-skills ::skill/for-agent([
 
 skill-transports
 meta {
-  doc: """
+    doc: """
   Pull the set of `transport:*` tokens out of a skill's `when:` list.
   Returns `[]` for skills that don't declare any transport tag —
   those count as transport-agnostic.
@@ -279,7 +279,7 @@ fn (skill: ::skill/Skill): Vec<Str> {
 
 skill-matches-transport
 meta {
-  doc: """
+    doc: """
   True if `skill` is either transport-agnostic (no `transport:*`
   tag) or one of its declared transports matches `transport`.
   """
@@ -294,7 +294,7 @@ fn (skill: ::skill/Skill, transport: Str): Bool {
 
 skills-for-session
 meta {
-  doc: """
+    doc: """
   Filter `agent-skills` down to the ones the LLM should see for a
   given session. Lets the model pick the right tone skill without
   burning a turn re-reading the wrong one.
@@ -307,7 +307,7 @@ fn (session: Session): Vec<::skill/Skill> {
 
 session-skill-resolver
 meta {
-  doc: """
+    doc: """
   Build a `SkillResolver` that lists only the skills appropriate to
   `session`'s transport, but lets `read_skill` reach any registered
   skill (so a model that names a hidden skill explicitly still gets
@@ -793,17 +793,21 @@ handle-forget-command fn (session: Session, sender: Identity, arg: Str, reply-to
       ::mem/forget-session(mem)
       before
     }
+
     eq(req.scope, "source") => {
       if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector))
     }
+
     eq(req.scope, "user") => {
       if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0))
     }
+
     eq(req.scope, "kb") => {
       if(is-empty(req.selector), 0, if(::mem/forget-kb-key(mem, req.selector), 1, 0))
     }
     => { 0 }
   }
+
   ::agent-stream/emit-memory-end(AGENT_NAME, "forget", {
     session-id: session.id,
     scope: req.scope,
@@ -875,6 +879,7 @@ handle-why-command fn (session: Session, arg: Str, reply-to: Str?) {
             |> join("\n")
         }
       }
+
       ::transport/reply(session, concat("<b>Why / Sources</b>\n\n", body), reply-to)
     }
   }
@@ -969,6 +974,7 @@ diag-text fn (session: Session): Str {
     eq(t, "slack")    => { "Slack" }
     =>                   { t }
   }
+
   concat(
     "<b>Team Brain — Diagnostics</b>\n\n",
     `<b>Transport:</b> ${transport-label}\n`,
@@ -1367,6 +1373,7 @@ meta {
     on-event: "telegram:record-voice",
     retry: 2,
 }
+
 ::tg-adapter/record-voice
 
 tg-check-updates
@@ -1401,6 +1408,7 @@ meta {
         },
     ],
 }
+
 ::tg-adapter/check-updates
 
 tg-on-update
@@ -1439,6 +1447,7 @@ meta {
         },
     ],
 }
+
 ::tg-adapter/on-telegram-update
 
 slack-on-event
@@ -1473,6 +1482,7 @@ meta {
         },
     ],
 }
+
 ::slack-adapter/on-slack-event
 
 web-on-message
@@ -1507,6 +1517,7 @@ meta {
         },
     ],
 }
+
 ::web-adapter/on-web-message
 
 // ============================================================================

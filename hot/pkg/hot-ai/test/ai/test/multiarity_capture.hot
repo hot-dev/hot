@@ -185,6 +185,7 @@ invoke-cap-first-of-2 fn (label: Str?, extra: Map?, n: Str): Map {
     inner fn (m: Str): Map {
         {n: m, label: or(label, "default")}
     }
+
     inner(n)
 }
 

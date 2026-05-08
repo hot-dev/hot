@@ -135,6 +135,7 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
                 text: truncated,
             }
         }
+
         eq(t, "telegram") => { ::team-brain::telegram-adapter/reply-impl(session, truncated, reply-to) }
         eq(t, "slack")    => { ::team-brain::slack-adapter/reply-impl(session, truncated, reply-to) }
         eq(t, "web")      => { ::team-brain::web-adapter/reply-impl(session, truncated, reply-to) }
@@ -143,7 +144,9 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
 }
 
 show-typing
-meta { doc: "Best-effort 'typing…' indicator. Silently no-ops when the transport doesn't support it or in dry-run." }
+meta {
+    doc: "Best-effort 'typing…' indicator. Silently no-ops when the transport doesn't support it or in dry-run."
+}
 fn (session: Session): Any {
     t session-transport(session)
     cond {

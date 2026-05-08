@@ -80,6 +80,7 @@ meta ["test"] fn () {
     has-name fn (target: Str): Bool {
         not(is-null(find-first(names, (n) { eq(n, target) })))
     }
+
     assert(has-name("Anthropic"), "Anthropic builtin present")
     assert(has-name("OpenAI"), "OpenAI builtin present")
     assert(has-name("xAI"), "xAI builtin present")
@@ -102,6 +103,7 @@ meta ["test"] fn () {
     fake-fn fn (model: Str, messages: Vec<Map>, system: Str?, tools: Vec<Map>?): Map {
         {text: `fake:${model}`, tool-calls: null}
     }
+
     custom ::chat/ProviderRegistration({
         variant: Provider.OpenAi,
         detect: ::chat/prefix-detector("gpt"),

@@ -35,6 +35,7 @@ fn (session-id: Str, meta: Map?): Session {
         starts-with(session-id, "web:") => { session-id }
         => { `web:${session-id}` }
     }
+
     ::transport/session-with-transport(
         ::session/Session({id: raw, meta: or(meta, {})}),
         "web",
@@ -71,10 +72,12 @@ fn (body: Map): ::transport/IncomingMessage {
     callback-url or(body.callback_url, get(or(body.session_meta, {}), "callback-url"))
     reply-mode or(body.reply_mode, get(or(body.session_meta, {}), "reply-mode"), "stream")
     meta {
-        callback-url: callback-url,
-        reply-mode: reply-mode,
-        client: or(body.client, "web"),
-    }
+    callback-url: callback-url,
+    reply-mode: reply-mode,
+    client: or(body.client,
+    "web"),
+}
+
     ::transport/IncomingMessage({
         session: session-from-id(Str(session-id), meta),
         sender: identity-from-body(body),
@@ -103,6 +106,7 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
         reply_to: reply-to,
         transport: "web",
     }
+
     cond {
         not(is-empty(callback-url)) => {
             ::http/post(callback-url, payload)
@@ -128,7 +132,9 @@ fn (session: Session): Any {
 }
 
 message-link
-meta { doc: "Custom web clients can provide source URLs in message metadata; otherwise no deep link is available." }
+meta {
+    doc: "Custom web clients can provide source URLs in message metadata; otherwise no deep link is available."
+}
 fn (session: Session, message-id: Any): Str {
     ""
 }

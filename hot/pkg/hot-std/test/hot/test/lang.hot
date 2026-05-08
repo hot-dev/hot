@@ -934,6 +934,7 @@ meta ["test"] fn () {
     contains-x fn (xs: Vec, needle: Str): Bool {
         not(is-empty(filter(xs, eq(%, needle))))
     }
+
     assert-eq(true,  contains-x(["a", "needle"], "needle"), "HOF: closed-over var match")
     assert-eq(false, contains-x(["a", "b"],      "needle"), "HOF: closed-over var miss")
 

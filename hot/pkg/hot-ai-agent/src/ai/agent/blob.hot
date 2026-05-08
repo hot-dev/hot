@@ -246,7 +246,9 @@ fn
 }
 
 put-text
-meta { doc: "Write `text` (UTF-8) as a blob. `mime` defaults to `text/plain` when unset." }
+meta {
+    doc: "Write `text` (UTF-8) as a blob. `mime` defaults to `text/plain` when unset."
+}
 fn
 (text: Str): BlobRef { put-text(text, PutOptions({mime: "text/plain"})) },
 (text: Str, opts: PutOptions): BlobRef {
@@ -276,14 +278,18 @@ fn (ref: BlobRef): Bytes? {
 }
 
 get-text
-meta { doc: "Fetch the bytes and decode as UTF-8. Returns `null` when missing or undecodable." }
+meta {
+    doc: "Fetch the bytes and decode as UTF-8. Returns `null` when missing or undecodable."
+}
 fn (ref: BlobRef): Str? {
     bytes get-bytes(ref)
     if(is-null(bytes), null, Str(bytes))
 }
 
 delete
-meta { doc: "Remove a blob from its backing store. Idempotent; returns `false` when the blob was already gone." }
+meta {
+    doc: "Remove a blob from its backing store. Idempotent; returns `false` when the blob was already gone."
+}
 fn (ref: BlobRef): Bool {
     cond {
         is-null(ref) => { false }
