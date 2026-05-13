@@ -18,6 +18,11 @@ hot/src-offline/
 profile.json
 profile.json.gz
 
+# Per-test scratch dir. Tests that exercise the real `::hot::file`
+# direct-mode backend (e.g. `::ai::agent::blob`) write here through an
+# explicit prefix so output never lands in production-shaped paths.
+**/.test-tmp/
+
 # macOS specific files
 .DS_Store
 

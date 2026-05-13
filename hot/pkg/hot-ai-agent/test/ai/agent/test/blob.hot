@@ -5,10 +5,17 @@ meta ["test"]
 ::att    ::ai::agent::attachments
 ::base64 ::hot::base64
 
+// Tests that hit the real `::hot::file` direct-mode backend write into
+// a gitignored scratch dir under a fresh, per-test prefix so blobs from
+// different tests never collide and never leak into production-shaped
+// paths under CWD.
+scratch-prefix fn (): Str { `.test-tmp/agent-blob/${Uuid()}` }
+
 test-put-text-and-get-back
 meta ["test"]
 fn () {
-    ref ::blob/put-text("Hello, blob!")
+    prefix scratch-prefix()
+    ref ::blob/put-text("Hello, blob!", ::blob/PutOptions({prefix: prefix}))
     assert(not(is-null(ref.id)), "ref.id should be set")
     assert(eq(64, length(ref.sha256)), `sha256 should be 64 hex chars, got: ${ref.sha256}`)
     out ::blob/get-text(ref)
@@ -18,8 +25,13 @@ fn () {
 test-put-bytes-roundtrip
 meta ["test"]
 fn () {
+    prefix scratch-prefix()
     bytes Bytes("binary-payload-here")
-    ref ::blob/put-bytes(bytes, ::blob/PutOptions({mime: "application/octet-stream", name: "data.bin"}))
+    ref ::blob/put-bytes(bytes, ::blob/PutOptions({
+        mime: "application/octet-stream",
+        name: "data.bin",
+        prefix: prefix,
+    }))
     assert-eq("application/octet-stream", ref.mime)
     assert-eq("data.bin", ref.name)
     out ::blob/get-bytes(ref)
@@ -29,15 +41,17 @@ fn () {
 test-put-bytes-content-addressed-dedup
 meta ["test"]
 fn () {
-    a ::blob/put-text("dedup-me")
-    b ::blob/put-text("dedup-me")
+    prefix scratch-prefix()
+    a ::blob/put-text("dedup-me", ::blob/PutOptions({prefix: prefix}))
+    b ::blob/put-text("dedup-me", ::blob/PutOptions({prefix: prefix}))
     assert-eq(a.sha256, b.sha256)
 }
 
 test-delete-removes-blob
 meta ["test"]
 fn () {
-    ref ::blob/put-text("temp")
+    prefix scratch-prefix()
+    ref ::blob/put-text("temp", ::blob/PutOptions({prefix: prefix}))
     assert-eq("temp", ::blob/get-text(ref))
     ::blob/delete(ref)
     assert(is-null(::blob/get-text(ref)), "deleted blob should be gone")
@@ -46,6 +60,7 @@ fn () {
 test-attach-from-base64-promotes-bytes
 meta ["test"]
 fn () {
+    prefix scratch-prefix()
     raw {
         name: "notes.md",
         type: "text/markdown",
@@ -54,7 +69,7 @@ fn () {
     }
 
     a ::att/from-map(raw)
-    promoted ::blob/attach-from-base64(a)
+    promoted ::blob/attach-from-base64(a, prefix)
     assert(is-null(promoted.content-base64), "content-base64 should be cleared")
     ref get(promoted.meta, "blob-ref")
     assert(not(is-null(ref)), "blob-ref should be in meta")
