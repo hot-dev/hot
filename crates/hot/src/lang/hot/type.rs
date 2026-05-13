@@ -1419,11 +1419,36 @@ pub fn result_if_err(
                     };
                     let result = match vm.execute_lambda(&args[0], &[]) {
                         Ok(val) => val,
-                        Err(_err) => {
+                        Err(err) => {
                             if let Some(saved) = saved_suppress {
                                 vm.set_suppress_result_checking(saved);
                             }
-                            let err_val = Val::from("evaluation failed");
+                            // if-err is a halt boundary for its lazy first arg:
+                            // if evaluating the result expression halts via
+                            // `fail()` / `cancel()`, capture the structured
+                            // failure payload (preferring `fail()` data over
+                            // the runtime error string), clear the halt state
+                            // so the handler and downstream code can run, and
+                            // dispatch the handler branch.
+                            let err_val = if let Some(f) = vm.get_failure() {
+                                vm.reset_failure_state();
+                                vm.reset_cancellation_state();
+                                if matches!(f.data, Val::Null) {
+                                    Val::from(f.msg)
+                                } else {
+                                    f.data
+                                }
+                            } else if let Some(c) = vm.get_cancellation() {
+                                vm.reset_failure_state();
+                                vm.reset_cancellation_state();
+                                if matches!(c.data, Val::Null) {
+                                    Val::from(c.msg)
+                                } else {
+                                    c.data
+                                }
+                            } else {
+                                Val::from(err.to_string())
+                            };
                             return handle_err_branch(vm, &args[1], &err_val);
                         }
                     };

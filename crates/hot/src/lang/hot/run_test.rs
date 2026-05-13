@@ -295,10 +295,12 @@ mod run_tests {
     }
 
     #[test]
-    fn test_fail_in_pmap() {
-        // This test verifies that fail() works correctly in parallel map
-        // When fail() is called in pmap, it's caught and returned as an error Result within the result vector.
-        // pmap itself succeeds, but returns a Vec containing both successful values and error Results.
+    fn test_fail_in_pmap_propagates() {
+        // pmap shares `map`'s halt-propagation contract: an unhandled
+        // `fail()` inside the callback propagates out of pmap. Workers
+        // complete their in-flight chunks (no wasted parallel work),
+        // then pmap surfaces the lowest-input-index halt — same
+        // observable result as a sequential `map`.
 
         let source = r#"
             ::test ns
@@ -316,35 +318,52 @@ mod run_tests {
         "#;
 
         let result = compile_and_run_with_std(source);
+        assert!(
+            result.is_err(),
+            "pmap should propagate the unhandled fail(): {:?}",
+            result
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("Found 5"),
+            "pmap propagated error should carry the original failure message, got: {msg}"
+        );
+    }
 
-        // pmap should succeed and return a vector
-        assert!(result.is_ok(), "pmap should succeed: {:?}", result);
+    #[test]
+    fn test_fail_in_pmap_recovers_via_if_err() {
+        // The idiomatic way to keep going past a failing per-item call
+        // is `if-err` inside the callback. The callback returns a
+        // domain-typed fallback and pmap completes normally.
 
-        let result_val = result.unwrap();
+        let source = r#"
+            ::test ns
 
-        // Verify it's a Vec
-        if let Val::Vec(vec) = result_val {
-            // Find the error Result in the vector (for x=5)
-            // New format: {$type: "::hot::type/Result.Err", $val: ...}
-            let has_error_result = vec.iter().any(|v| {
-                if let Val::Map(m) = v
-                    && let Some(Val::Str(type_str)) = m.get(&Val::from("$type"))
-                    && &**type_str == "::hot::type/Result.Err"
-                {
-                    return true;
-                }
-                false
-            });
+            process fn (x: Int): Int {
+                ::hot::type/if-err(
+                    ::hot::bool/if(
+                        ::hot::cmp/eq(x, 5),
+                        ::hot::exec/fail("Found 5", x),
+                        ::hot::math/mul(x, 2)
+                    ),
+                    (e: Any) { -1 }
+                )
+            }
 
-            assert!(
-                has_error_result,
-                "pmap result should contain an error Result for x=5"
-            );
-            println!(
-                "✓ pmap correctly caught fail() and returned it as an error Result in the vector"
-            );
+            numbers [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            pmap-result ::hot::coll/pmap(numbers, process)
+        "#;
+
+        let result = compile_and_run_with_std(source);
+        assert!(result.is_ok(), "pmap with if-err should succeed: {:?}", result);
+
+        if let Val::Vec(vec) = result.unwrap() {
+            assert_eq!(vec.len(), 10, "all 10 items present");
+            // index 4 is x=5 which recovered to -1
+            assert_eq!(vec[4], Val::Int(-1), "recovered slot should be -1");
+            assert_eq!(vec[0], Val::Int(2), "first item computed normally");
         } else {
-            panic!("Expected Vec, got: {:?}", result_val);
+            panic!("Expected Vec");
         }
     }
 

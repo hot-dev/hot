@@ -1214,3 +1214,140 @@ meta ["test"] fn () {
     result2 update-in({}, ["a"], (n) { or(n, 0) |> add(1) })
     assert-eq(1, get-in(result2, ["a"]), "update-in on missing key passes null to func")
 }
+
+
+// ---------------------------------------------------------------------------
+// Halt propagation contract for higher-order collection functions.
+//
+// In Hot, `fail()` / `cancel()` are hard halts. HOFs (`map`, `map-indexed`,
+// `mapcat`, `filter`, `for-each`, `pmap`) intentionally do NOT swallow them
+// — an unhandled halt inside the per-item callback propagates out of the
+// HOF, exactly as if the user had written the loop by hand. This keeps
+// failure semantics consistent and avoids HOFs silently downgrading halts
+// into Result.Err slots that downstream code may not expect.
+//
+// To recover per item, the callback should use `if-err` (or the explicit
+// halt boundary `::hot::lang/try-call`) inside the callback itself.
+//
+// `pmap` follows the same contract with a batch-completion twist: parallel
+// in-flight work is allowed to finish, then the lowest-input-index halt is
+// propagated. The observed failure is therefore the same one a sequential
+// `map` would have surfaced.
+// ---------------------------------------------------------------------------
+
+map-with-halt-on-2 fn (): Vec<Int> {
+    ::hot::coll/map([1, 2, 3], (x: Int) {
+        cond {
+            eq(x, 2) => { fail("boom on 2") }
+            => { mul(x, 10) }
+        }
+    })
+}
+
+test-map-propagates-halts
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call(map-with-halt-on-2, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "boom on 2"))
+}
+
+map-with-if-err-recovery fn (): Vec<Int> {
+    ::hot::coll/map([1, 2, 3], (x: Int) {
+        if-err(cond {
+            eq(x, 2) => { fail("boom on 2") }
+            => { mul(x, 10) }
+        }, (e: Any) { -1 })
+    })
+}
+
+test-map-if-err-recovers-per-item
+meta ["test"] fn () {
+    result map-with-if-err-recovery()
+    assert-eq([10, -1, 30], result, "if-err inside the callback recovers without halting map")
+}
+
+mapcat-with-halt fn (): Vec<Int> {
+    ::hot::coll/mapcat([1, 2, 3], (x: Int) {
+        cond {
+            eq(x, 2) => { fail("mapcat boom") }
+            => { [x, mul(x, 10)] }
+        }
+    })
+}
+
+test-mapcat-propagates-halts
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call(mapcat-with-halt, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "mapcat boom"))
+}
+
+filter-with-halt fn (): Vec<Int> {
+    ::hot::coll/filter([1, 2, 3], (x: Int) {
+        cond {
+            eq(x, 2) => { fail("filter boom") }
+            => { gt(x, 0) }
+        }
+    })
+}
+
+test-filter-propagates-halts
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call(filter-with-halt, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "filter boom"))
+}
+
+map-indexed-with-halt fn (): Vec<Int> {
+    ::hot::coll/map-indexed([10, 20, 30], (i: Int, x: Int) {
+        cond {
+            eq(i, 1) => { fail("map-indexed boom") }
+            => { add(i, x) }
+        }
+    })
+}
+
+test-map-indexed-propagates-halts
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call(map-indexed-with-halt, [])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "map-indexed boom"))
+}
+
+pmap-with-halt-large fn (): Vec<Int> {
+    // Size > thread_count * 2 so the tokio parallel path is exercised.
+    inputs ::hot::coll/map([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40], (x: Int) { x })
+    ::hot::coll/pmap(inputs, (x: Int) {
+        cond {
+            eq(x, 7) => { fail("pmap boom on 7") }
+            => { mul(x, 10) }
+        }
+    })
+}
+
+test-pmap-propagates-halts-after-batch
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call(pmap-with-halt-large, [])
+    assert-eq(false, attempt.ok)
+    // The lowest-input-index halt wins regardless of scheduling.
+    assert(contains(attempt.error, "pmap boom on 7"))
+}
+
+pmap-with-if-err-recovery fn (): Vec<Int> {
+    inputs ::hot::coll/map([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40], (x: Int) { x })
+    ::hot::coll/pmap(inputs, (x: Int) {
+        if-err(cond {
+            eq(x, 7) => { fail("pmap boom on 7") }
+            => { mul(x, 10) }
+        }, (e: Any) { -1 })
+    })
+}
+
+test-pmap-if-err-recovers-per-item
+meta ["test"] fn () {
+    result pmap-with-if-err-recovery()
+    assert-eq(40, length(result), "pmap with if-err returns all 40 entries")
+    assert-eq(-1, get(result, 6), "item 7 (index 6) recovered to -1")
+    assert-eq(10, get(result, 0), "other items computed normally")
+    assert-eq(80, get(result, 7), "items after the recovered one continue normally")
+}

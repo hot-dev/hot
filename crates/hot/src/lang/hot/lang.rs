@@ -421,6 +421,67 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         }
     };
 
+    // Fast-path: typed Fn wrapping an inline lambda. Mirrors `call`'s
+    // lambda fast-path so `try-call(some-lambda, [...])` works when the
+    // callee is an inline lambda value rather than a qualified function
+    // name. Without this, the generic name-extraction path below errors
+    // because $val is a boxed LambdaInfo rather than a string.
+    if let Val::Map(m) = function_val
+        && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
+        && &**tn == "::hot::type/Fn"
+        && let Some(inner) = m.get(&Val::from("$val"))
+        && let Val::Box(b) = inner
+        && b.as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+            .is_some()
+    {
+        let exec = vm.execute_lambda(inner, &arg_vals);
+        vm.decrement_call_depth();
+        return match exec {
+            Ok(value) => {
+                let mut result = indexmap::IndexMap::new();
+                result.insert(Val::from("ok"), Val::Bool(true));
+                result.insert(Val::from("value"), value);
+                HotResult::Ok(Val::Map(Box::new(result)))
+            }
+            Err(err) => {
+                vm.reset_failure_state();
+                vm.reset_cancellation_state();
+                let mut result = indexmap::IndexMap::new();
+                result.insert(Val::from("ok"), Val::Bool(false));
+                result.insert(Val::from("error"), Val::from(err.to_string()));
+                HotResult::Ok(Val::Map(Box::new(result)))
+            }
+        };
+    }
+
+    // Bare boxed LambdaInfo (less common; mirrors `call`'s Val::Box arm).
+    if let Val::Box(boxed_val) = function_val
+        && boxed_val
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+            .is_some()
+    {
+        let exec = vm.execute_lambda(&Val::Box(boxed_val.clone_box()), &arg_vals);
+        vm.decrement_call_depth();
+        return match exec {
+            Ok(value) => {
+                let mut result = indexmap::IndexMap::new();
+                result.insert(Val::from("ok"), Val::Bool(true));
+                result.insert(Val::from("value"), value);
+                HotResult::Ok(Val::Map(Box::new(result)))
+            }
+            Err(err) => {
+                vm.reset_failure_state();
+                vm.reset_cancellation_state();
+                let mut result = indexmap::IndexMap::new();
+                result.insert(Val::from("ok"), Val::Bool(false));
+                result.insert(Val::from("error"), Val::from(err.to_string()));
+                HotResult::Ok(Val::Map(Box::new(result)))
+            }
+        };
+    }
+
     // Extract function name (same logic as call)
     let function_name: String = match function_val {
         Val::Str(name) => (**name).to_owned(),

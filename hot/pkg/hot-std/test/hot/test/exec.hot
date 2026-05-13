@@ -91,6 +91,29 @@ meta ["test"] fn () {
     assert(is-err(result), "div(10.0, 0.0) should produce error, not crash")
 }
 
+// try-call accepts inline lambdas, not just named functions.
+
+test-try-call-with-inline-lambda-success
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call((x: Any) { add(x, 1) }, [41])
+    assert-eq(true, attempt.ok)
+    assert-eq(42, attempt.value)
+}
+
+test-try-call-with-inline-lambda-fail
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call((x: Any) { fail("lambda boom") }, [3])
+    assert-eq(false, attempt.ok)
+    assert(contains(attempt.error, "lambda boom"))
+}
+
+test-try-call-with-inline-lambda-no-args
+meta ["test"] fn () {
+    attempt ::hot::lang/try-call(() { 7 }, [])
+    assert-eq(true, attempt.ok)
+    assert-eq(7, attempt.value)
+}
+
 test-mixed-type-arithmetic
 meta ["test"] fn () {
     // Int + Dec should produce Dec
