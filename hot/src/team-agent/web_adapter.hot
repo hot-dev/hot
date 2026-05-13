@@ -1,9 +1,9 @@
-::team-brain::web-adapter ns
+::team-agent::web-adapter ns
 meta {
     doc: """
-    Generic webhook/stream transport for custom TeamBrain clients.
+    Generic webhook/stream transport for custom TeamAgent clients.
 
-    A custom chat app can POST normalized messages to the TeamBrain
+    A custom chat app can POST normalized messages to the TeamAgent
     webhook, then receive replies either via a callback URL in the
     session metadata or by subscribing to Hot stream events emitted by
     this adapter.
@@ -13,8 +13,8 @@ meta {
 ::ctx       ::hot::ctx
 ::http      ::hot::http
 ::session   ::ai::session
-::transport ::team-brain::transport
-::agent     ::team-brain::agent
+::transport ::team-agent::transport
+::agent     ::team-agent::agent
 ::stream    ::ai::agent::stream
 
 Session      ::session/Session
@@ -58,7 +58,7 @@ fn (body: Map): Identity {
 to-incoming
 meta {
     doc: """
-    Convert a custom chat webhook body to TeamBrain's normalized
+    Convert a custom chat webhook body to TeamAgent's normalized
     `IncomingMessage`. Expected fields:
 
     - `session_id` (required)
@@ -99,7 +99,7 @@ meta {
 }
 fn (session: Session, text: Str, reply-to: Str?): Any {
     meta or(session.meta, {})
-    callback-url or(get(meta, "callback-url"), ::ctx/get("teambrain.web.callback-url", ""))
+    callback-url or(get(meta, "callback-url"), ::ctx/get("team-agent.web.callback-url", ""))
     payload {
         session_id: session.id,
         text: text,
@@ -112,9 +112,9 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
             ::http/post(callback-url, payload)
         }
         => {
-            ::stream/emit-reply-start("teambrain", {session_id: session.id, reply_to: reply-to})
-            ::stream/emit-reply-delta("teambrain", {...payload, delta: text})
-            ::stream/emit-reply-end("teambrain", payload)
+            ::stream/emit-reply-start("team-agent", {session_id: session.id, reply_to: reply-to})
+            ::stream/emit-reply-delta("team-agent", {...payload, delta: text})
+            ::stream/emit-reply-end("team-agent", payload)
             {
                 ok: true,
                 streamed: true,
@@ -127,7 +127,7 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
 show-typing-impl
 meta { doc: "Emit a typing/progress event for custom clients." }
 fn (session: Session): Any {
-    ::stream/emit("teambrain:typing", {session_id: session.id})
+    ::stream/emit("team-agent:typing", {session_id: session.id})
     {ok: true}
 }
 

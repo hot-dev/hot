@@ -1,6 +1,6 @@
 ---
 name: group-summary
-description: How TeamBrain should structure /summary and /decisions output for a chat session.
+description: How TeamAgent should structure /summary and /decisions output for a chat session.
 when:
   - summarize the group
   - generate digest
@@ -9,7 +9,7 @@ when:
 
 # Summarizing a chat session
 
-TeamBrain summaries are often read on a phone, between meetings. Optimize
+TeamAgent summaries are often read on a phone, between meetings. Optimize
 for **scannability**, not completeness.
 
 ## Structure

@@ -1,7 +1,7 @@
-::team-brain::slack-adapter ns
+::team-agent::slack-adapter ns
 meta {
     doc: """
-    Slack transport adapter for Team Brain.
+    Slack transport adapter for Team Agent.
 
     Mirrors `telegram_adapter.hot`:
 
@@ -33,8 +33,8 @@ meta {
 ::regex ::hot::regex
 
 ::session   ::ai::session
-::transport ::team-brain::transport
-::agent     ::team-brain::agent
+::transport ::team-agent::transport
+::agent     ::team-agent::agent
 
 // Slack package namespaces. The third-party `::slack` package
 // groups Web API methods by surface (messaging, users, …) rather
@@ -314,13 +314,13 @@ meta {
     meta-bearing alias:
 
     ```hot
-    ::slack-adapter ::team-brain::slack-adapter
+    ::slack-adapter ::team-agent::slack-adapter
 
     slack-on-event
     meta {
-        agent: TeamBrain,
+        agent: TeamAgent,
         webhook: {
-            service: "team-brain",
+            service: "team-agent",
             path: "/slack/events",
             method: "POST",
             description: "Receive Slack Events API callbacks",

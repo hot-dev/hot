@@ -16,24 +16,24 @@ hot.remote.hot-dev.key ::env/get("HOT_API_KEY", "")
 
 hot.project.hot-dev.src.paths ["./hot/src"]
 //hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/pkg/aws-eventstream/test"]
-hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/team-brain/test", "./hot/src/personal-agent/test"]
+hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/team-agent/test", "./hot/src/personal-agent/test"]
 hot.project.hot-dev.test.capture true
 hot.project.hot-dev.resources.paths [
-    "./hot/src/team-brain/resources",
+    "./hot/src/team-agent/resources",
     "./hot/src/personal-agent/resources",
     "./hot/pkg/hot-std/test/fixtures/resources",
 ]
-// The default hot-dev project compiles the Team Brain agent, so it owns
+// The default hot-dev project compiles the Team Agent agent, so it owns
 // the agent's Markdown-authored skills too. Keep codegen scoped to the
 // agent resources so test-only resource fixtures remain data fixtures.
 hot.project.hot-dev.skills.codegen.enabled true
-hot.project.hot-dev.skills.codegen.paths ["./hot/src/team-brain/resources", "./hot/src/personal-agent/resources"]
+hot.project.hot-dev.skills.codegen.paths ["./hot/src/team-agent/resources", "./hot/src/personal-agent/resources"]
 hot.project.hot-dev.deps {
     // AI types package
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
 
-    // AI packages — enabled because hot/src/team-brain/agent.hot
+    // AI packages — enabled because hot/src/team-agent/agent.hot
     // depends on ::anthropic::messages and ::openai::chat for live LLM
     // dispatch. Keep these enabled (not commented) so hot-dev compiles
     // the demo agent.
@@ -256,40 +256,40 @@ hot.project.pkg-test-mcp.deps {
 }
 
 // =============================================================================
-// TeamBrain Agent Demo
+// TeamAgent Agent Demo
 // =============================================================================
-// Narrow project for deploying or testing only the Team Brain agent.
+// Narrow project for deploying or testing only the Team Agent agent.
 // Local development uses the default hot-dev project.
 // Run with: hot dev
-// Deploy:   hot deploy --project demo-team-brain
+// Deploy:   hot deploy --project demo-team-agent
 //
-// TeamBrain is a multi-transport agent — Telegram and Slack adapters
+// TeamAgent is a multi-transport agent — Telegram and Slack adapters
 // share the same agent core, transport abstraction, and skill resolver.
 //
 // Source layout:
-//   hot/src/team-brain/        — agent.hot, transport.hot,
+//   hot/src/team-agent/        — agent.hot, transport.hot,
 //                                    telegram_adapter.hot, slack_adapter.hot,
 //                                    skills.hot, researcher.hot, seed.hot
-//   hot/src/team-brain/resources/ — *.skill.md sources
-//   hot/src/_skills/team-brain/   — codegen output (mirror of resources)
+//   hot/src/team-agent/resources/ — *.skill.md sources
+//   hot/src/_skills/team-agent/   — codegen output (mirror of resources)
 //
 // We compile both the hand-authored sources and the codegen output, but
 // not the rest of `hot/src/` (frontpage-demos, so-fire, etc.) so the
 // demo stays self-contained.
-hot.project.demo-team-brain.src.paths [
-    "./hot/src/team-brain",
-    "./hot/src/_skills/team-brain",
+hot.project.demo-team-agent.src.paths [
+    "./hot/src/team-agent",
+    "./hot/src/_skills/team-agent",
 ]
-hot.project.demo-team-brain.test.paths ["./hot/src/team-brain/test"]
-hot.project.demo-team-brain.test.capture true
-hot.project.demo-team-brain.resources.paths [
-    "./hot/src/team-brain/resources",
+hot.project.demo-team-agent.test.paths ["./hot/src/team-agent/test"]
+hot.project.demo-team-agent.test.capture true
+hot.project.demo-team-agent.resources.paths [
+    "./hot/src/team-agent/resources",
 ]
-// Codegen owns hot/src/_skills/team-brain/ — re-runs of `hot dev`
+// Codegen owns hot/src/_skills/team-agent/ — re-runs of `hot dev`
 // regenerate the stubs from `*.skill.md` sources whenever the source
 // changes, and prune stubs whose source disappeared.
-hot.project.demo-team-brain.skills.codegen.enabled true
-hot.project.demo-team-brain.deps {
+hot.project.demo-team-agent.skills.codegen.enabled true
+hot.project.demo-team-agent.deps {
     "hot.dev/hot-ai":    { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
     "hot.dev/telegram":  { "local": "./hot/pkg/telegram" },

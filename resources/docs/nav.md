@@ -10,7 +10,7 @@ can link to a section overview page.
 
 - [Getting Started](getting-started)
 - [Demos](demos)
-  - [TeamBrain](demos/team-brain)
+  - [TeamAgent](demos/team-agent)
   - [PersonalAgent](demos/personal-agent)
   - [Graph-RAG Memory](demos/graph-rag-memory)
   - [Hot Chat](demos/hot-chat)

@@ -1,7 +1,7 @@
-::team-brain::test::test_slack_markdown ns
+::team-agent::test::test_slack_markdown ns
 meta ["test"]
 
-::sl ::team-brain::slack-adapter
+::sl ::team-agent::slack-adapter
 
 // ============================================================================
 // to-slack-markdown — adapter-side HTML → Slack mrkdwn translator

@@ -1,7 +1,7 @@
 # Hot Chat Demo
 
 Hot Chat is a polished local web chat UI for Hot agents. It is intentionally a
-*transport client*, not a new agent: it sends normalized messages to TeamBrain
+*transport client*, not a new agent: it sends normalized messages to TeamAgent
 or PersonalAgent through Hot webhooks, using the same payload shape a Telegram
 or Slack adapter would.
 
@@ -9,7 +9,7 @@ or Slack adapter would.
 
 ## What You'll Get To See
 
-- a clean chat UI that switches between TeamBrain and PersonalAgent live,
+- a clean chat UI that switches between TeamAgent and PersonalAgent live,
 - quick-prompt chips that map to slash commands without baking policy into
   the UI,
 - file attachments (drag-and-drop or paperclip) carried through to the agent
@@ -31,13 +31,13 @@ cd hot-demos/personal-agent
 hot dev --open
 ```
 
-(Use `team-brain` instead if you'd rather start there.)
+(Use `team-agent` instead if you'd rather start there.)
 
 The demo expects the local Hot Dev defaults:
 
 ```text
 http://localhost:4681/webhook/local/development/personal-agent/web/messages
-http://localhost:4681/webhook/local/development/team-brain/web/messages
+http://localhost:4681/webhook/local/development/team-agent/web/messages
 ```
 
 ## Step 1: Install And Run
@@ -55,7 +55,7 @@ Open [http://localhost:3000](http://localhost:3000).
 
 The first time you load Hot Chat, the conversation is empty and you see a
 column of suggestions. Click **Daily brief** (PersonalAgent) or **Decisions**
-(TeamBrain). The chip sends a slash command immediately and the agent reply
+(TeamAgent). The chip sends a slash command immediately and the agent reply
 streams in below.
 
 Try writing a message of your own next:
@@ -63,7 +63,7 @@ Try writing a message of your own next:
 - with PersonalAgent: type *"I prefer launch updates that start with
   blockers"* and press Enter. PersonalAgent replies `remembered`. Click
   **Recall preferences** to verify it stuck.
-- with TeamBrain: type *"We decided to ship docs before launch"*, then click
+- with TeamAgent: type *"We decided to ship docs before launch"*, then click
   **Ask the team** and adjust the prefilled question. The reply lists the
   matching memory.
 
@@ -82,7 +82,7 @@ receives:
 
 ```text
 Session       person:<your-uuid>      ← PersonalAgent
-              web:chat:<your-uuid>    ← TeamBrain
+              web:chat:<your-uuid>    ← TeamAgent
 User identity web:user:<your-uuid>
 ```
 

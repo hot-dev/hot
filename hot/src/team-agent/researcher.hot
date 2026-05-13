@@ -1,8 +1,8 @@
-::team-brain::researcher ns
+::team-agent::researcher ns
 meta {
     doc: """
-  Researcher is a second agent in the Team Brain demo. It listens on the
-  `agents:collaborate` bus and answers questions that Team Brain decided
+  Researcher is a second agent in the Team Agent demo. It listens on the
+  `agents:collaborate` bus and answers questions that Team Agent decided
   it can't answer from group memory (general fact lookups, definitions,
   external knowledge).
 
@@ -60,7 +60,7 @@ researcher Researcher({
 
 // ============================================================================
 // AI dispatch (mirrors the pattern in agent.hot but kept independent so
-// Researcher and Team Brain can run different models).
+// Researcher and Team Agent can run different models).
 // ============================================================================
 
 provider-to-chat-fn fn match (provider: ::chat/Provider): Fn {
@@ -83,7 +83,7 @@ ask-llm fn (question: Str): Str {
 // requesting agent matches one of our peers. Other agents on the same
 // bus will simply ignore requests they aren't equipped to handle.
 
-PEERS ["Team Brain"]
+PEERS ["Team Agent"]
 
 answer
 meta {
@@ -93,7 +93,7 @@ meta {
     sends: [
         {
             event: "brain:ask-response",
-            doc: "Responds to TeamBrain collaboration requests using the reply event carried on the request.",
+            doc: "Responds to TeamAgent collaboration requests using the reply event carried on the request.",
         },
     ],
 }

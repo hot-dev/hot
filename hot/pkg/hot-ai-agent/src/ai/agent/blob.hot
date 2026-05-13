@@ -45,19 +45,19 @@ meta {
 
     ```hot
     ref ::blob/put-bytes(bytes, ::blob/PutOptions({
-        prefix: "team-brain/attachments",
+        prefix: "team-agent/attachments",
         mime: "image/png",
     }))
-    // → path: "team-brain/attachments/<sha256>.png"
+    // → path: "team-agent/attachments/<sha256>.png"
     ```
 
     The default prefix is `"agents/blobs"`. Tenant isolation is
     applied by the platform; agents only ever pick the `prefix`.
 
     Recommended convention: `<agent>/<purpose>` (e.g.
-    `"team-brain/attachments"`, `"team-brain/renders"`,
+    `"team-agent/attachments"`, `"team-agent/renders"`,
     `"personal-agent/uploads"`). Add a transport segment when retention
-    differs by transport: `"team-brain/slack/attachments"`.
+    differs by transport: `"team-agent/slack/attachments"`.
 
     Two-layer provenance model
     --------------------------
@@ -110,7 +110,7 @@ meta {
     - `name` — display name (filename), when known.
     - `path` — storage path. Stable for the lifetime of the blob.
     - `prefix` — the namespace the blob lives under (e.g.
-      `"team-brain/attachments"`). Defaults to `"agents/blobs"`.
+      `"team-agent/attachments"`). Defaults to `"agents/blobs"`.
     """
 }
 type {
@@ -134,7 +134,7 @@ meta {
     - `name` — display name (filename). Optional.
     - `prefix` — namespace under which to store the blob. Defaults to
       `DEFAULT_PREFIX` (`"agents/blobs"`). Use this to keep
-      per-agent blobs separate (e.g. `"team-brain/attachments"`).
+      per-agent blobs separate (e.g. `"team-agent/attachments"`).
     """
 }
 type {
@@ -311,7 +311,7 @@ meta {
     of mixed attachments.
 
     Pass `prefix` to organize blobs per-agent, e.g.
-    `attach-from-base64(att, "team-brain/attachments")`.
+    `attach-from-base64(att, "team-agent/attachments")`.
     """
 }
 fn

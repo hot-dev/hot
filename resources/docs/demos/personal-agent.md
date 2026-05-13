@@ -1,6 +1,6 @@
 # PersonalAgent Demo
 
-PersonalAgent is the identity-first sibling of TeamBrain. It's still one chat
+PersonalAgent is the identity-first sibling of TeamAgent. It's still one chat
 agent, but the durable memory key is the *person*, not the channel. That makes
 it a good base for assistants, journaling apps, or per-user copilots.
 
@@ -16,13 +16,13 @@ A web-callable agent that:
 - generates a quick brief and a privacy review on demand.
 
 You'll also see why this agent's graph is intentionally smaller than
-TeamBrain's: command handling is direct, not event-driven, until you decide
+TeamAgent's: command handling is direct, not event-driven, until you decide
 you need it.
 
 ## Prerequisites
 
 Install the Hot CLI and check `hot dev` works. PersonalAgent shares the
-unreleased `hot-ai` and `hot-ai-agent` packages with TeamBrain, so clone the
+unreleased `hot-ai` and `hot-ai-agent` packages with TeamAgent, so clone the
 main `hot` repo as a sibling of `hot-demos`:
 
 ```text

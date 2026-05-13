@@ -13,12 +13,23 @@ meta {
 Session ::session/Session
 
 AgentRuntime
-meta { doc: "Per-agent runtime stores and configuration." }
+meta {
+    doc: """
+    Per-agent runtime stores and configuration.
+
+    Four stores are kept distinct so unrelated read paths never collide:
+    `state-store` for arbitrary state (incl. registered sessions),
+    `stats-store` for counters, `errors-store` for the rolling error
+    log, and `notify-store` for the agent notification ledger used by
+    `::ai::agent::notify`.
+    """
+}
 type {
     agent-name: Str,
     state-store: ::hot::store/Map,
     stats-store: ::hot::store/Map,
     errors-store: ::hot::store/Map,
+    notify-store: ::hot::store/Map,
     max-errors: Int,
 }
 
@@ -35,10 +46,11 @@ fn
     prefix get(data, "store-prefix", agent-name)
     AgentRuntime({
         agent-name: agent-name,
-        state-store: ::hot::store/Map({name: `agent:${prefix}:state`}),
-        stats-store: ::hot::store/Map({name: `agent:${prefix}:stats`}),
+        state-store:  ::hot::store/Map({name: `agent:${prefix}:state`}),
+        stats-store:  ::hot::store/Map({name: `agent:${prefix}:stats`}),
         errors-store: ::hot::store/Map({name: `agent:${prefix}:errors`}),
-        max-errors: get(data, "max-errors", 5),
+        notify-store: ::hot::store/Map({name: `agent:${prefix}:notify`}),
+        max-errors:   get(data, "max-errors", 5),
     })
 }
 

@@ -194,7 +194,7 @@ The package ships with 54 unit tests covering session, message, chat, memory (pu
 hot test --project pkg-test-hot-ai
 ```
 
-Memory and RAG paths that touch persistent stores are exercised by running the demo agent (see `hot/src/team-brain`) rather than by unit tests.
+Memory and RAG paths that touch persistent stores are exercised by running the demo agent (see `hot/src/team-agent`) rather than by unit tests.
 
 ## License
 

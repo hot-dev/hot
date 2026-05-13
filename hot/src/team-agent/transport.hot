@@ -1,7 +1,7 @@
-::team-brain::transport ns
+::team-agent::transport ns
 meta {
     doc: """
-    Transport-agnostic surface for Team Brain. Defines the shapes
+    Transport-agnostic surface for Team Agent. Defines the shapes
     every front-end (Telegram, Slack, future Discord/Matrix/CLI) must
     speak, and dispatches outbound replies by inspecting
     `session.meta.transport`.
@@ -136,9 +136,9 @@ fn (session: Session, text: Str, reply-to: Str?): Any {
             }
         }
 
-        eq(t, "telegram") => { ::team-brain::telegram-adapter/reply-impl(session, truncated, reply-to) }
-        eq(t, "slack")    => { ::team-brain::slack-adapter/reply-impl(session, truncated, reply-to) }
-        eq(t, "web")      => { ::team-brain::web-adapter/reply-impl(session, truncated, reply-to) }
+        eq(t, "telegram") => { ::team-agent::telegram-adapter/reply-impl(session, truncated, reply-to) }
+        eq(t, "slack")    => { ::team-agent::slack-adapter/reply-impl(session, truncated, reply-to) }
+        eq(t, "web")      => { ::team-agent::web-adapter/reply-impl(session, truncated, reply-to) }
         => { fail(`unknown transport tag: ${t}`) }
     }
 }
@@ -151,9 +151,9 @@ fn (session: Session): Any {
     t session-transport(session)
     cond {
         is-dry-run()      => { {ok: true, dry: true} }
-        eq(t, "telegram") => { ::team-brain::telegram-adapter/show-typing-impl(session) }
-        eq(t, "slack")    => { ::team-brain::slack-adapter/show-typing-impl(session) }
-        eq(t, "web")      => { ::team-brain::web-adapter/show-typing-impl(session) }
+        eq(t, "telegram") => { ::team-agent::telegram-adapter/show-typing-impl(session) }
+        eq(t, "slack")    => { ::team-agent::slack-adapter/show-typing-impl(session) }
+        eq(t, "web")      => { ::team-agent::web-adapter/show-typing-impl(session) }
         =>                   { {ok: true, no-op: true} }
     }
 }
@@ -171,9 +171,9 @@ fn (session: Session, message-id: Any): Str {
     t session-transport(session)
     cond {
         is-null(message-id) => { "" }
-        eq(t, "telegram")   => { ::team-brain::telegram-adapter/message-link(session, message-id) }
-        eq(t, "slack")      => { ::team-brain::slack-adapter/message-link(session, message-id) }
-        eq(t, "web")        => { ::team-brain::web-adapter/message-link(session, message-id) }
+        eq(t, "telegram")   => { ::team-agent::telegram-adapter/message-link(session, message-id) }
+        eq(t, "slack")      => { ::team-agent::slack-adapter/message-link(session, message-id) }
+        eq(t, "web")        => { ::team-agent::web-adapter/message-link(session, message-id) }
         =>                     { "" }
     }
 }

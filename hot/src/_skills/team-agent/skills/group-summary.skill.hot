@@ -1,19 +1,19 @@
-// HOT-CODEGEN: skill-stub from team-brain/skills/group-summary.skill.md [hash:241543430c5c]
+// HOT-CODEGEN: skill-stub from team-agent/skills/group-summary.skill.md [hash:ff23cb226527]
 // Edit the source .skill.md and re-run `hot dev` / `hot build` to refresh.
 // To take ownership, remove the marker line above; codegen will then leave
 // this file alone (and `*.skill.md` will no longer overwrite it).
 
-::skills::team-brain::skills ns
+::skills::team-agent::skills ns
 
 group-summary ::ai::skill/Skill({
     name: "group-summary",
-    description: "How TeamBrain should structure /summary and /decisions output for a chat session.",
+    description: "How TeamAgent should structure /summary and /decisions output for a chat session.",
     when: ["summarize the group", "generate digest", "extract decisions"],
     body: """
 
         # Summarizing a chat session
 
-        TeamBrain summaries are often read on a phone, between meetings. Optimize
+        TeamAgent summaries are often read on a phone, between meetings. Optimize
         for **scannability**, not completeness.
 
         ## Structure

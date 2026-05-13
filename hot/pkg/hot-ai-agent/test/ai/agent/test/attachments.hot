@@ -18,7 +18,7 @@ base64-att fn (name: Str, mime: Str, body: Str): Map {
         name: name,
         type: mime,
         size: length(body),
-        content-base64: ::base64/encode(body),
+        content-base64: ::base64/encode(Bytes(body)),
     }
 }
 

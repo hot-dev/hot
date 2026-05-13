@@ -89,7 +89,7 @@ by 4 edges.
 ## Step 5: Run A Hybrid Query
 
 ```bash
-hot eval '::graph-rag-memory::demo/query("What blocks TeamBrain launch readiness?")'
+hot eval '::graph-rag-memory::demo/query("What blocks TeamAgent launch readiness?")'
 ```
 
 Expected result (counts will vary by embedding configuration):
@@ -100,7 +100,7 @@ Expected result (counts will vary by embedding configuration):
   edge-count: 4,
   citation-count: 4..7,
   citations: [
-    {id: "edge:teambrain-docs", label: "TeamBrain blocked-by Docs walkthrough", excerpt: "…"},
+    {id: "edge:team-agent-docs", label: "TeamAgent blocked-by Docs walkthrough", excerpt: "…"},
     …
   ]
 }

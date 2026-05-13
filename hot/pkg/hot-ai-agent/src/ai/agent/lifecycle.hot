@@ -41,9 +41,7 @@ fn (session: Session, action: Str, result: Any?): LifecycleJob {
 }
 
 job-error
-meta {
-    doc: "Build a failed LifecycleJob result and record it in the runtime error log."
-}
+meta { doc: "Build a failed LifecycleJob result and record it in the runtime error log." }
 fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
     msg Str(error)
     ::runtime/record-error(rt, action, msg)
@@ -58,16 +56,25 @@ fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
 
 run-session-job
 meta {
-    doc: "Run an app-provided handler for each registered session with lifecycle error capture."
+    doc: """
+    Run `handler(session)` for every registered session and collect a
+    `LifecycleJob` per session.
+
+    Per-session recovery is handled inside the callback with `if-err`:
+    if a handler halts via `fail()` / `cancel()`, the structured error
+    is captured and recorded on `rt.errors-store`, and the slot becomes
+    `LifecycleJob.ok = false`. The loop always processes every session
+    and always returns a uniform `Vec<LifecycleJob>` — halts never
+    escape `run-session-job`.
+    """
 }
 fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
     sessions ::runtime/list-registered-sessions(rt)
     map(sessions, (session) {
-        res if-err(handler(session), (e) { err(e) })
-        cond {
-            is-err(res) => { job-error(rt, session, action, res) }
-            => { job-ok(session, action, res) }
-        }
+        if-err(
+            job-ok(session, action, handler(session)),
+            (e: Any) { job-error(rt, session, action, e) }
+        )
     })
 }
 

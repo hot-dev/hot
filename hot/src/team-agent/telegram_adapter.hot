@@ -1,7 +1,7 @@
-::team-brain::telegram-adapter ns
+::team-agent::telegram-adapter ns
 meta {
     doc: """
-    Telegram transport adapter for Team Brain.
+    Telegram transport adapter for Team Agent.
 
     Owns everything Telegram-specific:
 
@@ -34,8 +34,8 @@ meta {
 ::session   ::ai::session
 ::msg       ::ai::message
 ::mem       ::ai::memory
-::transport ::team-brain::transport
-::agent     ::team-brain::agent
+::transport ::team-agent::transport
+::agent     ::team-agent::agent
 
 // Type aliases used in fn signatures and as class names. Hot resolves
 // these at parse time, so the short forms work in `: Session`-style
@@ -132,7 +132,7 @@ meta {
     Send `text` to the Telegram chat encoded in `session`, threading
     off `reply-to` (a Telegram message id, here in string form because
     `::transport/IncomingMessage.message-id` is `Str`). HTML is the
-    parse mode because all of Team Brain's templated replies use
+    parse mode because all of Team Agent's templated replies use
     `<b>`/`<i>`/`<a>`. Called only by `::transport/reply` after the
     dry-run gate.
     """
@@ -263,11 +263,11 @@ meta {
     your agent assembly file as a meta-bearing alias:
 
     ```hot
-    ::tg-adapter ::team-brain::telegram-adapter
+    ::tg-adapter ::team-agent::telegram-adapter
 
     tg-record-voice
     meta {
-        agent: TeamBrain,
+        agent: TeamAgent,
         on-event: "telegram:record-voice",
         retry: 2,
     }
@@ -399,11 +399,11 @@ meta {
     from your agent assembly file as a meta-bearing alias:
 
     ```hot
-    ::tg-adapter ::team-brain::telegram-adapter
+    ::tg-adapter ::team-agent::telegram-adapter
 
     tg-check-updates
     meta {
-        agent: TeamBrain,
+        agent: TeamAgent,
         schedule: "every 30 seconds",
         on-event: "telegram:check-updates",
     }
@@ -453,7 +453,7 @@ fn (event) {
 // ============================================================================
 // Registered via Telegram's `setWebhook`; verifies the optional
 // secret token before handing off to the agent. Mounted at
-// `/team-brain/updates` once deployed.
+// `/team-agent/updates` once deployed.
 
 on-telegram-update
 meta {
@@ -474,13 +474,13 @@ meta {
     meta-bearing alias:
 
     ```hot
-    ::tg-adapter ::team-brain::telegram-adapter
+    ::tg-adapter ::team-agent::telegram-adapter
 
     tg-on-update
     meta {
-        agent: TeamBrain,
+        agent: TeamAgent,
         webhook: {
-            service: "team-brain",
+            service: "team-agent",
             path: "/updates",
             method: "POST",
             description: "Receive Telegram bot updates",

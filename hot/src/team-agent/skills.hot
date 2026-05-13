@@ -1,7 +1,7 @@
-::team-brain::skills ns
+::team-agent::skills ns
 meta {
     doc: """
-    Example skills for the TeamBrain multi-transport agent. Demonstrates the
+    Example skills for the TeamAgent multi-transport agent. Demonstrates the
     three flavors of skill authoring used by the resolver:
 
     1. **Inline-body Hot skill** (`telegram-tone`) — the body is a
@@ -11,12 +11,12 @@ meta {
     2. **Bundled-tool skill** (`coach-on-stats`) — same inline body,
        plus a `tools:` entry that ships a callable `lookup-recent-stats`
        tool to the model whenever the skill is read. The tool reads
-       directly from `::team-brain::agent/brain-stats`.
+       directly from `::team-agent::agent/brain-stats`.
 
     3. **Markdown-bodied skill** — see
-       `resources/team-brain/skills/group-summary.skill.md`. The
+       `resources/team-agent/skills/group-summary.skill.md`. The
        skill-stub codegen turns it into a generated `.skill.hot` file
-       under `hot/src/_skills/team-brain/skills/` containing a
+       under `hot/src/_skills/team-agent/skills/` containing a
        prompt-only `Skill` value with the Markdown body wired in.
 
     To make these live for a chat-loop based command (e.g. a future
@@ -27,7 +27,7 @@ meta {
     skills ::skill/for-agent([
         telegram-tone,
         coach-on-stats,
-        ::skills::team-brain::skills::group-summary/group-summary,
+        ::skills::team-agent::skills::group-summary/group-summary,
     ])
     ::chat/run-loop(messages, ChatOptions({…, skills: skills}))
     ```
@@ -45,8 +45,8 @@ telegram-tone
 meta {
     skill: {
         name: "telegram-tone",
-        description: "Voice and formatting rules for Team Brain replies in Telegram chats.",  // The `transport:telegram` tag is read by
-        // `::team-brain::agent/skills-for-session`: skills carrying
+        description: "Voice and formatting rules for Team Agent replies in Telegram chats.",  // The `transport:telegram` tag is read by
+        // `::team-agent::agent/skills-for-session`: skills carrying
         // a `transport:*` token are hidden from the LLM whenever the
         // active session uses a different transport. Drop the tag if
         // you want this skill always-on.
@@ -85,7 +85,7 @@ slack-tone
 meta {
     skill: {
         name: "slack-tone",
-        description: "Voice and formatting rules for Team Brain replies in Slack channels.",  // See `telegram-tone` above for how the `transport:*` tag is
+        description: "Voice and formatting rules for Team Agent replies in Slack channels.",  // See `telegram-tone` above for how the `transport:*` tag is
         // consumed by the per-session skill resolver.
         when: ["reply to user", "format chat message", "summarize for slack", "transport:slack"],
         body: """
@@ -99,7 +99,7 @@ meta {
             optional bullets. Slack threads expect skim-ability.
             - Cite teammates as `<@USERID>` when you have the Slack id
             in metadata, otherwise plain `*name*`. Avoid `@channel` /
-            `@here` — Team Brain shouldn't be paging the whole channel.
+            `@here` — Team Agent shouldn't be paging the whole channel.
             - Never lead with greetings ("Hi everyone!") or sign-offs
             ("Hope this helps!"). Channels are noisy; every line should
             carry information.
@@ -125,7 +125,7 @@ meta {
     doc: """
     Bundled tool for `coach-on-stats`. Reads today's AI-call counter,
     today's estimated token total, and the most-recent model name from
-    `::team-brain::agent/brain-stats` for a given chat.
+    `::team-agent::agent/brain-stats` for a given chat.
 
     Stats are keyed by `${session.id}:...` (transport-prefixed, e.g.
     `telegram:-100…` or `slack:T1:C2`). The model can pass an explicit
@@ -140,13 +140,13 @@ meta {
     """,
 }
 fn (session-id: Str?): Map {
-    day  ::team-brain::agent/today-bucket()
-    stats ::team-brain::agent/brain-stats
+    day  ::team-agent::agent/today-bucket()
+    stats ::team-agent::agent/brain-stats
     raw-sid or(session-id, "")
     bucket cond {
         not(is-empty(raw-sid)) => { raw-sid }
         => {
-            registered ::team-brain::agent/list-registered-sessions()
+            registered ::team-agent::agent/list-registered-sessions()
             cond {
                 is-empty(registered) => { "" }
                 => { first(registered).id }
@@ -170,13 +170,13 @@ fn (session-id: Str?): Map {
 // `::tool/Tool` and 404s). Until `::ai::skill/from-fn` learns to
 // materialize a `tool-fns:` (Vec<Fn>) field via `::ai::tool/from-fn`,
 // the workaround is to list the helper as a top-level agent tool in
-// `::team-brain::agent/agent-tools` so it's still callable when
+// `::team-agent::agent/agent-tools` so it's still callable when
 // the model decides to coach.
 coach-on-stats
 meta {
     skill: {
         name: "coach-on-stats",
-        description: "Suggest next actions for a Team Brain chat based on today's usage.",
+        description: "Suggest next actions for a Team Agent chat based on today's usage.",
         when: ["coach the team", "review usage", "suggest next steps"],
         body: """
             # Coaching from today's usage

@@ -63,6 +63,15 @@ MODEL_PREFIXES [
     {prefix: "gemini",  provider: Provider.Gemini},
 ]
 
+// FOLLOWUP: `provider-available?(opts: ChatOptions) -> Bool` and a
+// per-registration `available?-fn` that probes provider auth (`api-key`
+// in `::hot::ctx`, or any other provider-specific signal). This would
+// let `::ai::agent::chat-turn` (and other downstream callers) decide
+// "should I run the model or fall back to a deterministic stub?"
+// without hardcoding `::hot::ctx/get("anthropic.api.key")`. The
+// ChatTurn fallback-text path is the current workaround — see
+// `::ai::agent::chat-turn/TurnInput.fallback-text`.
+
 ProviderRegistration
 meta {
     doc: """

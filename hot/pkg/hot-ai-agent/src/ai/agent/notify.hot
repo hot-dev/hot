@@ -1,0 +1,250 @@
+::ai::agent::notify ns
+meta {
+    doc: """
+    Notification ledger for scheduled (and ad-hoc) agent output.
+
+    Scheduled handlers (daily recaps, stale-task nudges, standups, …) run
+    without a client subscribed to their reply stream, so they need a
+    durable place to land their output. `notify` is that place: a
+    runtime-scoped store of `Notification` records the active UI can
+    surface via an `/inbox` command or a "new since you were here" badge.
+
+    Design notes
+    ------------
+    - Storage: `rt.notify-store` (a `::hot::store/Map`). One key per
+      notification, value is a serialized `Notification` map. Keys are
+      `${recipient-id}:${created-at}:${id}` so they sort newest-last
+      when listed.
+    - Recipient: a free-form string. PersonalAgents typically pass the
+      user id (`u1`); TeamAgents pass `channel:<session-id>` so a
+      channel-wide inbox is keyed independently from any one user.
+    - Kind: short tag for the emitter (e.g. `daily-recap`,
+      `stale-task-nudge`, `daily-standup`). Lets UIs filter or group.
+    - Read state: a single `read-at` epoch-seconds field. `null` = unread.
+
+    This is intentionally a small primitive. Production agents will
+    likely add external delivery (Slack post, email) by tailing this
+    store from a separate channel — see `record-notification` for the
+    write path you'd reuse.
+    """
+}
+
+::store   ::hot::store
+::rt      ::ai::agent::runtime
+::time    ::hot::time
+
+AgentRuntime ::rt/AgentRuntime
+
+Notification
+meta {
+    doc: """
+    One notification record. `recipient-id` is opaque (user id for
+    personal, `channel:<sid>` for team). `kind` identifies the cron
+    handler that wrote it; UIs can group/badge by kind.
+    """
+}
+type {
+    id: Str,
+    recipient-id: Str,
+    session-id: Str?,
+    kind: Str,
+    body: Str,
+    source: Str?,
+    created-at: Int,
+    read-at: Int?,
+    meta: Map?,
+}
+
+now-secs fn (): Int { ::rt/now-epoch-secs() }
+
+storage-key
+meta {
+    doc: """
+    Compose the store key for a notification. Sortable by recipient,
+    then time, then id — so `::store/list` returns chronologically
+    grouped entries per recipient.
+    """
+}
+fn (recipient-id: Str, created-at: Int, id: Str): Str {
+    `${recipient-id}:${created-at}:${id}`
+}
+
+record-notification
+meta {
+    doc: """
+    Append a new notification to `rt.notify-store` and return the
+    typed record. `opts` shape:
+
+    - `recipient-id` (Str, required): user id for personal agents,
+      `channel:<session-id>` for team agents.
+    - `kind` (Str, required): emitter tag, e.g. `daily-recap`.
+    - `body` (Str, required): the message body. Markdown is fine.
+    - `session-id` (Str?): the originating session if any.
+    - `source` (Str?): a free-form provenance string (cron job name).
+    - `meta` (Map?): extra structured metadata.
+    """
+}
+fn (rt: AgentRuntime, opts: Map): Notification {
+    o or(opts, {})
+    recipient-id Str(or(get(o, "recipient-id"), ""))
+    kind         Str(or(get(o, "kind"), "generic"))
+    body         Str(or(get(o, "body"), ""))
+    created-at   now-secs()
+    id           Str(Uuid())
+
+    notif Notification({
+        id: id,
+        recipient-id: recipient-id,
+        session-id: get(o, "session-id", null),
+        kind: kind,
+        body: body,
+        source: get(o, "source", null),
+        created-at: created-at,
+        read-at: null,
+        meta: get(o, "meta", null),
+    })
+
+    key storage-key(recipient-id, created-at, id)
+    ::store/put(rt.notify-store, key, untype(notif))
+    notif
+}
+
+hydrate
+meta { doc: "Lift a serialized notification map back into a `Notification` value." }
+fn (raw: Map): Notification {
+    Notification({
+        id:           Str(or(get(raw, "id"), "")),
+        recipient-id: Str(or(get(raw, "recipient-id"), "")),
+        session-id:   get(raw, "session-id", null),
+        kind:         Str(or(get(raw, "kind"), "generic")),
+        body:         Str(or(get(raw, "body"), "")),
+        source:       get(raw, "source", null),
+        created-at:   Int(or(get(raw, "created-at"), 0)),
+        read-at:      get(raw, "read-at", null),
+        meta:         get(raw, "meta", null),
+    })
+}
+
+list-notifications
+meta {
+    doc: """
+    List notifications for a recipient, oldest first.
+
+    `opts`:
+    - `unread-only` (Bool, default false): drop records with `read-at`.
+    - `kind` (Str?): if set, only matching `kind` records.
+    - `limit` (Int?): cap the result length (after filtering).
+    """
+}
+fn (rt: AgentRuntime, recipient-id: Str, opts: Map?): Vec<Notification> {
+    o or(opts, {})
+    unread-only get(o, "unread-only", false)
+    kind-filter get(o, "kind", null)
+    limit       get(o, "limit", null)
+
+    prefix `${recipient-id}:`
+    entries ::store/list(rt.notify-store)
+    matching filter(entries, (e) { starts-with(Str(e.key), prefix) })
+    notifs map(matching, (e) { hydrate(e.value) })
+    by-kind cond {
+        is-null(kind-filter) => { notifs }
+        => { filter(notifs, (n) { eq(n.kind, kind-filter) }) }
+    }
+    by-read cond {
+        unread-only => { filter(by-kind, (n) { is-null(n.read-at) }) }
+        => { by-kind }
+    }
+    cond {
+        is-null(limit) => { by-read }
+        gte(length(by-read), limit) => { slice(by-read, sub(length(by-read), limit), length(by-read)) }
+        => { by-read }
+    }
+}
+
+unread-count
+meta { doc: "Number of unread notifications for a recipient." }
+fn (rt: AgentRuntime, recipient-id: Str): Int {
+    length(list-notifications(rt, recipient-id, {unread-only: true}))
+}
+
+mark-read
+meta {
+    doc: """
+    Mark a single notification (looked up by id) read for the given
+    recipient. Returns the updated `Notification`, or `null` when the
+    id is unknown for that recipient.
+    """
+}
+fn (rt: AgentRuntime, recipient-id: Str, id: Str): Notification? {
+    prefix `${recipient-id}:`
+    entries ::store/list(rt.notify-store)
+    hit find-first(entries, (e) {
+        and(
+            starts-with(Str(e.key), prefix),
+            eq(Str(or(get(e.value, "id"), "")), id),
+        )
+    })
+    cond {
+        is-null(hit) => { null }
+        => {
+            updated {...hit.value, read-at: now-secs()}
+            ::store/put(rt.notify-store, hit.key, updated)
+            hydrate(updated)
+        }
+    }
+}
+
+mark-all-read
+meta {
+    doc: "Mark every unread notification for a recipient as read. Returns the count touched."
+}
+fn (rt: AgentRuntime, recipient-id: Str): Int {
+    unread list-notifications(rt, recipient-id, {unread-only: true})
+    touched map(unread, (n) {
+        mark-read(rt, recipient-id, n.id)
+    })
+    length(touched)
+}
+
+forget-notification
+meta {
+    doc: "Permanently delete a notification by id. Returns true when removed."
+}
+fn (rt: AgentRuntime, recipient-id: Str, id: Str): Bool {
+    prefix `${recipient-id}:`
+    entries ::store/list(rt.notify-store)
+    hit find-first(entries, (e) {
+        and(
+            starts-with(Str(e.key), prefix),
+            eq(Str(or(get(e.value, "id"), "")), id),
+        )
+    })
+    cond {
+        is-null(hit) => { false }
+        => {
+            ::store/delete(rt.notify-store, hit.key)
+            true
+        }
+    }
+}
+
+render-inbox
+meta {
+    doc: """
+    Format a list of notifications as a single markdown block suitable
+    for an `/inbox` reply. Empty input yields a friendly "no
+    notifications" line.
+    """
+}
+fn (notifications: Vec<Notification>): Str {
+    cond {
+        is-empty(notifications) => { "No notifications." }
+        => {
+            blocks map(notifications, (n) {
+                tag if(is-null(n.read-at), "•", " ")
+                `${tag} **${n.kind}** — ${n.body}`
+            })
+            join(blocks, "\n\n")
+        }
+    }
+}

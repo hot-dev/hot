@@ -1,11 +1,11 @@
-# Team Brain — Multi-Transport AI Agent
+# Team Agent — Multi-Transport AI Agent
 
 An AI agent that gives any chat (Telegram group, Slack channel, custom web app, …) a
 searchable, summarizable memory. Built with Hot, `::ai`, `::ai::agent`, and
 one adapter per transport.
 
 > **Project note.** Local development runs in the default `hot-dev`
-> project. The narrower `demo-team-brain` project remains available for
+> project. The narrower `demo-team-agent` project remains available for
 > targeted deploys.
 
 **What it does:**
@@ -22,7 +22,7 @@ one adapter per transport.
   through Whisper (in a Hot Box) and indexed alongside text.
 - Scheduled daily digest + weekly summary across every registered
   session.
-- MCP tool `search_team_brain` so external AI clients can query a
+- MCP tool `search_team_agent` so external AI clients can query a
   session's memory.
 - Citations with deep links — `/ask` replies link back to the cited
   messages when the active transport supports stable message URLs.
@@ -70,11 +70,11 @@ functions.
 The shorthand looks like this:
 
 ```hot
-::tg-adapter ::team-brain::telegram-adapter
+::tg-adapter ::team-agent::telegram-adapter
 
 tg-record-voice
 meta {
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "telegram:record-voice",
     retry: 2,
 }
@@ -132,7 +132,7 @@ does process schedule/call dispatch internally and registers the
 core `hot:call`, `hot:schedule`, `hot:schedule:new`,
 `hot:schedule:cancel` event handlers itself.
 
-Each agent assembly file (here: `agent.hot` for Team Brain,
+Each agent assembly file (here: `agent.hot` for Team Agent,
 `researcher.hot` for the Researcher peer) **is** wiring code by
 construction and does carry agentic annotations directly on its
 own handlers (`record-message`, `handle-ask`, `daily-digest`, …).
@@ -234,11 +234,11 @@ The bot **only stores messages sent after it joined the group.**
 3. Install the app to your workspace and save the **Bot User OAuth
    Token** (starts with `xoxb-`).
 4. **Event Subscriptions** → enable, set the request URL to
-   `https://api.hot.dev/webhook/{org-slug}/{env-name}/team-brain/slack/events`
+   `https://api.hot.dev/webhook/{org-slug}/{env-name}/team-agent/slack/events`
    after deploying, and subscribe to bot events:
    - `message.channels`
    - `message.groups`
-5. Invite the bot to a channel: `/invite @TeamBrain` from inside the
+5. Invite the bot to a channel: `/invite @TeamAgent` from inside the
    target channel.
 
 ### 2. Set context variables
@@ -253,15 +253,15 @@ hot ctx set slack.team.domain "myworkspace"  # for permalink generation; optiona
 ### 3. Deploy and register the events URL
 
 ```bash
-hot deploy --project demo-team-brain
+hot deploy --project demo-team-agent
 ```
 
 Then point Slack's Event Subscriptions at the deployed webhook URL. The route is
-declared as `service: "team-brain", path: "/slack/events"`, so the default Hot
+declared as `service: "team-agent", path: "/slack/events"`, so the default Hot
 URL shape is:
 
 ```text
-https://api.hot.dev/webhook/{org-slug}/{env-name}/team-brain/slack/events
+https://api.hot.dev/webhook/{org-slug}/{env-name}/team-agent/slack/events
 ```
 
 Slack will challenge once with a `url_verification` payload — the agent handles
@@ -271,7 +271,7 @@ it automatically.
 
 ## Quick Start — Custom Web App
 
-A custom chat app can post normalized messages directly to TeamBrain:
+A custom chat app can post normalized messages directly to TeamAgent:
 
 ```json
 {
@@ -285,15 +285,15 @@ A custom chat app can post normalized messages directly to TeamBrain:
 ```
 
 POST that body to the custom web transport. The route is declared as
-`service: "team-brain", path: "/web/messages"`, so local Hot Dev uses:
+`service: "team-agent", path: "/web/messages"`, so local Hot Dev uses:
 
 ```text
-http://localhost:4681/webhook/local/development/team-brain/web/messages
+http://localhost:4681/webhook/local/development/team-agent/web/messages
 ```
 
-If the body includes `callback_url`, TeamBrain posts replies there. Otherwise
-`web_adapter.hot` emits Hot stream events such as `teambrain:reply:start`,
-`teambrain:reply:delta`, and `teambrain:reply:end` for clients that subscribe
+If the body includes `callback_url`, TeamAgent posts replies there. Otherwise
+`web_adapter.hot` emits Hot stream events such as `team-agent:reply:start`,
+`team-agent:reply:delta`, and `team-agent:reply:end` for clients that subscribe
 to the run stream.
 
 ---
@@ -352,19 +352,19 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # Telegram /help (no LLM needed)
 hot run \
         --ctx /tmp/dev-driver.ctx.hot \
-        hot/src/team-brain/dev-driver.hot
+        hot/src/team-agent/dev-driver.hot
 
 # Telegram /ask against seeded chat history
 DEV_CMD=ask DEV_TEXT="What did we decide about the launch?" \
   hot run \
           --ctx /tmp/dev-driver.ctx.hot \
-          hot/src/team-brain/dev-driver.hot
+          hot/src/team-agent/dev-driver.hot
 
 # Same agent, Slack session
 DEV_TRANSPORT=slack DEV_CMD=diag \
   hot run \
           --ctx /tmp/dev-driver.ctx.hot \
-          hot/src/team-brain/dev-driver.hot
+          hot/src/team-agent/dev-driver.hot
 ```
 
 The dry-run reply tag includes the session id so you can verify
@@ -406,7 +406,7 @@ launch decision, a postmortem, and several action items:
 ```bash
 hot run \
         --ctx /tmp/dev-driver.ctx.hot \
-        hot/src/team-brain/seed.hot
+        hot/src/team-agent/seed.hot
 ```
 
 Memory persists in your local store across runs, so this is a
@@ -494,7 +494,7 @@ Two delivery modes:
 
 - **Long-polling** (`check-updates` scheduled function) — self-contained,
   no public URL required. Default in local dev.
-- **Webhook** (`on-telegram-update`, declared as `service: "team-brain",
+- **Webhook** (`on-telegram-update`, declared as `service: "team-agent",
   path: "/updates"`) — zero-latency, requires a public HTTPS URL and a
   one-time `setWebhook` call.
 
@@ -503,18 +503,18 @@ Don't run both — they double-deliver. In production:
 ```bash
 hot ctx set brain.polling.enabled false
 curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
-  -d "url=https://api.hot.dev/webhook/{org-slug}/{env-name}/team-brain/updates" \
+  -d "url=https://api.hot.dev/webhook/{org-slug}/{env-name}/team-agent/updates" \
   -d "secret_token=<your-telegram.webhook.secret>"
 ```
 
 ### Slack
 
 Slack uses Events API webhooks exclusively. The `on-slack-event` route is
-declared as `service: "team-brain", path: "/slack/events"`, so the deployed
+declared as `service: "team-agent", path: "/slack/events"`, so the deployed
 request URL is:
 
 ```text
-https://api.hot.dev/webhook/{org-slug}/{env-name}/team-brain/slack/events
+https://api.hot.dev/webhook/{org-slug}/{env-name}/team-agent/slack/events
 ```
 
 There is no polling option. Set that request URL in your app's
@@ -526,7 +526,7 @@ There is no polling option. Set that request URL in your app's
 
 ```bash
 hot ctx set brain.polling.enabled false
-hot deploy --project demo-team-brain
+hot deploy --project demo-team-agent
 ```
 
 Then register the Telegram webhook and/or Slack Events URL against
@@ -627,7 +627,7 @@ recording:
 
 ```bash
 hot ctx set telegram.chat.id "-1001234567890"
-hot run hot/src/team-brain/seed.hot
+hot run hot/src/team-agent/seed.hot
 ```
 
 This posts ~28 synthetic messages from five fictional teammates over
@@ -644,8 +644,8 @@ Telegram or Slack.
 ## Source Layout
 
 ```
-hot/src/team-brain/
-├── agent.hot              # TeamBrain core: handlers, schedules, MCP tool, /stats, /diag,
+hot/src/team-agent/
+├── agent.hot              # TeamAgent core: handlers, schedules, MCP tool, /stats, /diag,
 │                            transport-aware skill resolver, registered-sessions index
 ├── transport.hot          # Transport-agnostic surface: IncomingMessage, reply,
 │                            show-typing, format-source-link, dry-run gate
@@ -695,7 +695,7 @@ disable verification.
 **Slack URL verification fails** — The `on-slack-event` handler
 auto-replies to `url_verification` callbacks. If Slack still complains,
 double-check the Request URL uses the full deployed webhook URL:
-`https://api.hot.dev/webhook/{org-slug}/{env-name}/team-brain/slack/events`.
+`https://api.hot.dev/webhook/{org-slug}/{env-name}/team-agent/slack/events`.
 
 **Duplicate Telegram responses in production** — You have both polling
 and the webhook enabled. Set `brain.polling.enabled = false`.

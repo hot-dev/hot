@@ -1,7 +1,7 @@
-::team-brain::seed ns
+::team-agent::seed ns
 meta {
     doc: """
-  Seed Team Brain with a realistic synthetic conversation so the demo can
+  Seed Team Agent with a realistic synthetic conversation so the demo can
   be filmed without recruiting a live group. Posts ~28 messages across
   five fictional teammates spanning the last ~24 hours. Touches on a
   launch decision, a bug postmortem, action items, shared links, and an
@@ -10,13 +10,13 @@ meta {
 
   Run (Telegram, default):
     hot ctx set telegram.chat.id <your-chat-id>
-    hot run hot/src/team-brain/seed.hot
+    hot run hot/src/team-agent/seed.hot
 
   Run (Slack):
     hot ctx set seed.transport slack
     hot ctx set slack.team.id    <your-team-id>
     hot ctx set slack.channel.id <your-channel-id>
-    hot run hot/src/team-brain/seed.hot
+    hot run hot/src/team-agent/seed.hot
 
   The seed only writes to memory — it does NOT post to Telegram or
   Slack. Re-running is safe: each call uses fresh, unique message ids.
@@ -29,9 +29,9 @@ meta {
 ::mem           ::ai::memory
 ::msg           ::ai::message
 ::session       ::ai::session
-::tg-adapter    ::team-brain::telegram-adapter
-::slack-adapter ::team-brain::slack-adapter
-::agent         ::team-brain::agent
+::tg-adapter    ::team-agent::telegram-adapter
+::slack-adapter ::team-agent::slack-adapter
+::agent         ::team-agent::agent
 
 AGENT_NAME "brain"
 

@@ -36,7 +36,7 @@ meta {
         ::auth/protect(request, [
             ::auth/platform-verifier(),
             ::auth/hmac-verifier(::auth/HmacOptions({
-                secret-env: "TEAMBRAIN_WEBHOOK_SECRET",
+                secret-env: "TEAMAGENT_WEBHOOK_SECRET",
                 header: "x-hot-signature",
                 scheme: "sha256=",
             })),
@@ -514,12 +514,12 @@ meta {
     returns a 401 `HttpResponse` with `unauthorized(reason)`.
 
     ```hot
-    fn meta {webhook: {service: "team-brain", path: "/web", method: "POST"}}
+    fn meta {webhook: {service: "team-agent", path: "/web", method: "POST"}}
        (request: HttpRequest): HttpResponse {
         ::auth/protect(request, [
             ::auth/platform-verifier(),
             ::auth/hmac-verifier(::auth/HmacOptions({
-                secret-env: "TEAMBRAIN_HMAC_SECRET",
+                secret-env: "TEAMAGENT_HMAC_SECRET",
                 header: "x-hot-signature",
                 scheme: "sha256=",
             })),

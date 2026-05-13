@@ -1,12 +1,12 @@
-::team-brain::test::test_skills ns
+::team-agent::test::test_skills ns
 meta ["test"]
 
 ::chat   ::ai::chat
 ::tool   ::ai::tool
 ::skill  ::ai::skill
-::agent  ::team-brain::agent
-::tg     ::team-brain::telegram-adapter
-::sl     ::team-brain::slack-adapter
+::agent  ::team-agent::agent
+::tg     ::team-agent::telegram-adapter
+::sl     ::team-agent::slack-adapter
 
 ChatOptions ::chat/ChatOptions
 ChatReply   ::chat/ChatReply
@@ -65,7 +65,7 @@ opts-with-mock fn (chat-fn: Fn): ChatOptions {
     ChatOptions({
         chat-fn: chat-fn,
         model: "mock-model",
-        system: "You are Team Brain (test).",
+        system: "You are Team Agent (test).",
         skills: ::agent/agent-skills,
     })
 }
@@ -79,7 +79,7 @@ meta ["test"]
 fn () {
     skills ::agent/agent-skills
     assert(gte(length(skills), 11),
-        `expected TeamBrain core skills wired, got ${length(skills)}`)
+        `expected TeamAgent core skills wired, got ${length(skills)}`)
 }
 
 test-resolver-index-includes-all-three-skills
@@ -104,7 +104,7 @@ test-original-system-prompt-preserved
 meta ["test"]
 fn () {
     result ::chat/run-loop(opts-with-mock(mock-chat-echo-system), "hi")
-    assert(contains(result, "You are Team Brain (test)."),
+    assert(contains(result, "You are Team Agent (test)."),
         "original system prompt should still appear above the resolver index")
 }
 

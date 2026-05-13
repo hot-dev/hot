@@ -1,7 +1,7 @@
-::team-brain::dev-driver ns
+::team-agent::dev-driver ns
 meta {
     doc: """
-    Local iteration harness for the Team Brain agent. Builds a
+    Local iteration harness for the Team Agent agent. Builds a
     transport-agnostic `IncomingMessage` and feeds it through
     `::agent/process-incoming` so you can exercise commands (`/ask`,
     `/summary`, …) end-to-end without registering a bot or talking to
@@ -27,12 +27,12 @@ meta {
 
     # Seed first so /ask has something to find:
     hot ctx set telegram.chat.id "-1001234567890"
-    hot run hot/src/team-brain/seed.hot
+    hot run hot/src/team-agent/seed.hot
 
     # Now ask:
     hot ctx set dev.cmd "ask"
     hot ctx set dev.text "what did we decide about the launch?"
-    hot run hot/src/team-brain/dev-driver.hot
+    hot run hot/src/team-agent/dev-driver.hot
     ```
 
     Pick the transport with `dev.transport` (defaults to `telegram`):
@@ -62,10 +62,10 @@ meta {
 ::run       ::hot::run
 ::time      ::hot::time
 ::session   ::ai::session
-::transport ::team-brain::transport
-::tg-adapter   ::team-brain::telegram-adapter
-::slack-adapter ::team-brain::slack-adapter
-::agent     ::team-brain::agent
+::transport ::team-agent::transport
+::tg-adapter   ::team-agent::telegram-adapter
+::slack-adapter ::team-agent::slack-adapter
+::agent     ::team-agent::agent
 
 DEFAULT_USERNAME "dev-driver"
 

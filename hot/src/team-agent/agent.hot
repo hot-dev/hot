@@ -1,7 +1,7 @@
-::team-brain::agent ns
+::team-agent::agent ns
 meta {
     doc: """
-    Team Brain agent core — transport-agnostic.
+    Team Agent agent core — transport-agnostic.
 
     Every public handler takes a `Session` + `Identity` and replies
     via `::transport/reply`. The two transport adapters
@@ -49,7 +49,7 @@ meta {
 ::agent-stream  ::ai::agent::stream
 
 // Cross-cutting transport surface (reply, show-typing, format-source-link).
-::transport ::team-brain::transport
+::transport ::team-agent::transport
 
 // Transport adapters. These expose pure callable functions for inbound
 // dispatch (polling, webhooks, voice download). The agentic wiring
@@ -59,15 +59,15 @@ meta {
 // and webhook registrations when those library files are compiled by
 // more than one project in the same worker (e.g. dev meta-project +
 // the demo).
-::tg-adapter    ::team-brain::telegram-adapter
-::slack-adapter ::team-brain::slack-adapter
-::web-adapter   ::team-brain::web-adapter
+::tg-adapter    ::team-agent::telegram-adapter
+::slack-adapter ::team-agent::slack-adapter
+::web-adapter   ::team-agent::web-adapter
 
 // Skills authored in this project. `telegram-tone` and `coach-on-stats`
 // are inline-bodied skills declared in skills.hot. `group-summary` is
-// the codegen'd stub for resources/team-brain/skills/group-summary.skill.md.
-::own-skills        ::team-brain::skills
-::generated-skills  ::skills::team-brain::skills
+// the codegen'd stub for resources/team-agent/skills/group-summary.skill.md.
+::own-skills        ::team-agent::skills
+::generated-skills  ::skills::team-agent::skills
 
 Session     ::session/Session
 Identity    ::session/Identity
@@ -81,7 +81,7 @@ Role        ::msg/Role
 // Agent Definition
 // ============================================================================
 
-TeamBrain
+TeamAgent
 meta {
     doc: """
     Multi-transport AI agent that gives a chat (Telegram group, Slack
@@ -90,7 +90,7 @@ meta {
     digests, and answers questions using AI + RAG.
     """,
     agent: {
-        name: "Team Brain",
+        name: "Team Agent",
         description: "Multi-transport group memory agent with semantic search, AI summaries, and digests",
         tags: ["telegram", "slack", "ai", "memory", "rag"],
     },
@@ -104,21 +104,21 @@ type {
 AGENT_NAME "brain"
 
 SYSTEM_PROMPT """
-  You are Team Brain, an AI assistant embedded in a group chat.
+  You are Team Agent, an AI assistant embedded in a group chat.
   You have access to the group's message history.
   Be concise, helpful, and cite who said what.
   Use HTML formatting (<b>bold</b>, <i>italic</i>, <code>code</code>)
   unless the active skill tells you otherwise.
 """
 
-brain TeamBrain({
+brain TeamAgent({
   model: ::ctx/get("brain.model", "claude-sonnet-4-5"),
   service: ::ctx/get("brain.service", "Anthropic"),
   system-prompt: ::ctx/get("brain.system", SYSTEM_PROMPT),
 })
 
 // Reusable runtime stores from `hot-ai-agent`: agent state, per-session
-// stats, and a rolling error log. TeamBrain keeps the existing public
+// stats, and a rolling error log. TeamAgent keeps the existing public
 // bindings because adapters and skills read them directly.
 agent-runtime ::agent-runtime/create-runtime(AGENT_NAME, {store-prefix: "brain", max-errors: 5})
 agent-state  agent-runtime.state-store
@@ -331,7 +331,7 @@ fn (session: Session): ::skill/SkillResolver {
 // this list can shrink and skills can carry their own tool kits.
 //
 // IMPORTANT: pass an explicit `name:` override. `from-fn` defaults to
-// the function's fully qualified name (`::team-brain::skills/lookup-recent-stats`),
+// the function's fully qualified name (`::team-agent::skills/lookup-recent-stats`),
 // which contains `:` and `/`. Anthropic's tools API rejects any name that
 // doesn't match `^[a-zA-Z0-9_-]{1,64}$`. The rejection silently turns
 // the response into `text=null, tool-calls=null, stop-reason=end_turn`
@@ -468,7 +468,7 @@ meta {
     `message_id` for Telegram deep links, `ts` + `thread_ts` for
     Slack permalinks).
     """,
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "brain:record",
 }
 fn (event) {
@@ -519,7 +519,7 @@ classify-question fn (question: Str): Str {
 handle-ask
 meta {
     doc: "Routes /ask: memory questions answered via RAG, external questions delegated to Researcher over ::ai::bus.",
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "brain:ask",
     sends: [
         {
@@ -559,7 +559,7 @@ fn (event) {
       ::bus/collaborate(::bus/CollaborationRequest({
         session: session,
         sender: sender,
-        from-agent: "Team Brain",
+        from-agent: "Team Agent",
         question: question,
         reply-event: "brain:ask-response",
         correlation-id: or(reply-to, ""),
@@ -618,7 +618,7 @@ fn (event) {
 handle-ask-response
 meta {
     doc: "Receives an answer from Researcher (via ::ai::bus/respond) and posts it back through the originating transport.",
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "brain:ask-response",
 }
 fn (event) {
@@ -643,7 +643,7 @@ fn (event) {
 handle-summarize
 meta {
     doc: "Generates an AI summary via ::ai::rag/summarize",
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "brain:summarize",
 }
 fn (event) {
@@ -681,7 +681,7 @@ fn (event) {
 handle-decisions
 meta {
     doc: "Extracts decisions, action items, and open questions via ::ai::rag/summarize with a custom instruction",
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "brain:decisions",
 }
 fn (event) {
@@ -726,7 +726,7 @@ fn (event) {
 handle-search
 meta {
     doc: "Semantic search via ::ai::memory/recall",
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "brain:search",
 }
 fn (event) {
@@ -823,19 +823,19 @@ handle-forget-command fn (session: Session, sender: Identity, arg: Str, reply-to
   }
 }
 
-compact-teambrain-session fn (session: Session, hours: Int): Map {
+compact-team-agent-session fn (session: Session, hours: Int): Map {
   mem make-memory(session, system-identity)
   opts get-chat-opts(session)
   capsule ::rag/compact-window(mem, opts, {
     hours: hours,
     limit: 800,
-    id: `teambrain:${session.id}:${today-bucket()}:${hours}h`,
+    id: `team-agent:${session.id}:${today-bucket()}:${hours}h`,
     instruction: """
-      Compact this TeamBrain chat window into a durable capsule.
+      Compact this TeamAgent chat window into a durable capsule.
       Preserve decisions, tasks, links, open questions, owners, and source ids.
       Keep the summary short enough to use as retrieval context later.
     """,
-    metadata: {agent: "teambrain", session-id: session.id},
+    metadata: {agent: "team-agent", session-id: session.id},
     emit-stream: true,
   })
   {capsule-id: capsule.id, source-count: length(capsule.source-ids)}
@@ -844,7 +844,7 @@ compact-teambrain-session fn (session: Session, hours: Int): Map {
 handle-compact-command fn (session: Session, arg: Str, reply-to: Str?) {
   hours if(is-empty(trim(or(arg, ""))), 168, Int(trim(arg)))
   ::agent-stream/emit-memory-start(AGENT_NAME, "compact", {session-id: session.id, hours: hours})
-  result ::hot::lang/try-call(() { compact-teambrain-session(session, hours) })
+  result ::hot::lang/try-call(() { compact-team-agent-session(session, hours) })
   cond {
     result.ok => {
       ::agent-stream/emit-memory-end(AGENT_NAME, "compact", {session-id: session.id, result: result.value})
@@ -935,7 +935,7 @@ stats-text fn (session: Session): Str {
   }
 
   concat(
-    "<b>Team Brain — Stats</b>\n\n",
+    "<b>Team Agent — Stats</b>\n\n",
     `<b>Messages recorded:</b> ${total}\n`,
     `<b>Top contributors (7d):</b> ${contributors}\n`,
     `<b>AI calls today:</b> ${calls}\n`,
@@ -976,7 +976,7 @@ diag-text fn (session: Session): Str {
   }
 
   concat(
-    "<b>Team Brain — Diagnostics</b>\n\n",
+    "<b>Team Agent — Diagnostics</b>\n\n",
     `<b>Transport:</b> ${transport-label}\n`,
     `<b>Session:</b> <code>${session.id}</code>\n`,
     `<b>AI model:</b> ${provider-label} <code>${model}</code>\n`,
@@ -993,7 +993,7 @@ diag-text fn (session: Session): Str {
 
 welcome-message
 """
-  <b>Hi there! I'm Team Brain 🧠</b>
+  <b>Hi there! I'm Team Agent 🧠</b>
 
   I quietly record this chat's messages and help you make sense of them:
 
@@ -1014,7 +1014,7 @@ help-message fn (): Str {
   provider ::chat/detect-provider(model)
   provider-label ::chat/provider-name(provider)
   concat(
-    "<b>Team Brain</b>\n\n",
+    "<b>Team Agent</b>\n\n",
     `AI model: <b>${provider-label}</b> <code>${model}</code>\n\n`,
     "<b>Commands:</b>\n",
     "/ask &lt;question&gt; — Ask about chat history\n",
@@ -1251,7 +1251,7 @@ run-digest-for-session fn (session: Session) {
         instruction: DIGEST_INSTRUCTION,
       })
       ::transport/reply(session, concat("<b>Daily Digest</b>\n\n", digest), null)
-      compact-teambrain-session(session, 24)
+      compact-team-agent-session(session, 24)
     }
   }
 }
@@ -1259,7 +1259,7 @@ run-digest-for-session fn (session: Session) {
 daily-digest
 meta {
     doc: "Iterates every registered session and posts a morning summary of the prior 24h.",
-    agent: TeamBrain,
+    agent: TeamAgent,
     schedule: "every day at 9am",
     on-event: "brain:daily-digest",
 }
@@ -1310,7 +1310,7 @@ run-weekly-for-session fn (session: Session) {
         instruction: WEEKLY_INSTRUCTION,
       })
       ::transport/reply(session, concat("<b>Weekly Summary</b>\n\n", summary), null)
-      compact-teambrain-session(session, 168)
+      compact-team-agent-session(session, 168)
     }
   }
 }
@@ -1318,7 +1318,7 @@ run-weekly-for-session fn (session: Session) {
 weekly-summary
 meta {
     doc: "Iterates every registered session and posts a Monday morning weekly summary.",
-    agent: TeamBrain,
+    agent: TeamAgent,
     schedule: "every monday at 9am",
     on-event: "brain:weekly-summary",
 }
@@ -1332,16 +1332,16 @@ fn (event) {
   })
 }
 
-teambrain-compact-stale-memory
+team-agent-compact-stale-memory
 meta {
-    doc: "Scheduled reusable lifecycle compaction for registered TeamBrain sessions.",
-    agent: TeamBrain,
+    doc: "Scheduled reusable lifecycle compaction for registered TeamAgent sessions.",
+    agent: TeamAgent,
     schedule: "every day at 2am",
     on-event: "brain:compact-stale-memory",
 }
 fn (event) {
   ::agent-life/compact-stale-sessions(agent-runtime, (session) {
-    compact-teambrain-session(session, 168)
+    compact-team-agent-session(session, 168)
   })
 }
 
@@ -1369,7 +1369,7 @@ fn (event) {
 
 tg-record-voice
 meta {
-    agent: TeamBrain,
+    agent: TeamAgent,
     on-event: "telegram:record-voice",
     retry: 2,
 }
@@ -1378,7 +1378,7 @@ meta {
 
 tg-check-updates
 meta {
-    agent: TeamBrain,
+    agent: TeamAgent,
     schedule: "every 30 seconds",
     on-event: "telegram:check-updates",
     sends: [
@@ -1388,23 +1388,23 @@ meta {
         },
         {
             event: "brain:ask",
-            doc: "Incoming /ask commands are normalized by the Telegram adapter and routed through TeamBrain.",
+            doc: "Incoming /ask commands are normalized by the Telegram adapter and routed through TeamAgent.",
         },
         {
             event: "brain:summarize",
-            doc: "Incoming /summary commands are normalized by the Telegram adapter and routed through TeamBrain.",
+            doc: "Incoming /summary commands are normalized by the Telegram adapter and routed through TeamAgent.",
         },
         {
             event: "brain:decisions",
-            doc: "Incoming /decisions commands are normalized by the Telegram adapter and routed through TeamBrain.",
+            doc: "Incoming /decisions commands are normalized by the Telegram adapter and routed through TeamAgent.",
         },
         {
             event: "brain:search",
-            doc: "Incoming /search commands are normalized by the Telegram adapter and routed through TeamBrain.",
+            doc: "Incoming /search commands are normalized by the Telegram adapter and routed through TeamAgent.",
         },
         {
             event: "brain:record",
-            doc: "Regular Telegram text messages are normalized and stored in TeamBrain memory.",
+            doc: "Regular Telegram text messages are normalized and stored in TeamAgent memory.",
         },
     ],
 }
@@ -1413,9 +1413,9 @@ meta {
 
 tg-on-update
 meta {
-    agent: TeamBrain,
+    agent: TeamAgent,
     webhook: {
-        service: "team-brain",
+        service: "team-agent",
         path: "/updates",
         method: "POST",
         description: "Receive Telegram bot updates",
@@ -1427,23 +1427,23 @@ meta {
         },
         {
             event: "brain:ask",
-            doc: "Incoming /ask commands are normalized by the Telegram webhook and routed through TeamBrain.",
+            doc: "Incoming /ask commands are normalized by the Telegram webhook and routed through TeamAgent.",
         },
         {
             event: "brain:summarize",
-            doc: "Incoming /summary commands are normalized by the Telegram webhook and routed through TeamBrain.",
+            doc: "Incoming /summary commands are normalized by the Telegram webhook and routed through TeamAgent.",
         },
         {
             event: "brain:decisions",
-            doc: "Incoming /decisions commands are normalized by the Telegram webhook and routed through TeamBrain.",
+            doc: "Incoming /decisions commands are normalized by the Telegram webhook and routed through TeamAgent.",
         },
         {
             event: "brain:search",
-            doc: "Incoming /search commands are normalized by the Telegram webhook and routed through TeamBrain.",
+            doc: "Incoming /search commands are normalized by the Telegram webhook and routed through TeamAgent.",
         },
         {
             event: "brain:record",
-            doc: "Regular Telegram text messages are normalized and stored in TeamBrain memory.",
+            doc: "Regular Telegram text messages are normalized and stored in TeamAgent memory.",
         },
     ],
 }
@@ -1452,9 +1452,9 @@ meta {
 
 slack-on-event
 meta {
-    agent: TeamBrain,
+    agent: TeamAgent,
     webhook: {
-        service: "team-brain",
+        service: "team-agent",
         path: "/slack/events",
         method: "POST",
         description: "Receive Slack Events API callbacks",
@@ -1462,23 +1462,23 @@ meta {
     sends: [
         {
             event: "brain:ask",
-            doc: "Incoming /ask commands are normalized by the Slack adapter and routed through TeamBrain.",
+            doc: "Incoming /ask commands are normalized by the Slack adapter and routed through TeamAgent.",
         },
         {
             event: "brain:summarize",
-            doc: "Incoming /summary commands are normalized by the Slack adapter and routed through TeamBrain.",
+            doc: "Incoming /summary commands are normalized by the Slack adapter and routed through TeamAgent.",
         },
         {
             event: "brain:decisions",
-            doc: "Incoming /decisions commands are normalized by the Slack adapter and routed through TeamBrain.",
+            doc: "Incoming /decisions commands are normalized by the Slack adapter and routed through TeamAgent.",
         },
         {
             event: "brain:search",
-            doc: "Incoming /search commands are normalized by the Slack adapter and routed through TeamBrain.",
+            doc: "Incoming /search commands are normalized by the Slack adapter and routed through TeamAgent.",
         },
         {
             event: "brain:record",
-            doc: "Regular Slack messages are normalized and stored in TeamBrain memory.",
+            doc: "Regular Slack messages are normalized and stored in TeamAgent memory.",
         },
     ],
 }
@@ -1487,33 +1487,33 @@ meta {
 
 web-on-message
 meta {
-    agent: TeamBrain,
+    agent: TeamAgent,
     webhook: {
-        service: "team-brain",
+        service: "team-agent",
         path: "/web/messages",
         method: "POST",
-        description: "Receive custom TeamBrain chat messages",
+        description: "Receive custom TeamAgent chat messages",
     },
     sends: [
         {
             event: "brain:ask",
-            doc: "Incoming /ask commands are normalized by the web adapter and routed through TeamBrain.",
+            doc: "Incoming /ask commands are normalized by the web adapter and routed through TeamAgent.",
         },
         {
             event: "brain:summarize",
-            doc: "Incoming /summary commands are normalized by the web adapter and routed through TeamBrain.",
+            doc: "Incoming /summary commands are normalized by the web adapter and routed through TeamAgent.",
         },
         {
             event: "brain:decisions",
-            doc: "Incoming /decisions commands are normalized by the web adapter and routed through TeamBrain.",
+            doc: "Incoming /decisions commands are normalized by the web adapter and routed through TeamAgent.",
         },
         {
             event: "brain:search",
-            doc: "Incoming /search commands are normalized by the web adapter and routed through TeamBrain.",
+            doc: "Incoming /search commands are normalized by the web adapter and routed through TeamAgent.",
         },
         {
             event: "brain:record",
-            doc: "Regular web messages are normalized and stored in TeamBrain memory.",
+            doc: "Regular web messages are normalized and stored in TeamAgent memory.",
         },
     ],
 }
@@ -1527,10 +1527,10 @@ meta {
 search-brain
 meta {
     doc: "Search a registered session's history using semantic search. Pass session_id to target a specific chat; defaults to the first registered session.",
-    agent: TeamBrain,
+    agent: TeamAgent,
     mcp: {
-        service: "team-brain",
-        name: "search_team_brain",
+        service: "team-agent",
+        name: "search_team_agent",
         description: "Search a chat's message history by meaning. Returns relevant messages with sender and relevance score.",
     },
 }
@@ -1561,14 +1561,14 @@ fn (params) {
   }
 }
 
-query-teambrain-graph
+query-team-agent-graph
 meta {
-    doc: "Hybrid vector plus graph retrieval over a registered TeamBrain session.",
-    agent: TeamBrain,
+    doc: "Hybrid vector plus graph retrieval over a registered TeamAgent session.",
+    agent: TeamAgent,
     mcp: {
-        service: "team-brain",
-        name: "query_team_brain_graph",
-        description: "Query TeamBrain graph memory for decisions, blockers, launch readiness, incidents, or unresolved questions.",
+        service: "team-agent",
+        name: "query_team_agent_graph",
+        description: "Query TeamAgent graph memory for decisions, blockers, launch readiness, incidents, or unresolved questions.",
     },
 }
 fn (params) {

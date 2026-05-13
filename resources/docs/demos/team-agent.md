@@ -1,6 +1,6 @@
-# TeamBrain Demo
+# TeamAgent Demo
 
-TeamBrain gives a chat — a Telegram group, a Slack channel, or a web app like
+TeamAgent gives a chat — a Telegram group, a Slack channel, or a web app like
 [Hot Chat](/docs/demos/hot-chat) — a searchable team memory. This standalone
 demo focuses on the web transport so you can run it without setting up
 Telegram or Slack.
@@ -23,7 +23,7 @@ separate, so memory stays per-channel while attribution stays per-person.
 ## Prerequisites
 
 Install the Hot CLI and confirm `hot dev` works on your machine. The current
-development version of TeamBrain depends on unreleased `hot-ai` and
+development version of TeamAgent depends on unreleased `hot-ai` and
 `hot-ai-agent` packages, so clone the main `hot` repo as a sibling of
 `hot-demos`:
 
@@ -43,7 +43,7 @@ needed:
 
 ```bash
 git clone https://github.com/hot-dev/hot-demos
-cd hot-demos/team-brain
+cd hot-demos/team-agent
 cp .env.example .env
 ```
 
@@ -63,7 +63,7 @@ hot test
 ```
 
 You should see four tests pass. This confirms the local package paths resolve
-and TeamBrain compiles end to end.
+and TeamAgent compiles end to end.
 
 ## Step 3: Start Hot Dev
 
@@ -75,31 +75,31 @@ The Hot App opens in your browser. Leave this terminal running and use a
 second one for the steps below.
 
 The webhook is declared in source as
-`service: "team-brain", path: "/web/messages"`. Hot Dev's default profile uses
+`service: "team-agent", path: "/web/messages"`. Hot Dev's default profile uses
 `org.slug = "local"` and `env.name = "development"`, so the full URL on this
 machine is:
 
 ```text
-http://localhost:4681/webhook/local/development/team-brain/web/messages
+http://localhost:4681/webhook/local/development/team-agent/web/messages
 ```
 
 That same shape works in production, with your real org slug and environment
-name (e.g. `https://api.hot.dev/webhook/acme/prod/team-brain/web/messages`).
+name (e.g. `https://api.hot.dev/webhook/acme/prod/team-agent/web/messages`).
 
 ## Step 4: Record A Team Message
 
 This is what a chat adapter looks like under the hood — it sends a normalized
 JSON payload. `session_id` identifies the channel; `user_id` identifies the
-person. TeamBrain stores both.
+person. TeamAgent stores both.
 
 ```bash
-curl -X POST http://localhost:4681/webhook/local/development/team-brain/web/messages \
+curl -X POST http://localhost:4681/webhook/local/development/team-agent/web/messages \
   -H 'content-type: application/json' \
   -d '{
     "session_id": "demo-channel",
     "user_id": "u-curt",
     "user_name": "Curt",
-    "text": "We decided to ship the TeamBrain demo after the docs pass."
+    "text": "We decided to ship the TeamAgent demo after the docs pass."
   }'
 ```
 
@@ -108,12 +108,12 @@ Send a couple more messages so there's something to ask about later.
 
 ## Step 5: Ask About Remembered Context
 
-Now ask a question. TeamBrain finds matching messages from this session and
+Now ask a question. TeamAgent finds matching messages from this session and
 returns them. The standalone demo replies inline (`reply_mode: "response"` is
 the default), so you'll see the answer in the curl response right away.
 
 ```bash
-curl -X POST http://localhost:4681/webhook/local/development/team-brain/web/messages \
+curl -X POST http://localhost:4681/webhook/local/development/team-agent/web/messages \
   -H 'content-type: application/json' \
   -d '{
     "session_id": "demo-channel",
@@ -127,10 +127,10 @@ adapter would post that text back to the channel.
 
 ## Step 6: Inspect Memory
 
-Quickly check what TeamBrain has stored for this session:
+Quickly check what TeamAgent has stored for this session:
 
 ```bash
-curl -X POST http://localhost:4681/webhook/local/development/team-brain/web/messages \
+curl -X POST http://localhost:4681/webhook/local/development/team-agent/web/messages \
   -H 'content-type: application/json' \
   -d '{"session_id":"demo-channel","user_id":"u-curt","text":"/memory"}'
 ```
@@ -141,13 +141,13 @@ graph entry count.
 ## Optional: Use Hot Chat
 
 For a browser walkthrough, run the [Hot Chat](/docs/demos/hot-chat) client and
-select **TeamBrain** from the agent switcher. Quick prompts mirror the curl
+select **TeamAgent** from the agent switcher. Quick prompts mirror the curl
 examples here, and you can drag files in to attach them to messages.
 
 ## Commands In This Demo
 
-The standalone TeamBrain demo implements these commands. Each one is a short
-function in `hot/src/team-brain/demo.hot` so you can read the whole flow in
+The standalone TeamAgent demo implements these commands. Each one is a short
+function in `hot/src/team-agent/demo.hot` so you can read the whole flow in
 one file:
 
 | Command       | What it does                                                          |
@@ -161,14 +161,14 @@ one file:
 | `/whoami`     | show the current transport, session id, and user id                   |
 | `/guide`      | cheat sheet of the available commands                                 |
 
-The full TeamBrain agent in the main Hot repo adds `/forget`, `/why`,
+The full TeamAgent in the main Hot repo adds `/forget`, `/why`,
 `/export`, `/compact`, `/search`, `/stats`, `/diag`, `/ai`, scheduled digests,
 and a `Researcher` peer. The standalone demo deliberately keeps a smaller
 surface area so the source stays readable.
 
 ## Agent Graph Walkthrough
 
-Open the Hot App, choose **TeamBrain Demo**, and click the **Graph** tab. You
+Open the Hot App, choose **TeamAgent Demo**, and click the **Graph** tab. You
 should see a webhook trigger on the left (`on-web-message`), feeding a single
 helper (`process-incoming`), which sends to two event handlers:
 
@@ -183,4 +183,4 @@ through a helper that hides the literal `send(...)` from the compiler.
 ## Source
 
 The runnable project lives in
-[hot-dev/hot-demos/team-brain](https://github.com/hot-dev/hot-demos/tree/main/team-brain).
+[hot-dev/hot-demos/team-agent](https://github.com/hot-dev/hot-demos/tree/main/team-agent).

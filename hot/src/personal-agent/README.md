@@ -1,6 +1,6 @@
 # PersonalAgent Demo
 
-PersonalAgent is the identity-first sibling of TeamBrain. It uses the shared
+PersonalAgent is the identity-first sibling of TeamAgent. It uses the shared
 `hot-ai` memory/RAG primitives and the reusable `hot-ai-agent` harness, but its
 policy treats user/profile memory as primary and session memory as context.
 

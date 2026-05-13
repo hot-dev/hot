@@ -14,17 +14,17 @@ hot.project.hot-dev.src.paths ["./hot/src"]
 // They run instead via the isolated pkg-test-hot-ai /
 // pkg-test-hot-ai-agent / pkg-test-mcp projects defined below,
 // mirroring the layout in hot.hot.
-hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/team-brain/test", "./hot/src/personal-agent/test"]
+hot.project.hot-dev.test.paths ["./hot/test", "./hot/pkg/hot-std/test", "./hot/src/team-agent/test", "./hot/src/personal-agent/test"]
 hot.project.hot-dev.test.capture true
 hot.project.hot-dev.resources.paths [
-    "./hot/src/team-brain/resources",
+    "./hot/src/team-agent/resources",
     "./hot/src/personal-agent/resources",
     "./hot/pkg/hot-std/test/fixtures/resources",
 ]
-// Keep codegen scoped to Team Brain resources so the hot-std customer-tone
+// Keep codegen scoped to Team Agent resources so the hot-std customer-tone
 // fixture stays a resource fixture rather than generated project source.
 hot.project.hot-dev.skills.codegen.enabled true
-hot.project.hot-dev.skills.codegen.paths ["./hot/src/team-brain/resources", "./hot/src/personal-agent/resources"]
+hot.project.hot-dev.skills.codegen.paths ["./hot/src/team-agent/resources", "./hot/src/personal-agent/resources"]
 hot.project.hot-dev.deps {
 
     // AI types package

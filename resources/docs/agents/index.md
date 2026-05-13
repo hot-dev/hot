@@ -5,7 +5,7 @@ Agents are typed groups of event handlers, schedules, and webhooks that share id
 Agents group handlers by type reference, giving you compile-time validation and structured config fields.
 
 For complete runnable examples, see the [Demos](/docs/demos) section. The
-[TeamBrain demo](/docs/demos/team-brain) shows a multi-transport team memory
+[TeamAgent demo](/docs/demos/team-agent) shows a multi-transport team memory
 agent, the [PersonalAgent demo](/docs/demos/personal-agent) shows an
 identity-first personal memory agent, and [Hot Chat](/docs/demos/hot-chat)
 shows a reusable web chat client over the same wire contract used by

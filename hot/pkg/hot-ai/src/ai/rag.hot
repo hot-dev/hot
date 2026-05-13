@@ -90,6 +90,126 @@ DEFAULT_SYSTEM_THREAD "You are a helpful AI assistant. Answer based on the provi
 DEFAULT_SUMMARY_SYSTEM "You are a helpful assistant that summarizes conversations concisely."
 DEFAULT_SUMMARY_INSTRUCTION "Summarize the key topics, decisions, and action items from this conversation."
 
+DEFAULT_MEMORY_HEADING "## Memory"
+
+with-memory-block
+meta {
+    doc: """
+    Compose a system prompt by appending a memory-context section to `base`.
+
+    Returns `base` unchanged when `context` is empty (or whitespace only), so
+    callers can pass the result of `build-context` / `build-context-safe`
+    directly without branching. When `context` is non-empty, the result is
+    `${base}\n\n${heading}\n${context}`. `heading` defaults to `## Memory`.
+    """
+}
+fn (base: Str, context: Str, heading: Str?): Str {
+    h or(heading, DEFAULT_MEMORY_HEADING)
+    cond {
+        is-empty(trim(or(context, ""))) => { base }
+        => { concat(base, "\n\n", h, "\n", context) }
+    }
+}
+
+role-of
+meta {
+    doc: """
+    Read the `role` tag from a `::ai::memory/recent` entry's metadata.
+    Returns `""` when unset so role filters never accidentally drop
+    untagged records (callers asking to exclude `assistant` shouldn't
+    also exclude legacy un-roled writes).
+    """
+}
+fn (entry: Map): Str {
+    meta or(get-in(entry, ["value", "metadata"]), {})
+    Str(or(get(meta, "role"), ""))
+}
+
+role-in
+meta { doc: "True when `role` equals any element of `roles`." }
+fn (roles: Vec, role: Str): Bool {
+    some(roles, (r) { eq(r, role) })
+}
+
+passes-role-filter
+meta {
+    doc: """
+    Apply `include-roles` / `exclude-roles` semantics:
+
+    - When `include-roles` is non-empty, the entry must have a role in
+      that list. Untagged entries are dropped.
+    - `exclude-roles` is a blacklist applied next. Tagged matches are
+      dropped; untagged entries pass.
+    - With neither set, every entry passes.
+    """
+}
+fn (entry: Map, include-roles: Vec?, exclude-roles: Vec?): Bool {
+    role role-of(entry)
+    inc or(include-roles, [])
+    exc or(exclude-roles, [])
+    include-pass cond {
+        is-empty(inc) => { true }
+        => { role-in(inc, role) }
+    }
+    exclude-pass cond {
+        is-empty(exc) => { true }
+        => { not(role-in(exc, role)) }
+    }
+    and(include-pass, exclude-pass)
+}
+
+recent-text
+meta {
+    doc: """
+    Format recent session memory as bulleted `- <content>` lines, oldest
+    first.
+
+    Convenience over `::ai::memory/recent` for synthesis prompts that want
+    the raw window as text rather than a finished summary. Errors degrade
+    to `""` so missing stores / providers don't crash callers.
+
+    Options:
+    - `limit` — number of records to include (default 100, matches
+      `::ai::memory/recent`).
+    - `hours` — recency window in hours (default 24).
+    - `include-roles` — `Vec<Str>?`. When set, only records whose
+      `metadata.role` is in this list are kept. Untagged records are
+      dropped.
+    - `exclude-roles` — `Vec<Str>?`. When set, records whose
+      `metadata.role` is in this list are dropped. Untagged records
+      pass.
+
+    The role filters compose with `limit`: filtering happens after
+    `recent`, so `limit` bounds the window, not the post-filter count.
+    For synthesis prompts that want only user turns + task records,
+    pass `exclude-roles: ["assistant"]`.
+    """
+}
+fn (mem: AgentMemory, opts: Map?): Str {
+    o or(opts, {})
+    records if-err(::ai::memory/recent(mem, o), [])
+    include-roles get(o, "include-roles", null)
+    exclude-roles get(o, "exclude-roles", null)
+    kept cond {
+        and(is-null(include-roles), is-null(exclude-roles)) => { records }
+        => {
+            filter(records, (entry) {
+                passes-role-filter(entry, include-roles, exclude-roles)
+            })
+        }
+    }
+    cond {
+        is-empty(kept) => { "" }
+        => {
+            lines map(kept, (entry) {
+                content or(entry.value.content, "")
+                `- ${content}`
+            })
+            join(lines, "\n")
+        }
+    }
+}
+
 // ============================================================================
 // Core RAG (impure — uses AgentMemory)
 // ============================================================================
@@ -108,6 +228,22 @@ fn (mem: AgentMemory, query: Str, opts: Map?): Str {
 
     all-lines concat(format-session-results(session-results), format-kb-results(kb-results))
     if(is-empty(all-lines), "", join(all-lines, "\n"))
+}
+
+build-context-safe
+meta {
+    doc: """
+    Best-effort `build-context`. Any failure (no embedding provider
+    configured, transient store error, etc.) degrades to `""` so callers
+    can still answer ungrounded rather than aborting the whole reply.
+
+    Use this in interactive request paths and demos / CI / offline
+    tutorials where an embedding backend may not be wired. Prefer
+    `build-context` directly in code paths that should propagate errors.
+    """
+}
+fn (mem: AgentMemory, query: Str, opts: Map?): Str {
+    if-err(build-context(mem, query, opts), "")
 }
 
 ask

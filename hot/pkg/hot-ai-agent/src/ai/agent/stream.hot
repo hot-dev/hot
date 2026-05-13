@@ -25,7 +25,7 @@ MEMORY_EXPORT_END "ai:agent:memory:export:end"
 MEMORY_EXPORT_ERROR "ai:agent:memory:export:error"
 
 label
-meta { doc: "Build an agent-specific stream label, e.g. `teambrain:reply:delta`." }
+meta { doc: "Build an agent-specific stream label, e.g. `team-agent:reply:delta`." }
 fn (agent-name: Str, topic: Str, verb: Str): Str {
     `${agent-name}:${topic}:${verb}`
 }

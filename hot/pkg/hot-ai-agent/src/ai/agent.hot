@@ -17,6 +17,17 @@ meta {
     - `::ai::agent::memory` for reusable memory lifecycle command shapes.
     - `::ai::agent::lifecycle` for scheduled memory lifecycle helpers.
     - `::ai::agent::mcp` for common MCP tool plumbing.
+    - `::ai::agent::ctx` for per-request session/identity bindings that
+      let statically-registered tools recover the active caller.
+    - `::ai::agent::chat-turn` for the canonical memory-grounded LLM
+      reply lifecycle (recall → persist user → stream → persist
+      assistant) used by free-chat handlers.
+    - `::ai::agent::notify` for a runtime-scoped notification ledger so
+      scheduled handlers (daily recaps, stale-task nudges, standups)
+      have somewhere to land output when no client is listening.
+    - `::ai::agent::synthesis` for the one-shot, non-streaming LLM
+      pattern that scheduled handlers use to turn a memory window into
+      a notification body.
     """
 }
 
@@ -29,3 +40,6 @@ Reply ::ai::agent::render/Reply
 RetentionPolicy ::ai::agent::memory/RetentionPolicy
 MemoryInspection ::ai::agent::memory/MemoryInspection
 LifecycleJob ::ai::agent::lifecycle/LifecycleJob
+Notification ::ai::agent::notify/Notification
+SynthesisInput ::ai::agent::synthesis/SynthesisInput
+SynthesisResult ::ai::agent::synthesis/SynthesisResult

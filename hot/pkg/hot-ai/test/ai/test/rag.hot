@@ -2,10 +2,35 @@
 meta ["test"]
 
 ::rag ::ai::rag
+::mem ::ai::memory
 ::msg ::ai::message
+::session ::ai::session
+::time ::hot::time
 
 Role        ::msg/Role
 ChatMessage ::msg/ChatMessage
+Session     ::session/Session
+Identity    ::session/Identity
+Message     ::msg/Message
+
+test-memory fn (): ::mem/AgentMemory {
+    run-id Str(Uuid())
+    s Session({id: `rag-test:${run-id}`})
+    i Identity({id: `user:${run-id}`, name: "Tester"})
+    ::mem/create-memory(`test-agent:${run-id}`, s, i)
+}
+
+test-message fn (id: Str, content: Str, ts: Int): Message {
+    Message({
+        id: id,
+        content: content,
+        sender: Identity({id: "u1", name: "User One"}),
+        session: Session({id: "s1"}),
+        timestamp: ts,
+        source: "test",
+        metadata: {message_id: id, source_id: id},
+    })
+}
 
 // ============================================================================
 // format-session-results
@@ -122,4 +147,129 @@ meta ["test"] fn () {
     assert(contains(p, "Context from memory:"))
     assert(contains(p, "[bob]: relevant fact"))
     assert(contains(p, "Question: So what?"))
+}
+
+// ============================================================================
+// with-memory-block
+// ============================================================================
+
+test-with-memory-block-empty-context-returns-base
+meta ["test"] fn () {
+    base "You are a helpful assistant."
+    assert-eq(base, ::rag/with-memory-block(base, "", null))
+    assert-eq(base, ::rag/with-memory-block(base, "   \n  ", null))
+}
+
+test-with-memory-block-appends-default-heading
+meta ["test"] fn () {
+    out ::rag/with-memory-block("base", "- alpha", null)
+    assert(contains(out, "base"))
+    assert(contains(out, "## Memory"))
+    assert(contains(out, "- alpha"))
+    assert(ends-with(out, "- alpha"))
+}
+
+test-with-memory-block-custom-heading
+meta ["test"] fn () {
+    out ::rag/with-memory-block("base", "context line", "## Channel memory")
+    assert(contains(out, "## Channel memory"))
+    assert(not(contains(out, "## Memory\n")))
+}
+
+// ============================================================================
+// build-context-safe
+// ============================================================================
+
+test-build-context-safe-empty-mem-returns-empty-string
+meta ["test"] fn () {
+    mem test-memory()
+    // No records and no embedding provider → returns "" rather than throwing.
+    out ::rag/build-context-safe(mem, "anything", {limit: 3, min-score: 0.1})
+    assert-eq("", out)
+}
+
+// ============================================================================
+// recent-text
+// ============================================================================
+
+test-recent-text-empty-when-no-records
+meta ["test"] fn () {
+    mem test-memory()
+    assert-eq("", ::rag/recent-text(mem, {limit: 5}))
+}
+
+test-recent-text-formats-records-as-bullets
+meta ["test"] fn () {
+    mem test-memory()
+    // `recent` filters to a recent window (default 24h), so use current
+    // timestamps rather than arbitrary fixtures or the records get
+    // filtered out before formatting.
+    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    ::mem/remember(mem, test-message("m1", "first note",  now-secs))
+    ::mem/remember(mem, test-message("m2", "second note", now-secs))
+    out ::rag/recent-text(mem, {limit: 5})
+    assert(contains(out, "- first note"))
+    assert(contains(out, "- second note"))
+}
+
+test-roled-message fn (id: Str, content: Str, role: Str, ts: Int): ::msg/Message {
+    Message({
+        id: id,
+        content: content,
+        sender: Identity({id: "u1", name: "User One"}),
+        session: Session({id: "s1"}),
+        timestamp: ts,
+        source: "test",
+        metadata: {message_id: id, source_id: id, role: role},
+    })
+}
+
+test-recent-text-exclude-roles-drops-matches
+meta ["test"] fn () {
+    mem test-memory()
+    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    ::mem/remember(mem, test-roled-message("u1", "user line",      "user",      now-secs))
+    ::mem/remember(mem, test-roled-message("a1", "assistant chat", "assistant", now-secs))
+    ::mem/remember(mem, test-roled-message("u2", "another user",   "user",      now-secs))
+
+    out ::rag/recent-text(mem, {limit: 10, exclude-roles: ["assistant"]})
+    assert(contains(out, "- user line"))
+    assert(contains(out, "- another user"))
+    assert(not(contains(out, "assistant chat")))
+}
+
+test-recent-text-include-roles-keeps-only-matches
+meta ["test"] fn () {
+    mem test-memory()
+    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    ::mem/remember(mem, test-roled-message("u1", "user line",      "user",      now-secs))
+    ::mem/remember(mem, test-roled-message("a1", "assistant chat", "assistant", now-secs))
+
+    out ::rag/recent-text(mem, {limit: 10, include-roles: ["user"]})
+    assert(contains(out, "- user line"))
+    assert(not(contains(out, "assistant chat")))
+}
+
+test-recent-text-include-roles-drops-untagged
+meta ["test"] fn () {
+    mem test-memory()
+    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    ::mem/remember(mem, test-message("m1", "untagged note", now-secs))
+    ::mem/remember(mem, test-roled-message("u1", "user line", "user", now-secs))
+
+    out ::rag/recent-text(mem, {limit: 10, include-roles: ["user"]})
+    assert(contains(out, "- user line"))
+    assert(not(contains(out, "untagged note")))
+}
+
+test-recent-text-exclude-roles-keeps-untagged
+meta ["test"] fn () {
+    mem test-memory()
+    now-secs div(::time/epoch-millis(::time/now()), 1000)
+    ::mem/remember(mem, test-message("m1", "untagged note", now-secs))
+    ::mem/remember(mem, test-roled-message("a1", "assistant chat", "assistant", now-secs))
+
+    out ::rag/recent-text(mem, {limit: 10, exclude-roles: ["assistant"]})
+    assert(contains(out, "- untagged note"))
+    assert(not(contains(out, "assistant chat")))
 }

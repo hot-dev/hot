@@ -6,7 +6,7 @@ meta ["test"]
 test-parse-command
 meta ["test"]
 fn () {
-    parsed ::command/parse("/ask@TeamBrain what shipped today?")
+    parsed ::command/parse("/ask@TeamAgent what shipped today?")
     assert(parsed.is-command)
     assert-eq("ask", parsed.name)
     assert-eq("what shipped today?", parsed.arg)

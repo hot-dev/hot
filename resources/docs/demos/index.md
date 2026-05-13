@@ -7,7 +7,7 @@ and *how to read* what you see in the Hot App; the source projects live in
 
 ## Available Demos
 
-- **[TeamBrain](/docs/demos/team-brain)** — a multi-transport team memory agent.
+- **[TeamAgent](/docs/demos/team-agent)** — a multi-transport team memory agent.
   Records channel messages, answers from remembered context, and shows how a
   webhook fans out to event handlers in the Agent Graph.
 - **[PersonalAgent](/docs/demos/personal-agent)** — an identity-first memory
@@ -16,7 +16,7 @@ and *how to read* what you see in the Hot App; the source projects live in
   behind the agent demos: raw records, capsules, graph nodes/edges, and hybrid
   retrieval with citations.
 - **[Hot Chat](/docs/demos/hot-chat)** — a polished local web chat UI that talks
-  to TeamBrain or PersonalAgent through the same webhook contract used by
+  to TeamAgent or PersonalAgent through the same webhook contract used by
   Telegram and Slack adapters.
 
 ## Identity Vocabulary
@@ -24,7 +24,7 @@ and *how to read* what you see in the Hot App; the source projects live in
 Every Hot agent works with the same two ideas. Holding them apart makes the
 demos easier to read.
 
-| Concept    | TeamBrain                       | PersonalAgent                          |
+| Concept    | TeamAgent                       | PersonalAgent                          |
 |------------|---------------------------------|----------------------------------------|
 | Session    | the channel or thread           | a scratch context per person           |
 | Identity   | the person who posted a message | the durable memory owner               |
@@ -51,7 +51,7 @@ You can run one demo without cloning the main Hot repository:
 
 ```bash
 git clone https://github.com/hot-dev/hot-demos
-cd hot-demos/team-brain
+cd hot-demos/team-agent
 hot dev --open
 ```
 
