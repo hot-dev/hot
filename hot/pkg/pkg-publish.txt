@@ -11,6 +11,7 @@
 anthropic
 gemini
 hot-ai
+hot-ai-agent
 mcp
 openai
 xai

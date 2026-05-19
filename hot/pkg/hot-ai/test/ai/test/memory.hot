@@ -1,0 +1,116 @@
+::ai::test::memory ns
+meta ["test"]
+
+::mem ::ai::memory
+::session ::ai::session
+::msg ::ai::message
+
+Session ::session/Session
+Identity ::session/Identity
+Message ::msg/Message
+Role ::msg/Role
+
+test-memory fn (): ::mem/AgentMemory {
+    run-id Str(Uuid())
+    s Session({id: `memory-test:${run-id}`})
+    i Identity({id: `user:${run-id}`, name: "Tester"})
+    ::mem/create-memory(`test-agent:${run-id}`, s, i)
+}
+
+test-message fn (id: Str, content: Str, ts: Int): Message {
+    Message({
+        id: id,
+        content: content,
+        sender: Identity({id: "u1", name: "User One"}),
+        session: Session({id: "s1"}),
+        timestamp: ts,
+        source: "test",
+        metadata: {message_id: id, source_id: id},
+    })
+}
+
+test-export-and-forget-source
+meta ["test"]
+fn () {
+    mem test-memory()
+    ::mem/remember(mem, test-message("m1", "alpha launch decision", 100))
+    ::mem/remember(mem, test-message("m2", "beta follow up", 200))
+    bundle ::mem/export-memory(mem)
+    assert-eq(2, length(bundle.session))
+
+    deleted ::mem/forget-by-source-id(mem, "m1")
+    assert-eq(1, deleted)
+    after ::mem/export-memory(mem)
+    assert-eq(1, length(after.session))
+}
+
+test-capsule-store-and-list
+meta ["test"]
+fn () {
+    mem test-memory()
+    ::mem/remember(mem, test-message("m1", "ship it", 100))
+    entries ::hot::store/list(mem.session-store)
+    capsule ::mem/capsule-from-window("cap-1", "Decision: ship it.", entries, {metadata: {kind: "test"}})
+    ::mem/store-capsule(mem, capsule)
+    capsules ::mem/list-capsules(mem)
+    assert-eq(1, length(capsules))
+    assert-eq("Decision: ship it.", first(capsules).value.summary)
+    assert-eq(1, length(first(capsules).value.source-ids))
+}
+
+test-graph-candidates-and-neighbors
+meta ["test"]
+fn () {
+    mem test-memory()
+    prov [::mem/MemoryProvenance({
+        source: "test",
+        source-id: "m1",
+        session-id: "s1",
+        user-id: "u1",
+        message-id: "m1",
+        key: "m1",
+        timestamp: 1,
+        score: 1.0,
+        metadata: {},
+    })]
+    candidates ::mem/extract-graph-candidates({
+        nodes: [
+            {
+                id: "project:hot",
+                kind: "project",
+                label: "Hot",
+            },
+            {
+                id: "decision:launch",
+                kind: "decision",
+                label: "Launch",
+            },
+        ],
+        edges: [
+            {
+                id: "edge:1",
+                from: "project:hot",
+                relation: "decided",
+                to: "decision:launch",
+            },
+        ],
+    }, prov)
+    counts ::mem/store-graph-candidates(mem, candidates)
+    assert-eq(2, counts.nodes)
+    assert-eq(1, counts.edges)
+    neighbors ::mem/neighbor-edges(mem, "project:hot")
+    assert-eq(1, length(neighbors))
+}
+
+test-thread-tool-role-roundtrips
+meta ["test"]
+fn () {
+    run-id Str(Uuid())
+    s Session({id: `thread:${run-id}`})
+    i Identity({id: `user:${run-id}`, name: "Tester"})
+    t ::mem/thread("test-agent", s, i, {max-turns: 10})
+    ::mem/thread-add(t, Role.Tool, "{\"ok\":true}")
+    history ::mem/thread-history(t, {})
+    assert-eq(1, length(history))
+    assert-eq(Role.Tool, first(history).role)
+}

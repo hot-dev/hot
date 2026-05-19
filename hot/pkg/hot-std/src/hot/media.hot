@@ -15,28 +15,34 @@ FileMeta ::hot::file/FileMeta
 // ============================================================================
 
 ImageFormat
-meta {doc: """
+meta {
+    doc: """
 Common image file formats. Declared `open` so applications can register
 additional formats (e.g., "heic", "avif", "tiff") without forking this
 type. Add members at top level in any namespace, e.g.
 
     ::hot::media/ImageFormat type open | "heic"
     ::hot::media/ImageFormat type open "avif" | "tiff"
-"""}
+"""
+}
 type open "png" | "jpeg" | "webp" | "gif"
 
 AudioFormat
-meta {doc: """
+meta {
+    doc: """
 Common audio file formats. Declared `open` so applications can register
 additional formats (e.g., "m4a", "alac") without forking this type.
-"""}
+"""
+}
 type open "mp3" | "wav" | "ogg" | "flac" | "aac" | "opus"
 
 VideoFormat
-meta {doc: """
+meta {
+    doc: """
 Common video file formats. Declared `open` so applications can register
 additional formats (e.g., "mkv", "flv") without forking this type.
-"""}
+"""
+}
 type open "mp4" | "webm" | "mov" | "avi"
 
 // ============================================================================
@@ -186,12 +192,14 @@ type {
 // ============================================================================
 
 is-image
-meta {doc: """
+meta {
+    doc: """
 Check if media is an Image variant. The bare `=>` default arm is what
 makes this dispatch helper safe on the open `Media` enum — any future
 variant enrolled via an arrow falls through to `false` rather than
 producing a runtime error.
-"""}
+"""
+}
 fn (media: Media): Bool {
     match media { Media.Image => true, _ => false }
 }

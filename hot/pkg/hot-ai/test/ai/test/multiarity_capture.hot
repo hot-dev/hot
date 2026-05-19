@@ -1,0 +1,230 @@
+::ai::test::multiarity-capture ns
+meta ["test"]
+
+// Regression guard for two closure-capture compiler bugs found while
+// generalising `::ai::skill/builtin-apply-skill` to take a `skill-context`
+// parameter. The original symptom was a runtime "Variable not found"
+// when an inner lambda tried to use an outer-function parameter.
+//
+// Two underlying bugs in `crates/hot/src/lang/compiler/mod.rs`:
+//
+//   1) Free-variable analysis didn't recurse into `Value::Val(Val::Map)` /
+//      `Val::Vec` literals. The parser stores non-literal map/vec entries
+//      as `Val::Box(AstNode(inner))` inside the literal, so any var refs
+//      embedded in `{key: <expr>}` literals (e.g. inside a `::tool/Tool({fn: <lambda>})`
+//      ctor) were invisible to capture analysis. Affected lambdas got
+//      empty `capture_vars` and resolved nothing at call time.
+//
+//   2) The Flow walker only recognised `Ref(name)` followed by an
+//      expression as *separate* Flow elements as a binding pattern. The
+//      parser actually emits same-line bindings like
+//      `s find-skill(skills, name)` as a single
+//      `MultipleValues([Ref(name), rhs])` element. The walker missed
+//      these, so flow-local names (`s`, `enriched`) leaked into
+//      `capture_vars` as if they were free, which forced lambdas down
+//      the slow re-capture path at invoke time — too late, since the
+//      defining function had already returned.
+//
+// Both fixes live in `analyze_free_variables` / `collect_free_variables`.
+// These tests exercise: capture of first/second/both params, lambdas inside
+// vs outside struct constructors, and locally-bound names.
+
+::lang ::hot::lang
+
+ToolBox type {
+    name: Str,
+    fn: Fn?,
+}
+
+// === Direct closure over a multi-arity parameter ===
+
+// A multi-arity function whose arity-2 body constructs a lambda that
+// captures `extra` (the second parameter) directly.
+build-direct fn
+(): ToolBox { build-direct(null) },
+(extra: Map?): ToolBox {
+    ToolBox({
+        name: "direct",
+        fn: (n: Str): Map {
+            merge({n: n}, or(extra, {}))
+        }
+    })
+}
+
+test-direct-arity-2-with-map
+meta ["test"] fn () {
+    box build-direct({k: "v"})
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `arity-2 with map: out=${Str(out)}`)
+    assert-eq("v", get(out, "k"), `arity-2 with map: out=${Str(out)}`)
+}
+
+test-direct-arity-2-with-null
+meta ["test"] fn () {
+    box build-direct(null)
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `arity-2 with null: out=${Str(out)}`)
+}
+
+test-direct-arity-1-delegates
+meta ["test"] fn () {
+    box build-direct()
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `arity-1 delegating: out=${Str(out)}`)
+}
+
+// === Workaround: rebind to a local before constructing the lambda ===
+
+build-rebind fn
+(): ToolBox { build-rebind(null) },
+(extra: Map?): ToolBox {
+    e or(extra, {})
+    ToolBox({
+        name: "rebind",
+        fn: (n: Str): Map {
+            merge({n: n}, e)
+        }
+    })
+}
+
+test-rebind-arity-1-delegates
+meta ["test"] fn () {
+    box build-rebind()
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `rebind arity-1: out=${Str(out)}`)
+}
+
+test-rebind-arity-2-with-map
+meta ["test"] fn () {
+    box build-rebind({k: "v"})
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `rebind arity-2: out=${Str(out)}`)
+    assert-eq("v", get(out, "k"), `rebind arity-2: out=${Str(out)}`)
+}
+
+// === Two-parameter: capture FIRST param ===
+// (matches `skills` in `::ai::skill/builtin-apply-skill`)
+
+build-cap-first-of-2 fn (label: Str?, extra: Map?): ToolBox {
+    ToolBox({
+        name: "first-of-2",
+        fn: (n: Str): Map {
+            {n: n, label: or(label, "default")}
+        }
+    })
+}
+
+test-cap-first-of-2
+meta ["test"] fn () {
+    box build-cap-first-of-2("LBL", {k: "v"})
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `first-of-2: out=${Str(out)}`)
+    assert-eq("LBL", get(out, "label"), `first-of-2: out=${Str(out)}`)
+}
+
+// === Two-parameter: capture SECOND param ===
+// (matches `skill-context` in `::ai::skill/builtin-apply-skill`)
+
+build-cap-second-of-2 fn (label: Str?, extra: Map?): ToolBox {
+    ToolBox({
+        name: "second-of-2",
+        fn: (n: Str): Map {
+            merge({n: n}, or(extra, {}))
+        }
+    })
+}
+
+test-cap-second-of-2
+meta ["test"] fn () {
+    box build-cap-second-of-2("LBL", {k: "v"})
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `second-of-2: out=${Str(out)}`)
+    assert-eq("v", get(out, "k"), `second-of-2: out=${Str(out)}`)
+}
+
+// === Two-parameter: capture BOTH params ===
+
+build-cap-both-of-2 fn (label: Str?, extra: Map?): ToolBox {
+    ToolBox({
+        name: "both-of-2",
+        fn: (n: Str): Map {
+            merge({n: n, label: or(label, "default")}, or(extra, {}))
+        }
+    })
+}
+
+test-cap-both-of-2
+meta ["test"] fn () {
+    box build-cap-both-of-2("LBL", {k: "v"})
+    out box.fn("hello")
+    assert-eq("hello", get(out, "n"), `both-of-2: out=${Str(out)}`)
+    assert-eq("LBL", get(out, "label"), `both-of-2: out=${Str(out)}`)
+    assert-eq("v", get(out, "k"), `both-of-2: out=${Str(out)}`)
+}
+
+// === Two-parameter, lambda not inside a struct constructor ===
+// Pins whether the struct-ctor seam is part of the bug.
+
+returns-fn-cap-first-of-2 fn (label: Str?, extra: Map?): Fn {
+    fn (n: Str): Map {
+        {n: n, label: or(label, "default")}
+    }
+}
+
+test-fn-cap-first-of-2-no-struct
+meta ["test"] fn () {
+    f returns-fn-cap-first-of-2("LBL", null)
+    out f("hello")
+    assert-eq("hello", get(out, "n"), `no-struct first-of-2: out=${Str(out)}`)
+    assert-eq("LBL", get(out, "label"), `no-struct first-of-2: out=${Str(out)}`)
+}
+
+// === Two-parameter, lambda invoked directly (not through Fn? field) ===
+
+invoke-cap-first-of-2 fn (label: Str?, extra: Map?, n: Str): Map {
+    inner fn (m: Str): Map {
+        {n: m, label: or(label, "default")}
+    }
+
+    inner(n)
+}
+
+test-invoke-cap-first-of-2
+meta ["test"] fn () {
+    out invoke-cap-first-of-2("LBL", null, "hello")
+    assert-eq("hello", get(out, "n"), `invoke first-of-2: out=${Str(out)}`)
+    assert-eq("LBL", get(out, "label"), `invoke first-of-2: out=${Str(out)}`)
+}
+
+// === Inner lambda with same-line `name expr` bindings (bug #2) ===
+// Mirrors `::ai::skill/builtin-apply-skill`'s lambda body, where
+// `s find-skill(skills, name)` and `enriched merge(...)` are emitted as
+// `MultipleValues([Ref(name), rhs])`. Pre-fix, `s` and `enriched` leaked
+// into capture_vars, forcing the slow re-capture path at invoke time and
+// losing access to the parent's parameters.
+
+build-flow-bindings fn (label: Str?, extra: Map?): ToolBox {
+    ToolBox({
+        name: "flow-bindings",
+        fn: (key: Str): Map {
+            s concat(or(label, "default"), "-", key)
+            enriched merge(or(extra, {}), {tag: s})
+            enriched
+        }
+    })
+}
+
+test-flow-bindings-arity-2
+meta ["test"] fn () {
+    box build-flow-bindings("LBL", {seen: true})
+    out box.fn("hello")
+    assert-eq("LBL-hello", get(out, "tag"), `flow-bindings arity-2: out=${Str(out)}`)
+    assert-eq(true, get(out, "seen"), `flow-bindings arity-2: out=${Str(out)}`)
+}
+
+test-flow-bindings-arity-2-with-null-extra
+meta ["test"] fn () {
+    box build-flow-bindings("LBL", null)
+    out box.fn("hello")
+    assert-eq("LBL-hello", get(out, "tag"), `flow-bindings arity-2 (null): out=${Str(out)}`)
+}

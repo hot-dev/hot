@@ -1,0 +1,18 @@
+::personal-agent::dev-driver ns
+meta { doc: "Small local driver for the PersonalAgent demo." }
+
+::ctx ::hot::ctx
+::agent ::personal-agent::agent
+::session ::ai::session
+
+run
+meta {
+    doc: "Run one PersonalAgent command from ctx: personal.user_id, personal.user_name, personal.text."
+}
+fn (): Str {
+    id ::ctx/get("personal.user_id", "local-user")
+    name ::ctx/get("personal.user_name", id)
+    text ::ctx/get("personal.text", "/memory")
+    identity ::session/Identity({id: id, name: name})
+    ::agent/process-command(identity, text)
+}

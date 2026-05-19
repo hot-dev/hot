@@ -1,0 +1,122 @@
+::ai::agent::synthesis ns
+meta {
+    doc: """
+    "One-shot" LLM synthesis for scheduled (or otherwise non-streaming)
+    agent handlers.
+
+    `::ai::agent::chat-turn` covers the streamed, memory-persisting
+    free-chat lifecycle. Scheduled handlers — daily briefs, standups,
+    stale-task nudges — have a different shape:
+
+    - There is no client subscribed to a reply stream.
+    - The "user" message is a pre-baked window of memory (the cron job
+      builds it from `::ai::rag/recent-text`), not a real user turn.
+    - The result should NOT be persisted as an assistant turn — it is
+      a synthesis ABOUT memory, not a new piece of memory.
+
+    `run-once` is that minimal helper: take a `system` prompt, a
+    `user-text` body, and a chat-opts, run the model once (no streaming,
+    no tools loop side effects), and return `{ok, text, error?}`. The
+    caller decides where to land the output (typically via
+    `::ai::agent::notify/record-notification`).
+
+    Offline fallback
+    ----------------
+    `fallback-text` short-circuits the LLM and returns the canned string.
+    Same convention as `chat-turn` — agents check for a provider key and
+    pass the stub when it's absent.
+
+    Error model
+    -----------
+    Provider failures inside `::ai::chat/run-loop` halt via Hot's
+    `fail()` rather than returning a `Result.Err` value. `run-once`
+    deliberately does not try to catch the halt — that's the job of the
+    cron handler boundary. The recommended composition is:
+
+        ::ai::agent::lifecycle/run-session-job(rt, "<action>", (session) {
+            ...
+            ::ai::agent::synthesis/run-once(input)
+        })
+
+    `run-session-job` uses `map`'s built-in per-item halt boundary, so a
+    handler that halts has its slot recovered to a `LifecycleJob.ok =
+    false` record (with the failure data preserved) and the loop
+    continues with the next session. No callsite-level `try-call` is
+    required.
+
+    Follow-up: a future iteration of `::ai::chat/run-loop` should return
+    `Result<Str, ChatError>` so plain `if-err` works at every callsite
+    and the halt boundary collapses entirely to a single point inside
+    the chat layer.
+    """
+}
+
+::ai-chat ::ai::chat
+
+ChatOptions ::ai-chat/ChatOptions
+
+SynthesisInput
+meta {
+    doc: """
+    Input for one synthesis call.
+
+    - `chat-opts` — the agent's chat options. `system` is replaced by
+      the value passed in below; the rest (chat-fn, model,
+      max-iterations, tools) flows through.
+    - `system` — the synthesis system prompt.
+    - `user-text` — the pre-baked body to send as the user message
+      (typically the result of `::ai::rag/recent-text` or
+      `recent-channel-text`).
+    - `fallback-text` — when non-null, the LLM is skipped and this
+      string is returned as the result. Use when the provider key is
+      not wired.
+    """
+}
+type {
+    chat-opts: ChatOptions,
+    system: Str,
+    user-text: Str,
+    fallback-text: Str?,
+}
+
+SynthesisResult
+meta { doc: "Outcome of one synthesis call." }
+type {
+    ok: Bool,
+    text: Str,
+    error: Str?,
+}
+
+ok-result fn (text: Str): SynthesisResult {
+    SynthesisResult({ok: true, text: text, error: null})
+}
+
+err-result fn (msg: Str): SynthesisResult {
+    SynthesisResult({ok: false, text: "", error: msg})
+}
+
+run-once
+meta {
+    doc: """
+    Execute one synthesis turn and return the result.
+
+    Behaviour:
+    1. If `fallback-text` is non-null, return it verbatim with `ok: true`.
+    2. Otherwise build a `ChatOptions` with the supplied `system`
+       prompt and call `::ai::chat/run-loop(opts, user-text)`.
+
+    Provider halts (`fail()`) propagate to the caller. Compose with
+    `::ai::agent::lifecycle/run-session-job` to get automatic per-
+    session halt recovery — see the namespace doc above.
+    """
+}
+fn (input: SynthesisInput): SynthesisResult {
+    cond {
+        not(is-null(input.fallback-text)) => { ok-result(input.fallback-text) }
+        => {
+            opts ChatOptions({...untype(input.chat-opts), system: input.system})
+            text ::ai-chat/run-loop(opts, input.user-text)
+            ok-result(Str(text))
+        }
+    }
+}

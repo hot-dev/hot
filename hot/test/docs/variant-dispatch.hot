@@ -19,9 +19,13 @@ Avian type {
   species: Str,
   wingspan: Dec
 }
+
 Avian -> Critter.Bird
 
-Aquatic type { species: Str, depth: Int }
+Aquatic type {
+    species: Str,
+    depth: Int
+}
 Aquatic -> Critter.Fish
 
 // -- Variant tag is what `match` dispatches on --

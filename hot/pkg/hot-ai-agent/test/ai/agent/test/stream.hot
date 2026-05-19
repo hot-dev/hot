@@ -1,0 +1,17 @@
+::ai::agent::test::stream ns
+meta ["test"]
+
+::stream ::ai::agent::stream
+
+test-label
+meta ["test"]
+fn () {
+    assert-eq("team-agent:reply:delta", ::stream/label("team-agent", "reply", "delta"))
+}
+
+test-emit-without-stream-context-is-safe
+meta ["test"]
+fn () {
+    result ::stream/emit-reply-delta("team-agent", {text: "hello"})
+    assert(is-null(result))
+}

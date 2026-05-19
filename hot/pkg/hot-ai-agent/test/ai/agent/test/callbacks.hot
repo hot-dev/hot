@@ -1,0 +1,91 @@
+::ai::agent::test::callbacks ns
+meta ["test"]
+
+::cb ::ai::agent::callbacks
+
+test-from-body-when-callback-url-set
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "https://example.com/cb"})
+    assert(not(is-null(opts)))
+    assert-eq("https://example.com/cb", opts.url)
+}
+
+test-from-body-when-no-callback
+meta ["test"]
+fn () {
+    opts ::cb/from-body({some_other: "field"})
+    assert(is-null(opts))
+}
+
+test-from-body-rejects-non-https-callback
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "http://127.0.0.1/internal"})
+    assert(is-null(opts), "non-HTTPS callback URLs should be ignored")
+}
+
+test-from-body-rejects-private-host-callback
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "https://127.0.0.1/internal"})
+    assert(is-null(opts), "private callback hosts should be ignored")
+}
+
+test-from-body-snake-and-kebab-case
+meta ["test"]
+fn () {
+    snake ::cb/from-body({
+        callback_url: "https://example.com/cb",
+        callback_secret_env: "MY_SECRET",
+    })
+    kebab ::cb/from-body({
+        "callback-url": "https://example.com/cb2",
+        "callback-secret-env": "MY_SECRET",
+    })
+    assert-eq("https://example.com/cb", snake.url)
+    assert-eq("MY_SECRET", snake.signing-secret-env)
+    assert-eq("https://example.com/cb2", kebab.url)
+    assert-eq("MY_SECRET", kebab.signing-secret-env)
+}
+
+test-build-headers-adds-signature
+meta ["test"]
+fn () {
+    opts ::cb/CallbackOptions({
+        url: "https://example.com/cb",
+        signing-secret: "shhh",
+        signing-header: "x-custom-signature",
+    })
+    headers ::cb/build-headers("{\"ok\":true}", opts)
+    sig get(headers, "x-custom-signature")
+    assert(starts-with(sig, "sha256="), `expected sha256 signature, got: ${Str(sig)}`)
+    assert-eq("application/json", get(headers, "content-type"))
+}
+
+test-post-callback-no-options-fails-cleanly
+meta ["test"]
+fn () {
+    result ::cb/post-callback({hi: "x"}, null)
+    assert(not(result.ok))
+    assert-eq("no-callback-options", result.error)
+}
+
+test-post-callback-empty-url-fails-cleanly
+meta ["test"]
+fn () {
+    opts ::cb/CallbackOptions({url: ""})
+    result ::cb/post-callback({hi: "x"}, opts)
+    assert(not(result.ok))
+    assert-eq("no-callback-url", result.error)
+}
+
+test-post-callback-rejects-non-https-url
+meta ["test"]
+fn () {
+    opts ::cb/CallbackOptions({url: "http://127.0.0.1:1/no-such-port"})
+    result ::cb/post-callback({hi: "x"}, opts)
+    assert(not(result.ok), "non-HTTPS callback URL should fail")
+    assert-eq("callback-url-not-allowed", result.error)
+    assert-eq(0, result.attempt-ms)
+}

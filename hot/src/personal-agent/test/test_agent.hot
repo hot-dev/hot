@@ -1,0 +1,34 @@
+::personal-agent::test::agent ns
+meta ["test"]
+
+::agent ::personal-agent::agent
+::session ::ai::session
+::mem ::ai::memory
+
+test-personal-remember-recall
+meta ["test"]
+fn () {
+    identity ::session/Identity({id: `pa:${Uuid()}`, name: "Personal Test"})
+    id ::agent/remember-text(identity, "I prefer launch tasks before lunch.", {kind: "preference"})
+    assert(starts-with(id, "personal:"))
+    bundle ::mem/export-memory(::agent/make-memory(identity))
+    assert-eq(1, length(bundle.session))
+    assert-eq(1, length(bundle.user))
+}
+
+test-personal-process-memory-command
+meta ["test"]
+fn () {
+    identity ::session/Identity({id: `pa:${Uuid()}`, name: "Personal Test"})
+    text ::agent/process-command(identity, "/memory")
+    assert(contains(text, "Memory snapshot:"))
+}
+
+test-personal-forget-flow
+meta ["test"]
+fn () {
+    identity ::session/Identity({id: `pa:${Uuid()}`, name: "Personal Test"})
+    ::agent/remember-text(identity, "Temporary note for deletion.", {kind: "note"})
+    deleted ::agent/forget-personal(identity, "session")
+    assert(gte(deleted, 1))
+}

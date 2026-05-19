@@ -10,17 +10,13 @@ meta {
 Failure
 meta {
     doc: """
-    Represents a failed task execution. Created by `fail()` when called inside a task.
+    Represents a failed task execution. Produced by `fail()` when called
+    inside a task and surfaced as a `task:fail` event.
 
-    Same structure as `::hot::run/Failure` but indicates the failure occurred in a task context.
-
-    **Example**
-
-    ```hot
-    f fail("Processing failed", {"step": "transform", "input-id": id})
-    f.$msg   // "Processing failed"
-    f.$err   // {"step": "transform", "input-id": "..."}
-    ```
+    Same structure as `::hot::run/Failure` but tagged for the task
+    context. `fail()` halts the task; user code does not bind a
+    `Failure` directly. Inspect it from a halt boundary like
+    `::hot::lang/try-call` or from the engine's task event stream.
     """
 }
 type {
@@ -31,17 +27,13 @@ type {
 Cancellation
 meta {
     doc: """
-    Represents a cancelled task execution. Created by `cancel()` when called inside a task.
+    Represents a cancelled task execution. Produced by `cancel()` when
+    called inside a task and surfaced as a `task:cancel` event.
 
-    Same structure as `::hot::run/Cancellation` but indicates the cancellation occurred in a task context.
-
-    **Example**
-
-    ```hot
-    c cancel("Task cancelled", {"reason": "user-request"})
-    c.$msg    // "Task cancelled"
-    c.$data   // {"reason": "user-request"}
-    ```
+    Same structure as `::hot::run/Cancellation` but tagged for the task
+    context. `cancel()` halts the task; user code does not bind a
+    `Cancellation` directly. Inspect it from a halt boundary like
+    `::hot::lang/try-call` or from the engine's task event stream.
     """
 }
 type {

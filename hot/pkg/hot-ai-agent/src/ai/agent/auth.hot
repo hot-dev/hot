@@ -1,0 +1,561 @@
+::ai::agent::auth ns
+meta {
+    doc: """
+    Webhook authentication helpers for agent transport adapters.
+
+    Three complementary mechanisms are supported, designed to compose:
+
+    1. **Platform** — assert that the Hot platform itself authenticated
+       the caller. When the webhook endpoint has `auth_mode = "required"`,
+       Hot validates `Authorization: Bearer <hot_api_key>` against the
+       org/env API keys and threads an `auth` map onto the
+       `HttpRequest`. `verify-platform` reads that map. **This is the
+       canonical choice for any production webhook deployed on Hot.**
+    2. **HMAC** — verify a raw-body HMAC-SHA256 signature in a header
+       (Slack, Stripe, GitHub, Telegram secret-token+IP, custom). The
+       only option for third-party webhooks where the upstream cannot
+       send a Hot API key.
+    3. **Shared secret** — verify a static `Authorization: Bearer <token>`
+       (or any header) against an env-resolved secret. Useful for
+       self-hosted agents, `auth_mode = "none"` endpoints, and local
+       dev. **Not** integrated with Hot API keys — that is what
+       `verify-platform` is for.
+
+    All helpers are pure; secrets are read from the environment via
+    `::hot::env`.
+
+    Typical use, deny-by-default
+    ----------------------------
+
+    Wrap your webhook handler with `protect`:
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    fn meta {webhook: {…}} (request) {
+        ::auth/protect(request, [
+            ::auth/platform-verifier(),
+            ::auth/hmac-verifier(::auth/HmacOptions({
+                secret-env: "TEAMAGENT_WEBHOOK_SECRET",
+                header: "x-hot-signature",
+                scheme: "sha256=",
+            })),
+        ], handle-message)
+    }
+    ```
+
+    `protect` runs the verifiers in order, returning the first
+    successful auth or a 401 if none succeed. **Empty verifier list
+    yields 401**, so forgetting to configure auth fails closed rather
+    than open.
+
+    Demos that intentionally allow unauthenticated traffic pass an
+    explicit `[::auth/anonymous()]` verifier list.
+    """
+}
+
+::env  ::hot::env
+::http ::hot::http
+::hmac ::hot::hmac
+::time ::hot::time
+::json ::hot::json
+::math ::hot::math
+
+HmacOptions
+meta {
+    doc: """
+    HMAC verification configuration.
+
+    - `secret-env` — environment variable holding the shared secret.
+    - `secret` — literal secret (rare; prefer `secret-env`).
+    - `header` — case-insensitive header name carrying the signature.
+    - `scheme` — optional prefix on the header value (e.g. `"sha256="`,
+      `"v0="`). The prefix is stripped before comparison.
+    - `algorithm` — `"sha256"` (default), `"sha512"`, or `"sha1"`.
+    - `prefix-body` — optional string prepended to the body before
+      hashing. Some providers (Slack v0) sign
+      `"v0:<timestamp>:<body>"`; pass that prefix here.
+    - `timestamp-header` — optional header providing the request
+      timestamp; required when `max-skew-seconds` is set.
+    - `max-skew-seconds` — when set, reject signatures whose
+      `timestamp-header` is more than this many seconds away from now.
+      Mitigates replay attacks.
+    """
+}
+type {
+    secret-env: Str?,
+    secret: Str?,
+    header: Str,
+    scheme: Str?,
+    algorithm: Str?,
+    prefix-body: Str?,
+    timestamp-header: Str?,
+    max-skew-seconds: Int?,
+}
+
+BearerOptions
+meta {
+    doc: """
+    Shared-secret bearer-token verification configuration. **Not**
+    integrated with Hot API keys — for that, use `PlatformOptions` and
+    `verify-platform`. Use this only for:
+
+    - Self-hosted agents not running on the Hot platform.
+    - Webhook endpoints with `auth_mode = "none"` where the upstream
+      can still send `Authorization: Bearer <token>`.
+    - Local dev, staging allowlists, and `dev-driver` runs.
+
+    Either `token-env` or `token` must be set; `header` defaults to
+    `authorization`. The helper accepts both `Bearer <token>` and
+    bare-token header values so it works whether or not the caller
+    sent the standard prefix.
+    """
+}
+type {
+    token-env: Str?,
+    token: Str?,
+    header: Str?,
+}
+
+SharedSecretOptions ::ai::agent::auth/BearerOptions
+
+PlatformOptions
+meta {
+    doc: """
+    Platform-auth verification configuration. Reads the `auth` map
+    that Hot's API server adds to the inbound `HttpRequest` when the
+    webhook endpoint is configured with `auth_mode = "required"`.
+
+    - `require-types` — when set, the auth context's `type` field
+      (`"api-key"`, `"session"`, `"service-key"`) must be in this list.
+      `null` means "any authenticated caller is fine".
+    - `require-service-key-id` — when set, only allow this specific
+      service-key id. Ignored when the auth context isn't a service key.
+    """
+}
+type {
+    require-types: Vec<Str>?,
+    require-service-key-id: Str?,
+}
+
+AuthResult
+meta {
+    doc: """
+    Outcome of a verification call. `ok` is true on success;
+    `error` carries a human-readable reason on failure (no secret
+    material). Pass `error` straight to the transport's `unauthorized`
+    helper to produce a 401 response.
+    """
+}
+type {
+    ok: Bool,
+    error: Str?,
+}
+
+ok-result fn (): AuthResult { AuthResult({ok: true, error: null}) }
+fail-result fn (msg: Str): AuthResult { AuthResult({ok: false, error: msg}) }
+
+resolve-secret
+meta {
+    doc: """
+    Internal: resolve a literal-or-env secret. Returns `null` when
+    neither field is set; returns the env value when only
+    `secret-env` is set.
+    """
+}
+fn (literal: Str?, env-name: Str?): Str? {
+    cond {
+        not(is-null(literal)) => { literal }
+        not(is-null(env-name)) => {
+            v ::env/get(env-name, null)
+            if(is-empty(or(v, "")), null, v)
+        }
+        => { null }
+    }
+}
+
+header-lookup
+meta {
+    doc: "Internal: case-insensitive header lookup; returns `null` if missing or empty."
+}
+fn (headers: Map?, name: Str): Str? {
+    src or(headers, {})
+    target lowercase(name)
+    keys-list keys(src)
+    hit find-first(keys-list, (k) { eq(lowercase(k), target) })
+    cond {
+        is-null(hit) => { null }
+        => {
+            v get(src, hit)
+            if(is-empty(or(Str(v), "")), null, Str(v))
+        }
+    }
+}
+
+strip-prefix
+meta {
+    doc: "Internal: remove `prefix` from the start of `s` if present, otherwise return `s` unchanged."
+}
+fn (s: Str, prefix: Str?): Str {
+    cond {
+        is-null(prefix) => { s }
+        is-empty(prefix) => { s }
+        starts-with(s, prefix) => { slice(s, length(prefix), length(s)) }
+        => { s }
+    }
+}
+
+verify-hmac
+meta {
+    doc: """
+    Verify an HMAC-signed webhook body. `headers` and `body` come from
+    the transport's parsed request; `body` should be the **raw, undecoded**
+    body string the provider used to sign — re-serializing JSON will
+    break the signature.
+
+    Returns an `AuthResult`. On failure, `error` is safe to log and
+    surface to the caller.
+
+    Failure reasons:
+    - `secret-not-set` — neither `secret` nor `secret-env` resolved.
+    - `signature-missing` — the signature header was absent or empty.
+    - `timestamp-stale` — `timestamp-header` was older than
+      `max-skew-seconds`.
+    - `signature-mismatch` — HMAC did not match.
+    """
+}
+fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
+    secret resolve-secret(opts.secret, opts.secret-env)
+    cond {
+        is-null(secret) => { fail-result("secret-not-set") }
+        => {
+            sig-header header-lookup(headers, opts.header)
+            cond {
+                is-null(sig-header) => { fail-result("signature-missing") }
+                => {
+                    sig strip-prefix(sig-header, opts.scheme)
+                    skew opts.max-skew-seconds
+                    ts-header opts.timestamp-header
+                    skew-check cond {
+                        is-null(skew) => { ok-result() }
+                        is-null(ts-header) => { fail-result("timestamp-header-not-set") }
+                        => {
+                            ts-str header-lookup(headers, ts-header)
+                            cond {
+                                is-null(ts-str) => { fail-result("timestamp-missing") }
+                                => {
+                                    ts-attempt ::hot::lang/try-call(Int, [ts-str])
+                                    cond {
+                                        not(ts-attempt.ok) => { fail-result("timestamp-invalid") }
+                                        => {
+                                            ts ts-attempt.value
+                                            now div(::time/epoch-millis(::time/now()), 1000)
+                                            delta ::math/abs(sub(now, ts))
+                                            if(gt(delta, skew),
+                                                fail-result("timestamp-stale"),
+                                                ok-result())
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    cond {
+                        not(skew-check.ok) => { skew-check }
+                        => {
+                            algo or(opts.algorithm, "sha256")
+                            prefixed if(is-null(opts.prefix-body), body, `${opts.prefix-body}${body}`)
+                            valid ::hmac/hmac-verify(secret, prefixed, sig, algo)
+                            if(valid, ok-result(), fail-result("signature-mismatch"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+verify-shared-secret
+meta {
+    doc: """
+    Verify a shared-secret bearer-token header. Accepts either
+    `Bearer <token>` or a bare `<token>` value, so it works whether or
+    not the caller sent the standard scheme prefix. The header name
+    defaults to `authorization`.
+
+    This is **not** a Hot API key check — see `BearerOptions` for when
+    to reach for this helper vs. `verify-platform`.
+
+    Returns an `AuthResult`. On failure, `error` is one of:
+    - `token-not-set`
+    - `token-missing`
+    - `token-mismatch`
+    """
+}
+fn (headers: Map?, opts: BearerOptions): AuthResult {
+    expected resolve-secret(opts.token, opts.token-env)
+    cond {
+        is-null(expected) => { fail-result("token-not-set") }
+        => {
+            header-name or(opts.header, "authorization")
+            raw header-lookup(headers, header-name)
+            cond {
+                is-null(raw) => { fail-result("token-missing") }
+                => {
+                    presented strip-prefix(raw, "Bearer ")
+                    if(secure-compare(presented, expected),
+                        ok-result(),
+                        fail-result("token-mismatch"))
+                }
+            }
+        }
+    }
+}
+
+verify-platform
+meta {
+    doc: """
+    Verify that the Hot platform authenticated the inbound webhook
+    request. The platform sets `request.auth = {type, …}` when the
+    endpoint is configured with `auth_mode = "required"`. Returns:
+
+    - `ok` if `request.auth` is present and (when `require-types` is
+      set) the `auth.type` is in the allowlist, and (when
+      `require-service-key-id` is set) the service-key id matches.
+
+    Failure reasons:
+    - `platform-auth-missing`
+    - `platform-auth-type-rejected:<type>`
+    - `platform-auth-service-key-id-mismatch`
+
+    This is a structural check — the platform has already validated
+    the credential against the database. We only inspect the
+    already-trusted `auth` map.
+    """
+}
+fn (request: Any, opts: PlatformOptions): AuthResult {
+    src or(request, {})
+    auth-ctx get(src, "auth")
+    cond {
+        is-null(auth-ctx) => { fail-result("platform-auth-missing") }
+        => {
+            kind Str(or(get(auth-ctx, "type"), ""))
+            allowed or(opts.require-types, [])
+            type-ok cond {
+                is-empty(allowed) => { true }
+                => { not(is-null(find-first(allowed, (t) { eq(t, kind) }))) }
+            }
+
+            cond {
+                not(type-ok) => { fail-result(`platform-auth-type-rejected:${kind}`) }
+                and(eq(kind, "service-key"), not(is-null(opts.require-service-key-id))) => {
+                    sk get(auth-ctx, "service-key", {})
+                    id Str(or(get(sk, "id"), ""))
+                    if(eq(id, opts.require-service-key-id),
+                        ok-result(),
+                        fail-result("platform-auth-service-key-id-mismatch"))
+                }
+                => { ok-result() }
+            }
+        }
+    }
+}
+
+verify-any
+meta {
+    doc: """
+    Try multiple verifiers in order, returning the first `ok` result or
+    the **last** failure if none succeed. Useful when a webhook
+    endpoint accepts either an HMAC signature OR a shared-secret
+    bearer token. For platform-issued API keys, use `verify` with
+    `platform-verifier()` so the full request auth context is available.
+
+    Each entry is `{kind, options}` where `kind` is one of:
+    - `"hmac"` (options: `HmacOptions`)
+    - `"shared-secret"` (options: `BearerOptions`)
+
+    Prefer `verify` (which takes a full `HttpRequest` and a
+    `Vec<Verifier>`) for new code.
+    """
+}
+fn (headers: Map?, body: Str, candidates: Vec<Map>): AuthResult {
+    fold-result fn (acc: AuthResult, entry: Map): AuthResult {
+        cond {
+            acc.ok => { acc }
+            => {
+                kind get(entry, "kind", "hmac")
+                opts get(entry, "options")
+                cond {
+                    eq(kind, "hmac") => { verify-hmac(headers, body, opts) }
+                    eq(kind, "shared-secret") => { verify-shared-secret(headers, opts) }
+                    => { fail-result(`unknown-auth-kind:${kind}`) }
+                }
+            }
+        }
+    }
+
+    reduce(candidates, fold-result, fail-result("no-verifiers"))
+}
+
+// ============================================================================
+// Verifier composition: the high-level `protect` middleware
+// ============================================================================
+
+Verifier
+meta {
+    doc: """
+    A single auth check. Compose with `verify` and `protect`. Build via
+    one of the constructor helpers below — never construct by hand
+    unless you want to thread an unknown `kind`.
+
+    - `kind` — `"platform"`, `"hmac"`, `"shared-secret"`, or
+      `"anonymous"`.
+    - `options` — the typed options for the kind.
+    """
+}
+type {
+    kind: Str,
+    options: Any,
+}
+
+platform-verifier
+meta {
+    doc: """
+    Build a `Verifier` for the platform-auth check. Call with no args
+    to accept any authenticated caller, or with `PlatformOptions` to
+    constrain by type / service-key id.
+
+    ```hot
+    ::auth/platform-verifier()
+    ::auth/platform-verifier(::auth/PlatformOptions({
+        require-types: ["api-key", "service-key"],
+    }))
+    ```
+    """
+}
+fn
+(): Verifier { platform-verifier(PlatformOptions({})) },
+(opts: PlatformOptions): Verifier {
+    Verifier({kind: "platform", options: opts})
+}
+
+hmac-verifier
+meta { doc: "Build a `Verifier` for an HMAC-signed body. See `HmacOptions`." }
+fn (opts: HmacOptions): Verifier {
+    Verifier({kind: "hmac", options: opts})
+}
+
+shared-secret-verifier
+meta {
+    doc: "Build a `Verifier` for a shared-secret bearer token. See `BearerOptions`."
+}
+fn (opts: BearerOptions): Verifier {
+    Verifier({kind: "shared-secret", options: opts})
+}
+
+anonymous
+meta {
+    doc: """
+    Build a `Verifier` that always succeeds. Use only when you
+    intentionally want to allow unauthenticated traffic — typically
+    demos and local dev. Production webhooks should never accept this.
+    """
+}
+fn (): Verifier {
+    Verifier({kind: "anonymous", options: null})
+}
+
+run-verifier
+meta { doc: "Internal: dispatch a single `Verifier` against a request." }
+fn (request: Any, body: Str, verifier: Verifier): AuthResult {
+    headers or(get(or(request, {}), "headers"), {})
+    cond {
+        eq(verifier.kind, "platform") => { verify-platform(request, verifier.options) }
+        eq(verifier.kind, "hmac") => { verify-hmac(headers, body, verifier.options) }
+        eq(verifier.kind, "shared-secret") => { verify-shared-secret(headers, verifier.options) }
+        eq(verifier.kind, "anonymous") => { ok-result() }
+        => { fail-result(`unknown-verifier-kind:${verifier.kind}`) }
+    }
+}
+
+verify
+meta {
+    doc: """
+    Run `verifiers` against `request` in order, returning the first
+    `ok` result or the **last** failure if none succeed.
+
+    `request` is the `HttpRequest` value passed to a webhook handler.
+    The raw body is read from `request.body-raw` (set by the platform
+    on webhook requests) — HMAC signatures will not match against a
+    re-serialized JSON body.
+
+    An empty `verifiers` list returns `fail-result("no-verifiers")`,
+    which `protect` translates into a 401. **Auth fails closed.**
+    """
+}
+fn (request: Any, verifiers: Vec<Verifier>): AuthResult {
+    body Str(or(get(or(request, {}), "body-raw"), ""))
+    fold-result fn (acc: AuthResult, v: Verifier): AuthResult {
+        cond {
+            acc.ok => { acc }
+            => { run-verifier(request, body, v) }
+        }
+    }
+
+    reduce(verifiers, fold-result, fail-result("no-verifiers"))
+}
+
+protect
+meta {
+    doc: """
+    Deny-by-default webhook middleware. Runs `verifiers` against
+    `request`; if auth succeeds, calls `handler(request)`; otherwise
+    returns a 401 `HttpResponse` with `unauthorized(reason)`.
+
+    ```hot
+    fn meta {webhook: {service: "team-agent", path: "/web", method: "POST"}}
+       (request: HttpRequest): HttpResponse {
+        ::auth/protect(request, [
+            ::auth/platform-verifier(),
+            ::auth/hmac-verifier(::auth/HmacOptions({
+                secret-env: "TEAMAGENT_HMAC_SECRET",
+                header: "x-hot-signature",
+                scheme: "sha256=",
+            })),
+        ], handle-message)
+    }
+    ```
+
+    Empty `verifiers` returns 401 with `no-verifiers`. Demos can opt
+    out by passing `[::auth/anonymous()]`.
+    """
+}
+fn (request: Any, verifiers: Vec<Verifier>, handler: Fn): Any {
+    auth verify(request, verifiers)
+    cond {
+        auth.ok => { handler(request) }
+        => { unauthorized(auth.error) }
+    }
+}
+
+unauthorized
+meta {
+    doc: """
+    Build a 401 `HttpResponse` with a JSON body. `reason` is included so
+    callers can correlate failures in logs without leaking secrets.
+    """
+}
+fn (reason: Str?): ::http/HttpResponse {
+    body {
+        ok: false,
+        error: "unauthorized",
+        reason: or(reason, "unauthorized"),
+    }
+
+    ::http/HttpResponse({
+        status: 401,
+        headers: {"content-type": "application/json"},
+        body: ::json/to-json(body),
+    })
+}

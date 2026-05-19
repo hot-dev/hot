@@ -1,0 +1,86 @@
+::ai::agent::test::synthesis ns
+meta ["test"]
+
+::syn     ::ai::agent::synthesis
+::ai-chat ::ai::chat
+
+ChatOptions ::ai-chat/ChatOptions
+ChatReply   ::ai-chat/ChatReply
+
+test-fallback-text-short-circuits-llm
+meta ["test"]
+fn () {
+    input ::syn/SynthesisInput({
+        chat-opts: ChatOptions({model: "stub"}),
+        system: "ignored when fallback is set",
+        user-text: "ignored too",
+        fallback-text: "(offline stub)",
+    })
+    out ::syn/run-once(input)
+    assert(out.ok)
+    assert-eq("(offline stub)", out.text)
+    assert(is-null(out.error))
+}
+
+// A canned chat-fn that returns a fixed `ChatReply.text`. Lets us
+// exercise the LLM path without a real provider.
+canned-chat-fn fn (model: Str, messages: Vec, system: Str?, tools: Vec?): ChatReply {
+    ChatReply({
+        text: "synthesized brief",
+        tool-calls: [],
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null,
+    })
+}
+
+test-run-once-uses-supplied-system-and-user-text
+meta ["test"]
+fn () {
+    opts ChatOptions({
+        chat-fn: canned-chat-fn,
+        model: "stub-model",
+        max-iterations: 1,
+    })
+    input ::syn/SynthesisInput({
+        chat-opts: opts,
+        system: "You are a synthesis bot.",
+        user-text: "the window text",
+        fallback-text: null,
+    })
+    out ::syn/run-once(input)
+    assert(out.ok)
+    assert-eq("synthesized brief", out.text)
+}
+
+// Empty-text ChatReply: covers a real provider edge case where the
+// model legitimately returns nothing. `run-once` should still report
+// ok=true with an empty body — callers decide whether to drop or keep.
+empty-chat-fn fn (model: Str, messages: Vec, system: Str?, tools: Vec?): ChatReply {
+    ChatReply({
+        text: "",
+        tool-calls: [],
+        stop-reason: "end_turn",
+        usage: null,
+        raw: null,
+    })
+}
+
+test-run-once-returns-ok-with-empty-text-when-model-says-nothing
+meta ["test"]
+fn () {
+    opts ChatOptions({
+        chat-fn: empty-chat-fn,
+        model: "stub-model",
+        max-iterations: 1,
+    })
+    input ::syn/SynthesisInput({
+        chat-opts: opts,
+        system: "system",
+        user-text: "user",
+        fallback-text: null,
+    })
+    out ::syn/run-once(input)
+    assert(out.ok)
+    assert-eq("", out.text)
+}

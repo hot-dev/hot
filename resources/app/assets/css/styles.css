@@ -2363,8 +2363,8 @@
   .\[hash\:\<hash\>\] {
     hash: <hash>;
   }
-  .\[hash\:f22a671c80d2\] {
-    hash: f22a671c80d2;
+  .\[hash\:ff23cb226527\] {
+    hash: ff23cb226527;
   }
   .group-hover\:translate-x-0\.5 {
     &:is(:where(.group):hover *) {

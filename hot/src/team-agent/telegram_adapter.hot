@@ -1,0 +1,518 @@
+::team-agent::telegram-adapter ns
+meta {
+    doc: """
+    Telegram transport adapter for Team Agent.
+
+    Owns everything Telegram-specific:
+
+    - Translating Telegram `Update`s into the agent-internal
+      `::transport/IncomingMessage` shape.
+    - Constructing `Session` / `Identity` records from Telegram
+      `chat.id` / `from` payloads (`session.id` is namespaced
+      `telegram:${chat-id}` so it can never collide with another
+      transport).
+    - Implementing the `reply` / `show-typing` / `message-link`
+      operations that `::transport` dispatches to.
+    - The long-poll loop, the webhook receiver, and the voice-file
+      download helper.
+
+    The agent core (`agent.hot`) imports nothing from this module —
+    `::transport` does the dispatch, and the polling/webhook entry
+    points push into `::agent/process-incoming`. Add a sibling
+    `slack_adapter.hot` to bring up Slack; nothing in this file needs
+    to change.
+    """
+}
+
+::store ::hot::store
+::ctx   ::hot::ctx
+
+::tg-messages ::telegram::messages
+::tg-updates  ::telegram::updates
+::tg-bot      ::telegram::bot
+
+::session   ::ai::session
+::msg       ::ai::message
+::mem       ::ai::memory
+::transport ::team-agent::transport
+::agent     ::team-agent::agent
+
+// Type aliases used in fn signatures and as class names. Hot resolves
+// these at parse time, so the short forms work in `: Session`-style
+// annotations.
+//
+// NOTE on *constructors*: `Session(...)`, `Identity(...)`,
+// `HttpResponse(...)` etc. are referenced *fully-qualified* in
+// expressions below — Hot's compiler currently can't dispatch type
+// constructors via these aliases when they're invoked from inside
+// another function body (it looks up `Session` as a function in the
+// local namespace and 404s at runtime). Same family of bugs as
+// `::store/Map` and `::ai::tool/Tool`. Use the long form for calls,
+// the short form for types.
+Session      ::session/Session
+Identity     ::session/Identity
+HttpRequest  ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Identity / Session translation
+// ============================================================================
+
+session-from-chat-id
+meta {
+    doc: """
+    Build a transport-stamped `Session` for a Telegram `chat.id`. The
+    id namespace is `telegram:${chat-id}` so brain-stats / brain-errors
+    keys, store names, and the multi-tenant scoping in `::ai::memory`
+    can never collide with a Slack channel that happens to share an
+    integer id (Slack ids are strings, but explicit > implicit).
+    """
+}
+fn (chat-id: Int): Session {
+    ::transport/session-with-transport(
+        ::session/Session({id: `telegram:${chat-id}`}),
+        "telegram",
+    )
+}
+
+chat-id-from-session
+meta {
+    doc: """
+    Inverse of `session-from-chat-id`. Strips the `telegram:` prefix
+    and parses back to Int — needed because the Telegram Bot API
+    expects an integer `chat_id` everywhere.
+    """
+}
+fn (session: Session): Int {
+    raw session.id
+    Int(if(starts-with(raw, "telegram:"), slice(raw, length("telegram:")), raw))
+}
+
+identity-from-tg-user
+meta { doc: "Convert a Telegram `User` into a portable `::ai::session/Identity`." }
+fn (from: Map): Identity {
+    name or(from.username, from.first_name, "unknown")
+    ::session/Identity({id: Str(from.id), name: name})
+}
+
+// ============================================================================
+// Message translation: Telegram Update.message -> IncomingMessage
+// ============================================================================
+
+to-incoming
+meta {
+    doc: """
+    Translate a single Telegram `message` payload into the
+    transport-agnostic `IncomingMessage` the agent core consumes. The
+    raw payload travels along in `raw` so transport-specific
+    features (voice download, etc.) can still reach it without
+    re-parsing.
+    """
+}
+fn (msg: Map): ::transport/IncomingMessage {
+    voice or(msg.voice, msg.audio)
+    ::transport/IncomingMessage({
+        session: session-from-chat-id(msg.chat.id),
+        sender: identity-from-tg-user(msg.from),
+        text: or(msg.text, ""),
+        message-id: Str(msg.message_id),
+        timestamp: msg.date,
+        voice: voice,
+        raw: msg,
+    })
+}
+
+// ============================================================================
+// Outbound: reply + show-typing implementations
+// ============================================================================
+
+reply-impl
+meta {
+    doc: """
+    Send `text` to the Telegram chat encoded in `session`, threading
+    off `reply-to` (a Telegram message id, here in string form because
+    `::transport/IncomingMessage.message-id` is `Str`). HTML is the
+    parse mode because all of Team Agent's templated replies use
+    `<b>`/`<i>`/`<a>`. Called only by `::transport/reply` after the
+    dry-run gate.
+    """
+}
+fn (session: Session, text: Str, reply-to: Str?): Any {
+    chat-id chat-id-from-session(session)
+    reply-params if(and(is-some(reply-to), not(is-empty(reply-to))),
+        {message_id: Int(reply-to), allow_sending_without_reply: true},
+        null)
+    ::tg-messages/send-message(::tg-messages/SendMessageRequest({
+        chat_id: chat-id,
+        text: text,
+        parse_mode: "HTML",
+        reply_parameters: reply-params,
+    }))
+}
+
+show-typing-impl
+meta {
+    doc: "Telegram `sendChatAction` with `action: typing`. Best-effort; errors swallowed by the caller."
+}
+fn (session: Session): Any {
+    ::tg-messages/send-chat-action(::tg-messages/SendChatActionRequest({
+        chat_id: chat-id-from-session(session),
+        action: "typing",
+    }))
+}
+
+message-link
+meta {
+    doc: """
+    Build a `https://t.me/c/<internal>/<message-id>` deep link for a
+    private supergroup. Returns `""` for chats where deep linking
+    isn't supported (regular groups, DMs) — the caller falls back to
+    plain text in that case.
+
+    Telegram supergroup chat ids look like `-100<internal-id>`; the
+    deep-link format uses just the internal id.
+    """
+}
+fn (session: Session, message-id: Any): Str {
+    chat-id chat-id-from-session(session)
+    cond {
+        lt(chat-id, -1000000000000) => {
+            internal sub(0, add(chat-id, 1000000000000))
+            `https://t.me/c/${internal}/${message-id}`
+        }
+        => { "" }
+    }
+}
+
+// ============================================================================
+// Top-level inbound dispatch — peels off voice before agent core sees it
+// ============================================================================
+
+dispatch-update
+meta {
+    doc: """
+    Telegram-flavored top-level dispatcher. Called for every inbound
+    Telegram `message` (from polling or webhook). Voice/audio messages
+    are routed to the Telegram-specific `record-voice` handler via the
+    `telegram:record-voice` event so the agent core never has to know
+    about Telegram file ids. Everything else is normalized via
+    `to-incoming` and forwarded to `::agent/process-incoming`.
+    """
+}
+fn (msg: Map): Any {
+    voice or(msg.voice, msg.audio)
+    cond {
+        and(is-some(voice), ::agent/is-voice-enabled()) => {
+            send("telegram:record-voice", {
+                session: session-from-chat-id(msg.chat.id),
+                sender: identity-from-tg-user(msg.from),
+                voice: voice,
+                message-id: Str(msg.message_id),
+                timestamp: msg.date,
+            })
+        }
+
+        is-some(voice) => { "voice ignored" }
+        => { ::agent/process-incoming(to-incoming(msg)) }
+    }
+}
+
+// ============================================================================
+// Voice file download + transcription
+// ============================================================================
+// Telegram delivers voice messages as `file_id` references. To
+// process them we (1) call the Telegram Bot API's getFile to resolve
+// a file_path, then (2) download the bytes from the file CDN, then
+// (3) hand the bytes to Whisper running in a Hot Box container.
+
+download-file
+meta {
+    doc: """
+    Two-step Telegram file download: getFile to resolve a file_path,
+    then a plain HTTP GET against the file CDN. Returns raw bytes for
+    Whisper. Only used by `record-voice` below.
+    """
+}
+fn (file-id: Str): Bytes {
+    token ::ctx/get("telegram.bot.token")
+    meta-resp ::hot::http/get(`https://api.telegram.org/bot${token}/getFile?file_id=${file-id}`)
+    file-path meta-resp.body.result.file_path
+    resp ::hot::http/get(`https://api.telegram.org/file/bot${token}/${file-path}`)
+    resp.body
+}
+
+record-voice
+meta {
+    doc: """
+    Download a Telegram voice/audio file, transcribe it via
+    `::whisper/transcribe`, write the transcript into session memory,
+    and post a confirmation reply with a snippet. Voice handling is
+    transport-specific — Slack v1 doesn't have a counterpart, so
+    this lives in the Telegram adapter rather than the agent core.
+
+    Failure modes (empty transcript, download error) get logged via
+    `::agent/record-error` and short-circuit silently so a flaky
+    voice file doesn't take the worker down.
+
+    ## Wiring (wrapper pattern)
+
+    `record-voice` is a pure callable. It does NOT register itself
+    as an event handler — keeping the `meta {on-event: …}` off the
+    library function prevents duplicate registrations when this
+    adapter is compiled into more than one project. Register it from
+    your agent assembly file as a meta-bearing alias:
+
+    ```hot
+    ::tg-adapter ::team-agent::telegram-adapter
+
+    tg-record-voice
+    meta {
+        agent: TeamAgent,
+        on-event: "telegram:record-voice",
+        retry: 2,
+    }
+
+    ::tg-adapter/record-voice
+    ```
+
+    The library function's `doc:` and arity flow through to the
+    registered handler; alias keys win on collision. If you need
+    pre/post-processing, swap the alias for a full
+    `fn (event) { … ::tg-adapter/record-voice(event) … }` wrapper.
+
+    Voice messages reach this handler via `dispatch-update`, which
+    fans `voice` / `audio` payloads onto the `telegram:record-voice`
+    event before the agent core ever sees them.
+    """
+}
+fn (event) {
+    d        event.data
+    session  d.session
+    sender   d.sender
+    voice    d.voice
+    msg-id   d.message-id
+    timestamp d.timestamp
+
+    mem ::mem/create-memory(::agent/AGENT_NAME, session, sender)
+
+    bytes download-file(voice.file_id)
+    audio-url `hot://brain/voice/${msg-id}.ogg`
+    ::hot::file/write-file-bytes(audio-url, bytes)
+
+    out ::whisper/transcribe(audio-url, {
+        model: ::ctx/get("brain.voice.model", "base"),
+    })
+    text or(out.text, "")
+
+    cond {
+        is-empty(trim(text)) => {
+            ::agent/record-error("record-voice", `empty transcript for msg ${msg-id}`)
+            "empty transcript"
+        }
+        => {
+            message ::msg/Message({
+                id: msg-id,
+                content: text,
+                sender: sender,
+                session: session,
+                timestamp: timestamp,
+                source: "voice",
+                metadata: {
+                    message_id: msg-id,
+                    voice: true,
+                    duration: or(voice.duration, 0),
+                },
+            })
+            ::mem/remember(mem, message)
+
+            snippet if(gt(length(text), 120),
+                concat(slice(text, 0, 120), "..."),
+                text)
+            ::transport/reply(session,
+                `<i>Transcribed voice message:</i>\n${snippet}`,
+                msg-id)
+        }
+    }
+}
+
+// ============================================================================
+// Bot identity (for /diag, classifier, etc.)
+// ============================================================================
+
+cached-bot-username
+meta {
+    doc: """
+    Cache the bot's `@username` after the first `getMe` call. Used by
+    `/diag` and message routing. Falls back to `"unknown"` when the
+    Bot API is unreachable (e.g. in dry-run with a fake token).
+    """
+}
+fn (): Str {
+    cached ::store/get(::agent/agent-state, "bot-username")
+    cond {
+        is-some(cached) => { cached }
+        => {
+            info ::tg-bot/get-me()
+            name or(get(or(info, {}), "username"), "unknown")
+            ::store/put(::agent/agent-state, "bot-username", name)
+            name
+        }
+    }
+}
+
+// ============================================================================
+// Polling: Local Development
+// ============================================================================
+// Long-polls Telegram for new messages and pushes each through the
+// adapter -> agent. Gated on `brain.polling.enabled` so production
+// (where webhooks are registered) doesn't double-deliver.
+
+is-polling-enabled
+meta { doc: "Honors `brain.polling.enabled`. Defaults to disabled." }
+fn (): Bool {
+    val ::ctx/get("brain.polling.enabled", false)
+    cond {
+        eq(val, true)   => { true }
+        eq(val, "true") => { true }
+        =>                 { false }
+    }
+}
+
+check-updates
+meta {
+    doc: """
+    Long-polling loop for local development. Pulls up to 50 updates
+    every 30 seconds and feeds each non-bot message into
+    `::agent/process-incoming` after translating via `to-incoming`.
+
+    Stores the last seen `update_id` in `::agent/agent-state` so a
+    crash + restart resumes mid-stream rather than reprocessing the
+    last 24h of messages. Disable in production by setting
+    `brain.polling.enabled = false` and registering the webhook.
+
+    ## Wiring (wrapper pattern)
+
+    `check-updates` is a pure callable. It does NOT register its
+    own schedule — keeping the `meta {schedule: …}` off the
+    library function prevents duplicate scheduled runs when this
+    adapter is compiled into more than one project. Register it
+    from your agent assembly file as a meta-bearing alias:
+
+    ```hot
+    ::tg-adapter ::team-agent::telegram-adapter
+
+    tg-check-updates
+    meta {
+        agent: TeamAgent,
+        schedule: "every 30 seconds",
+        on-event: "telegram:check-updates",
+    }
+
+    ::tg-adapter/check-updates
+    ```
+
+    Tune the cron expression (`every 30 seconds` / `*/30 * * * * *`)
+    to your traffic profile, or drop the `schedule:` and keep only
+    `on-event:` if you only ever drive polling from manual `send`s
+    in tests.
+    """
+}
+fn (event) {
+    cond {
+        not(is-polling-enabled()) => { "polling disabled" }
+        => {
+            last-offset or(::store/get(::agent/agent-state, "last-offset"), 0)
+
+            updates ::tg-updates/get-updates(::tg-updates/GetUpdatesRequest({
+                offset: add(last-offset, 1),
+                limit: 50,
+                timeout: 25,
+            }))
+
+            cond {
+                is-empty(updates) => { "no new updates" }
+                => {
+                    for-each(updates, (update) {
+                        msg or(update.message, update.edited_message)
+                        cond {
+                            and(is-some(msg), not(or(msg.from.is_bot, false))) => {
+                                dispatch-update(msg)
+                            }
+                        }
+
+                        ::store/put(::agent/agent-state, "last-offset", update.update_id)
+                    })
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Webhook: Production
+// ============================================================================
+// Registered via Telegram's `setWebhook`; verifies the optional
+// secret token before handing off to the agent. Mounted at
+// `/team-agent/updates` once deployed.
+
+on-telegram-update
+meta {
+    doc: """
+    HTTPS receiver for Telegram updates in production. Verifies
+    `telegram.webhook.secret` (if set), translates the update via
+    `to-incoming`, and dispatches into `::agent/process-incoming`.
+    Always returns 200 except on signature mismatch — Telegram
+    retries on non-2xx, which would re-deliver the message storm.
+
+    ## Wiring (wrapper pattern)
+
+    `on-telegram-update` is a pure callable. It does NOT mount its
+    own webhook — keeping the `meta {webhook: …}` off the library
+    function prevents duplicate route registrations and ambiguous
+    service routing when this adapter is compiled into more than
+    one project. Register it from your agent assembly file as a
+    meta-bearing alias:
+
+    ```hot
+    ::tg-adapter ::team-agent::telegram-adapter
+
+    tg-on-update
+    meta {
+        agent: TeamAgent,
+        webhook: {
+            service: "team-agent",
+            path: "/updates",
+            method: "POST",
+            description: "Receive Telegram bot updates",
+        },
+    }
+
+    ::tg-adapter/on-telegram-update
+    ```
+
+    Pick a `service:` name unique to the deploying project; that's
+    what Hot's worker uses to route inbound HTTPS to the right
+    build. Then register the webhook with Telegram once via
+    `setWebhook` pointing at your worker's public URL.
+    """
+}
+fn (request: HttpRequest): HttpResponse {
+    secret or(::ctx/get("telegram.webhook.secret"), "")
+    cond {
+        and(not(is-empty(secret)), not(::tg-updates/verify-request(request, secret))) => {
+            ::hot::http/HttpResponse({status: 401, body: {error: "invalid secret"}})
+        }
+    }
+
+    update or(request.body, {})
+    msg or(update.message, update.edited_message)
+
+    cond {
+        is-null(msg)    => { ::hot::http/HttpResponse({status: 200, body: {ok: true}}) }
+        msg.from.is_bot => { ::hot::http/HttpResponse({status: 200, body: {ok: true}}) }
+        => {
+            dispatch-update(msg)
+            ::hot::http/HttpResponse({status: 200, body: {ok: true}})
+        }
+    }
+}

@@ -1,0 +1,68 @@
+::personal-agent::skills ns
+meta { doc: "Skills for the identity-first PersonalAgent demo." }
+
+daily-brief
+meta {
+    skill: {
+        name: "daily-brief",
+        description: "Prepare a personal morning brief from tasks, preferences, and recent memory.",
+        when: ["daily brief", "morning brief", "plan my day"],
+        body: "Summarize today's priorities, commitments, blockers, and suggested first action. Respect stated preferences and time constraints.",
+    }
+}
+fn () { {} }
+
+personal-memory
+meta {
+    skill: {
+        name: "personal-memory",
+        description: "Recall user facts without leaking private memory across identities.",
+        when: ["remember about me", "personal memory", "recall preferences"],
+        body: "Use identity-scoped facts first. Do not mix another user's facts into this answer. Cite the memory category when helpful.",
+    }
+}
+fn () { {} }
+
+task-capture
+meta {
+    skill: {
+        name: "task-capture",
+        description: "Capture personal tasks, owners, due dates, and next actions.",
+        when: ["task", "todo", "remind me", "follow up"],
+        body: "Extract a clear task title, due date if present, project/context, and the smallest next action. Ask only for critical missing details.",
+    }
+}
+fn () { {} }
+
+weekly-review
+meta {
+    skill: {
+        name: "weekly-review",
+        description: "Review a person's week and identify themes, wins, and stuck work.",
+        when: ["weekly review", "reflect on week", "what happened this week"],
+        body: "Group activity by project or theme. Include wins, repeated blockers, unfinished commitments, and one practical improvement for next week.",
+    }
+}
+fn () { {} }
+
+privacy-guard
+meta {
+    skill: {
+        name: "privacy-guard",
+        description: "Apply cautious privacy defaults to personal memory operations.",
+        when: ["forget", "export", "privacy", "sensitive"],
+        body: "Prefer explicit confirmation language for destructive actions. Avoid exposing raw sensitive content unless the user requested export or inspection.",
+    }
+}
+fn () { {} }
+
+context-switch
+meta {
+    skill: {
+        name: "context-switch",
+        description: "Help a person switch projects by restoring the important context.",
+        when: ["context switch", "resume work", "where was I", "switch projects"],
+        body: "Identify the target project, last known state, open decisions, active tasks, and next best action. Keep it short enough to act on immediately.",
+    }
+}
+fn () { {} }

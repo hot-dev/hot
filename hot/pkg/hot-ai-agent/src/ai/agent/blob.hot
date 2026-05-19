@@ -1,0 +1,343 @@
+::ai::agent::blob ns
+meta {
+    doc: """
+    Content-addressed blob storage for agent attachments.
+
+    Attachments arrive at agents inside webhook bodies — typically as
+    base64 strings — and quickly become a problem if we keep them in
+    memory bundles or in the structured KV store:
+
+    - Memory bundles balloon (4/3× overhead from base64).
+    - Re-prompting replays the bytes through every retrieval pass.
+    - Provider rate limits / context windows are blown by binary.
+    - The KV store wasn't built for MB-scale row values.
+
+    `::ai::agent::blob` is the seam between agents and durable file
+    storage. It writes through `::hot::file`, so callers inherit the
+    platform's file-storage guarantees:
+
+    - **Durable** — bytes survive process restarts and redeploys.
+    - **Isolated per org and env** — one tenant's blobs are never
+      visible to another, with no extra plumbing on the agent side.
+    - **Quota-enforced** — per-upload and per-org limits are applied
+      by the platform; an agent that overruns its plan gets a clear
+      error, not silent corruption.
+    - **Audited** — every write is recorded with the originating run
+      and user so blobs are traceable after the fact.
+
+    Surface:
+
+    - `BlobRef` — `{id, sha256, size, mime, name?, path, prefix?}`.
+    - `put-bytes(bytes, opts)` / `put-text(text, opts)` — write a blob
+      to `${prefix}/${sha256}.${ext}`. Returns a `BlobRef` callers can
+      embed in agent memory.
+    - `get-bytes(ref)` / `get-text(ref)` — fetch the bytes back.
+    - `delete(ref)` — remove a blob (used by `forget` in agent memory).
+    - `attach-from-base64(att)` — promote an `Attachment.content-base64`
+      into a blob, returning a new `Attachment` whose `meta.blob-ref`
+      points at the stored payload and whose `content-base64` is null.
+
+    Organizing per-agent storage
+    ----------------------------
+
+    Pass `opts.prefix` to namespace blobs by agent or feature so they
+    can be retained / pruned independently:
+
+    ```hot
+    ref ::blob/put-bytes(bytes, ::blob/PutOptions({
+        prefix: "team-agent/attachments",
+        mime: "image/png",
+    }))
+    // → path: "team-agent/attachments/<sha256>.png"
+    ```
+
+    The default prefix is `"agents/blobs"`. Tenant isolation is
+    applied by the platform; agents only ever pick the `prefix`.
+
+    Recommended convention: `<agent>/<purpose>` (e.g.
+    `"team-agent/attachments"`, `"team-agent/renders"`,
+    `"personal-agent/uploads"`). Add a transport segment when retention
+    differs by transport: `"team-agent/slack/attachments"`.
+
+    Two-layer provenance model
+    --------------------------
+
+    A blob's "where did this come from?" answer is split between two
+    layers, on purpose:
+
+    - **Blob layer (this module).** The `prefix` identifies the agent
+      (and optionally the feature within it). Together with the
+      platform's file audit metadata recorded by `::hot::file`, this
+      answers the platform-side question: which agent wrote it, which
+      run, which user, when, and the content identity (`sha256`).
+
+    - **Memory layer (`::ai::memory`).** Whenever a blob is stored on
+      behalf of an event (an inbound message, a tool result, an
+      agent-generated render), the agent records the originating
+      context (session, sender, transport, message-id, kind) in its
+      memory and embeds the `BlobRef` inside that record (typically as
+      `Attachment.meta.blob-ref`). This is where the chat-level
+      provenance lives.
+
+    The `BlobRef` itself stays a thin pointer — bytes id, sha256, size,
+    mime, name, path, prefix. We deliberately do **not** stamp
+    session-id / sender-id / message-id onto every BlobRef, because
+    those are properties of the originating *event*, not of the bytes;
+    duplicating them in two places risks drift. If you need to answer
+    "which session uploaded this?" from a `BlobRef` in hand, look it
+    up by `sha256` (or `path`) in the agent's memory store.
+    """
+}
+
+::file    ::hot::file
+::base64  ::hot::base64
+::hash    ::hot::hash
+::att-mod ::ai::agent::attachments
+
+DEFAULT_PREFIX "agents/blobs"
+
+BlobRef
+meta {
+    doc: """
+    Lightweight handle to a stored blob. Safe to embed in agent memory
+    — the bytes are not duplicated, only the pointer.
+
+    - `id` — platform-issued unique id for the stored blob.
+    - `sha256` — content hash. Same content always produces the same
+      `sha256`, so callers can dedupe on this field.
+    - `size` — byte size.
+    - `mime` — best-effort media type when known.
+    - `name` — display name (filename), when known.
+    - `path` — storage path. Stable for the lifetime of the blob.
+    - `prefix` — the namespace the blob lives under (e.g.
+      `"team-agent/attachments"`). Defaults to `"agents/blobs"`.
+    """
+}
+type {
+    id: Str,
+    sha256: Str,
+    size: Int,
+    mime: Str?,
+    name: Str?,
+    path: Str,
+    prefix: Str?,
+}
+
+PutOptions
+meta {
+    doc: """
+    Options for `put-bytes` / `put-text`.
+
+    - `mime` — best-effort media type. Falls back to
+      `application/octet-stream`. Used to choose a file extension so
+      `::hot::file` can detect content type on read.
+    - `name` — display name (filename). Optional.
+    - `prefix` — namespace under which to store the blob. Defaults to
+      `DEFAULT_PREFIX` (`"agents/blobs"`). Use this to keep
+      per-agent blobs separate (e.g. `"team-agent/attachments"`).
+    """
+}
+type {
+    mime: Str?,
+    name: Str?,
+    prefix: Str?,
+}
+
+resolve-prefix
+meta { doc: "Internal: resolve a possibly-null prefix to `DEFAULT_PREFIX`." }
+fn (p: Str?): Str {
+    candidate or(p, DEFAULT_PREFIX)
+    if(is-empty(candidate), DEFAULT_PREFIX, candidate)
+}
+
+ext-from-mime
+meta {
+    doc: """
+    Internal: derive a file extension from a mime type so that the
+    underlying file backend can detect content type on read. Returns
+    `.bin` for unknown / missing mimes.
+    """
+}
+fn (mime: Str?): Str {
+    cond {
+        is-null(mime) => { ".bin" }
+        eq(mime, "image/png") => { ".png" }
+        eq(mime, "image/jpeg") => { ".jpg" }
+        eq(mime, "image/gif") => { ".gif" }
+        eq(mime, "image/webp") => { ".webp" }
+        eq(mime, "image/svg+xml") => { ".svg" }
+        eq(mime, "application/pdf") => { ".pdf" }
+        eq(mime, "application/json") => { ".json" }
+        eq(mime, "application/zip") => { ".zip" }
+        eq(mime, "text/plain") => { ".txt" }
+        eq(mime, "text/markdown") => { ".md" }
+        eq(mime, "text/csv") => { ".csv" }
+        eq(mime, "text/html") => { ".html" }
+        eq(mime, "audio/mpeg") => { ".mp3" }
+        eq(mime, "audio/wav") => { ".wav" }
+        eq(mime, "video/mp4") => { ".mp4" }
+        eq(mime, "video/webm") => { ".webm" }
+        => { ".bin" }
+    }
+}
+
+blob-path
+meta {
+    doc: """
+    Internal: build the storage path for a blob.
+
+    Path shape: `${prefix}/${sha256}${ext}`. Same content with the
+    same mime always produces the same path, giving us free
+    deduplication. Different mimes for the same bytes will end up at
+    different paths — that's the trade-off of putting the extension in
+    the path so the file backend can detect content type.
+    """
+}
+fn (prefix: Str, sha: Str, mime: Str?): Str {
+    `${prefix}/${sha}${ext-from-mime(mime)}`
+}
+
+build-blob-ref
+meta {
+    doc: "Internal: assemble a `BlobRef` from a `FileMeta`, sha, prefix, and put options."
+}
+fn (file-meta: ::file/FileMeta, sha: Str, prefix: Str, opts: PutOptions): BlobRef {
+    BlobRef({
+        id: file-meta.file-id,
+        sha256: sha,
+        size: file-meta.size,
+        mime: or(file-meta.content-type, opts.mime, "application/octet-stream"),
+        name: opts.name,
+        path: file-meta.path,
+        prefix: prefix,
+    })
+}
+
+put-bytes
+meta {
+    doc: """
+    Write `bytes` and return a `BlobRef`. The blob is stored under its
+    sha256 hash so identical bytes (with the same mime) produce
+    identical paths — the second `put-bytes` becomes an existence
+    check rather than a re-upload.
+
+    Dedup is best-effort: it relies on `::hot::file/file-exists`, which
+    consults the file metadata table for the active org/env. Bytes
+    written under a different prefix or by a different env will not
+    dedupe.
+    """
+}
+fn
+(bytes: Bytes): BlobRef { put-bytes(bytes, PutOptions({})) },
+(bytes: Bytes, opts: PutOptions): BlobRef {
+    sha ::hash/sha256(bytes)
+    prefix resolve-prefix(opts.prefix)
+    path blob-path(prefix, sha, opts.mime)
+    cond {
+        ::file/file-exists(path) => {
+            existing ::file/file-info(path)
+            build-blob-ref(existing, sha, prefix, opts)
+        }
+        => {
+            written ::file/write-file-bytes(path, bytes)
+            build-blob-ref(written, sha, prefix, opts)
+        }
+    }
+}
+
+put-text
+meta {
+    doc: "Write `text` (UTF-8) as a blob. `mime` defaults to `text/plain` when unset."
+}
+fn
+(text: Str): BlobRef { put-text(text, PutOptions({mime: "text/plain"})) },
+(text: Str, opts: PutOptions): BlobRef {
+    bytes Bytes(text)
+    mime or(opts.mime, "text/plain")
+    put-bytes(bytes, PutOptions({
+        mime: mime,
+        name: opts.name,
+        prefix: opts.prefix,
+    }))
+}
+
+get-bytes
+meta {
+    doc: """
+    Fetch the bytes for a `BlobRef`. Returns `null` when the blob is
+    missing — for example, the file was deleted, the env was switched,
+    or the storage backend was reset between runs.
+    """
+}
+fn (ref: BlobRef): Bytes? {
+    cond {
+        is-null(ref) => { null }
+        not(::file/file-exists(ref.path)) => { null }
+        => { ::file/read-file-bytes(ref.path) }
+    }
+}
+
+get-text
+meta {
+    doc: "Fetch the bytes and decode as UTF-8. Returns `null` when missing or undecodable."
+}
+fn (ref: BlobRef): Str? {
+    bytes get-bytes(ref)
+    if(is-null(bytes), null, Str(bytes))
+}
+
+delete
+meta {
+    doc: "Remove a blob from its backing store. Idempotent; returns `false` when the blob was already gone."
+}
+fn (ref: BlobRef): Bool {
+    cond {
+        is-null(ref) => { false }
+        => { ::file/delete-file(ref.path) }
+    }
+}
+
+attach-from-base64
+meta {
+    doc: """
+    Promote an attachment whose `content-base64` is set into a
+    blob-backed attachment. Returns a new `Attachment` with:
+
+    - `content-base64` set to `null`.
+    - `meta.blob-ref` populated with the new `BlobRef`.
+
+    Attachments without `content-base64` (or with malformed base64)
+    are returned unchanged so this helper is safe to map across a vec
+    of mixed attachments.
+
+    Pass `prefix` to organize blobs per-agent, e.g.
+    `attach-from-base64(att, "team-agent/attachments")`.
+    """
+}
+fn
+(att: Any): Any { attach-from-base64(att, DEFAULT_PREFIX) },
+(att: Any, prefix: Str?): Any {
+    cond {
+        is-null(att) => { null }
+        is-null(att.content-base64) => { att }
+        not(::base64/is-valid(att.content-base64)) => { att }
+        => {
+            decoded ::base64/decode(att.content-base64)
+            ref put-bytes(decoded, PutOptions({
+                mime: att.type,
+                name: att.name,
+                prefix: prefix,
+            }))
+            existing-meta or(att.meta, {})
+            ::att-mod/Attachment({
+                name: att.name,
+                type: att.type,
+                size: ref.size,
+                content-text: att.content-text,
+                content-base64: null,
+                content-url: att.content-url,
+                meta: assoc(existing-meta, "blob-ref", ref),
+            })
+        }
+    }
+}

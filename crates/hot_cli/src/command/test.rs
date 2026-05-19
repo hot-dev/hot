@@ -10,7 +10,8 @@ use tracing::{info, warn};
 
 use crate::Env;
 use crate::cli::GlobalOptions;
-use crate::command::api::{run_api_with_stream_pubsub, run_app};
+use crate::command::api::run_api_with_stream_pubsub;
+use crate::command::app::run_app;
 use crate::command::deploy::setup_live_build_for_dev;
 use crate::command::scheduler::run_scheduler;
 use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub};

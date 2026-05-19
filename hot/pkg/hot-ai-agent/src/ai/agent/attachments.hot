@@ -1,0 +1,323 @@
+::ai::agent::attachments ns
+meta {
+    doc: """
+    Normalized attachment shape and helpers for chat-style agents.
+
+    Today, transports surface attachments as ad-hoc maps: Telegram
+    sends a `file_id`, Slack sends a `file` object, Hot Chat sends a
+    base64 `content` blob in the webhook body. This module gives
+    agents a single shape and a small toolkit:
+
+    - **`Attachment`** — `{name, type, size, content-base64?,
+       content-text?, content-url?, meta?}`. At least one of the three
+       content fields should be set.
+    - **`from-body`** — coerce a raw `body.attachments` array into
+      `Vec<Attachment>`, dropping malformed entries.
+    - **`extract-text`** — return UTF-8 text for any attachment whose
+      `content-text` is set or whose mime is in
+      `text-extractable-types`. Decodes base64 only when the type is
+      known to be text. Truncates at `max-bytes` to bound prompt size.
+    - **`summarize`** — Markdown bullet list, one line per attachment,
+      for memory storage and quick prompt context.
+    - **`weave-into-prompt`** — prepend extracted text from each
+      attachment onto a user message, tagged so the model can see
+      file boundaries and names.
+
+    The goal is parity across Slack, Telegram, and the Hot Chat web
+    client without leaking transport details into agent code.
+    """
+}
+
+::base64 ::hot::base64
+
+DEFAULT_MAX_BYTES_PER_FILE 65536
+DEFAULT_MAX_BYTES_TOTAL    262144
+
+text-extractable-types
+meta {
+    doc: """
+    Mime types whose body is safe to decode as UTF-8 and inline into
+    the model prompt. Add to this list cautiously — anything matching
+    flows straight into model context and consumes tokens.
+    """
+}
+[
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "text/x-log",
+    "text/yaml",
+    "text/x-yaml",
+    "application/yaml",
+    "application/x-yaml",
+    "text/xml",
+    "application/xml",
+    "application/json",
+    "application/x-ndjson",
+    "application/x-sh",
+    "application/javascript",
+    "text/x-python",
+    "text/x-rust",
+    "text/x-go",
+]
+
+is-text-type
+meta {
+    doc: "Return true when `mime` is in `text-extractable-types`. Case-insensitive, ignores any `;charset=…` suffix."
+}
+fn (mime: Str?): Bool {
+    cond {
+        is-null(mime) => { false }
+        => {
+            normalized lowercase(or(first(split(mime, ";")), mime))
+            trimmed trim(normalized)
+            not(is-null(find-first(text-extractable-types, (t) { eq(t, trimmed) })))
+        }
+    }
+}
+
+Attachment
+meta {
+    doc: """
+    Normalized attachment record. Transports populate at least one of
+    `content-text`, `content-base64`, or `content-url`.
+
+    - `name` — display filename. Falls back to `"file"` when missing.
+    - `type` — best-effort mime type. Falls back to
+      `"application/octet-stream"`.
+    - `size` — byte count when reported by the transport, else `0`.
+    - `content-text` — UTF-8 text payload (already decoded).
+    - `content-base64` — raw bytes, base64-encoded. Used by Hot Chat,
+      Telegram fetched files, Slack file downloads.
+    - `content-url` — addressable URL. Used when a transport delivers
+      a link (Slack `permalink_public`, S3 pre-signed URL, etc.).
+    - `meta` — open map for transport-specific fields the agent might
+      want to read (Slack `file_id`, Telegram `file_unique_id`, etc.).
+    """
+}
+type {
+    name: Str,
+    type: Str,
+    size: Int,
+    content-text: Str?,
+    content-base64: Str?,
+    content-url: Str?,
+    meta: Map?,
+}
+
+from-map
+meta {
+    doc: """
+    Coerce one raw map into an `Attachment`. Accepts both kebab-case
+    (`content-text`) and snake_case (`content_text`) keys, mirroring
+    the JSON conventions Hot Chat and most webhooks use. Returns
+    `null` when the input is not a map.
+    """
+}
+fn (raw: Any): Attachment? {
+    cond {
+        not(is-map(raw)) => { null }
+        => {
+            Attachment({
+                name: Str(or(get(raw, "name"), get(raw, "filename"), "file")),
+                type: Str(or(get(raw, "type"), get(raw, "mime"), get(raw, "content_type"), "application/octet-stream")),
+                size: Int(or(get(raw, "size"), get(raw, "bytes"), 0)),
+                content-text: get-text-content(raw),
+                content-base64: or(get(raw, "content-base64"), get(raw, "content_base64"), get(raw, "base64")),
+                content-url: or(get(raw, "content-url"), get(raw, "content_url"), get(raw, "url")),
+                meta: get(raw, "meta"),
+            })
+        }
+    }
+}
+
+get-text-content
+meta {
+    doc: "Internal: dig out an explicit text payload from raw, supporting kebab- and snake-case."
+}
+fn (raw: Map): Str? {
+    or(get(raw, "content-text"), get(raw, "content_text"), get(raw, "text"))
+}
+
+from-body
+meta {
+    doc: """
+    Coerce a webhook body's `attachments` field (or the body itself,
+    when it's already a list) into a `Vec<Attachment>`. Drops
+    malformed entries silently so a single bad attachment never sinks
+    a request.
+    """
+}
+fn (body: Any): Vec<Attachment> {
+    raw cond {
+        is-vec(body) => { body }
+        is-map(body) => { or(get(body, "attachments"), []) }
+        => { [] }
+    }
+
+    list if(is-vec(raw), raw, [])
+    coerced map(list, from-map)
+    filter(coerced, (a) { not(is-null(a)) })
+}
+
+decoded-text
+meta {
+    doc: """
+    Return decoded text for an attachment, or `null` when nothing is
+    extractable. Caps decoded length at `max-bytes` to bound prompt
+    cost.
+    """
+}
+fn (att: Attachment, max-bytes: Int): Str? {
+    cond {
+        not(is-null(att.content-text)) => { truncate-text(att.content-text, max-bytes) }
+        and(is-text-type(att.type), not(is-null(att.content-base64))) => {
+            cond {
+                not(::base64/is-valid(att.content-base64)) => { null }
+                => {
+                    decoded Str(::base64/decode(att.content-base64))
+                    truncate-text(decoded, max-bytes)
+                }
+            }
+        }
+        => { null }
+    }
+}
+
+truncate-text
+meta {
+    doc: "Internal: hard-truncate `text` to `max-bytes` characters. Appends an ellipsis marker when the cap was hit."
+}
+fn (text: Str, max-bytes: Int): Str {
+    cond {
+        lte(length(text), max-bytes) => { text }
+        => { concat(slice(text, 0, max-bytes), "\n…[truncated]") }
+    }
+}
+
+extract-text
+meta {
+    doc: """
+    Return decoded text for a single attachment. Convenience wrapper
+    over `decoded-text` using `DEFAULT_MAX_BYTES_PER_FILE`.
+    """
+}
+fn
+(att: Attachment): Str? { decoded-text(att, DEFAULT_MAX_BYTES_PER_FILE) },
+(att: Attachment, max-bytes: Int): Str? { decoded-text(att, max-bytes) }
+
+summarize
+meta {
+    doc: """
+    Markdown bullet list, one entry per attachment, suitable for
+    memory storage and lightweight prompt context. Returns the empty
+    string when there are no attachments.
+    """
+}
+fn (atts: Vec<Attachment>): Str {
+    cond {
+        is-empty(atts) => { "" }
+        => {
+            lines map(atts, (a) {
+                `- ${a.name} (${a.type}, ${a.size}B)`
+            })
+            concat("\nAttachments:\n", join(lines, "\n"))
+        }
+    }
+}
+
+weave-into-prompt
+meta {
+    doc: """
+    Combine a base prompt with extracted text from each attachment.
+    Returns a single string the agent can pass as `Message.content`.
+
+    Each attachment that yields text becomes a tagged block:
+
+    ```
+    <attachment name="notes.md" type="text/markdown">
+    # Project notes
+    ...
+    </attachment>
+    ```
+
+    Attachments without extractable text are listed but not inlined,
+    so the model can ask for them by name or address them via tool
+    calls.
+
+    `total-cap` bounds the combined byte budget across all
+    attachments; once exhausted, remaining attachments are listed
+    by name only.
+    """
+}
+fn
+(prompt: Str, atts: Vec<Attachment>): Str {
+    weave-into-prompt(prompt, atts, DEFAULT_MAX_BYTES_TOTAL)
+},
+(prompt: Str, atts: Vec<Attachment>, total-cap: Int): Str {
+    cond {
+        is-empty(atts) => { prompt }
+        => {
+            folded reduce(atts, weave-folder(total-cap), {used: 0, blocks: [], skipped: []})
+            blocks-text join(folded.blocks, "\n\n")
+            skipped-line cond {
+                is-empty(folded.skipped) => { "" }
+                => { concat("\nReferenced (not inlined): ", join(folded.skipped, ", ")) }
+            }
+
+            concat(prompt, "\n\n", blocks-text, skipped-line)
+        }
+    }
+}
+
+weave-folder
+meta {
+    doc: "Internal: builds the reducer used by weave-into-prompt to honor a total byte cap."
+}
+fn (total-cap: Int): Fn {
+    (acc, att) {
+        remaining sub(total-cap, acc.used)
+        cond {
+            lte(remaining, 0) => {
+                {
+                    used: acc.used,
+                    blocks: acc.blocks,
+                    skipped: concat(acc.skipped, [att.name]),
+                }
+            }
+            => {
+                budget min(DEFAULT_MAX_BYTES_PER_FILE, remaining)
+                text decoded-text(att, budget)
+                cond {
+                    is-null(text) => {
+                        {
+                            used: acc.used,
+                            blocks: acc.blocks,
+                            skipped: concat(acc.skipped, [att.name]),
+                        }
+                    }
+                    => {
+                        safe-name escape-attr(att.name)
+                        safe-type escape-attr(att.type)
+                        block `<attachment name="${safe-name}" type="${safe-type}">\n${text}\n</attachment>`
+                        {
+                            used: add(acc.used, length(text)),
+                            blocks: concat(acc.blocks, [block]),
+                            skipped: acc.skipped,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+escape-attr
+meta { doc: "Internal: escape a value for use in pseudo-XML attachment attributes." }
+fn (value: Str?): Str {
+    or(value, "")
+        |> replace("&", "&amp;")
+        |> replace("\"", "&quot;")
+        |> replace("<", "&lt;")
+        |> replace(">", "&gt;")
+}

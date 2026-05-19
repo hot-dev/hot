@@ -1,0 +1,159 @@
+::ai::agent::test::notify ns
+meta ["test"]
+
+::notify ::ai::agent::notify
+::rt     ::ai::agent::runtime
+
+build-rt fn (): ::rt/AgentRuntime {
+    ::rt/create-runtime(`notify-test:${Uuid()}`)
+}
+
+test-record-and-list-notifications
+meta ["test"]
+fn () {
+    r build-rt()
+    ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "daily-recap",
+        body: "your day at a glance",
+    })
+    ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "stale-task",
+        body: "haircut still open",
+    })
+    ::notify/record-notification(r, {
+        recipient-id: "u2",
+        kind: "daily-recap",
+        body: "another user",
+    })
+    u1 ::notify/list-notifications(r, "u1", null)
+    u2 ::notify/list-notifications(r, "u2", null)
+    assert-eq(2, length(u1))
+    assert-eq(1, length(u2))
+}
+
+test-list-unread-only-filters-read-records
+meta ["test"]
+fn () {
+    r build-rt()
+    a ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "x",
+        body: "a",
+    })
+    ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "x",
+        body: "b",
+    })
+    ::notify/mark-read(r, "u1", a.id)
+    unread ::notify/list-notifications(r, "u1", {unread-only: true})
+    assert-eq(1, length(unread))
+    assert-eq("b", first(unread).body)
+}
+
+test-list-kind-filter
+meta ["test"]
+fn () {
+    r build-rt()
+    ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "alpha",
+        body: "a",
+    })
+    ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "beta",
+        body: "b",
+    })
+    alpha ::notify/list-notifications(r, "u1", {kind: "alpha"})
+    assert-eq(1, length(alpha))
+    assert-eq("alpha", first(alpha).kind)
+}
+
+test-unread-count
+meta ["test"]
+fn () {
+    r build-rt()
+    assert-eq(0, ::notify/unread-count(r, "u1"))
+    ::notify/record-notification(r, {recipient-id: "u1", kind: "k", body: "1"})
+    ::notify/record-notification(r, {recipient-id: "u1", kind: "k", body: "2"})
+    assert-eq(2, ::notify/unread-count(r, "u1"))
+    ::notify/mark-all-read(r, "u1")
+    assert-eq(0, ::notify/unread-count(r, "u1"))
+}
+
+test-mark-read-returns-null-for-unknown-id
+meta ["test"]
+fn () {
+    r build-rt()
+    ::notify/record-notification(r, {recipient-id: "u1", kind: "k", body: "real"})
+    out ::notify/mark-read(r, "u1", "no-such-id")
+    assert(is-null(out))
+}
+
+test-mark-read-does-not-cross-recipients
+meta ["test"]
+fn () {
+    r build-rt()
+    a ::notify/record-notification(r, {recipient-id: "u1", kind: "k", body: "a"})
+    // Same id, wrong recipient → no-op.
+    out ::notify/mark-read(r, "u2", a.id)
+    assert(is-null(out))
+    // Original is still unread.
+    assert-eq(1, ::notify/unread-count(r, "u1"))
+}
+
+test-forget-notification-deletes-record
+meta ["test"]
+fn () {
+    r build-rt()
+    a ::notify/record-notification(r, {recipient-id: "u1", kind: "k", body: "x"})
+    assert-eq(1, length(::notify/list-notifications(r, "u1", null)))
+    removed ::notify/forget-notification(r, "u1", a.id)
+    assert(removed)
+    assert-eq(0, length(::notify/list-notifications(r, "u1", null)))
+}
+
+test-render-inbox-empty
+meta ["test"]
+fn () {
+    out ::notify/render-inbox([])
+    assert-eq("No notifications.", out)
+}
+
+test-render-inbox-marks-unread
+meta ["test"]
+fn () {
+    r build-rt()
+    ::notify/record-notification(r, {
+        recipient-id: "u1",
+        kind: "daily-recap",
+        body: "morning",
+    })
+    notifs ::notify/list-notifications(r, "u1", null)
+    out ::notify/render-inbox(notifs)
+    assert(contains(out, "daily-recap"))
+    assert(contains(out, "morning"))
+    // Unread → bullet marker is present.
+    assert(contains(out, "•"))
+}
+
+test-list-limit-takes-tail
+meta ["test"]
+fn () {
+    r build-rt()
+    map([1, 2, 3, 4, 5], (i) {
+        ::notify/record-notification(r, {
+            recipient-id: "u1",
+            kind: "k",
+            body: `body-${i}`,
+        })
+    })
+    limited ::notify/list-notifications(r, "u1", {limit: 2})
+    assert-eq(2, length(limited))
+    // Tail = newest two.
+    assert-eq("body-4", first(limited).body)
+    assert-eq("body-5", last(limited).body)
+}

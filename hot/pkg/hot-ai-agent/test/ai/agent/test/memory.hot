@@ -1,0 +1,46 @@
+::ai::agent::test::memory ns
+meta ["test"]
+
+::agent-memory ::ai::agent::memory
+::mem ::ai::memory
+
+test-common-memory-commands
+meta ["test"]
+fn () {
+    commands ::agent-memory/common-memory-commands()
+    names map(commands, (c) { c.name })
+    assert(in("memory", names))
+    assert(in("forget", names))
+    assert(in("export", names))
+    assert(in("compact", names))
+    assert(in("why", names))
+}
+
+test-parse-forget-request
+meta ["test"]
+fn () {
+    req ::agent-memory/parse-forget-request("source msg-123")
+    assert-eq("source", req.scope)
+    assert-eq("msg-123", req.selector)
+}
+
+test-inspect-export
+meta ["test"]
+fn () {
+    bundle ::mem/MemoryExport({
+        agent-name: "test",
+        session: [],
+        user: [],
+        kb: [],
+        thread: [],
+        metadata: {},
+    })
+    inspection ::agent-memory/inspect-export(bundle, {
+        capsule-count: 2,
+        graph-node-count: 3,
+        graph-edge-count: 4,
+    })
+    assert-eq(2, inspection.capsule-count)
+    assert-eq(3, inspection.graph-node-count)
+    assert(contains(::agent-memory/render-inspection(inspection), "Graph nodes: 3"))
+}

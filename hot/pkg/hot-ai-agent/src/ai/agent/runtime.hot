@@ -1,0 +1,119 @@
+::ai::agent::runtime ns
+meta {
+    doc: """
+    Runtime helpers shared by long-lived AI agents: scoped stores,
+    registered sessions, simple counters, and rolling error logs.
+    """
+}
+
+::store   ::hot::store
+::time    ::hot::time
+::session ::ai::session
+
+Session ::session/Session
+
+AgentRuntime
+meta {
+    doc: """
+    Per-agent runtime stores and configuration.
+
+    Four stores are kept distinct so unrelated read paths never collide:
+    `state-store` for arbitrary state (incl. registered sessions),
+    `stats-store` for counters, `errors-store` for the rolling error
+    log, and `notify-store` for the agent notification ledger used by
+    `::ai::agent::notify`.
+    """
+}
+type {
+    agent-name: Str,
+    state-store: ::hot::store/Map,
+    stats-store: ::hot::store/Map,
+    errors-store: ::hot::store/Map,
+    notify-store: ::hot::store/Map,
+    max-errors: Int,
+}
+
+REGISTERED_SESSIONS_KEY "registered-sessions"
+
+create-runtime
+meta { doc: "Create standard state/stats/errors stores for an agent name." }
+fn
+(agent-name: Str): AgentRuntime {
+    create-runtime(agent-name, {})
+},
+(agent-name: Str, opts: Map?): AgentRuntime {
+    data or(opts, {})
+    prefix get(data, "store-prefix", agent-name)
+    AgentRuntime({
+        agent-name: agent-name,
+        state-store:  ::hot::store/Map({name: `agent:${prefix}:state`}),
+        stats-store:  ::hot::store/Map({name: `agent:${prefix}:stats`}),
+        errors-store: ::hot::store/Map({name: `agent:${prefix}:errors`}),
+        notify-store: ::hot::store/Map({name: `agent:${prefix}:notify`}),
+        max-errors:   get(data, "max-errors", 5),
+    })
+}
+
+now-epoch-secs
+meta { doc: "Current Unix epoch seconds." }
+fn (): Int {
+    div(::time/epoch-millis(::time/now()), 1000)
+}
+
+today-bucket
+meta {
+    doc: "Day number since Unix epoch, useful for naturally sortable daily counters."
+}
+fn (): Int {
+    floor(div(now-epoch-secs(), 86400))
+}
+
+bump-counter
+meta { doc: "Increment a numeric counter in a store and return the new value." }
+fn (store: ::hot::store/Map, key: Str, delta: Int): Int {
+    current or(::store/get(store, key), 0)
+    next add(current, delta)
+    ::store/put(store, key, next)
+    next
+}
+
+register-session
+meta { doc: "Add a session to the runtime's registered-session index. Idempotent." }
+fn (rt: AgentRuntime, session: Session): Vec {
+    current or(::store/get(rt.state-store, REGISTERED_SESSIONS_KEY), [])
+    serialized {id: session.id, meta: session.meta}
+    cond {
+        some(current, (s) { eq(s.id, session.id) }) => { current }
+        => {
+            next concat(current, [serialized])
+            ::store/put(rt.state-store, REGISTERED_SESSIONS_KEY, next)
+            next
+        }
+    }
+}
+
+list-registered-sessions
+meta { doc: "Materialize registered sessions from the runtime state store." }
+fn (rt: AgentRuntime): Vec<Session> {
+    raw or(::store/get(rt.state-store, REGISTERED_SESSIONS_KEY), [])
+    map(raw, (s) { ::session/Session({id: s.id, meta: s.meta}) })
+}
+
+record-error
+meta { doc: "Append a rolling error entry to the runtime error store." }
+fn (rt: AgentRuntime, where: Str, msg: Str): Any {
+    ts now-epoch-secs()
+    ::store/put(rt.errors-store, `${ts}:${where}`, {
+        where: where,
+        msg: msg,
+        ts: ts,
+    })
+    all ::store/list(rt.errors-store)
+    cond {
+        gt(length(all), rt.max-errors) => {
+            to-trim slice(all, 0, sub(length(all), rt.max-errors))
+            map(to-trim, (e) { ::store/delete(rt.errors-store, e.key) })
+        }
+        => { all }
+    }
+}

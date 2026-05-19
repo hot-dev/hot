@@ -9,7 +9,7 @@ Provider-specific code (Anthropic, OpenAI, xAI, Gemini) stays in the user's proj
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/hot-ai": "1.3.0"
+"hot.dev/hot-ai": "1.4.0"
 ```
 
 ## Namespaces
@@ -194,7 +194,7 @@ The package ships with 54 unit tests covering session, message, chat, memory (pu
 hot test --project pkg-test-hot-ai
 ```
 
-Memory and RAG paths that touch persistent stores are exercised by running the demo agent (see `hot/src/telegram-agent`) rather than by unit tests.
+Memory and RAG paths that touch persistent stores are exercised by running the demo agent (see `hot/src/team-agent`) rather than by unit tests.
 
 ## License
 

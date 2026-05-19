@@ -1,0 +1,256 @@
+::ai::agent::callbacks ns
+meta {
+    doc: """
+    Outbound callback support for queued / asynchronous agent replies.
+
+    The standard agent webhook contract has three reply modes:
+
+    1. **`response`** — the agent computed an answer synchronously and
+       returns it in the HTTP response.
+    2. **`queued`** — the agent kicked off async work (memory recall,
+       LLM call) and returns a placeholder. The transport client is
+       expected to listen on the Hot run stream for the eventual
+       answer, or...
+    3. **`callback`** — same as `queued`, but the agent commits to
+       POSTing the final answer to a `callback_url` provided by the
+       caller. This is the right shape for Slack / Telegram / Discord
+       integrations that don't speak Hot's run stream natively.
+
+    This module is the agent-side helper for mode 3.
+
+    Surface
+
+    - `CallbackOptions` — `{url, signing-secret-env?, signing-header?,
+       timeout-ms?, headers?}`.
+    - `post-callback(payload, opts)` — POST `payload` (JSON-encoded)
+       to an HTTPS `opts.url`, attaching an HMAC signature header when
+       a signing secret is configured. Returns
+       `{ok, status, error?, attempt-ms}`.
+    - `from-body(body)` — extract a `CallbackOptions` from the
+       webhook body's `callback_url` / `callback_secret_env` fields,
+       returning `null` when no callback was requested.
+
+    Transports that want callback parity should:
+
+    1. Pull a `CallbackOptions` from the inbound body via `from-body`.
+    2. Reply synchronously with `mode: "queued"` and `callback: true`.
+    3. Once the async work finishes, call `post-callback(answer, opts)`.
+    """
+}
+
+::http ::hot::http
+::hmac ::hot::hmac
+::env  ::hot::env
+::json ::hot::json
+::time ::hot::time
+
+CallbackOptions
+meta {
+    doc: """
+    Configuration for a callback POST.
+
+    - `url` — destination URL.
+    - `signing-secret-env` — env var holding the HMAC secret used to
+      sign the JSON body.
+    - `signing-secret` — literal secret (rare; prefer env).
+    - `signing-header` — header name for the signature. Defaults to
+      `x-hot-signature`. The value is `"sha256=<hex>"`.
+    - `headers` — extra headers to send.
+    - `timeout-ms` — reserved (HTTP timeout — currently advisory).
+    """
+}
+type {
+    url: Str,
+    signing-secret-env: Str?,
+    signing-secret: Str?,
+    signing-header: Str?,
+    headers: Map?,
+    timeout-ms: Int?,
+}
+
+CallbackResult
+meta {
+    doc: """
+    Outcome of a callback POST.
+
+    - `ok` — true when the upstream returned a 2xx status.
+    - `status` — HTTP status code (or `0` when the call never reached
+      the server).
+    - `error` — human-readable error string on failure.
+    - `attempt-ms` — wall-clock time spent on the attempt.
+    """
+}
+type {
+    ok: Bool,
+    status: Int,
+    error: Str?,
+    attempt-ms: Int,
+}
+
+resolve-secret
+meta {
+    doc: "Internal: resolve a literal-or-env signing secret. Returns `null` when neither is set."
+}
+fn (literal: Str?, env-name: Str?): Str? {
+    cond {
+        not(is-null(literal)) => { literal }
+        not(is-null(env-name)) => {
+            v ::env/get(env-name, null)
+            if(is-empty(or(v, "")), null, v)
+        }
+        => { null }
+    }
+}
+
+build-headers
+meta {
+    doc: "Internal: assemble the headers dictionary for a callback POST. Adds the signature header when a secret is configured."
+}
+fn (body-text: Str, opts: CallbackOptions): Map {
+    base or(opts.headers, {})
+    with-content-type assoc(base, "content-type", "application/json")
+    secret resolve-secret(opts.signing-secret, opts.signing-secret-env)
+    cond {
+        is-null(secret) => { with-content-type }
+        => {
+            sig ::hmac/hmac-sha256(secret, body-text)
+            header-name lowercase(or(opts.signing-header, "x-hot-signature"))
+            assoc(with-content-type, header-name, `sha256=${sig}`)
+        }
+    }
+}
+
+is-url-allowed
+meta {
+    doc: """
+    Return true when a callback URL is safe for the shared helper to
+    call. The default policy is intentionally narrow: callbacks must be
+    HTTPS and must not target obvious local/private hosts, so untrusted
+    webhook bodies cannot direct the worker at internal services.
+    """
+}
+fn (url: Str?): Bool {
+    u lowercase(or(url, ""))
+    cond {
+        not(starts-with(u, "https://")) => { false }
+        => {
+            host callback-host(u)
+            not(is-private-callback-host(host))
+        }
+    }
+}
+
+callback-host
+meta {
+    doc: "Internal: best-effort host extraction for already-lowercased HTTPS callback URLs."
+}
+fn (url: Str): Str {
+    without-scheme slice(url, length("https://"))
+    authority first(split(without-scheme, "/"))
+    first(split(authority, ":"))
+}
+
+is-private-callback-host
+meta {
+    doc: "Internal: reject obvious localhost, link-local, and RFC1918 callback hosts."
+}
+fn (host: Str): Bool {
+    or(
+        is-empty(host),
+        eq(host, "localhost"),
+        starts-with(host, "127."),
+        starts-with(host, "10."),
+        starts-with(host, "192.168."),
+        starts-with(host, "172."),
+        starts-with(host, "169.254."),
+        starts-with(host, "[")
+    )
+}
+
+post-callback
+meta {
+    doc: """
+    POST `payload` to `opts.url` as JSON, optionally signing the body
+    with HMAC-SHA256. Returns a `CallbackResult` capturing status and
+    elapsed time so the agent can log / retry.
+
+    `payload` may be any value — it's wrapped through
+    `::hot::json/to-json` before transmission.
+    """
+}
+fn (payload: Any, opts: CallbackOptions): CallbackResult {
+    cond {
+        is-null(opts) => { CallbackResult({ok: false, status: 0, error: "no-callback-options", attempt-ms: 0}) }
+        is-empty(or(opts.url, "")) => { CallbackResult({ok: false, status: 0, error: "no-callback-url", attempt-ms: 0}) }
+        not(is-url-allowed(opts.url)) => { CallbackResult({ok: false, status: 0, error: "callback-url-not-allowed", attempt-ms: 0}) }
+        => {
+            body-text ::json/to-json(payload)
+            headers build-headers(body-text, opts)
+            started ::time/epoch-millis(::time/now())
+            attempt ::http/try-request(::http/HttpRequest({
+                method: "POST",
+                url: opts.url,
+                headers: headers,
+                body: body-text,
+            }))
+            elapsed sub(::time/epoch-millis(::time/now()), started)
+            cond {
+                is-err(attempt) => {
+                    CallbackResult({
+                        ok: false,
+                        status: 0,
+                        error: Str(attempt.$val),
+                        attempt-ms: elapsed,
+                    })
+                }
+                => {
+                    response attempt.$val
+                    status response.status
+                    success and(gte(status, 200), lt(status, 300))
+                    CallbackResult({
+                        ok: success,
+                        status: status,
+                        error: if(success, null, `upstream-${status}`),
+                        attempt-ms: elapsed,
+                    })
+                }
+            }
+        }
+    }
+}
+
+from-body
+meta {
+    doc: """
+    Build a `CallbackOptions` from a webhook body. Returns `null` when
+    the caller didn't supply a callback URL. Recognized keys (both
+    kebab-case and snake_case):
+
+    - `callback_url` / `callback-url`
+    - `callback_secret_env` / `callback-secret-env`
+    - `callback_signing_header` / `callback-signing-header`
+
+    Convenience for transports that accept `callback_url` in the
+    inbound payload directly. Non-HTTPS URLs are ignored; callers that
+    need local development callbacks should use streams or construct
+    their own stricter transport-local policy.
+    """
+}
+fn (body: Map?): Any {
+    raw or(body, {})
+    url or(get(raw, "callback_url"), get(raw, "callback-url"))
+    cond {
+        is-empty(or(url, "")) => { null }
+        not(is-url-allowed(url)) => { null }
+        => {
+            CallbackOptions({
+                url: url,
+                signing-secret-env: or(get(raw, "callback_secret_env"), get(raw, "callback-secret-env")),
+                signing-secret: null,
+                signing-header: or(get(raw, "callback_signing_header"), get(raw, "callback-signing-header")),
+                headers: get(raw, "callback_headers"),
+                timeout-ms: get(raw, "callback_timeout_ms"),
+            })
+        }
+    }
+}

@@ -63,12 +63,153 @@ MODEL_PREFIXES [
     {prefix: "gemini",  provider: Provider.Gemini},
 ]
 
+// FOLLOWUP: `provider-available?(opts: ChatOptions) -> Bool` and a
+// per-registration `available?-fn` that probes provider auth (`api-key`
+// in `::hot::ctx`, or any other provider-specific signal). This would
+// let `::ai::agent::chat-turn` (and other downstream callers) decide
+// "should I run the model or fall back to a deterministic stub?"
+// without hardcoding `::hot::ctx/get("anthropic.api.key")`. The
+// ChatTurn fallback-text path is the current workaround — see
+// `::ai::agent::chat-turn/TurnInput.fallback-text`.
+
+ProviderRegistration
+meta {
+    doc: """
+    Open-registry entry describing a chat-completion provider. First-party
+    providers (Anthropic, OpenAI, xAI, Gemini) populate the built-in
+    registry; third-party packages register their own via
+    `with-providers`.
+
+    Fields
+
+    - `variant` — the `Provider` enum variant (open enum, third parties
+      enroll via arrow: `MyProviderTag -> Provider.MyProviderTag`).
+    - `detect` — `(model: Str) -> Bool`. Returns true when this entry
+      should handle the given lowercased model name.
+    - `display-name` — human-readable label used in logs and `provider-name`.
+    - `chat-fn` — tools-aware chat function matching the
+      `(model, messages, system, tools) -> ChatReply` contract.
+    - `chat-stream-fn` — optional streaming variant.
+    - `embed-fn` — optional embeddings function for RAG.
+    - `meta` — open map for capability flags (`vision`, `audio`, `tool-choice`, etc.).
+    """
+}
+type {
+    variant: Provider,
+    detect: Any,
+    display-name: Str,
+    chat-fn: Any,
+    chat-stream-fn: Any,
+    embed-fn: Any,
+    meta: Map?,
+}
+
+prefix-detector
+meta {
+    doc: "Build a `detect` function that matches when the model starts with `prefix` (case-insensitive)."
+}
+fn (prefix: Str): Fn {
+    p lowercase(prefix)
+    (model) { starts-with(lowercase(model), p) }
+}
+
+builtin-providers
+meta {
+    doc: """
+    Built-in provider registry. Populated lazily so this namespace
+    doesn't pin a hard dependency on every provider package — entries
+    only carry `variant`, `detect`, and `display-name`. Concrete
+    `chat-fn` references live in user-facing setup code or in the
+    `with-provider-fns` helper below.
+    """
+}
+fn (): Vec<ProviderRegistration> {
+    [
+        ProviderRegistration({
+            variant: Provider.Anthropic,
+            detect: prefix-detector("claude"),
+            display-name: "Anthropic",
+            chat-fn: null,
+            chat-stream-fn: null,
+            embed-fn: null,
+            meta: null,
+        }),
+        ProviderRegistration({
+            variant: Provider.OpenAi,
+            detect: (m) {
+                lower lowercase(m)
+                or(starts-with(lower, "gpt"), or(starts-with(lower, "o1"), or(starts-with(lower, "o3"), starts-with(lower, "o4"))))
+            },
+            display-name: "OpenAI",
+            chat-fn: null,
+            chat-stream-fn: null,
+            embed-fn: null,
+            meta: null,
+        }),
+        ProviderRegistration({
+            variant: Provider.Xai,
+            detect: prefix-detector("grok"),
+            display-name: "xAI",
+            chat-fn: null,
+            chat-stream-fn: null,
+            embed-fn: null,
+            meta: null,
+        }),
+        ProviderRegistration({
+            variant: Provider.Gemini,
+            detect: prefix-detector("gemini"),
+            display-name: "Google Gemini",
+            chat-fn: null,
+            chat-stream-fn: null,
+            embed-fn: null,
+            meta: null,
+        }),
+    ]
+}
+
+with-providers
+meta {
+    doc: """
+    Compose a registry from the built-in entries plus `extras`. Later
+    entries take precedence over earlier ones when their `detect`
+    matches the same model — this lets a third-party adapter override
+    a built-in (e.g. routing all `gpt-*` calls through a self-hosted
+    proxy).
+
+    ```hot
+    REGISTRY ::ai::chat/with-providers([
+        ::ollama-chat/provider(),
+        ::mistral-chat/provider(),
+    ])
+    ```
+    """
+}
+fn (extras: Vec<ProviderRegistration>): Vec<ProviderRegistration> {
+    concat(builtin-providers(), or(extras, []))
+}
+
+detect-provider-from
+meta {
+    doc: """
+    Find the registry entry whose `detect` returns true for `model`.
+    Walks `registry` from the end first so user-supplied overrides win
+    over built-ins. Returns `null` when nothing matches.
+    """
+}
+fn (registry: Vec<ProviderRegistration>, model: Str): ProviderRegistration? {
+    name lowercase(model)
+    walk reverse(or(registry, []))
+    find-first(walk, (entry) { entry.detect(name) })
+}
+
 detect-provider
 meta {
     doc: """
-    Map a model name to its `Provider`. Matches on known prefixes
-    (`claude`, `gpt`, `o1`/`o3`/`o4`, `grok`, `gemini`). Returns `Err`
-    for unrecognized models.
+    Map a model name to its `Provider` variant. Walks
+    `builtin-providers()` first, then falls back to the legacy
+    `MODEL_PREFIXES` table for backward compatibility. Returns `Err`
+    for unrecognized models. Use `detect-provider-from` when you have
+    a custom registry.
 
     **Example**
 
@@ -80,8 +221,14 @@ meta {
 }
 fn (model: Str): Provider {
     name lowercase(model)
-    hit find-first(MODEL_PREFIXES, (entry) { starts-with(name, entry.prefix) })
-    if(is-null(hit), err(`Unknown model: ${model}`), hit.provider)
+    found detect-provider-from(builtin-providers(), name)
+    cond {
+        not(is-null(found)) => { found.variant }
+        => {
+            hit find-first(MODEL_PREFIXES, (entry) { starts-with(name, entry.prefix) })
+            if(is-null(hit), err(`Unknown model: ${model}`), hit.provider)
+        }
+    }
 }
 
 provider-name
@@ -101,9 +248,245 @@ fn match (provider: Provider): Str {
     _                  => { Str(provider) }
 }
 
+resolve-registration
+meta {
+    doc: """
+    Pick the `ProviderRegistration` whose `detect` matches `opts.model`,
+    using `opts.providers` first if set, otherwise the built-in
+    registry.
+
+    Returns the **whole registration value** rather than its `chat-fn`.
+    This is intentional — Hot reliably round-trips struct values across
+    function boundaries, but extracting a typed fn field and returning
+    it as a value does not preserve the fn ref. Call `reg.chat-fn(...)`
+    directly on the returned registration to dispatch.
+
+    ```hot
+    REGISTRY ::ai::chat/with-providers([::ollama-chat/provider()])
+    opts ::ai::chat/ChatOptions({model: "ollama/llama3", providers: REGISTRY})
+    reg ::ai::chat/resolve-registration(opts)
+    cond {
+        is-null(reg) => { fail(`No provider for ${opts.model}`) }
+        => { reg.chat-fn(opts.model, messages, opts.system, tools) }
+    }
+    ```
+    """
+}
+fn (opts: ChatOptions): Any {
+    extras or(opts.providers, [])
+    cond {
+        not(is-empty(extras)) => { detect-provider-from(extras, opts.model) }
+        => { detect-provider-from(builtin-providers(), opts.model) }
+    }
+}
+
+dispatch-chat
+meta {
+    doc: """
+    Dispatch a chat call using `opts`. Resolution order:
+
+    1. If `opts.chat-fn` is set, call it directly.
+    2. Otherwise resolve a `ProviderRegistration` via `opts.providers`
+       (or built-ins) and call `reg.chat-fn` if populated.
+    3. Otherwise `fail` with a clear message.
+
+    Use this helper in any code that wants to honor
+    `ChatOptions.providers` without bypassing `chat-fn`'s
+    explicit-override semantics.
+    """
+}
+fn (opts: ChatOptions, messages: Any, tools: Any): Any {
+    cond {
+        not(is-null(opts.chat-fn)) => {
+            opts.chat-fn(opts.model, messages, opts.system, tools)
+        }
+        => {
+            reg resolve-registration(opts)
+            cond {
+                is-null(reg) => {
+                    fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
+                }
+
+                is-null(reg.chat-fn) => {
+                    fail(`Provider '${reg.display-name}' has no chat-fn wired; pass an explicit chat-fn or supply a registration with chat-fn populated`)
+                }
+                => {
+                    reg.chat-fn(opts.model, messages, opts.system, tools)
+                }
+            }
+        }
+    }
+}
+
+dispatch-chat-stream
+meta {
+    doc: """
+    Streaming counterpart to `dispatch-chat`. Honors explicit
+    `opts.chat-stream-fn` first, then `opts.providers[*].chat-stream-fn`.
+    """
+}
+fn (opts: ChatOptions, messages: Any, tools: Any, on-delta: Fn): Any {
+    cond {
+        not(is-null(opts.chat-stream-fn)) => {
+            opts.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+        }
+        => {
+            reg resolve-registration(opts)
+            cond {
+                is-null(reg) => {
+                    fail(`No provider matched model '${opts.model}' in ChatOptions.providers or built-ins`)
+                }
+
+                is-null(reg.chat-stream-fn) => {
+                    fail(`Provider '${reg.display-name}' has no chat-stream-fn wired; pass an explicit chat-stream-fn or supply a registration with chat-stream-fn populated`)
+                }
+                => {
+                    reg.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Conversation types
 // ============================================================================
+
+MessagePart
+meta {
+    doc: """
+    One element of a multi-part message. Used by adapters and agent
+    code to pass mixed text + image + audio + file content into a
+    single `Message` turn without falling back to provider-specific
+    shapes.
+
+    Fields
+
+    - `kind` — `"text" | "image" | "audio" | "file" | "tool-result"`.
+    - `text` — UTF-8 string content. Set for `kind: "text"` and as a
+      caption fallback on other kinds.
+    - `mime` — best-effort media type (e.g. `"image/png"`,
+      `"audio/mp3"`).
+    - `data` — base64-encoded bytes when the part is inlined.
+    - `url` — addressable URL when the part is referenced rather than
+      inlined.
+    - `name` — display label (filename for files, alt text for
+      images).
+    - `meta` — open map for adapter-specific hints (Anthropic
+      `cache_control`, OpenAI `image.detail`, etc.).
+
+    Adapters that don't yet support multi-part input MUST flatten
+    parts via `flatten-parts(parts)` before sending — this collapses
+    text parts into a single string and discards everything else with
+    a placeholder note so the model sees something coherent.
+    """
+}
+type {
+    kind: Str,
+    text: Str?,
+    mime: Str?,
+    data: Str?,
+    url: Str?,
+    name: Str?,
+    meta: Map?,
+}
+
+text-part
+meta { doc: "Convenience: build a `MessagePart({kind: \"text\", text: …})`." }
+fn (text: Str): MessagePart {
+    MessagePart({
+        kind: "text",
+        text: text,
+        mime: null,
+        data: null,
+        url: null,
+        name: null,
+        meta: null,
+    })
+}
+
+image-part
+meta {
+    doc: """
+    Convenience: build an image `MessagePart`. Either `data`
+    (base64) or `url` should be set; `mime` should describe the
+    encoding when `data` is set.
+    """
+}
+fn
+(url: Str): MessagePart {
+    MessagePart({
+        kind: "image",
+        text: null,
+        mime: null,
+        data: null,
+        url: url,
+        name: null,
+        meta: null,
+    })
+},
+(data: Str, mime: Str): MessagePart {
+    MessagePart({
+        kind: "image",
+        text: null,
+        mime: mime,
+        data: data,
+        url: null,
+        name: null,
+        meta: null,
+    })
+}
+
+flatten-parts
+meta {
+    doc: """
+    Collapse a `Vec<MessagePart>` into a single string for adapters
+    that don't yet support multi-part input. Text parts are
+    concatenated with `\\n\\n` separators; image/audio/file parts
+    become bracketed placeholders so the model knows something was
+    attached even when the bytes can't be sent.
+
+    Returns the empty string for empty input.
+    """
+}
+fn (parts: Vec<MessagePart>): Str {
+    cond {
+        is-null(parts) => { "" }
+        is-empty(parts) => { "" }
+        => {
+            rendered map(parts, render-part)
+            join(filter(rendered, (s) { not(is-empty(s)) }), "\n\n")
+        }
+    }
+}
+
+render-part
+meta { doc: "Internal: render a single `MessagePart` for `flatten-parts`." }
+fn (p: MessagePart): Str {
+    cond {
+        eq(p.kind, "text") => { or(p.text, "") }
+        eq(p.kind, "image") => {
+            label or(p.name, "image")
+            location or(p.url, if(is-null(p.data), "inline", "inline-data"))
+            `[image:${label} (${location})]`
+        }
+
+        eq(p.kind, "audio") => {
+            label or(p.name, "audio")
+            location or(p.url, "inline-data")
+            `[audio:${label} (${location})]`
+        }
+
+        eq(p.kind, "file") => {
+            label or(p.name, "file")
+            mime or(p.mime, "application/octet-stream")
+            `[file:${label} (${mime})]`
+        }
+
+        eq(p.kind, "tool-result") => { or(p.text, "[tool-result]") }
+        => { `[${p.kind}]` }
+    }
+}
 
 Message
 meta {
@@ -117,6 +500,13 @@ meta {
     - `content` — usually a `Str` (plain text). For `role: "tool"` it
       is the result returned by `::ai::tool/dispatch`. For
       `role: "assistant"` turns that called tools it may be empty.
+      When `parts` is set, adapters that support multi-part input
+      should prefer `parts` and treat `content` as a flattened
+      fallback.
+    - `parts` — optional multi-part body. Set this when the message
+      mixes text with images, audio, or files. Adapters that don't
+      support multi-part input call `flatten-parts(parts)` to get a
+      string equivalent.
     - `tool-calls` — present on `role: "assistant"` turns that
       requested tool use; carries the parsed `ToolCall` records.
     - `tool-call-id` — present on `role: "tool"` results, echoing
@@ -126,6 +516,15 @@ meta {
 
     ```hot
     user-msg Message({role: "user", content: "What's the weather in Paris?"})
+
+    multimodal Message({
+        role: "user",
+        content: "What's in this image?",
+        parts: [
+            text-part("What's in this image?"),
+            image-part(image-bytes, "image/png"),
+        ],
+    })
 
     assistant-call Message({
         role: "assistant",
@@ -144,8 +543,97 @@ meta {
 type {
     role: Str,
     content: Any,
+    parts: Vec<MessagePart>?,
     tool-calls: Vec<::ai::tool/ToolCall>?,
     tool-call-id: Str?
+}
+
+message-text
+meta {
+    doc: """
+    Extract the textual content of a `Message`, regardless of whether
+    it's stored in `content` or in `parts`. Adapters that haven't
+    moved to multi-part input use this to keep working with
+    multi-part-aware callers.
+    """
+}
+fn (msg: Message): Str {
+    cond {
+        not(is-null(msg.parts)) => { flatten-parts(msg.parts) }
+        is-str(msg.content) => { msg.content }
+        => { Str(or(msg.content, "")) }
+    }
+}
+
+ChatUsage
+meta {
+    doc: """
+    Provider-agnostic usage and cost shape. Returned alongside
+    `ChatReply.usage` by adapters that have populated it. Construct via
+    `make-usage(map)` to coerce a provider's native usage map (with
+    fields like `prompt_tokens`, `completion_tokens`) into the
+    normalized shape.
+
+    Fields
+
+    - `input-tokens` — tokens consumed by the prompt + tool definitions.
+    - `output-tokens` — tokens generated by the model.
+    - `total-tokens` — convenience sum (input + output).
+    - `cost-usd` — provider-reported cost in USD when available.
+    - `latency-ms` — wall-clock time the call took, when measured by
+      the adapter.
+    - `provider` — `display-name` of the provider that handled the call.
+    - `model` — concrete model name (e.g. `"claude-sonnet-4-5"`).
+    """
+}
+type {
+    input-tokens: Int?,
+    output-tokens: Int?,
+    total-tokens: Int?,
+    cost-usd: Dec?,
+    latency-ms: Int?,
+    provider: Str?,
+    model: Str?,
+}
+
+make-usage
+meta {
+    doc: """
+    Build a `ChatUsage` from a provider-native usage map. Accepts both
+    Anthropic-style (`input_tokens`/`output_tokens`) and OpenAI-style
+    (`prompt_tokens`/`completion_tokens`) keys; missing fields stay
+    `null`. `total-tokens` is computed when both input and output are
+    present.
+
+    ```hot
+    usage ::ai::chat/make-usage({
+        prompt_tokens: 120,
+        completion_tokens: 84,
+        latency_ms: 1280,
+    })
+    ```
+    """
+}
+fn (raw: Map?, provider-name: Str?, model: Str?): ChatUsage {
+    src or(raw, {})
+    input-tokens or(get(src, "input-tokens"), get(src, "input_tokens"), get(src, "prompt_tokens"), null)
+    output-tokens or(get(src, "output-tokens"), get(src, "output_tokens"), get(src, "completion_tokens"), null)
+    total-tokens cond {
+        and(not(is-null(input-tokens)), not(is-null(output-tokens))) => { add(input-tokens, output-tokens) }
+        => { or(get(src, "total-tokens"), get(src, "total_tokens"), null) }
+    }
+
+    cost-usd or(get(src, "cost-usd"), get(src, "cost_usd"), null)
+    latency-ms or(get(src, "latency-ms"), get(src, "latency_ms"), null)
+    ChatUsage({
+        input-tokens: input-tokens,
+        output-tokens: output-tokens,
+        total-tokens: total-tokens,
+        cost-usd: cost-usd,
+        latency-ms: latency-ms,
+        provider: provider-name,
+        model: model,
+    })
 }
 
 ChatReply
@@ -162,8 +650,10 @@ meta {
       requested tool use.
     - `stop-reason` — `"end_turn"`, `"tool_use"`, `"max_tokens"`,
       `"stop_sequence"`, or any other provider-specific reason.
-    - `usage` — token accounting `{input-tokens, output-tokens}` when
-      the provider reports it (Phase 1.5 populates this universally).
+    - `usage` — token accounting and cost. Adapters that have moved to
+      structured usage populate this with a `ChatUsage`; legacy
+      adapters still populate it with a raw `Map` and callers use
+      `make-usage` to coerce. Phase 1.5 will normalize on `ChatUsage`.
     - `raw` — the raw provider response for adapter use; opaque to
       `run-loop` callers.
     """
@@ -172,7 +662,7 @@ type {
     text: Str?,
     tool-calls: Vec<::ai::tool/ToolCall>?,
     stop-reason: Str,
-    usage: Map?,
+    usage: Any?,
     raw: Any?
 }
 
@@ -377,6 +867,13 @@ meta {
       precedence over `skills` and lets callers plug in store-backed,
       embedding-ranked, or otherwise dynamic skill discovery while
       reusing the run-loop's index + built-in-tools machinery.
+    - `skill-context` — per-turn map merged into every `apply_skill`
+      invocation's `ctx` argument before the skill's `body-fn` runs.
+      The harness's keys override anything the model passes for the
+      same key — useful for threading inbound `attachments`, sender
+      identity, transport, or session info into skill resolution
+      without trusting the model to populate them. Ignored by static
+      `body` skills (those are returned verbatim).
     - `max-iterations` — hard cap on `run-loop` turns (default 10).
     - `max-context-tokens`, `max-output-tokens`, `warn-context-pct` —
       reserved for Phase 1.5 token-budget enforcement; ignored today.
@@ -427,6 +924,8 @@ type {
     tools: Vec<::ai::tool/Tool>?,
     skills: Vec<Any>?,
     skill-resolver: ::ai::skill/SkillResolver?,
+    skill-context: Map?,
+    providers: Vec<ProviderRegistration>?,
     max-iterations: Int?,
     max-context-tokens: Int?,
     max-output-tokens: Int?,
@@ -563,7 +1062,7 @@ fn (opts: ChatOptions, messages: Vec<Message>): Str {
 
     tools cond {
         is-null(resolver) => { base-tools }
-        => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver)) }
+        => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver, opts.skill-context)) }
     }
 
     effective-system cond {
@@ -768,7 +1267,7 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
         max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
         iteration add(sub(max-iter, remaining), 1)
         check-budget(opts, messages, tools)
-        reply opts.chat-fn(opts.model, messages, opts.system, tools)
+        reply dispatch-chat(opts, messages, tools)
         calls or(reply.tool-calls, [])
         cond {
             is-empty(calls) => {
@@ -870,7 +1369,7 @@ fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
 
     tools cond {
         is-null(resolver) => { base-tools }
-        => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver)) }
+        => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver, opts.skill-context)) }
     }
 
     effective-system cond {
@@ -905,7 +1404,7 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
         max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
         iteration add(sub(max-iter, remaining), 1)
         check-budget(opts, messages, tools)
-        reply opts.chat-stream-fn(opts.model, messages, opts.system, tools, on-delta)
+        reply dispatch-chat-stream(opts, messages, tools, on-delta)
         calls or(reply.tool-calls, [])
         cond {
             is-empty(calls) => {

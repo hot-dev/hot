@@ -1,0 +1,155 @@
+::team-agent::web-adapter ns
+meta {
+    doc: """
+    Generic webhook/stream transport for custom TeamAgent clients.
+
+    A custom chat app can POST normalized messages to the TeamAgent
+    webhook, then receive replies either via a callback URL in the
+    session metadata or by subscribing to Hot stream events emitted by
+    this adapter.
+    """
+}
+
+::ctx       ::hot::ctx
+::http      ::hot::http
+::session   ::ai::session
+::transport ::team-agent::transport
+::agent     ::team-agent::agent
+::stream    ::ai::agent::stream
+
+Session      ::session/Session
+Identity     ::session/Identity
+HttpRequest  ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+session-from-id
+meta {
+    doc: """
+    Build a transport-stamped session for a custom chat app.
+    Session ids are namespaced as `web:${session-id}` unless already
+    prefixed by the caller.
+    """
+}
+fn (session-id: Str, meta: Map?): Session {
+    raw cond {
+        starts-with(session-id, "web:") => { session-id }
+        => { `web:${session-id}` }
+    }
+
+    ::transport/session-with-transport(
+        ::session/Session({id: raw, meta: or(meta, {})}),
+        "web",
+    )
+}
+
+identity-from-body
+meta { doc: "Convert a custom webhook body into an `Identity`." }
+fn (body: Map): Identity {
+    user or(body.user, {})
+    id or(body.user_id, user.id, "web-user")
+    name or(body.user_name, user.name, id)
+    ::session/Identity({
+        id: Str(id),
+        name: name,
+        meta: user,
+    })
+}
+
+to-incoming
+meta {
+    doc: """
+    Convert a custom chat webhook body to TeamAgent's normalized
+    `IncomingMessage`. Expected fields:
+
+    - `session_id` (required)
+    - `text`
+    - `user_id` / `user_name` or `user: {id, name}`
+    - optional `message_id`, `timestamp`, `callback_url`, `reply_mode`
+    """
+}
+fn (body: Map): ::transport/IncomingMessage {
+    session-id or(body.session_id, body.session, "default")
+    callback-url or(body.callback_url, get(or(body.session_meta, {}), "callback-url"))
+    reply-mode or(body.reply_mode, get(or(body.session_meta, {}), "reply-mode"), "stream")
+    meta {
+    callback-url: callback-url,
+    reply-mode: reply-mode,
+    client: or(body.client,
+    "web"),
+}
+
+    ::transport/IncomingMessage({
+        session: session-from-id(Str(session-id), meta),
+        sender: identity-from-body(body),
+        text: or(body.text, body.message, ""),
+        message-id: Str(or(body.message_id, Uuid())),
+        timestamp: Int(or(body.timestamp, ::agent/now-epoch-secs())),
+        voice: null,
+        raw: body,
+    })
+}
+
+reply-impl
+meta {
+    doc: """
+    Send a reply to a custom chat session. If the session carries
+    `callback-url`, POST the reply there; otherwise emit stream events
+    for a subscribed custom UI.
+    """
+}
+fn (session: Session, text: Str, reply-to: Str?): Any {
+    meta or(session.meta, {})
+    callback-url or(get(meta, "callback-url"), ::ctx/get("team-agent.web.callback-url", ""))
+    payload {
+        session_id: session.id,
+        text: text,
+        reply_to: reply-to,
+        transport: "web",
+    }
+
+    cond {
+        not(is-empty(callback-url)) => {
+            ::http/post(callback-url, payload)
+        }
+        => {
+            ::stream/emit-reply-start("team-agent", {session_id: session.id, reply_to: reply-to})
+            ::stream/emit-reply-delta("team-agent", {...payload, delta: text})
+            ::stream/emit-reply-end("team-agent", payload)
+            {
+                ok: true,
+                streamed: true,
+                session-id: session.id,
+            }
+        }
+    }
+}
+
+show-typing-impl
+meta { doc: "Emit a typing/progress event for custom clients." }
+fn (session: Session): Any {
+    ::stream/emit("team-agent:typing", {session_id: session.id})
+    {ok: true}
+}
+
+message-link
+meta {
+    doc: "Custom web clients can provide source URLs in message metadata; otherwise no deep link is available."
+}
+fn (session: Session, message-id: Any): Str {
+    ""
+}
+
+on-web-message
+meta {
+    doc: """
+    Pure callable webhook handler for custom chat apps. Agent assembly
+    owns the `meta {webhook: ...}` alias so this adapter can be reused
+    without duplicate route registrations.
+    """
+}
+fn (request: HttpRequest): HttpResponse {
+    body or(request.body, request.data, {})
+    im to-incoming(body)
+    ::agent/process-incoming(im)
+    ::hot::http/HttpResponse({status: 200, body: {ok: true, session_id: im.session.id}})
+}

@@ -1,0 +1,26 @@
+::ai::agent::test::runtime ns
+meta ["test"]
+
+::runtime ::ai::agent::runtime
+::session ::ai::session
+
+test-register-session-idempotent
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-${Uuid()}`)
+    s ::session/Session({id: "demo:1", meta: {transport: "demo"}})
+    ::runtime/register-session(rt, s)
+    ::runtime/register-session(rt, s)
+    sessions ::runtime/list-registered-sessions(rt)
+    assert-eq(1, length(sessions))
+    assert-eq("demo:1", first(sessions).id)
+}
+
+test-bump-counter
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-${Uuid()}`)
+    key "demo:counter"
+    assert-eq(1, ::runtime/bump-counter(rt.stats-store, key, 1))
+    assert-eq(3, ::runtime/bump-counter(rt.stats-store, key, 2))
+}

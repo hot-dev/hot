@@ -1,0 +1,350 @@
+::ai::agent::chat-turn ns
+meta {
+    doc: """
+    One-call wrapper around the "memory-grounded LLM reply" lifecycle.
+
+    Every memory-keyed chat agent we've written (PersonalAgent,
+    TeamAgent, …) reimplements the same five-step turn:
+
+    1. Build a memory-grounded system prompt (RAG over **prior** state).
+    2. Persist the new user turn to session memory.
+    3. Bind the per-request session/identity into ctx so tools recover
+       them safely.
+    4. Stream the LLM response token-by-token, forwarding `TextDelta`s
+       to the agent's reply stream so clients render live.
+    5. (Optionally) persist the assistant turn so the next call has it
+       as context.
+
+    Step ordering is load-bearing. A common bug — call it "RAG self
+    poisoning" — is doing step 2 *before* step 1, which makes the user's
+    fresh message land in their own retrieval results and convinces the
+    model that everything they say is already in memory.
+
+    `run-chat-turn` enforces the correct order. Concrete agents pass
+    config + per-turn input; the helper returns `{ok, text}` ready to be
+    used as the event-handler return value.
+
+    Offline / no-key handling
+    -------------------------
+    Callers can set `fallback-text` to short-circuit the LLM call and
+    emit a deterministic reply instead. Use this when probing for a
+    provider key and the probe came back empty (e.g.
+    `is-empty(::hot::ctx/get('anthropic.api.key', ''))`). The library
+    intentionally does not own the key probe — that's provider-specific
+    and likely to live in `::ai::chat/provider-available?` in a future
+    iteration.
+    """
+}
+
+::ctx     ::ai::agent::ctx
+::stream  ::ai::agent::stream
+::rt      ::ai::agent::runtime
+::att     ::ai::agent::attachments
+::memory  ::ai::memory
+::message ::ai::message
+::session ::ai::session
+::ai-chat ::ai::chat
+::rag     ::ai::rag
+
+Session      ::session/Session
+Identity     ::session/Identity
+AgentRuntime ::rt/AgentRuntime
+ChatOptions  ::ai-chat/ChatOptions
+ReplyDelta   ::ai-chat/ReplyDelta
+
+DEFAULT_RECALL_OPTS {limit: 5, min-score: 0.3}
+
+TurnConfig
+meta {
+    doc: """
+    Per-handler configuration: identity + memory scope + LLM transport.
+
+    Shared across every turn the handler serves. Build it once near the
+    top of the handler and reuse for each call.
+    """
+}
+type {
+    rt: AgentRuntime,
+    agent-name: Str,
+    stream-label: Str,
+    chat-opts: ChatOptions,
+    system-base: Str,
+}
+
+TurnInput
+meta {
+    doc: """
+    Per-turn input: who's talking, what they said, optional knobs.
+
+    - `session` / `sender` — resolved by the handler from the event.
+    - `text` — the user's message, raw.
+    - `attachments` — `Vec<Attachment>?`, summarized into the persisted
+      body and woven into the user prompt.
+    - `payload` — `{session_id?, message_id?}`, forwarded onto every
+      `reply:start|delta|end` event so the UI can correlate.
+    - `recall-opts` — passed to `::ai::rag/build-context-safe`. Defaults
+      to `{limit: 5, min-score: 0.3}`.
+    - `memory-heading` — heading text for the appended memory block.
+      Defaults to "## Memory".
+    - `persist-user` / `persist-assistant` — default true. Set to false
+      for dry runs or alternative storage strategies.
+    - `bind-tool-ctx` — default true. When set, calls
+      `::ai::agent::ctx/bind-request(session, sender, ctx-extras)` so
+      LLM tools registered at namespace top-level can recover the
+      caller via `current-session` / `current-sender`.
+    - `ctx-extras` — additional fields stored under `ai.agent.extras`.
+    - `user-source` / `user-metadata` — source field + metadata map for
+      the persisted user record. Default source is `cfg.agent-name`.
+    - `assistant-source` / `assistant-metadata` — same for the
+      assistant record.
+    - `fallback-text` — when non-null, the LLM is skipped and this
+      string is emitted as the final reply (and optionally persisted).
+      Use for offline fallbacks when no provider key is wired.
+    - `system-override` — when non-null, replaces the system prompt the
+      orchestrator would otherwise build from `cfg.system-base` + RAG.
+      Use for synthesis-style handlers (e.g. `/summary`, `/tasks`)
+      that hand the LLM a pre-baked prompt over a recency window
+      rather than memory-grounded free chat.
+    """
+}
+type {
+    session: Session,
+    sender: Identity,
+    text: Str,
+    attachments: Vec?,
+    payload: Map?,
+    recall-opts: Map?,
+    memory-heading: Str?,
+    persist-user: Bool?,
+    persist-assistant: Bool?,
+    bind-tool-ctx: Bool?,
+    ctx-extras: Map?,
+    user-source: Str?,
+    user-metadata: Map?,
+    assistant-source: Str?,
+    assistant-metadata: Map?,
+    fallback-text: Str?,
+    system-override: Str?,
+}
+
+now-secs fn (): Int {
+    ::rt/now-epoch-secs()
+}
+
+bool-default
+meta {
+    doc: """
+    Treat `null` as "unset" and return `fallback`; otherwise return
+    `value` as-is. Avoids `or(false, true)` returning `true` — `or`
+    treats `false` as falsy in Hot, so it's the wrong primitive for
+    boolean opts with `true` defaults.
+    """
+}
+fn (value: Bool?, fallback: Bool): Bool {
+    cond {
+        is-null(value) => { fallback }
+        => { value }
+    }
+}
+
+reply-payload
+meta {
+    doc: "Normalize `{session_id, message_id}` for stream emits."
+}
+fn (input: TurnInput): Map {
+    p or(input.payload, {})
+    {
+        session_id: Str(or(get(p, "session_id"), input.session.id, "")),
+        message_id: Str(or(get(p, "message_id"), "")),
+    }
+}
+
+user-body
+meta {
+    doc: "Compose the text we persist for a user turn (raw text + attachment summary)."
+}
+fn (input: TurnInput): Str {
+    atts or(input.attachments, [])
+    cond {
+        is-empty(atts) => { input.text }
+        => { concat(input.text, ::att/summarize(atts)) }
+    }
+}
+
+user-prompt
+meta {
+    doc: "Compose the user prompt sent to the LLM (raw text + attachment block)."
+}
+fn (input: TurnInput): Str {
+    atts or(input.attachments, [])
+    cond {
+        is-empty(atts) => { input.text }
+        => { concat(input.text, "\n\n", ::att/summarize(atts)) }
+    }
+}
+
+persist-user-turn
+meta {
+    doc: """
+    Persist a user turn into the session-keyed agent memory.
+
+    The record's metadata always carries `role: "user"`, even when the
+    caller supplies `user-metadata`. This keeps the role tag symmetric
+    with assistant records and lets synthesis handlers filter by role
+    via `::ai::rag/recent-text` (`include-roles` / `exclude-roles`).
+
+    Returns `null`. Errors during persistence are swallowed so a
+    transient store failure doesn't kill the reply.
+    """
+}
+fn (cfg: TurnConfig, input: TurnInput): Null {
+    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    p or(input.payload, {})
+    default-meta {
+        message_id: or(get(p, "message_id"), ""),
+        source_id:  or(get(p, "message_id"), ""),
+        attachment_count: length(or(input.attachments, [])),
+    }
+    base-meta or(input.user-metadata, default-meta)
+    msg ::message/Message({
+        id: Str(or(get(p, "message_id"), Uuid())),
+        content: user-body(input),
+        sender: input.sender,
+        session: input.session,
+        timestamp: Int(or(get(p, "timestamp"), now-secs())),
+        source: or(input.user-source, cfg.agent-name),
+        metadata: {...base-meta, role: "user"},
+    })
+    if-err(::memory/remember(mem, msg), null)
+    null
+}
+
+persist-assistant-turn
+meta {
+    doc: """
+    Persist an assistant turn so future RAG retrievals can see it.
+
+    The record's metadata always carries `role: "assistant"`. Skipped
+    silently when `text` is empty.
+    """
+}
+fn (cfg: TurnConfig, input: TurnInput, text: Str): Null {
+    cond {
+        is-empty(trim(or(text, ""))) => { null }
+        => {
+            mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+            base-meta or(input.assistant-metadata, {})
+            msg ::message/Message({
+                id: Str(Uuid()),
+                content: text,
+                sender: input.sender,
+                session: input.session,
+                timestamp: now-secs(),
+                source: or(input.assistant-source, cfg.agent-name),
+                metadata: {...base-meta, role: "assistant"},
+            })
+            if-err(::memory/remember(mem, msg), null)
+            null
+        }
+    }
+}
+
+build-system
+meta {
+    doc: """
+    Compose the system prompt for this turn.
+
+    Calls `::ai::rag/build-context-safe` against memory **as it stood
+    before** the current turn is persisted, then appends a heading +
+    context block to `cfg.system-base` via
+    `::ai::rag/with-memory-block`.
+    """
+}
+fn (cfg: TurnConfig, input: TurnInput): Str {
+    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    recall-opts or(input.recall-opts, DEFAULT_RECALL_OPTS)
+    context ::rag/build-context-safe(mem, input.text, recall-opts)
+    ::rag/with-memory-block(cfg.system-base, context, input.memory-heading)
+}
+
+stream-llm
+meta {
+    doc: """
+    Run the configured LLM with token-level streaming forwarded to the
+    agent reply stream. Internal helper — `run-chat-turn` orchestrates.
+    """
+}
+fn (cfg: TurnConfig, payload: Map, system: Str, prompt: Str): Str {
+    on-token fn (delta: ReplyDelta): Null {
+        match delta {
+            ReplyDelta.TextDelta => {
+                ::stream/emit-reply-delta(cfg.stream-label, {...payload, delta: delta.text})
+            }
+            _ => { null }
+        }
+    }
+
+    opts ChatOptions({...untype(cfg.chat-opts), system: system})
+    ::ai-chat/run-loop-stream(opts, prompt, on-token)
+}
+
+run-chat-turn
+meta {
+    doc: """
+    Execute one memory-grounded chat turn.
+
+    Enforces ordering:
+      1. Build the system prompt from prior memory (no self-poisoning).
+      2. Persist the user turn (default; opt out via `persist-user`).
+      3. Bind the per-request ctx for tools (default; opt out via
+         `bind-tool-ctx`).
+      4. Stream the LLM reply OR emit `fallback-text` if non-null.
+      5. Persist the assistant turn (default; opt out via
+         `persist-assistant`).
+
+    Returns `{ok: true, text: <final-text>}`. The handler can return
+    this directly.
+    """
+}
+fn (cfg: TurnConfig, input: TurnInput): Map {
+    ::rt/register-session(cfg.rt, input.session)
+
+    payload reply-payload(input)
+    ::stream/emit-reply-start(cfg.stream-label, payload)
+
+    // 1. System prompt: explicit override > RAG-grounded build.
+    system cond {
+        not(is-null(input.system-override)) => { input.system-override }
+        => { build-system(cfg, input) }
+    }
+
+    // 2. Persist the user turn (after RAG, before LLM).
+    if(bool-default(input.persist-user, true), {
+        persist-user-turn(cfg, input)
+    })
+
+    // 3. Bind per-request ctx so tools can recover the caller.
+    if(bool-default(input.bind-tool-ctx, true), {
+        ::ctx/bind-request(input.session, input.sender, input.ctx-extras)
+    })
+
+    // 4. LLM call (or fallback).
+    final-text cond {
+        not(is-null(input.fallback-text)) => {
+            ::stream/emit-reply-delta(cfg.stream-label, {...payload, delta: input.fallback-text})
+            input.fallback-text
+        }
+        => {
+            prompt user-prompt(input)
+            stream-llm(cfg, payload, system, prompt)
+        }
+    }
+
+    // 5. Persist the assistant turn.
+    if(bool-default(input.persist-assistant, true), {
+        persist-assistant-turn(cfg, input, final-text)
+    })
+
+    ::stream/emit-reply-end(cfg.stream-label, {...payload, text: final-text})
+    {ok: true, text: final-text}
+}

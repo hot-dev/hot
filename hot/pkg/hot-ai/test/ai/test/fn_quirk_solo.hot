@@ -1,0 +1,19 @@
+::ai::test::fn-quirk-solo ns
+meta ["test"]
+
+fixed-string fn (a: Any, b: Any): Str {
+    "called!"
+}
+
+Holder type {
+    label: Str,
+    body: Fn?,
+}
+
+test-extract-then-call
+meta ["test"] fn () {
+    h Holder({label: "x", body: fixed-string})
+    f h.body
+    out f(42, "hi")
+    assert-eq("called!", out, `f as Str = ${Str(f)}, out = ${Str(out)}`)
+}

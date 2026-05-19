@@ -1,0 +1,185 @@
+::team-agent::transport ns
+meta {
+    doc: """
+    Transport-agnostic surface for Team Agent. Defines the shapes
+    every front-end (Telegram, Slack, future Discord/Matrix/CLI) must
+    speak, and dispatches outbound replies by inspecting
+    `session.meta.transport`.
+
+    ## Rationale
+
+    The agent's handlers (`handle-ask`, `handle-summarize`, …) used to
+    take a Telegram-shaped `chat-id: Int` and reach for the Telegram
+    Bot API directly to send replies. Adding a second transport
+    without abstracting these would have meant copy/paste plus
+    transport-specific branches scattered through every handler.
+
+    By routing both inputs and outputs through `Transport` /
+    `IncomingMessage` / `reply` / `show-typing`:
+
+    - Handlers stay transport-blind. They take `Session` + `Identity`
+      and call `::transport/reply`. Whether the bytes end up at
+      Telegram or Slack is decided by `session.meta.transport`.
+    - Adding a transport is two new files (an adapter + a tone skill)
+      and one extra branch in this file's dispatch.
+
+    ## Flow
+
+    ```
+    incoming           ┌── handlers (handle-ask, handle-summarize, …)
+       ▲               ▼      │
+       │      ::transport/reply, ::transport/show-typing
+    [adapter]          │
+       │               ▼
+       └── outgoing ── [adapter]
+    ```
+    """
+}
+
+::ctx     ::hot::ctx
+::session ::ai::session
+::agent-transport ::ai::agent::transport
+::agent-render    ::ai::agent::render
+
+// Type aliases for fn signatures only. Use `::session/Session(...)` /
+// `::session/Identity(...)` for *constructor calls* — Hot can't yet
+// dispatch type-constructor calls through these aliases from inside
+// another function body. See `telegram_adapter.hot` for the full
+// rationale.
+Session  ::session/Session
+Identity ::session/Identity
+IncomingMessage ::agent-transport/IncomingMessage
+OutboundMessage ::agent-transport/OutboundMessage
+TransportCapabilities ::agent-transport/TransportCapabilities
+
+// ============================================================================
+// Transport tags + session metadata helpers
+// ============================================================================
+//
+// HISTORICAL NOTE: We originally modeled Transport as an `enum {Telegram,
+// Slack}`. Hot's runtime currently can't resolve enum-variant access
+// (`Transport.Telegram`) across file/namespace boundaries, even with a
+// local alias — `match … { Enum.Variant => … }` arms emit a "Variable
+// 'Enum' not found (unified lookup)" error. We tried module-level
+// `TRANSPORT_TELEGRAM "telegram"` constants instead, but lazy
+// top-level value bindings hit the same lookup bug both intra- and
+// inter-namespace. Until both bugs are fixed, transports are *string
+// literals* — `"telegram"` and `"slack"` — used inline. The literals
+// are duplicated across `transport.hot`, `telegram_adapter.hot`,
+// `slack_adapter.hot`, and `agent.hot`; grep before adding a new
+// transport.
+
+session-with-transport ::agent-transport/session-with-transport
+session-transport
+meta {
+    doc: """
+    Read the transport tag off a session, defaulting to `"telegram"`
+    when none was stamped (back-compat for sessions built before
+    transport stamping was introduced).
+    """
+}
+fn (session: Session): Str {
+    ::agent-transport/session-transport(session, "telegram")
+}
+
+transport-name ::agent-transport/transport-name
+
+// ============================================================================
+// Dry-run gate
+// ============================================================================
+
+is-dry-run
+meta {
+    doc: """
+    Honors `brain.dev.dry`. When true, `reply` and `show-typing`
+    short-circuit and print to stdout instead of calling the
+    transport. Used by the dev-driver smoke tests so contributors can
+    run the demo without touching real Telegram / Slack workspaces.
+    """
+}
+fn (): Bool {
+    val ::ctx/get("brain.dev.dry", false)
+    cond {
+        eq(val, true)   => { true }
+        eq(val, "true") => { true }
+        =>                 { false }
+    }
+}
+
+// ============================================================================
+// Outbound dispatch — match on session transport
+// ============================================================================
+
+reply
+meta {
+    doc: """
+    Send `text` to `session`, optionally threading off `reply-to`.
+    Returns whatever the underlying adapter returns (provider-specific
+    response object) or, in dry-run mode, a `{ok, dry, session-id, text}`
+    map for inspection.
+
+    Dispatches by `session.meta.transport`. Add a new branch here when
+    introducing a transport.
+    """
+}
+fn (session: Session, text: Str, reply-to: Str?): Any {
+    truncated ::agent-render/truncate-text(text, 4000, "\n\n<i>(truncated)</i>")
+    t session-transport(session)
+    cond {
+        is-dry-run() => {
+            println(`[dry-reply session=${session.id} reply-to=${or(reply-to, "")}]\n${truncated}\n---`)
+            {
+                ok: true,
+                dry: true,
+                session-id: session.id,
+                text: truncated,
+            }
+        }
+
+        eq(t, "telegram") => { ::team-agent::telegram-adapter/reply-impl(session, truncated, reply-to) }
+        eq(t, "slack")    => { ::team-agent::slack-adapter/reply-impl(session, truncated, reply-to) }
+        eq(t, "web")      => { ::team-agent::web-adapter/reply-impl(session, truncated, reply-to) }
+        => { fail(`unknown transport tag: ${t}`) }
+    }
+}
+
+show-typing
+meta {
+    doc: "Best-effort 'typing…' indicator. Silently no-ops when the transport doesn't support it or in dry-run."
+}
+fn (session: Session): Any {
+    t session-transport(session)
+    cond {
+        is-dry-run()      => { {ok: true, dry: true} }
+        eq(t, "telegram") => { ::team-agent::telegram-adapter/show-typing-impl(session) }
+        eq(t, "slack")    => { ::team-agent::slack-adapter/show-typing-impl(session) }
+        eq(t, "web")      => { ::team-agent::web-adapter/show-typing-impl(session) }
+        =>                   { {ok: true, no-op: true} }
+    }
+}
+
+format-source-link
+meta {
+    doc: """
+    Build a clickable deep-link to a source message in the transport's
+    native format, returning `""` when no link can be formed (e.g.
+    regular Telegram groups, or transports that lack stable per-message
+    URLs). Handlers use this to render `/ask` source citations.
+    """
+}
+fn (session: Session, message-id: Any): Str {
+    t session-transport(session)
+    cond {
+        is-null(message-id) => { "" }
+        eq(t, "telegram")   => { ::team-agent::telegram-adapter/message-link(session, message-id) }
+        eq(t, "slack")      => { ::team-agent::slack-adapter/message-link(session, message-id) }
+        eq(t, "web")        => { ::team-agent::web-adapter/message-link(session, message-id) }
+        =>                     { "" }
+    }
+}
+
+// ============================================================================
+// Helpers used by handlers and the brain-stats / brain-errors stores.
+// ============================================================================
+
+session-bucket ::agent-transport/session-bucket

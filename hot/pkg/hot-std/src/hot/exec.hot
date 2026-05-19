@@ -5,18 +5,20 @@ Failure
 meta {
     core: true,
     doc: """
-    Represents a failed execution. Created by `fail()`.
+    Represents a failed execution. Produced by `fail()` and surfaced as
+    a `run:fail` event.
 
-    Context-aware: produces `::hot::run/Failure` when called in a run,
+    Context-aware: `::hot::run/Failure` when called in a run,
     `::hot::task/Failure` when called in a task.
 
-    **Example**
+    Fields:
+    - `$msg` — short human-readable message.
+    - `$err` — structured details (whatever was passed as the second
+      `fail()` argument).
 
-    ```hot
-    f fail("Connection failed", {"host": "api.example.com"})
-    f.$msg   // "Connection failed"
-    f.$err   // {"host": "api.example.com"}
-    ```
+    `fail()` halts execution; user code does not bind a `Failure`
+    directly. Inspect it from a halt boundary like `::hot::lang/try-call`
+    or from the engine's `run:fail` event.
     """
 }
 type {
@@ -28,18 +30,20 @@ Cancellation
 meta {
     core: true,
     doc: """
-    Represents a cancelled execution. Created by `cancel()`.
+    Represents a cancelled execution. Produced by `cancel()` and surfaced
+    as a `run:cancel` event.
 
-    Context-aware: produces `::hot::run/Cancellation` when called in a run,
+    Context-aware: `::hot::run/Cancellation` when called in a run,
     `::hot::task/Cancellation` when called in a task.
 
-    **Example**
+    Fields:
+    - `$msg` — short human-readable message.
+    - `$data` — structured details (whatever was passed as the second
+      `cancel()` argument).
 
-    ```hot
-    c cancel("User cancelled", {"reason": "timeout"})
-    c.$msg    // "User cancelled"
-    c.$data   // {"reason": "timeout"}
-    ```
+    `cancel()` halts execution; user code does not bind a `Cancellation`
+    directly. Inspect it from a halt boundary like `::hot::lang/try-call`
+    or from the engine's `run:cancel` event.
     """
 }
 type {
@@ -51,18 +55,25 @@ fail
 meta {
     core: true,
     doc: """
-    Fail with `err` or `msg` and `err`. Halts execution immediately.
+    Halt execution with a `Failure`. The current run terminates, the
+    engine emits a `run:fail` event carrying the structured failure,
+    and any code after the call site is not executed.
 
     Context-aware: produces `::hot::run/Failure` in a run,
     `::hot::task/Failure` in a task.
 
+    Use `fail()` for unrecoverable conditions (programmer error,
+    missing configuration, exhausted budgets). For recoverable errors
+    that the caller is expected to handle, return `err(value)` instead
+    so it flows as a normal `Result.Err`.
+
     **Example**
 
     ```hot
-    // Simple failure
+    // Simple failure (halts the run)
     fail("Something went wrong")
 
-    // Failure with details
+    // Failure with structured details
     fail("Validation failed", {"field": "email", "error": "invalid format"})
 
     // Conditional failure
@@ -80,10 +91,16 @@ cancel
 meta {
     core: true,
     doc: """
-    Cancel the current execution. Halts execution gracefully.
+    Halt execution with a `Cancellation`. The current run terminates,
+    the engine emits a `run:cancel` event carrying the structured
+    cancellation, and any code after the call site is not executed.
 
     Context-aware: produces `::hot::run/Cancellation` in a run,
     `::hot::task/Cancellation` in a task.
+
+    Use `cancel()` for orderly stops (user-initiated abort, deadline
+    exceeded, downstream dependency unavailable) where the failure mode
+    is expected and the run should end without raising an alert.
 
     **Example**
 
@@ -91,7 +108,7 @@ meta {
     // Simple cancellation
     cancel("Operation cancelled by user")
 
-    // Cancellation with data
+    // Cancellation with structured details
     cancel("Task timeout", {"elapsed": 30000})
     ```
     """

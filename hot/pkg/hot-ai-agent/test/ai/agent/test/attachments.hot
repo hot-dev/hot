@@ -1,0 +1,158 @@
+::ai::agent::test::attachments ns
+meta ["test"]
+
+::att    ::ai::agent::attachments
+::base64 ::hot::base64
+
+text-att fn (name: Str, mime: Str, body: Str): Map {
+    {
+        name: name,
+        type: mime,
+        size: length(body),
+        content-text: body,
+    }
+}
+
+base64-att fn (name: Str, mime: Str, body: Str): Map {
+    {
+        name: name,
+        type: mime,
+        size: length(body),
+        content-base64: ::base64/encode(Bytes(body)),
+    }
+}
+
+test-from-body-coerces-mixed-keys
+meta ["test"]
+fn () {
+    body {
+        attachments: [
+            {name: "a.txt", type: "text/plain", size: 5, content_text: "hello"},
+            {filename: "b.json", content_type: "application/json", bytes: 9, content_base64: "eyJhIjoxfQ=="},
+        ],
+    }
+
+    atts ::att/from-body(body)
+    assert-eq(2, length(atts))
+    assert-eq("a.txt", atts[0].name)
+    assert-eq("hello", atts[0].content-text)
+    assert-eq("b.json", atts[1].name)
+    assert-eq("application/json", atts[1].type)
+}
+
+test-from-body-drops-malformed
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [text-att("ok.txt", "text/plain", "hi"), 7, "junk"]})
+    assert-eq(1, length(atts))
+    assert-eq("ok.txt", atts[0].name)
+}
+
+test-from-body-defaults
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [{}]})
+    assert-eq(1, length(atts))
+    assert-eq("file", atts[0].name)
+    assert-eq("application/octet-stream", atts[0].type)
+}
+
+test-extract-text-from-content-text
+meta ["test"]
+fn () {
+    a ::att/from-map(text-att("notes.md", "text/markdown", "# Hello\n\nWorld"))
+    out ::att/extract-text(a)
+    assert-eq("# Hello\n\nWorld", out)
+}
+
+test-extract-text-from-base64-text-type
+meta ["test"]
+fn () {
+    a ::att/from-map(base64-att("data.json", "application/json", "{\"a\":1}"))
+    out ::att/extract-text(a)
+    assert-eq("{\"a\":1}", out)
+}
+
+test-extract-text-skips-binary
+meta ["test"]
+fn () {
+    a ::att/from-map(base64-att("photo.png", "image/png", "fake-bytes"))
+    out ::att/extract-text(a)
+    assert(is-null(out), "binary attachments should not be inlined as text")
+}
+
+test-extract-text-respects-max-bytes
+meta ["test"]
+fn () {
+    body "abcdefghij"
+    a ::att/from-map(text-att("a.txt", "text/plain", body))
+    out ::att/extract-text(a, 5)
+    assert(starts-with(out, "abcde"), `Got: ${out}`)
+    assert(contains(out, "[truncated]"), `Got: ${out}`)
+}
+
+test-summarize-non-empty
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [
+        text-att("notes.md", "text/markdown", "x"),
+        base64-att("photo.png", "image/png", "fake"),
+    ]})
+    out ::att/summarize(atts)
+    assert(contains(out, "notes.md"))
+    assert(contains(out, "photo.png"))
+    assert(contains(out, "Attachments:"))
+}
+
+test-summarize-empty
+meta ["test"]
+fn () {
+    out ::att/summarize([])
+    assert-eq("", out)
+}
+
+test-weave-into-prompt-inlines-text
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [
+        text-att("notes.md", "text/markdown", "# Plan"),
+    ]})
+    out ::att/weave-into-prompt("Summarize the attached notes.", atts)
+    assert(contains(out, "Summarize the attached notes."))
+    assert(contains(out, "<attachment name=\"notes.md\""))
+    assert(contains(out, "# Plan"))
+}
+
+test-weave-into-prompt-escapes-attachment-attrs
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [
+        text-att("evil\" name <x>", "text/plain\" onload=\"bad", "hello"),
+    ]})
+    out ::att/weave-into-prompt("prompt", atts)
+    assert(contains(out, "evil&quot; name &lt;x&gt;"), "filename escaped")
+    assert(not(contains(out, "onload=\"bad")), "raw attribute injection not present")
+}
+
+test-weave-into-prompt-skips-binary
+meta ["test"]
+fn () {
+    atts ::att/from-body({attachments: [
+        base64-att("photo.png", "image/png", "fake-bytes"),
+    ]})
+    out ::att/weave-into-prompt("What's in the photo?", atts)
+    assert(contains(out, "Referenced (not inlined): photo.png"))
+}
+
+test-weave-respects-total-cap
+meta ["test"]
+fn () {
+    big-body "0123456789012345678901234567890123456789"
+    atts ::att/from-body({attachments: [
+        text-att("a.txt", "text/plain", big-body),
+        text-att("b.txt", "text/plain", big-body),
+    ]})
+    out ::att/weave-into-prompt("Summarize", atts, 30)
+    assert(contains(out, "a.txt"))
+    assert(contains(out, "Referenced (not inlined): b.txt"), `b.txt should be skipped, got: ${out}`)
+}

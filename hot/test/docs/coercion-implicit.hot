@@ -15,8 +15,12 @@ meta ["test"]
 
 // -- Explicit coercion via the registered arrow --
 
-Inches type { value: Dec }
-Centimeters type { value: Dec }
+Inches type {
+    value: Dec
+}
+Centimeters type {
+    value: Dec
+}
 
 Inches -> Centimeters fn (i: Inches): Centimeters {
   Centimeters({value: mul(i.value, 2.54)})
@@ -49,7 +53,10 @@ meta ["test"] fn () {
 
 Geom enum open { }
 
-Triangle type { base: Dec, height: Dec }
+Triangle type {
+    base: Dec,
+    height: Dec
+}
 Triangle -> Geom.Tri
 
 describe-geom fn (g: Geom): Str {

@@ -1,0 +1,41 @@
+::ai::agent::test::command ns
+meta ["test"]
+
+::command ::ai::agent::command
+
+test-parse-command
+meta ["test"]
+fn () {
+    parsed ::command/parse("/ask@TeamAgent what shipped today?")
+    assert(parsed.is-command)
+    assert-eq("ask", parsed.name)
+    assert-eq("what shipped today?", parsed.arg)
+}
+
+test-parse-plain-text
+meta ["test"]
+fn () {
+    parsed ::command/parse("hello team")
+    assert(not(parsed.is-command))
+    assert-eq("", parsed.name)
+    assert-eq("hello team", parsed.arg)
+}
+
+test-find-command-alias
+meta ["test"]
+fn () {
+    parsed ::command/parse("/help")
+    cmd ::command/find([
+        ::command/Command({
+            name: "start",
+            aliases: ["help"],
+            description: "Show help",
+            usage: "/help",
+            route: null,
+            is-async: false,
+            handler: null,
+            meta: null,
+        })
+    ], parsed)
+    assert-eq("start", cmd.name)
+}

@@ -1,0 +1,22 @@
+::ai::agent::test::transport ns
+meta ["test"]
+
+::transport ::ai::agent::transport
+::session   ::ai::session
+
+test-session-transport
+meta ["test"]
+fn () {
+    s ::session/Session({id: "demo:1"})
+    stamped ::transport/session-with-transport(s, "demo")
+    assert-eq("demo", ::transport/session-transport(stamped))
+    assert-eq("demo:1", ::transport/session-bucket(stamped))
+}
+
+test-session-transport-default
+meta ["test"]
+fn () {
+    s ::session/Session({id: "demo:1"})
+    assert-eq("unknown", ::transport/session-transport(s))
+    assert-eq("telegram", ::transport/session-transport(s, "telegram"))
+}

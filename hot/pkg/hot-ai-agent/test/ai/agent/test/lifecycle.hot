@@ -1,0 +1,145 @@
+::ai::agent::test::lifecycle ns
+meta ["test"]
+
+::runtime ::ai::agent::runtime
+::lifecycle ::ai::agent::lifecycle
+::agent-memory ::ai::agent::memory
+::session ::ai::session
+::mem ::ai::memory
+::msg ::ai::message
+::store ::hot::store
+
+test-run-session-job
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-life:${Uuid()}`)
+    s ::session/Session({id: `s:${Uuid()}`})
+    ::runtime/register-session(rt, s)
+    jobs ::lifecycle/run-session-job(rt, "noop", (session) { {id: session.id} })
+    assert-eq(1, length(jobs))
+    assert(first(jobs).ok)
+    assert-eq("noop", first(jobs).action)
+}
+
+// Verifies halt capture: a handler that calls `fail()` does NOT abort
+// the whole pass; the failing slot becomes a `LifecycleJob.ok = false`
+// and the error is recorded on rt.errors-store. Two sessions: one
+// succeeds, one halts.
+test-run-session-job-captures-handler-fail
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-life-fail:${Uuid()}`)
+    s-ok   ::session/Session({id: `ok:${Uuid()}`})
+    s-fail ::session/Session({id: `fail:${Uuid()}`})
+    ::runtime/register-session(rt, s-ok)
+    ::runtime/register-session(rt, s-fail)
+
+    handler fn (session) {
+        cond {
+            starts-with(session.id, "fail:") => { fail("synthetic boom", {where: session.id}) }
+            => { {ok-payload: session.id} }
+        }
+    }
+
+    jobs ::lifecycle/run-session-job(rt, "test-fail", handler)
+    assert-eq(2, length(jobs))
+
+    ok-job   find-first(jobs, (j) { eq(j.session-id, s-ok.id) })
+    fail-job find-first(jobs, (j) { eq(j.session-id, s-fail.id) })
+
+    assert(ok-job.ok)
+    assert(not(fail-job.ok))
+    assert(not(is-null(fail-job.error)))
+
+    // The rolling error log captured the failing handler.
+    logged ::store/list(rt.errors-store)
+    assert(gte(length(logged), 1))
+}
+
+// Verifies a handler that halts mid-vec does not stop subsequent slots
+// from running. The third session should still complete successfully
+// even though the second one fails.
+test-run-session-job-continues-after-fail
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-life-cont:${Uuid()}`)
+    s1 ::session/Session({id: `a:${Uuid()}`})
+    s2 ::session/Session({id: `fail:${Uuid()}`})
+    s3 ::session/Session({id: `c:${Uuid()}`})
+    ::runtime/register-session(rt, s1)
+    ::runtime/register-session(rt, s2)
+    ::runtime/register-session(rt, s3)
+
+    handler fn (session) {
+        cond {
+            starts-with(session.id, "fail:") => { fail("middle slot halts") }
+            => { session.id }
+        }
+    }
+
+    jobs ::lifecycle/run-session-job(rt, "fan-out", handler)
+    assert-eq(3, length(jobs))
+
+    // Every slot is a real LifecycleJob — `run-session-job` recovers
+    // halts inside the callback via `if-err`, so halts never escape
+    // and the output is uniformly typed.
+    map(jobs, (j) {
+        assert(not(is-err(j)), "slot must be a LifecycleJob, not a Result.Err")
+        assert(not(is-null(j.session-id)), "slot must have a session-id")
+    })
+
+    s3-job find-first(jobs, (j) { eq(j.session-id, s3.id) })
+    assert(s3-job.ok)
+}
+
+// A handler that returns a `Result.Err` value (rather than halting via
+// fail()) is treated as data: the slot is a successful LifecycleJob
+// whose `result` carries the Result.Err. To flag a per-session error,
+// the handler should `fail()` — that's the contract for triggering
+// the if-err catch path. Pinning this keeps the boundary unambiguous.
+test-run-session-job-passes-result-err-as-data
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-life-err:${Uuid()}`)
+    s  ::session/Session({id: `e:${Uuid()}`})
+    ::runtime/register-session(rt, s)
+
+    handler fn (session) {
+        ::hot::type/err("explicit error value")
+    }
+
+    jobs ::lifecycle/run-session-job(rt, "explicit-err", handler)
+    assert-eq(1, length(jobs))
+    job first(jobs)
+    assert(job.ok)
+    assert(is-err(job.result))
+}
+
+test-prune-raw-memory
+meta ["test"]
+fn () {
+    run-id Str(Uuid())
+    s ::session/Session({id: `s:${run-id}`})
+    i ::session/Identity({id: `u:${run-id}`})
+    memory ::mem/create-memory(`agent:${run-id}`, s, i)
+    ::mem/remember(memory, ::msg/Message({
+        id: "old",
+        content: "old content",
+        sender: i,
+        session: s,
+        timestamp: 1,
+        source: "test",
+        metadata: {message_id: "old"},
+    }))
+    policy ::agent-memory/RetentionPolicy({
+        name: "short",
+        raw-retention-secs: 1,
+        capsule-retention-secs: null,
+        compact-after-secs: null,
+        export-allowed: true,
+        forget-allowed: true,
+        metadata: {},
+    })
+    deleted ::lifecycle/prune-raw-memory(memory, policy)
+    assert-eq(1, deleted)
+}

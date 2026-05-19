@@ -20,6 +20,7 @@ const DEFAULT_ORG: &str = "hot.dev";
 pub struct DocsConfig {
     pub docs_dir: PathBuf,
     pub docs_overlay_dir: Option<PathBuf>,
+    pub app_assets_dir: PathBuf,
     pub pkg_docs_dir: PathBuf,
     pub pkg_source_dir: PathBuf,
     pub docs_examples_dir: PathBuf,
@@ -35,6 +36,7 @@ impl DocsConfig {
         Self {
             docs_dir: resources_dir.join("docs"),
             docs_overlay_dir: None,
+            app_assets_dir: resources_dir.join("app/assets"),
             pkg_docs_dir: resources_dir.join("pkg-docs"),
             pkg_source_dir: PathBuf::from("hot/pkg"),
             docs_examples_dir: PathBuf::from("hot/test/docs"),
@@ -66,12 +68,15 @@ pub fn router() -> Router {
 }
 
 pub fn router_with_config(config: DocsConfig) -> Router {
+    ensure_pkg_docs_generated(&config);
+
     let docs_assets_dir = config
         .docs_overlay_dir
         .as_ref()
         .filter(|path| path.exists())
         .cloned()
         .unwrap_or_else(|| config.docs_dir.clone());
+    let app_assets_dir = config.app_assets_dir.clone();
     let state = Arc::new(DocsState { config });
 
     Router::new()
@@ -85,6 +90,7 @@ pub fn router_with_config(config: DocsConfig) -> Router {
         .route("/api/search/pkg/{org}/{pkg_name}", get(search_pkg_handler))
         .route("/api/packages", get(list_packages_handler))
         .route("/api/search/packages", get(search_all_packages_handler))
+        .nest_service("/assets", ServeDir::new(app_assets_dir))
         .nest_service("/docs/assets", ServeDir::new(docs_assets_dir))
         .with_state(state)
 }
@@ -147,7 +153,7 @@ async fn render_docs_page(state: Arc<DocsState>, path: &str) -> Html<String> {
         r#"
         <div class="docs-shell">
             <aside class="sidebar">{}</aside>
-            <main class="content">
+            <main class="content docs-content">
                 {}
                 {}
                 <nav class="pager">
@@ -253,7 +259,7 @@ async fn pkg_docs_route_handler(
         r#"
         <div class="docs-shell">
             <aside class="sidebar">{}</aside>
-            <main class="content">{}</main>
+            <main class="content docs-content">{}</main>
             <aside class="toc">
                 <div class="version">Version {}</div>
                 {}
@@ -677,9 +683,28 @@ fn markdown_to_html_with_toc(markdown: &str) -> (String, Vec<TocSection>) {
     let mut events = Vec::new();
     let mut current_heading: Option<(u8, String)> = None;
     let mut in_code_block = false;
+    let mut code_block_lang = String::new();
+    let mut code_block_content = String::new();
 
     let parser = Parser::new_ext(markdown, Options::all());
     for event in parser {
+        if in_code_block {
+            match event {
+                Event::End(TagEnd::CodeBlock) => {
+                    in_code_block = false;
+                    events.push(Event::Html(
+                        render_code_block(&code_block_lang, &code_block_content).into(),
+                    ));
+                    code_block_lang.clear();
+                    code_block_content.clear();
+                }
+                Event::Text(text) | Event::Code(text) => code_block_content.push_str(&text),
+                Event::SoftBreak | Event::HardBreak => code_block_content.push('\n'),
+                _ => {}
+            }
+            continue;
+        }
+
         match &event {
             Event::Start(Tag::Heading { level, .. }) => {
                 current_heading = Some((*level as u8, String::new()));
@@ -702,11 +727,11 @@ fn markdown_to_html_with_toc(markdown: &str) -> (String, Vec<TocSection>) {
                     heading_text.push_str(text);
                 }
             }
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(lang))) => {
                 in_code_block = true;
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                in_code_block = false;
+                code_block_lang = lang.to_string();
+                code_block_content.clear();
+                continue;
             }
             _ => {}
         }
@@ -724,6 +749,23 @@ fn markdown_to_html_with_toc(markdown: &str) -> (String, Vec<TocSection>) {
             title: "On this page".to_string(),
             items: toc_items,
         }],
+    )
+}
+
+fn render_code_block(lang: &str, code: &str) -> String {
+    let lang = lang.split_whitespace().next().unwrap_or_default();
+    if lang == "result" {
+        return format!(
+            r#"<div class="result-block"><pre><code class="language-plaintext">{}</code></pre></div>"#,
+            escape_html(code)
+        );
+    }
+
+    let lang = if lang.is_empty() { "plaintext" } else { lang };
+    format!(
+        r#"<pre><code class="language-{}">{}</code></pre>"#,
+        escape_attr(lang),
+        escape_html(code)
     )
 }
 
@@ -779,7 +821,207 @@ fn list_packages(config: &DocsConfig) -> Vec<PkgSummary> {
             });
         }
     }
+    if packages.is_empty() {
+        packages.extend(list_source_packages(config));
+    }
+    sort_packages(&mut packages);
     packages
+}
+
+fn ensure_pkg_docs_generated(config: &DocsConfig) {
+    let package_names = source_package_names(config);
+    if package_names.is_empty() {
+        return;
+    }
+
+    let force_rebuild = truthy_env("HOT_REBUILD_DOCS");
+    let packages_to_generate = package_names
+        .iter()
+        .filter(|pkg_name| {
+            force_rebuild
+                || !config
+                    .pkg_docs_dir
+                    .join(pkg_name.as_str())
+                    .join("versions.json")
+                    .exists()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if packages_to_generate.is_empty() {
+        return;
+    }
+
+    if let Err(error) = fs::create_dir_all(&config.pkg_docs_dir) {
+        tracing::warn!(
+            "Failed to create package docs directory {}: {error}",
+            config.pkg_docs_dir.display()
+        );
+        return;
+    }
+
+    tracing::info!(
+        "Generating docs for {} package(s) into {}",
+        packages_to_generate.len(),
+        config.pkg_docs_dir.display()
+    );
+
+    let served_package_names = package_names
+        .iter()
+        .map(|pkg_name| format!("{DEFAULT_ORG}/{pkg_name}"))
+        .collect::<Vec<_>>();
+    let served_packages = served_package_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    for pkg_name in packages_to_generate {
+        let pkg_path = config.pkg_source_dir.join(&pkg_name);
+        match generate_versioned_pkg_docs_from_path(
+            &pkg_name,
+            &pkg_path,
+            &config.pkg_docs_dir,
+            &served_packages,
+        ) {
+            Ok(version) => tracing::info!("Generated docs for {pkg_name}@{version}"),
+            Err(error) => tracing::warn!("Failed to generate docs for {pkg_name}: {error}"),
+        }
+    }
+}
+
+fn source_package_names(config: &DocsConfig) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(&config.pkg_source_dir) else {
+        return Vec::new();
+    };
+
+    let mut package_names = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pkg_path = entry.path();
+            if pkg_path.is_dir() && pkg_path.join("pkg.hot").exists() {
+                entry.file_name().into_string().ok()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    package_names.sort();
+    package_names
+}
+
+fn generate_versioned_pkg_docs_from_path(
+    pkg_name: &str,
+    pkg_path: &Path,
+    out_dir: &Path,
+    served_packages: &[&str],
+) -> Result<String, String> {
+    let mut pkg_docs = docs::load_pkg_docs(pkg_path)?;
+    let version = pkg_docs.meta.version.clone();
+    if version.is_empty() {
+        return Err(format!(
+            "Package '{pkg_name}' has no version defined in pkg.hot"
+        ));
+    }
+
+    for dep in &mut pkg_docs.meta.deps {
+        if served_packages.contains(&dep.name.as_str()) {
+            dep.docs_url = Some(format!("/pkg/{}", dep.name));
+        }
+    }
+
+    let pkg_dir = out_dir.join(pkg_name);
+    let version_dir = pkg_dir.join(&version);
+    fs::create_dir_all(&version_dir)
+        .map_err(|e| format!("Failed to create docs directory: {e}"))?;
+
+    let docs_json = serde_json::to_string_pretty(&pkg_docs)
+        .map_err(|e| format!("Failed to serialize docs: {e}"))?;
+    fs::write(version_dir.join("docs.json"), docs_json)
+        .map_err(|e| format!("Failed to write docs file: {e}"))?;
+
+    let versions_path = pkg_dir.join("versions.json");
+    let mut versions_index =
+        docs::load_versions_index(&versions_path).unwrap_or_else(|_| PkgVersionsIndex {
+            latest: version.clone(),
+            versions: vec![],
+        });
+    if !versions_index.versions.contains(&version) {
+        versions_index.versions.push(version.clone());
+    }
+    versions_index.latest = version.clone();
+    versions_index.versions.sort_by(|a, b| b.cmp(a));
+
+    let versions_json = serde_json::to_string_pretty(&versions_index)
+        .map_err(|e| format!("Failed to serialize versions: {e}"))?;
+    fs::write(versions_path, versions_json)
+        .map_err(|e| format!("Failed to write versions file: {e}"))?;
+
+    Ok(version)
+}
+
+fn truthy_env(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| !value.is_empty() && value != "0" && value.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+fn list_source_packages(config: &DocsConfig) -> Vec<PkgSummary> {
+    let Ok(entries) = fs::read_dir(&config.pkg_source_dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pkg_path = entry.path();
+            if !pkg_path.is_dir() || !pkg_path.join("pkg.hot").exists() {
+                return None;
+            }
+
+            let pkg_name = pkg_path.file_name()?.to_str()?;
+            let Ok((docs, version, _)) = load_cached_pkg_docs_versioned(config, pkg_name, None)
+            else {
+                return None;
+            };
+
+            Some(PkgSummary {
+                name: docs.meta.name.clone(),
+                display_name: docs
+                    .meta
+                    .name
+                    .split('/')
+                    .next_back()
+                    .unwrap_or(&docs.meta.name)
+                    .to_string(),
+                version,
+                description: docs.meta.description.clone(),
+                tags: docs.meta.tags.clone(),
+                namespace_count: docs.namespaces.len(),
+                function_count: docs
+                    .namespaces
+                    .iter()
+                    .map(|namespace| namespace.functions.len())
+                    .sum(),
+                type_count: docs
+                    .namespaces
+                    .iter()
+                    .map(|namespace| namespace.types.len())
+                    .sum(),
+            })
+        })
+        .collect()
+}
+
+fn sort_packages(packages: &mut [PkgSummary]) {
+    packages.sort_by(|a, b| {
+        if a.display_name == "hot-std" {
+            std::cmp::Ordering::Less
+        } else if b.display_name == "hot-std" {
+            std::cmp::Ordering::Greater
+        } else {
+            a.display_name.cmp(&b.display_name)
+        }
+    });
 }
 
 fn parse_pkg_version(pkg_name_with_version: &str) -> (&str, Option<&str>) {
@@ -980,7 +1222,7 @@ fn render_toc(toc: &[TocSection]) -> String {
         ));
         for item in &section.items {
             html.push_str(&format!(
-                r##"<li class="indent-{}"><a href="#{}">{}</a></li>"##,
+                r##"<li class="indent-{}"><a class="toc-link" href="#{}">{}</a></li>"##,
                 item.indent,
                 escape_attr(&item.anchor),
                 escape_html(&item.name)
@@ -1025,12 +1267,13 @@ fn layout(config: &DocsConfig, title: &str, current_page: &str, body: &str) -> S
     let pkg_active = if current_page == "pkg" { "active" } else { "" };
     format!(
         r#"<!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{}</title>
-  <style>{}</style>
+  <link rel="stylesheet" href="/assets/css/prism-hot-theme.css">
+  <link rel="stylesheet" href="/assets/css/hot-docs.css">
 </head>
 <body>
   <header>
@@ -1048,10 +1291,12 @@ fn layout(config: &DocsConfig, title: &str, current_page: &str, body: &str) -> S
     <a href="{}">hot.dev</a>
     <a href="{}">GitHub</a>
   </footer>
+  <script src="/assets/js/prism.js" defer></script>
+  <script src="/assets/js/prism-hot.js" defer></script>
+  <script src="/assets/js/hot-docs.js" defer></script>
 </body>
 </html>"#,
         escape_html(title),
-        CSS,
         escape_attr(&config.hot_dev_url),
         escape_attr(&config.github_url),
         2026,
@@ -1123,81 +1368,6 @@ fn escape_attr(value: &str) -> String {
     escape_html(value).replace('\'', "&#39;")
 }
 
-const CSS: &str = r#"
-:root {
-  color-scheme: light dark;
-  --bg: #0f1115;
-  --panel: #171a21;
-  --text: #f4f4f5;
-  --muted: #a1a1aa;
-  --border: #2a2f3a;
-  --accent: #ff5a5f;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-a { color: inherit; }
-header, footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: center;
-  padding: 1rem 2rem;
-  border-bottom: 1px solid var(--border);
-}
-footer { border-top: 1px solid var(--border); border-bottom: 0; color: var(--muted); }
-header nav, footer { display: flex; gap: 1rem; flex-wrap: wrap; }
-header a, footer a { text-decoration: none; color: var(--muted); }
-header a.active, header a:hover, footer a:hover { color: var(--text); }
-.logo { color: var(--text); font-weight: 800; letter-spacing: -0.03em; }
-main { max-width: 1440px; margin: 0 auto; padding: 2rem; }
-.hero { padding: 5rem 0 3rem; max-width: 760px; }
-.hero.compact { padding: 2rem 0; }
-.hero h1 { font-size: clamp(2.5rem, 8vw, 5rem); line-height: 0.95; margin: 0 0 1rem; letter-spacing: -0.06em; }
-.hero p { color: var(--muted); font-size: 1.2rem; }
-.eyebrow { color: var(--accent) !important; text-transform: uppercase; font-weight: 700; letter-spacing: 0.08em; font-size: 0.85rem !important; }
-.panel-grid, .package-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
-.panel, .package-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  min-height: 160px;
-  padding: 1.5rem;
-  text-decoration: none;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  background: var(--panel);
-}
-.panel span, .package-card small, .package-card span, .tags { color: var(--muted); }
-.docs-shell { display: grid; grid-template-columns: 260px minmax(0, 1fr) 220px; gap: 2rem; align-items: start; }
-.sidebar, .toc { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; color: var(--muted); }
-.sidebar ul, .toc ul { list-style: none; padding-left: 0; }
-.sidebar ul ul { padding-left: 1rem; }
-.sidebar a, .toc a { color: var(--muted); text-decoration: none; }
-.sidebar a.active, .sidebar a:hover, .toc a:hover { color: var(--text); }
-.content { min-width: 0; }
-.content h1, .content h2, .content h3 { letter-spacing: -0.03em; line-height: 1.15; }
-.content pre { overflow: auto; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; background: #090b0f; }
-.content code { color: #ffd6d8; }
-.content img { max-width: 100%; }
-.breadcrumb { color: var(--muted); margin-bottom: 1rem; }
-.pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 3rem; }
-.pager-link { flex: 1; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; text-decoration: none; }
-.pager-link span { display: block; color: var(--muted); font-size: 0.85rem; }
-.tag { display: inline-block; margin: 0 0.5rem 0.5rem 0; padding: 0.25rem 0.6rem; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); }
-.version { color: var(--muted); margin-bottom: 1rem; }
-@media (max-width: 900px) {
-  .docs-shell { grid-template-columns: 1fr; }
-  .sidebar, .toc { position: static; max-height: none; }
-  header, footer { padding: 1rem; }
-  main { padding: 1rem; }
-}
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,5 +1391,19 @@ mod tests {
     fn normalizes_empty_docs_path_to_index() {
         assert_eq!(normalize_docs_path(""), "index");
         assert_eq!(normalize_docs_path("/language/"), "language");
+    }
+
+    #[test]
+    fn renders_code_blocks_for_prism() {
+        let (html, _) = markdown_to_html_with_toc("# Demo\n\n```hot\nmain fn () { null }\n```");
+        assert!(html.contains(r#"class="language-hot""#));
+        assert!(html.contains("main fn"));
+    }
+
+    #[test]
+    fn renders_result_blocks() {
+        let (html, _) = markdown_to_html_with_toc("```result\nok\n```");
+        assert!(html.contains(r#"class="result-block""#));
+        assert!(html.contains(r#"class="language-plaintext""#));
     }
 }

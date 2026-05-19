@@ -9,6 +9,11 @@ can link to a section overview page.
 -->
 
 - [Getting Started](getting-started)
+- [Demos](demos)
+  - [TeamAgent](demos/team-agent)
+  - [PersonalAgent](demos/personal-agent)
+  - [Graph-RAG Memory](demos/graph-rag-memory)
+  - [Hot Chat](demos/hot-chat)
 - [Hot Language](language)
   - [Vars and Values](language/vars-and-values)
   - [Data Literals](language/data-literals)

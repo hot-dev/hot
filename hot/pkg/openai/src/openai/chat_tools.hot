@@ -67,7 +67,7 @@ fn cond (m: ::ai-chat/Message): Map {
     }
 
     eq(m.role, "assistant") => {
-        base {role: "assistant", content: if(is-str(m.content), m.content, "")}
+        base {role: "assistant", content: ::ai-chat/message-text(m)}
         if(
             is-null(m.tool-calls),
             base,
@@ -75,7 +75,7 @@ fn cond (m: ::ai-chat/Message): Map {
         )
     }
     => {
-        {role: m.role, content: m.content}
+        {role: m.role, content: ::ai-chat/message-text(m)}
     }
 }
 
@@ -162,6 +162,12 @@ fn (u: Any): Map? {
 
 chat-with-tools
 meta {
+    ai-provider: {
+        variant: "OpenAi",
+        detect-prefixes: ["gpt", "o1", "o3", "o4"],
+        display-name: "OpenAI",
+        capabilities: ["tools", "streaming", "vision", "audio", "json-mode"],
+    },
     doc: """
     Tools-aware chat function compatible with `::ai::chat/run-loop`.
 

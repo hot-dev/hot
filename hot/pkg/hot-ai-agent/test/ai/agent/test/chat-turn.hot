@@ -1,0 +1,192 @@
+::ai::agent::test::chat-turn ns
+meta ["test"]
+
+::ct      ::ai::agent::chat-turn
+::actx    ::ai::agent::ctx
+::rt      ::ai::agent::runtime
+::memory  ::ai::memory
+::session ::ai::session
+::ai-chat ::ai::chat
+
+Session     ::session/Session
+Identity    ::session/Identity
+ChatOptions ::ai-chat/ChatOptions
+
+// All tests below opt into the `fallback-text` path so the LLM is
+// never invoked. `chat-stream-fn` is left null and the cfg's
+// `ChatOptions` is only present to satisfy the type signature.
+build-cfg fn (): ::ct/TurnConfig {
+    run-id Str(Uuid())
+    rt ::rt/create-runtime(`chat-turn-test:${run-id}`, {})
+    opts ChatOptions({model: "stub-model"})
+    ::ct/TurnConfig({
+        rt: rt,
+        agent-name: rt.agent-name,
+        stream-label: "test-chat-turn",
+        chat-opts: opts,
+        system-base: "You are a test assistant.",
+    })
+}
+
+build-input fn (text: Str, fallback: Str?): ::ct/TurnInput {
+    ::ct/TurnInput({
+        session: Session({id: `person:tester:${Uuid()}`}),
+        sender: Identity({id: "tester", name: "Tester"}),
+        text: text,
+        attachments: null,
+        payload: {session_id: "s1", message_id: "m1"},
+        recall-opts: null,
+        memory-heading: null,
+        persist-user: null,
+        persist-assistant: null,
+        bind-tool-ctx: null,
+        ctx-extras: null,
+        user-source: null,
+        user-metadata: null,
+        assistant-source: null,
+        assistant-metadata: null,
+        fallback-text: fallback,
+    })
+}
+
+// ============================================================================
+// run-chat-turn (fallback path — exercises ordering without an LLM)
+// ============================================================================
+
+test-fallback-path-returns-fallback-text
+meta ["test"]
+fn () {
+    cfg build-cfg()
+    input build-input("hello there", "(stub reply)")
+    result ::ct/run-chat-turn(cfg, input)
+    assert(result.ok)
+    assert-eq("(stub reply)", result.text)
+}
+
+test-fallback-path-persists-user-turn
+meta ["test"]
+fn () {
+    cfg build-cfg()
+    input build-input("first user message", "(stub)")
+    ::ct/run-chat-turn(cfg, input)
+
+    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    records ::memory/list-session-records(mem)
+    assert-eq(2, length(records))     // user + assistant
+    user-rec find-first(records, (r) {
+        contains(or(r.content, ""), "first user message")
+    })
+    assert(not(is-null(user-rec)))
+    // role tag is required for synthesis prompts to filter user vs
+    // assistant via `::ai::rag/recent-text` role filters.
+    assert-eq("user", or(get(or(user-rec.metadata, {}), "role"), ""))
+}
+
+test-fallback-path-persists-assistant-turn
+meta ["test"]
+fn () {
+    cfg build-cfg()
+    input build-input("anything", "(canned answer)")
+    ::ct/run-chat-turn(cfg, input)
+
+    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    records ::memory/list-session-records(mem)
+    asst-rec find-first(records, (r) {
+        eq("assistant", or(get(or(r.metadata, {}), "role"), ""))
+    })
+    assert(not(is-null(asst-rec)))
+    assert-eq("(canned answer)", asst-rec.content)
+}
+
+test-persist-user-false-skips-user-record
+meta ["test"]
+fn () {
+    cfg build-cfg()
+    input ::ct/TurnInput({...untype(build-input("ignored", "(reply)")), persist-user: false})
+    ::ct/run-chat-turn(cfg, input)
+
+    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    records ::memory/list-session-records(mem)
+    assert-eq(1, length(records))     // only the assistant turn
+}
+
+test-persist-assistant-false-skips-asst-record
+meta ["test"]
+fn () {
+    cfg build-cfg()
+    input ::ct/TurnInput({...untype(build-input("kept", "(skip me)")), persist-assistant: false})
+    ::ct/run-chat-turn(cfg, input)
+
+    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    records ::memory/list-session-records(mem)
+    assert-eq(1, length(records))     // only the user turn
+    assert(contains(or(first(records).content, ""), "kept"))
+}
+
+test-bind-tool-ctx-defaults-on
+meta ["test"]
+fn () {
+    ::actx/clear-request()
+    cfg build-cfg()
+    input build-input("any", "(stub)")
+    ::ct/run-chat-turn(cfg, input)
+
+    assert-eq(input.session.id, ::actx/current-session-id())
+    assert-eq(input.sender.id,  ::actx/current-user-id())
+}
+
+test-bind-tool-ctx-false-leaves-ctx-untouched
+meta ["test"]
+fn () {
+    ::actx/clear-request()
+    cfg build-cfg()
+    input ::ct/TurnInput({...untype(build-input("any", "(stub)")), bind-tool-ctx: false})
+    ::ct/run-chat-turn(cfg, input)
+
+    assert(is-null(::actx/current-session-id()))
+    assert(is-null(::actx/current-user-id()))
+}
+
+// ============================================================================
+// build-system / RAG ordering smoke
+// ============================================================================
+
+test-build-system-uses-system-base-when-no-memory
+meta ["test"]
+fn () {
+    cfg build-cfg()
+    input build-input("hello", "(stub)")
+    out ::ct/build-system(cfg, input)
+    assert(contains(out, "You are a test assistant."))
+    // No memory yet → no memory heading appended.
+    assert(not(contains(out, "## Memory")))
+}
+
+test-system-prompt-does-not-include-current-user-text
+meta ["test"]
+fn () {
+    // Verifies the ordering fix: the user message we just submitted
+    // should NOT be visible in the system prompt at the time the LLM
+    // sees it, even though we persist user turns by default.
+    cfg build-cfg()
+    input build-input("UNIQUE-FRESH-MARKER-987", "(stub)")
+    // Build the system prompt the way the orchestrator does.
+    out ::ct/build-system(cfg, input)
+    assert(not(contains(out, "UNIQUE-FRESH-MARKER-987")))
+}
+
+test-fallback-path-with-system-override-still-runs
+meta ["test"]
+fn () {
+    // system-override is for the LLM path. In the fallback path it's
+    // simply unused; this test makes sure passing it doesn't break
+    // the orchestrator (and doesn't change the persisted records).
+    cfg build-cfg()
+    input ::ct/TurnInput({
+        ...untype(build-input("hi", "(stub)")),
+        system-override: "custom",
+    })
+    result ::ct/run-chat-turn(cfg, input)
+    assert(result.ok)
+    assert-eq("(stub)", result.text)
+}

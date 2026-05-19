@@ -103,6 +103,43 @@ fn (request: HttpRequest): HttpResponse {
 }
 
 
+try-request
+meta {
+    doc: """
+    Like `request`, but catches transport errors (DNS failure, connection
+    refused, TLS errors, timeouts, etc.) and returns a `Result` instead
+    of halting execution.
+
+    Use this when you need to handle network failures gracefully — for
+    example, in agent callbacks, scheduled fan-out, or any code path
+    that must keep running even when an outbound HTTP call fails.
+
+    Returns:
+
+    - `Result.Ok(HttpResponse)` on success (including non-2xx status codes —
+      use `is-ok-response` to check status separately).
+    - `Result.Err(error-message)` when the transport itself failed.
+
+    **Example**
+
+    ```hot
+    result try-request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
+    cond {
+      is-err(result) => { println(`Network error: ${result.$val}`) }
+      => { handle-response(result.$val) }
+    }
+    ```
+    """
+}
+fn (request: HttpRequest): Result {
+    attempt ::hot::lang/try-call(::hot::http/request, [request])
+    if(attempt.ok, ::hot::type/ok(attempt.value), ::hot::type/err(attempt.error))
+},
+(method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result {
+    try-request(HttpRequest({method, url, headers, body}))
+}
+
+
 get
 meta {
     doc: """

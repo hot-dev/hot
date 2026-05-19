@@ -193,6 +193,7 @@ fn (m: Map): Str {
         is-null(m.content) => { "" }
         => { to-json(untype(m.content)) }
     }
+
     role-str or(m.role, "")
     tool-str cond {
         is-null(m.tool-calls) => { "" }

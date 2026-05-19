@@ -683,13 +683,13 @@ mod tests {
 
     #[test]
     fn resolve_source_path_supports_absolute_legacy_suffix() {
-        let candidates = vec!["hot/src/telegram-agent/agent.hot".to_string()];
+        let candidates = vec!["hot/src/team-agent/agent.hot".to_string()];
         assert_eq!(
             resolve_source_path_from_candidates(
-                "/Users/example/project/hot/src/telegram-agent/agent.hot",
+                "/Users/example/project/hot/src/team-agent/agent.hot",
                 &candidates
             ),
-            Some("hot/src/telegram-agent/agent.hot".to_string())
+            Some("hot/src/team-agent/agent.hot".to_string())
         );
     }
 

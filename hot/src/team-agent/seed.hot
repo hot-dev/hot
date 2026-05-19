@@ -1,0 +1,288 @@
+::team-agent::seed ns
+meta {
+    doc: """
+  Seed Team Agent with a realistic synthetic conversation so the demo can
+  be filmed without recruiting a live group. Posts ~28 messages across
+  five fictional teammates spanning the last ~24 hours. Touches on a
+  launch decision, a bug postmortem, action items, shared links, and an
+  open question — enough surface area for /summary, /decisions, /search,
+  and /ask to all return interesting results.
+
+  Run (Telegram, default):
+    hot ctx set telegram.chat.id <your-chat-id>
+    hot run hot/src/team-agent/seed.hot
+
+  Run (Slack):
+    hot ctx set seed.transport slack
+    hot ctx set slack.team.id    <your-team-id>
+    hot ctx set slack.channel.id <your-channel-id>
+    hot run hot/src/team-agent/seed.hot
+
+  The seed only writes to memory — it does NOT post to Telegram or
+  Slack. Re-running is safe: each call uses fresh, unique message ids.
+  """
+}
+
+::ctx           ::hot::ctx
+::run           ::hot::run
+::time          ::hot::time
+::mem           ::ai::memory
+::msg           ::ai::message
+::session       ::ai::session
+::tg-adapter    ::team-agent::telegram-adapter
+::slack-adapter ::team-agent::slack-adapter
+::agent         ::team-agent::agent
+
+AGENT_NAME "brain"
+
+// Messages are listed newest -> oldest in story order; the hours-ago
+// field is what actually places them in time. Mix of topics.
+MESSAGES [
+  // Topic: open question about hiring (24h ago)
+  {
+    h: 24,
+    who: "ada",
+    t: "Quick poll: do we have bandwidth to start interviewing for a second backend hire this quarter, or push to Q2?",
+  },
+  {
+    h: 23,
+    who: "ren",
+    t: "Honestly, with the migration we just shipped, I'd prefer to wait until the platform is stable. Maybe early Q2.",
+  },
+  {
+    h: 23,
+    who: "maya",
+    t: "Agree on Q2. Let's not pile hiring onto the launch crunch.",
+  },
+
+  // Topic: Launch decision (~22-19h ago)
+  {
+    h: 22,
+    who: "ada",
+    t: "Re: launch — are we still targeting May 14, or do we slip to the 21st?",
+  },
+  {
+    h: 22,
+    who: "maya",
+    t: "May 14 is doable if checkout bug is fixed by Friday. Otherwise we slip.",
+  },
+  {
+    h: 21,
+    who: "ren",
+    t: "Checkout fix landed in main this morning, in QA now. I'd say 14th is realistic.",
+  },
+  {
+    h: 20,
+    who: "sasha",
+    t: "Marketing assets are cut for the 14th. Slipping a week is a real cost on the campaign side.",
+  },
+  {
+    h: 19,
+    who: "ada",
+    t: "Decision: we ship May 14. Maya owns the go/no-go call Thursday EOD.",
+  },
+  {
+    h: 19,
+    who: "maya",
+    t: "Confirmed. I'll call it Thursday 5pm PT based on QA signoff and on-call coverage.",
+  },
+
+  // Topic: Bug postmortem (~17-14h ago)
+  {
+    h: 17,
+    who: "jin",
+    t: "Wrote up the postmortem for yesterday's checkout 500s: https://docs.example.com/pm/checkout-500-2026-04",
+  },
+  {
+    h: 17,
+    who: "ren",
+    t: "Root cause was the new tax provider returning empty arrays for some EU regions and our serializer choking on it.",
+  },
+  {
+    h: 16,
+    who: "jin",
+    t: "Added defensive parsing + a contract test. Should prevent this class of bug for any provider response.",
+  },
+  {
+    h: 16,
+    who: "sasha",
+    t: "Could we surface a friendlier error to the user when this happens, instead of a generic 500?",
+  },
+  {
+    h: 15,
+    who: "jin",
+    t: "Yes — already filed PROD-4421 to add a 'we couldn't calculate tax, please refresh' screen.",
+  },
+  {
+    h: 14,
+    who: "maya",
+    t: "Action item: Jin owns PROD-4421, target end of next week.",
+  },
+
+  // Topic: Misc work + links (~12-9h ago)
+  {
+    h: 12,
+    who: "ren",
+    t: "FYI everyone, our load tests are now running nightly — dashboard at https://grafana.example.com/d/loadtest",
+  },
+  {
+    h: 11,
+    who: "sasha",
+    t: "Hot just shipped 1.3 — they have a new agent graph view that looks really useful for tracing our event flows: https://hot.dev/blog/agent-graph",
+  },
+  {
+    h: 11,
+    who: "ren",
+    t: "Nice, I'll wire it up next week. Should make debugging the order pipeline way easier.",
+  },
+  {
+    h: 10,
+    who: "ada",
+    t: "Loved the Q1 retro. Big thanks to everyone for the candor.",
+  },
+  {
+    h: 9,
+    who: "maya",
+    t: "Reminder: design review at 2pm tomorrow on the new onboarding flow.",
+  },
+
+  // Topic: Action items + decisions (~8-5h ago)
+  {
+    h: 8,
+    who: "sasha",
+    t: "I'll have the v3 onboarding mocks ready before the review — promise.",
+  },
+  {
+    h: 7,
+    who: "jin",
+    t: "Decision needed: are we storing analytics events in the same Postgres or do we move them to a separate warehouse?",
+  },
+  {
+    h: 6,
+    who: "ren",
+    t: "I vote separate — the volume is going to dominate our primary very soon. Snowflake or Clickhouse, leaning Clickhouse for cost.",
+  },
+  {
+    h: 6,
+    who: "ada",
+    t: "Decision: separate warehouse, Clickhouse. Ren owns the migration plan, due in two weeks.",
+  },
+  {
+    h: 5,
+    who: "ren",
+    t: "Got it — I'll have a written plan by next Friday.",
+  },
+
+  // Topic: Casual + open thread (~3-1h ago)
+  {
+    h: 3,
+    who: "sasha",
+    t: "Anyone else having intermittent VPN issues today? Mine drops every ~20 min.",
+  },
+  {
+    h: 2,
+    who: "jin",
+    t: "Yes — IT pushed an update yesterday that's causing it. They have a fix rolling out tonight.",
+  },
+  {
+    h: 1,
+    who: "ada",
+    t: "Open question I want feedback on this week: should we move to a 4-day workweek for July as a trial?",
+  },
+  {
+    h: 1,
+    who: "maya",
+    t: "Big +1 from me. Happy to draft a proposal with the trade-offs.",
+  },
+]
+
+// Build a transport-stamped session for the configured target. We use
+// each adapter's own `session-from-*` builder so seeded memory and
+// live messages share the same `agent:brain:session:…` store key —
+// otherwise `/ask` against seeded data would miss because the keys
+// wouldn't match the live transport's session shape.
+build-target-session fn (transport: Str): ::session/Session {
+  cond {
+    eq(transport, "slack") => {
+      team-id    or(::ctx/get("slack.team.id"), "")
+      channel-id or(::ctx/get("slack.channel.id"), "")
+      cond {
+        is-empty(team-id)    => { fail("Missing slack.team.id — set it before seeding a Slack channel.") }
+        is-empty(channel-id) => { fail("Missing slack.channel.id — set it before seeding a Slack channel.") }
+        => { ::slack-adapter/session-from-channel(team-id, channel-id) }
+      }
+    }
+    => {
+      raw ::ctx/get("telegram.chat.id")
+      cond {
+        is-null(raw) => { fail("Missing telegram.chat.id — set it before seeding (or set seed.transport slack).") }
+        => { ::tg-adapter/session-from-chat-id(Int(raw)) }
+      }
+    }
+  }
+}
+
+run-seed
+meta {
+    doc: """
+    Seeds the agent's memory with MESSAGES for the configured target.
+    Reads `seed.transport` (defaults to `telegram`) and the matching
+    transport ctx (`telegram.chat.id` or `slack.team.id` +
+    `slack.channel.id`).
+    """
+}
+fn (): Vec<Str> {
+  transport   or(::ctx/get("seed.transport"), "telegram")
+  session-obj build-target-session(transport)
+  // Register the session so scheduled jobs (digests) and `/diag` see it.
+  ::agent/register-session(session-obj)
+
+  identities {
+    maya:  ::session/Identity({id: "1001", name: "maya"}),
+    ren:   ::session/Identity({id: "1002", name: "ren"}),
+    sasha: ::session/Identity({id: "1003", name: "sasha"}),
+    jin:   ::session/Identity({id: "1004", name: "jin"}),
+    ada:   ::session/Identity({id: "1005", name: "ada"}),
+  }
+
+  // `::time/now` returns an `Instant` record; convert through
+  // `epoch-millis` because Hot doesn't define an `Instant -> Int`
+  // coercion. Same pattern used in `agent.hot::now-epoch-secs` and
+  // `dev-driver.hot::synth-message`.
+  now-ts  div(::time/epoch-millis(::time/now()), 1000)
+  // Synthetic message_id offset; fresh per run to avoid collisions on re-seed.
+  id-base add(900000000, mod(now-ts, 100000))
+
+  println(`Seeding ${length(MESSAGES)} messages into ${transport} session ${session-obj.id}...`)
+
+  result map(MESSAGES, (m) {
+    sender   get(identities, m.who)
+    ts       sub(now-ts, mul(m.h, 3600))
+    msg-id   add(id-base, m.h)
+    mem      ::mem/create-memory(AGENT_NAME, session-obj, sender)
+    // Slack `ts` ids look like floats serialized as strings (`"1700000000.123456"`);
+    // for seeded data we just use the same int-stringified id we use
+    // for Telegram. message-link will return `""` for these (no
+    // permalink possible without a real ts), and the agent's
+    // citation rendering already handles that path.
+    message  ::msg/Message({
+      id:        Str(msg-id),
+      content:   m.t,
+      sender:    sender,
+      session:   session-obj,
+      timestamp: ts,
+      source:    transport,
+      metadata:  {message_id: msg-id, seed: true},
+    })
+    ::mem/remember(mem, message)
+    `[${sender.name} -${m.h}h] ${slice(m.t, 0, 60)}`
+  })
+
+  println(join(result, "\n"))
+  println(`Done. Try /summary, /decisions, or /ask "when did we decide to ship?"`)
+  result
+}
+
+// Only execute when invoked as a script (`hot run .../seed.hot`); skip when
+// the namespace is loaded as part of a broader compile or test sweep.
+if(::run/is-inline-run(), run-seed(), null)

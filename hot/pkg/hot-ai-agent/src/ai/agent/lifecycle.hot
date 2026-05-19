@@ -1,0 +1,123 @@
+::ai::agent::lifecycle ns
+meta {
+    doc: """
+    Reusable scheduled lifecycle helpers for AI agents.
+
+    These functions keep scheduling mechanics and error handling generic while
+    concrete agents provide memory construction, authorization, and compaction
+    policy.
+    """
+}
+
+::runtime ::ai::agent::runtime
+::agent-memory ::ai::agent::memory
+
+AgentRuntime ::runtime/AgentRuntime
+Session ::ai::session/Session
+AgentMemory ::ai::memory/AgentMemory
+ChatOptions ::ai::chat/ChatOptions
+RetentionPolicy ::agent-memory/RetentionPolicy
+
+LifecycleJob
+meta { doc: "Result record from a lifecycle job applied to one session." }
+type {
+    session-id: Str,
+    action: Str,
+    ok: Bool,
+    result: Any?,
+    error: Str?,
+}
+
+job-ok
+meta { doc: "Build a successful LifecycleJob result." }
+fn (session: Session, action: Str, result: Any?): LifecycleJob {
+    LifecycleJob({
+        session-id: session.id,
+        action: action,
+        ok: true,
+        result: result,
+        error: null,
+    })
+}
+
+job-error
+meta { doc: "Build a failed LifecycleJob result and record it in the runtime error log." }
+fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
+    msg Str(error)
+    ::runtime/record-error(rt, action, msg)
+    LifecycleJob({
+        session-id: session.id,
+        action: action,
+        ok: false,
+        result: null,
+        error: msg,
+    })
+}
+
+run-session-job
+meta {
+    doc: """
+    Run `handler(session)` for every registered session and collect a
+    `LifecycleJob` per session.
+
+    Per-session recovery is handled inside the callback with `if-err`:
+    if a handler halts via `fail()` / `cancel()`, the structured error
+    is captured and recorded on `rt.errors-store`, and the slot becomes
+    `LifecycleJob.ok = false`. The loop always processes every session
+    and always returns a uniform `Vec<LifecycleJob>` — halts never
+    escape `run-session-job`.
+    """
+}
+fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
+    sessions ::runtime/list-registered-sessions(rt)
+    map(sessions, (session) {
+        if-err(
+            job-ok(session, action, handler(session)),
+            (e: Any) { job-error(rt, session, action, e) }
+        )
+    })
+}
+
+compact-stale-sessions
+meta { doc: "Run an app-provided compaction handler for all registered sessions." }
+fn (rt: AgentRuntime, handler: Fn): Vec<LifecycleJob> {
+    run-session-job(rt, "compact-stale-sessions", handler)
+}
+
+prune-raw-memory
+meta {
+    doc: "Prune raw session memory older than `policy.raw-retention-secs`; returns deleted count."
+}
+fn (mem: AgentMemory, policy: RetentionPolicy): Int {
+    retention or(policy.raw-retention-secs, 0)
+    cond {
+        lte(retention, 0) => { 0 }
+        => {
+            cutoff sub(::runtime/now-epoch-secs(), retention)
+            ::ai::memory/forget-session-range(mem, 0, cutoff)
+        }
+    }
+}
+
+prune-sessions
+meta {
+    doc: "Run an app-provided memory factory and prune handler for all registered sessions."
+}
+fn (rt: AgentRuntime, policy: RetentionPolicy, memory-for-session: Fn): Vec<LifecycleJob> {
+    run-session-job(rt, "prune-raw-memory", (session) {
+        mem memory-for-session(session)
+        prune-raw-memory(mem, policy)
+    })
+}
+
+schedule-descriptor
+meta {
+    doc: "Return a neutral descriptor agents can attach to scheduled lifecycle functions."
+}
+fn (name: Str, cron: Str, action: Str): Map {
+    {
+        name: name,
+        cron: cron,
+        action: action,
+    }
+}

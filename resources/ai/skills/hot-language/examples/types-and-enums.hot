@@ -195,13 +195,18 @@ Critter enum open { Hound, Tabby }
 // Bodyless arrow enrolls `Falcon` as the `Critter.Falcon` variant AND
 // synthesizes the constructor — no fn body needed because the payload
 // type IS the source type. This is the recommended form.
-Falcon type { species: Str, wingspan: Dec }
+Falcon type {
+    species: Str,
+    wingspan: Dec
+}
 Falcon -> Critter.Falcon
 
 // Role-shaped variant: the variant name (Scaly) need not match the
 // source type name (Gecko). Use this when you want a domain-specific
 // label that doesn't match the data type.
-Gecko type { length-cm: Dec }
+Gecko type {
+    length-cm: Dec
+}
 Gecko -> Critter.Scaly
 
 // Construct enrolled variants like any other.

@@ -5,20 +5,17 @@ Failure
 meta {
     core: true,
     doc: """
-    Represents a failed run execution. Produced by `fail()` when called in a run context.
+    Represents a failed run execution. Produced by `fail()` when called
+    in a run context and surfaced as a `run:fail` event.
 
     **Fields**
 
     - `$msg` — Human-readable error message
     - `$err` — Structured error data (any type)
 
-    **Example**
-
-    ```hot
-    f fail("Connection failed", {"host": "api.example.com"})
-    f.$msg   // "Connection failed"
-    f.$err   // {"host": "api.example.com"}
-    ```
+    `fail()` halts execution; user code does not bind a `Failure`
+    directly. Inspect it from a halt boundary like `::hot::lang/try-call`
+    or from the engine's `run:fail` event.
     """
 }
 type {
@@ -30,20 +27,17 @@ Cancellation
 meta {
     core: true,
     doc: """
-    Represents a cancelled run execution. Produced by `cancel()` when called in a run context.
+    Represents a cancelled run execution. Produced by `cancel()` when
+    called in a run context and surfaced as a `run:cancel` event.
 
     **Fields**
 
     - `$msg` — Human-readable cancellation message
     - `$data` — Optional structured data
 
-    **Example**
-
-    ```hot
-    c cancel("User cancelled", {"reason": "timeout"})
-    c.$msg    // "User cancelled"
-    c.$data   // {"reason": "timeout"}
-    ```
+    `cancel()` halts execution; user code does not bind a `Cancellation`
+    directly. Inspect it from a halt boundary like `::hot::lang/try-call`
+    or from the engine's `run:cancel` event.
     """
 }
 type {
