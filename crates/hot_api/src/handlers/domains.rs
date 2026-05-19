@@ -19,6 +19,7 @@ use hot::db::api_key::ApiKey;
 use hot::db::domain::{Domain, DomainStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::ApiStateData;
@@ -29,14 +30,14 @@ use crate::models::*;
 // Request/Response DTOs
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateDomainRequest {
     /// The custom domain (e.g., "mcp.example.com")
     pub domain: String,
 }
 
 /// A DNS record the customer needs to create.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct DnsRecord {
     #[serde(rename = "type")]
     pub record_type: String,
@@ -45,11 +46,12 @@ pub struct DnsRecord {
     pub purpose: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DomainResponse {
     pub domain_id: Uuid,
     pub env_id: Uuid,
     pub domain: String,
+    #[schema(value_type = String)]
     pub status: DomainStatus,
     /// DNS records the customer needs to create.
     pub dns_records: Vec<DnsRecord>,
@@ -65,10 +67,11 @@ pub struct DomainResponse {
     pub provisioning_error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DomainVerifyResponse {
     pub domain_id: Uuid,
     pub domain: String,
+    #[schema(value_type = String)]
     pub status: DomainStatus,
     pub message: String,
 }

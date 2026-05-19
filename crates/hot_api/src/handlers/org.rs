@@ -7,12 +7,13 @@ use hot::db::api_key::ApiKey;
 use hot::db::env::Env;
 use hot::db::subscription::{OrgPlan, OrgUsageStats};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::ApiStateData;
 use crate::models::*;
 
 /// Response for organization usage and limits
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OrgUsageResponse {
     /// Organization ID
     pub org_id: uuid::Uuid,
@@ -26,7 +27,7 @@ pub struct OrgUsageResponse {
     pub plan: PlanInfo,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UsageStats {
     /// Runs executed this billing period
     pub runs_this_period: i64,
@@ -44,7 +45,7 @@ pub struct UsageStats {
     pub active_schedules: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Limits {
     /// Maximum runs per month (-1 for unlimited)
     pub runs_per_month: i32,
@@ -70,7 +71,7 @@ pub struct Limits {
     pub active_schedules_per_org: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UsagePercent {
     /// Runs usage percentage (0-100+)
     pub runs: f64,
@@ -88,7 +89,7 @@ pub struct UsagePercent {
     pub has_warning: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PlanInfo {
     /// Plan name (e.g., "Free", "Pro", "Team")
     pub name: String,

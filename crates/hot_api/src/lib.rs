@@ -4,6 +4,7 @@ pub mod build_info;
 pub mod domain_resolver;
 pub mod handlers;
 pub mod models;
+pub mod openapi;
 pub mod rate_limit;
 pub mod server;
 

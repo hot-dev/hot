@@ -25,6 +25,8 @@ once_cell = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
 tower = { workspace = true, features = ["limit"] }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

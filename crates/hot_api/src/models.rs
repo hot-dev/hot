@@ -2,37 +2,38 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 // ============================================================================
 // Response Wrappers
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiResponse<T> {
     pub data: T,
     pub meta: ResponseMeta,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiListResponse<T> {
     pub data: Vec<T>,
     pub pagination: PaginationMeta,
     pub meta: ResponseMeta,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiErrorResponse {
     pub error: ApiError,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ResponseMeta {
     pub request_id: Uuid,
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PaginationMeta {
     pub total: i64,
     pub limit: i64,
@@ -40,7 +41,7 @@ pub struct PaginationMeta {
     pub has_more: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
@@ -53,7 +54,7 @@ pub struct ApiError {
 // Project DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProjectResponse {
     pub project_id: Uuid,
     pub env_id: Uuid,
@@ -63,12 +64,12 @@ pub struct ProjectResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateProjectRequest {
     pub name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProjectActivateResponse {
     pub project: ProjectResponse,
     /// If activation triggered a redeploy of the latest build, this is its id.
@@ -77,7 +78,7 @@ pub struct ProjectActivateResponse {
     pub redeployed_build_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateProjectRequest {
     pub name: String,
 }
@@ -86,7 +87,7 @@ pub struct UpdateProjectRequest {
 // Build DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BuildResponse {
     pub build_id: Uuid,
     pub project_id: Uuid,
@@ -103,7 +104,7 @@ pub struct BuildResponse {
     pub storage_backend: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BuildWithProjectResponse {
     pub build_id: Uuid,
     pub project_id: Uuid,
@@ -121,20 +122,20 @@ pub struct BuildWithProjectResponse {
     pub storage_backend: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateBuildRequest {
     pub hash: String,
     pub size: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UploadBuildRequest {
     // Multipart form field names
     // - file: the build zip file
     // - hash: the build hash for validation
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BuildUploadResponse {
     pub build_id: Uuid,
     pub project_id: Uuid,
@@ -149,7 +150,7 @@ pub struct BuildUploadResponse {
 // Context Variable DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ContextVariableResponse {
     pub key: String,
     pub description: Option<String>,
@@ -157,14 +158,14 @@ pub struct ContextVariableResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateContextVariableRequest {
     pub key: String,
     pub value: String, // Plain text - will be encrypted
     pub description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateContextVariableRequest {
     pub value: String, // Plain text - will be encrypted
     pub description: Option<String>,
@@ -174,7 +175,7 @@ pub struct UpdateContextVariableRequest {
 // Run DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RunResponse {
     pub run_id: Uuid,
     pub env_id: Uuid,
@@ -198,7 +199,7 @@ pub struct RunResponse {
     pub next_retry_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RunStatsResponse {
     pub total_runs: i64,
     pub running: i64,
@@ -211,7 +212,7 @@ pub struct RunStatsResponse {
 // Event DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EventResponse {
     pub event_id: Uuid,
     pub env_id: Uuid,
@@ -222,7 +223,7 @@ pub struct EventResponse {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PublishEventRequest {
     pub event_type: String,
     pub event_data: serde_json::Value,
@@ -236,7 +237,7 @@ pub struct PublishEventRequest {
 // Event Handler DTOs (Read-only)
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EventHandlerResponse {
     pub event_handler_id: Uuid,
     pub build_id: Uuid,
@@ -249,7 +250,7 @@ pub struct EventHandlerResponse {
 // Schedule DTOs (Read-only)
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ScheduleResponse {
     pub schedule_id: Uuid,
     pub build_id: Uuid,
@@ -262,7 +263,7 @@ pub struct ScheduleResponse {
 // Environment DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EnvironmentResponse {
     pub env_id: Uuid,
     pub org_id: Uuid,
@@ -361,7 +362,7 @@ impl ApiErrorResponse {
 // File DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct FileResponse {
     pub file_id: Uuid,
     pub path: String,
@@ -375,7 +376,7 @@ pub struct FileResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct FileListQueryParams {
     #[serde(
         default = "default_file_limit",
@@ -396,7 +397,7 @@ fn default_file_limit() -> i64 {
 // Multipart Upload DTOs
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct InitiateUploadRequest {
     pub path: String,
     #[serde(default)]
@@ -405,7 +406,7 @@ pub struct InitiateUploadRequest {
     pub content_type: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct InitiateUploadResponse {
     pub upload_id: Uuid,
     pub path: String,
@@ -415,14 +416,14 @@ pub struct InitiateUploadResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UploadPartResponse {
     pub part_number: i32,
     pub size: i64,
     pub etag: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UploadStatusResponse {
     pub upload_id: Uuid,
     pub path: String,
