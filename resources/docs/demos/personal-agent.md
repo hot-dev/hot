@@ -21,14 +21,22 @@ you need it.
 
 ## Prerequisites
 
-Install the Hot CLI and check `hot dev` works. PersonalAgent shares the
-unreleased `hot-ai` and `hot-ai-agent` packages with TeamAgent, so clone the
-main `hot` repo as a sibling of `hot-demos`:
+Install the Hot CLI (2.0.3+) and check `hot dev` works. PersonalAgent depends
+on `hot.dev/hot-ai` **1.4.0** and `hot.dev/hot-ai-agent` **1.0.0** — add them
+to your `hot.hot` `deps` (see the demo project's `hot.hot` for an example).
+
+For local package development, clone the main `hot` repo as a sibling of
+`hot-demos` and use `local` deps or `HOT_AI_*` env overrides:
 
 ```text
 hot-dev/
   hot/
   hot-demos/
+```
+
+```bash
+export HOT_AI_PATH=/path/to/hot/hot/pkg/hot-ai
+export HOT_AI_AGENT_PATH=/path/to/hot/hot/pkg/hot-ai-agent
 ```
 
 ## Step 1: Clone And Configure
@@ -37,13 +45,6 @@ hot-dev/
 git clone https://github.com/hot-dev/hot-demos
 cd hot-demos/personal-agent
 cp .env.example .env
-```
-
-If your checkout layout differs, point at the local packages:
-
-```bash
-export HOT_AI_PATH=/path/to/hot/hot/pkg/hot-ai
-export HOT_AI_AGENT_PATH=/path/to/hot/hot/pkg/hot-ai-agent
 ```
 
 ## Step 2: Verify The Project

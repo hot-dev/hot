@@ -7,6 +7,21 @@ memory, RAG, chat loops, tools, skills, and inter-agent bus messages.
 `hot-ai-agent` extends that same namespace family with `::ai::agent::*`
 for the application harness code that many agents otherwise reimplement.
 
+## Installation
+
+Add this to the `deps` in your `hot.hot` file:
+
+```hot
+"hot.dev/hot-ai-agent": "1.0.0"
+```
+
+`hot-ai-agent` depends on `hot-ai` 1.4.0 or later:
+
+```hot
+"hot.dev/hot-ai": "1.4.0",
+"hot.dev/hot-ai-agent": "1.0.0",
+```
+
 ## Namespaces
 
 - `::ai::agent` - package overview and common aliases.
