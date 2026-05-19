@@ -8,7 +8,8 @@ mod update;
 
 use crate::cli::{CacheAction, Cli, Command, ConfAction, DbAction, HIDDEN_COMMANDS_HELP};
 use crate::command::ai::run_ai;
-use crate::command::api::{run_api, run_app};
+use crate::command::api::run_api;
+use crate::command::app::run_app;
 use crate::command::build::run_build;
 use crate::command::builds::run_builds;
 use crate::command::check::{run_check_watch, run_check_with_raw};

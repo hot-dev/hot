@@ -9,6 +9,7 @@
 
 pub(crate) mod ai;
 pub(crate) mod api;
+pub(crate) mod app;
 pub(crate) mod build;
 pub(crate) mod builds;
 pub(crate) mod check;
