@@ -10,6 +10,7 @@ use axum::{
 use hot::db::{api_key::ApiKey, run::Run};
 use hot::time_range::parse_time_range_cutoff;
 use serde::Deserialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::deserialize_clamped_limit;
@@ -18,7 +19,7 @@ fn default_limit() -> i64 {
     20
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RunFilters {
     #[serde(
         default = "default_limit",

@@ -15,6 +15,7 @@ use hot::db::api_key::ApiKey;
 use hot::db::service_key::ServiceKey;
 use hot::permission::Permissions;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::ListQueryParams;
@@ -26,7 +27,7 @@ use crate::models::*;
 // Request/Response DTOs
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateServiceKeyRequest {
     /// Human-readable name for the key
     pub name: Option<String>,
@@ -40,7 +41,7 @@ pub struct CreateServiceKeyRequest {
     pub expires_in: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceKeyResponse {
     pub service_key_id: Uuid,
     pub name: Option<String>,
@@ -60,13 +61,13 @@ pub struct ServiceKeyResponse {
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServiceKeyRequest {
     /// Updated metadata (replaces existing metadata entirely)
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RevokeAllServiceKeysResponse {
     pub revoked_count: u64,
 }

@@ -84,6 +84,8 @@ indexmap = "2.14.0"
 askama = "0.15.6"
 tower = "0.5"
 tower-http = "0.6.8"
+utoipa = { version = "5.5.0", features = ["chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 tower-lsp = "0.20"
 regex = "1.12.3"
 num-traits = "0.2"

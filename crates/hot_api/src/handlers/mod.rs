@@ -43,8 +43,9 @@ pub use webhook::*;
 // ============================================================================
 
 use serde::Deserialize;
+use utoipa::ToSchema;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ListQueryParams {
     #[serde(
         default = "default_limit",

@@ -18,6 +18,7 @@ use hot::permission::actions;
 use hot::stream::{StreamEvent as PubSubEvent, StreamSubscriber, StreamSubscriberFactory};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{get_and_verify_project, publish_event_internal};
@@ -26,14 +27,14 @@ use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
 use crate::models::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct StreamSubscribeParams {
     /// Optional project filter - only include runs from this project
     pub project: Option<String>,
 }
 
 /// SSE event types for stream subscription
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
     #[serde(rename = "run:start")]
@@ -401,7 +402,7 @@ fn run_to_response(run: &Run) -> RunResponse {
 // ============================================================================
 
 /// Request body for subscribe-with-event endpoint
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SubscribeWithEventRequest {
     /// The event type to publish
     pub event_type: String,
@@ -414,14 +415,14 @@ pub struct SubscribeWithEventRequest {
 }
 
 /// Query parameters for subscribe-with-event endpoint
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SubscribeWithEventParams {
     /// Optional project filter - only include runs from this project
     pub project: Option<String>,
 }
 
 /// SSE event for confirming event publication
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EventPublishedEvent {
     pub event_id: Uuid,
     pub stream_id: Uuid,

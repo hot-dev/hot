@@ -12,6 +12,7 @@ use hot::db::api_key::ApiKey;
 use hot::db::session::Session;
 use hot::permission::Permissions;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::ListQueryParams;
@@ -23,7 +24,7 @@ use crate::models::*;
 // Request/Response DTOs
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateSessionRequest {
     /// Permissions map: resource URN -> action array
     pub permissions: serde_json::Value,
@@ -33,7 +34,7 @@ pub struct CreateSessionRequest {
     pub expires_in: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SessionResponse {
     pub session_id: Uuid,
     /// Only present on creation
@@ -48,7 +49,7 @@ pub struct SessionResponse {
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RevokeAllResponse {
     pub revoked_count: u64,
 }

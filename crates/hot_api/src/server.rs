@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::trace::{self, TraceLayer};
 use tracing::{debug, info};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::access_log::access_log_middleware;
 use crate::auth::api_key_auth_middleware;
@@ -82,6 +84,7 @@ use crate::handlers::{
     verify_domain,
     webhook_catch_all_handler,
 };
+use crate::openapi::{ApiDoc, openapi_json};
 use crate::rate_limit::rate_limit_middleware;
 
 pub const DEFAULT_API_HOST: &str = "localhost";
@@ -234,6 +237,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     let public_routes = Router::new()
         .route("/", get(root_handler))
         .route("/status", get(status_handler))
+        .route("/openapi.json", get(openapi_json))
         // Webhook endpoints — single catch-all handles both standard and custom domain routes:
         //   Standard:      /webhook/{org}/{env}/{service}/{path...}/{token}
         //   Custom domain: /webhook/{service}/{path...}/{token}
@@ -263,6 +267,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
             "/mcp/{service}/messages",
             axum::routing::post(mcp_legacy_messages_handler_domain),
         )
+        .merge(SwaggerUi::new("/docs/api").url("/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for webhooks/MCP
         .layer(GlobalConcurrencyLimitLayer::new(public_concurrency_limit));
 

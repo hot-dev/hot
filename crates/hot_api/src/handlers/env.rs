@@ -11,6 +11,7 @@ use hot::db::{api_key::ApiKey, env::Env};
 use hot::stream::{EnvEvent as PubSubEnvEvent, EnvSubscriber, EnvSubscriberFactory};
 use serde::Serialize;
 use std::convert::Infallible;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::ApiStateData;
@@ -40,7 +41,7 @@ pub async fn get_env_info(
 // ============================================================================
 
 /// SSE event types for environment subscription
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum EnvSseEvent {
     #[serde(rename = "run:start")]
