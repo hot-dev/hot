@@ -2,15 +2,15 @@
 
 hot.pkg.qwen {
   name: "hot.dev/qwen",
-  version: "1.0.0",
-  hot-min-version: "1.2.0",
+  version: "1.0.1",
+  hot-min-version: "2.0.3",
   description: "Qwen (Alibaba Cloud Model Studio / DashScope) API bindings for Hot. Uses the OpenAI-compatible endpoint and includes Chat Completions, Models, and Embeddings APIs.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
   tags: ["ai"],
   deps: {
-    "hot.dev/hot-ai": "1.1.0"
+    "hot.dev/hot-ai": "1.4.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
