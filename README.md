@@ -131,6 +131,12 @@ Package documentation JSON can be regenerated from checked-in packages with:
 ./scripts/pkg-docs.sh
 ```
 
+Official package releases use the same release workflow as Hot runtime releases.
+Push or tag through the normal release path for a full Hot release, which also
+publishes packages. To publish only updated packages to `pkg.hot.dev`, update
+the package versions/docs allowlist and push the package changes to the
+`pkg-release` branch; that branch runs only the package CDN publishing path.
+
 ## Releases
 
 Public release automation lives in `.github/workflows/release.yml`. Releases are

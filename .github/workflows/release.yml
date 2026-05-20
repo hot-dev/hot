@@ -5,10 +5,18 @@ on:
     branches:
       - 'stable'
       - 'beta'
+      - 'pkg-release'
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
+      release_scope:
+        description: 'Release scope to run'
+        type: choice
+        default: 'hot_and_packages'
+        options:
+          - 'hot_and_packages'
+          - 'packages_only'
       publish_to_cdn:
         description: 'Publish installers to the release S3/CDN bucket'
         type: boolean
@@ -41,6 +49,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
       is_beta: ${{ steps.version.outputs.is_beta }}
+      is_package_only: ${{ steps.version.outputs.is_package_only }}
+      publish_package_cdn: ${{ steps.version.outputs.publish_package_cdn }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -55,8 +65,16 @@ jobs:
         VERSION=$(tr -d '[:space:]' < resources/version.txt)
         TAG_NAME="v${VERSION}"
         IS_BETA=false
+        IS_PACKAGE_ONLY=false
+        PUBLISH_PACKAGE_CDN=false
         if [[ "${{ github.ref }}" == "refs/heads/beta" || "${{ github.event.inputs.beta_release }}" == "true" ]]; then
           IS_BETA=true
+        fi
+        if [[ "${{ github.ref }}" == "refs/heads/pkg-release" || "${{ github.event.inputs.release_scope }}" == "packages_only" ]]; then
+          IS_PACKAGE_ONLY=true
+        fi
+        if [[ "$IS_BETA" == "true" || "$IS_PACKAGE_ONLY" == "true" || "${{ github.event.inputs.publish_to_cdn }}" == "true" || "${{ github.ref }}" == "refs/heads/stable" || "${{ github.ref_type }}" == "tag" ]]; then
+          PUBLISH_PACKAGE_CDN=true
         fi
 
         if [[ -z "$VERSION" ]]; then
@@ -64,12 +82,14 @@ jobs:
           exit 1
         fi
 
-        if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" != "$TAG_NAME" ]]; then
+        if [[ "$IS_PACKAGE_ONLY" != "true" && "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" != "$TAG_NAME" ]]; then
           echo "::error::Tag ${{ github.ref_name }} does not match resources/version.txt (${TAG_NAME})"
           exit 1
         fi
 
-        if [[ "$IS_BETA" != "true" ]]; then
+        if [[ "$IS_PACKAGE_ONLY" == "true" ]]; then
+          echo "Package-only release mode: skipping Hot release identity checks."
+        elif [[ "$IS_BETA" != "true" ]]; then
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             echo "::error::GitHub release ${TAG_NAME} already exists. Increment resources/version.txt for a new release."
             exit 1
@@ -87,7 +107,9 @@ jobs:
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
         echo "is_beta=$IS_BETA" >> "$GITHUB_OUTPUT"
-        echo "Validated release ${TAG_NAME} (beta: ${IS_BETA})"
+        echo "is_package_only=$IS_PACKAGE_ONLY" >> "$GITHUB_OUTPUT"
+        echo "publish_package_cdn=$PUBLISH_PACKAGE_CDN" >> "$GITHUB_OUTPUT"
+        echo "Validated release ${TAG_NAME} (beta: ${IS_BETA}, package-only: ${IS_PACKAGE_ONLY}, publish package CDN: ${PUBLISH_PACKAGE_CDN})"
 
   package-cdn:
     name: Generate Package CDN
@@ -129,7 +151,7 @@ jobs:
         path: cdn-output/
 
     - name: Validate AWS secrets for package CDN upload
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.PKG_S3_BUCKET != '' }}
+      if: ${{ needs.validate-release.outputs.publish_package_cdn == 'true' && vars.PKG_S3_BUCKET != '' }}
       run: |
         if [ -z "${{ secrets.PKG_AWS_ROLE_ARN }}" ]; then
           echo "::error::PKG_AWS_ROLE_ARN secret is not configured."
@@ -137,14 +159,14 @@ jobs:
         fi
 
     - name: Configure AWS credentials for package CDN upload
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.PKG_S3_BUCKET != '' }}
+      if: ${{ needs.validate-release.outputs.publish_package_cdn == 'true' && vars.PKG_S3_BUCKET != '' }}
       uses: aws-actions/configure-aws-credentials@v6
       with:
         role-to-assume: ${{ secrets.PKG_AWS_ROLE_ARN }}
         aws-region: ${{ vars.PKG_AWS_REGION || 'us-east-2' }}
 
     - name: Upload package CDN to S3
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.PKG_S3_BUCKET != '' }}
+      if: ${{ needs.validate-release.outputs.publish_package_cdn == 'true' && vars.PKG_S3_BUCKET != '' }}
       env:
         PACKAGE_CDN_BUCKET: ${{ vars.PKG_S3_BUCKET }}
         CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.PKG_CLOUDFRONT_DIST_ID }}
@@ -153,6 +175,7 @@ jobs:
   # Build binaries for all targets
   build:
     needs: validate-release
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     strategy:
       matrix:
         include:
@@ -377,7 +400,8 @@ jobs:
 
   # Package for Linux (using Docker)
   package-linux:
-    needs: build
+    needs: [validate-release, build]
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -413,7 +437,8 @@ jobs:
 
   # Package for macOS
   package-macos:
-    needs: build
+    needs: [validate-release, build]
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: macos-latest
     steps:
     - name: Checkout code
@@ -508,7 +533,8 @@ jobs:
 
   # Package for Homebrew (tarballs for macOS and Linux)
   package-homebrew:
-    needs: build
+    needs: [validate-release, build]
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -622,7 +648,8 @@ jobs:
 
   # Package and sign for Windows (native Windows runner with NSIS + Trusted Signing)
   package-windows:
-    needs: build
+    needs: [validate-release, build]
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: windows-latest
     steps:
     - name: Checkout code
@@ -1027,7 +1054,8 @@ jobs:
   # The public hot repo does not use GitHub Environments; staging/production
   # environments belong to hot-cloud deployments.
   determine-release-channel:
-    if: github.repository == 'hot-dev/hot'
+    needs: validate-release
+    if: ${{ github.repository == 'hot-dev/hot' && needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.channel.outputs.channel }}
@@ -1054,6 +1082,7 @@ jobs:
   # Create GitHub Release with all packages
   create-release:
     needs: [validate-release, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
