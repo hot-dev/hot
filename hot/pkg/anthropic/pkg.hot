@@ -2,15 +2,15 @@
 
 hot.pkg.anthropic {
   name: "hot.dev/anthropic",
-  version: "1.2.0",
-  hot-min-version: "1.4.0",
+  version: "1.2.1",
+  hot-min-version: "2.0.3",
   description: "Anthropic Claude API bindings for Hot. Includes Messages, Models, Batches, Files, Skills, Token Counting, and Prompt Caching APIs.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
   tags: ["ai"],
   deps: {
-    "hot.dev/hot-ai": "1.3.0"
+    "hot.dev/hot-ai": "1.4.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

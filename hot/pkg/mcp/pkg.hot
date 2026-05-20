@@ -2,8 +2,8 @@
 
 hot.pkg.mcp {
   name: "hot.dev/mcp",
-  version: "1.3.0",
-  hot-min-version: "1.4.0",
+  version: "1.3.1",
+  hot-min-version: "2.0.3",
   description: "MCP client for connecting to Model Context Protocol servers. Supports tools, resources, prompts, SSE streaming, and a bridge that surfaces remote tools as `::ai::tool/Tool` records consumable by the chat run-loop.",
   author: "Hot Dev",
   email: "support@hot.dev",
@@ -11,7 +11,7 @@ hot.pkg.mcp {
   tags: ["ai", "protocols"],
   deps: {
     "hot.dev/json-rpc": "1.1.0",
-    "hot.dev/hot-ai": "1.3.0"
+    "hot.dev/hot-ai": "1.4.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
