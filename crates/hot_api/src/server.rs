@@ -84,7 +84,7 @@ use crate::handlers::{
     verify_domain,
     webhook_catch_all_handler,
 };
-use crate::openapi::{ApiDoc, openapi_json};
+use crate::openapi::ApiDoc;
 use crate::rate_limit::rate_limit_middleware;
 
 pub const DEFAULT_API_HOST: &str = "localhost";
@@ -237,7 +237,6 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     let public_routes = Router::new()
         .route("/", get(root_handler))
         .route("/status", get(status_handler))
-        .route("/openapi.json", get(openapi_json))
         // Webhook endpoints — single catch-all handles both standard and custom domain routes:
         //   Standard:      /webhook/{org}/{env}/{service}/{path...}/{token}
         //   Custom domain: /webhook/{service}/{path...}/{token}
