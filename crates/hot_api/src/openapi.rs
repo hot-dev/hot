@@ -1,7 +1,6 @@
 //! OpenAPI document for the Hot API.
 #![allow(dead_code)]
 
-use axum::Json;
 use serde::Serialize;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
@@ -228,10 +227,6 @@ impl Modify for SecurityAddon {
             );
         }
     }
-}
-
-pub async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
 }
 
 #[utoipa::path(
