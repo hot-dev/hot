@@ -32,7 +32,7 @@ Add this to the `deps` in your `hot.hot` file:
 - `::ai::agent::runtime` - per-agent runtime stores, session registry,
   counters, error logging, and time helpers.
 - `::ai::agent::render` - neutral reply records and common text helpers.
-- `::ai::agent::stream` - stable agent-level stream labels and emit helpers.
+- `::ai::agent::stream` - stable agent-level stream event labels and emit helpers.
 - `::ai::agent::mcp` - helpers for agent-scoped MCP tools.
 
 The package deliberately does not depend on transport vendor packages such as

@@ -171,6 +171,7 @@ This builds your project and deploys it to Hot Cloud. Your workflows, schedules,
 
 ## Next Steps
 
+- **[Hot Chat demo](/docs/demos/hot-chat)** — run a complete AI chat product on Hot in 15 minutes
 - **[Hot Language](/docs/language)** — dive deeper into syntax and concepts
 - **[Standard Library](/pkg/hot-std)** — explore available functions
 - **[Events & Handlers](/docs/events)** — build event-driven workflows

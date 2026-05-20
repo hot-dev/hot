@@ -2,7 +2,7 @@
 meta ["test"]
 
 ::ct      ::ai::agent::chat-turn
-::actx    ::ai::agent::ctx
+::request ::ai::agent::request
 ::rt      ::ai::agent::runtime
 ::memory  ::ai::memory
 ::session ::ai::session
@@ -126,25 +126,25 @@ fn () {
 test-bind-tool-ctx-defaults-on
 meta ["test"]
 fn () {
-    ::actx/clear-request()
+    ::request/clear()
     cfg build-cfg()
     input build-input("any", "(stub)")
     ::ct/run-chat-turn(cfg, input)
 
-    assert-eq(input.session.id, ::actx/current-session-id())
-    assert-eq(input.sender.id,  ::actx/current-user-id())
+    assert-eq(input.session.id, ::request/session-id())
+    assert-eq(input.sender.id,  ::request/user-id())
 }
 
 test-bind-tool-ctx-false-leaves-ctx-untouched
 meta ["test"]
 fn () {
-    ::actx/clear-request()
+    ::request/clear()
     cfg build-cfg()
     input ::ct/TurnInput({...untype(build-input("any", "(stub)")), bind-tool-ctx: false})
     ::ct/run-chat-turn(cfg, input)
 
-    assert(is-null(::actx/current-session-id()))
-    assert(is-null(::actx/current-user-id()))
+    assert(is-null(::request/session-id()))
+    assert(is-null(::request/user-id()))
 }
 
 // ============================================================================

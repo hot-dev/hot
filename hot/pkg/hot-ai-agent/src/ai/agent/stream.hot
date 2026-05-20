@@ -1,11 +1,17 @@
 ::ai::agent::stream ns
 meta {
     doc: """
-    Agent-level stream labels and helpers.
+    Agent-level stream event labels and emit helpers.
 
-    These labels sit above raw `::ai::chat` deltas. A concrete agent can
-    expose stable product events to custom UIs while still using
-    provider-level streaming internally.
+    A thin wrapper over `::hot::stream` (the engine-level emission
+    primitive). This namespace defines the stable agent-level event
+    labels (`<agent>:reply:start` / `:delta` / `:end`,
+    `<agent>:memory:forget:start` / `:end`, …) and the helpers that
+    emit them via `::hot::stream/data` underneath.
+
+    Concrete agents and the harness's own `chat-turn` reach for these
+    helpers so that custom UIs can subscribe to a stable, agent-scoped
+    event surface while provider-level streaming changes underneath.
     """
 }
 

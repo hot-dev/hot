@@ -36,7 +36,7 @@ meta {
     """
 }
 
-::ctx     ::ai::agent::ctx
+::request ::ai::agent::request
 ::stream  ::ai::agent::stream
 ::rt      ::ai::agent::runtime
 ::att     ::ai::agent::attachments
@@ -89,9 +89,10 @@ meta {
     - `persist-user` / `persist-assistant` — default true. Set to false
       for dry runs or alternative storage strategies.
     - `bind-tool-ctx` — default true. When set, calls
-      `::ai::agent::ctx/bind-request(session, sender, ctx-extras)` so
+      `::ai::agent::request/bind(session, sender, ctx-extras)` so
       LLM tools registered at namespace top-level can recover the
-      caller via `current-session` / `current-sender`.
+      caller via `::ai::agent::request/session` /
+      `::ai::agent::request/sender`.
     - `ctx-extras` — additional fields stored under `ai.agent.extras`.
     - `user-source` / `user-metadata` — source field + metadata map for
       the persisted user record. Default source is `cfg.agent-name`.
@@ -323,9 +324,9 @@ fn (cfg: TurnConfig, input: TurnInput): Map {
         persist-user-turn(cfg, input)
     })
 
-    // 3. Bind per-request ctx so tools can recover the caller.
+    // 3. Bind per-request session/identity so tools can recover the caller.
     if(bool-default(input.bind-tool-ctx, true), {
-        ::ctx/bind-request(input.session, input.sender, input.ctx-extras)
+        ::request/bind(input.session, input.sender, input.ctx-extras)
     })
 
     // 4. LLM call (or fallback).

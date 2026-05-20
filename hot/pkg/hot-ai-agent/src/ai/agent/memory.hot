@@ -3,9 +3,19 @@ meta {
     doc: """
     Reusable memory lifecycle command declarations and response shapes.
 
-    Concrete agents own policy, authorization, and execution hooks. This
-    namespace keeps the common command surface and neutral formatting in one
-    place.
+    Sibling to `::ai::memory`, not a replacement: `::ai::memory` is
+    the memory **engine** (`AgentMemory`, `remember`, `recall`, the
+    three-store backing). This namespace is the command-surface
+    counterpart that concrete agents wire into `/forget`, `/compact`,
+    `/export`, `/memory`, and `/why` slash commands — declarations,
+    parsed argument shapes, response types, and neutral formatting.
+
+    Files that need both typically alias `::memory ::ai::memory` and
+    `::agent-memory ::ai::agent::memory`.
+
+    Concrete agents own policy, authorization, and execution hooks.
+    This namespace keeps the common command surface and neutral
+    formatting in one place.
     """
 }
 

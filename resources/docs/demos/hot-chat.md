@@ -1,126 +1,245 @@
 # Hot Chat Demo
 
-Hot Chat is a polished local web chat UI for Hot agents. It is intentionally a
-*transport client*, not a new agent: it sends normalized messages to TeamAgent
-or PersonalAgent through Hot webhooks, using the same payload shape a Telegram
-or Slack adapter would.
+Hot Chat is a complete, runnable demo of two AI agents and a polished web UI
+that drives them — all in one Hot project. It's the demo to point at when
+someone asks *"what does a product on Hot look like?"*
 
-**Expected time:** 15 minutes. **Cost:** none.
+- **Personal Mode** — identity-first memory. Notes follow the user across
+  sessions, channels, and devices.
+- **Team Mode** — session-first memory. Two people in the same chat share
+  one memory; two channels stay independent.
+- **One Next.js client** — a thin transport that publishes one typed event
+  per message and renders the agent's reply over the run stream.
+
+Both agents live under `hot/src/` in the same project and boot together with
+one `hot dev`. The Next.js side is a thin transport — the agent is the
+product.
+
+**Expected time:** 15 minutes. **Cost:** none — the demo agents answer from
+local memory by default. Set `ANTHROPIC_API_KEY` for live LLM replies.
 
 ## What You'll Get To See
 
-- a clean chat UI that switches between TeamAgent and PersonalAgent live,
+- a clean chat UI that switches between Personal and Team modes live,
 - quick-prompt chips that map to slash commands without baking policy into
   the UI,
 - file attachments (drag-and-drop or paperclip) carried through to the agent
-  as part of the same webhook payload,
-- a transparent identity panel so you can read off the exact `session_id` and
-  `user_id` the agent will see.
-
-This is the demo to point at when someone asks "what would my product look
-like on top of Hot?" — the UI is generic and the wire format is the same
-contract used by every other transport.
+  as part of the same typed event,
+- a transparent identity panel so you can read off the exact `session_id`
+  and `user_id` the agent will see,
+- per-command event handlers and streaming replies visible in the Agent
+  Graph.
 
 ## Prerequisites
 
-Hot Chat needs an agent to talk to. Start one of the agent demos in another
-terminal first; you can switch the active agent inside Hot Chat at any time.
+- **Hot CLI** 2.0.3+ — [hot.dev/download](https://hot.dev/download)
+- **Node 20+** for the Next.js app
+- A **Hot service key** for your local dev environment (one-time, see below)
+
+No LLM API keys required — the demo agents answer from local memory.
+
+The project's `hot.hot` declares published packages (`hot.dev/hot-ai`
+**1.4.0**, `hot.dev/hot-ai-agent` **1.0.0**, `hot.dev/anthropic` **1.2.1**),
+so dependencies resolve from the Hot package registry automatically.
+
+## Step 1: Clone
 
 ```bash
-cd hot-demos/personal-agent
+git clone https://github.com/hot-dev/hot-demos
+cd hot-demos/hot-chat
+```
+
+## Step 2: Verify The Project
+
+Compile and run the agent tests before booting the runtime:
+
+```bash
+hot test
+```
+
+You should see the tests pass for both Personal and Team agents. This
+confirms the published deps resolve and both agents compile end to end.
+
+## Step 3: Boot The Agents
+
+```bash
 hot dev --open
 ```
 
-(Use `team-agent` instead if you'd rather start there.)
+`hot dev` opens the Hot App at <http://localhost:4681> and registers both
+agents under one project. Leave it running.
 
-The demo expects the local Hot Dev defaults:
+While the Hot App is open, generate a service key:
 
-```text
-http://localhost:4681/webhook/local/development/personal-agent/web/messages
-http://localhost:4681/webhook/local/development/team-agent/web/messages
-```
+> *Hot App → Service Keys → New Key.* Copy the value.
 
-## Step 1: Install And Run
+## Step 4: Start The Chat UI
+
+In a second terminal:
 
 ```bash
 cd hot-demos/hot-chat
 cp .env.example .env
+# paste the service key into HOT_API_KEY in .env
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open <http://localhost:3000>. The toolbar switches between Personal and Team
+modes live.
 
-## Step 2: Try A Quick Prompt
+## Step 5: Walk Through The Modes
 
-The first time you load Hot Chat, the conversation is empty and you see a
-column of suggestions. Click **Daily brief** (PersonalAgent) or **Decisions**
-(TeamAgent). The chip sends a slash command immediately and the agent reply
-streams in below.
+### Personal Mode (identity-first)
 
-Try writing a message of your own next:
+Memory is keyed by **person** (`person:<user-id>`), so it follows the user
+across sessions and devices.
 
-- with PersonalAgent: type *"I prefer launch updates that start with
-  blockers"* and press Enter. PersonalAgent replies `remembered`. Click
-  **Recall preferences** to verify it stuck.
-- with TeamAgent: type *"We decided to ship docs before launch"*, then click
-  **Ask the team** and adjust the prefilled question. The reply lists the
-  matching memory.
+1. Type `/remember I prefer launch updates that start with blockers` and
+   press Enter. You'll see `remembered` stream into the assistant bubble.
+2. Click **Recall preferences** (a quick-prompt chip) — the matching note
+   comes back.
+3. Refresh the browser and ask `/recall` again. Same answer — memory is
+   keyed on you, not on the chat session.
 
-## Step 3: Attach A File
+Common Personal Mode commands:
 
-Drag a small file (text, image, PDF — under 4 MB) anywhere onto the chat. A
-chip appears below the composer. Send a message with it; the agent reply will
-include `… with 1 attachment(s)`. The agent stores the file's name and type as
-metadata; this demo doesn't deeply parse contents, but the same wire shape is
-how a real product would forward documents to your agent.
+| Command            | What it does                                                  |
+|--------------------|---------------------------------------------------------------|
+| `/remember <text>` | store a personal note (records attachments as metadata)       |
+| `/recall <query>`  | search identity-scoped memory                                 |
+| `/brief`           | recall preferences and tasks for a quick brief                |
+| `/tasks`           | recall commitments and next actions                           |
+| `/memory`          | inspect record/capsule/graph counts for this user             |
+| `/export`          | summarize the exportable memory bundle                        |
+| `/privacy`         | show the memory shape with a privacy-review framing           |
+| `/whoami`          | show transport, session, and user identity                    |
+| `/guide`           | cheat sheet of the available commands                         |
 
-## Step 4: Inspect Identity
+### Team Mode (session-first)
+
+Memory is keyed by **session** (`web:chat:<id>`, `slack:T0:C0`,
+`telegram:-100…`), so two channels stay independent while two members of the
+same channel share one memory.
+
+1. Switch to Team Mode in the toolbar.
+2. Type *"we decided to ship docs before launch"*, then *"CI is the only
+   blocker"*.
+3. Ask `/ask what is blocking launch?` — the reply cites the matching
+   records with attribution.
+
+Common Team Mode commands:
+
+| Command       | What it does                                                          |
+|---------------|-----------------------------------------------------------------------|
+| (no command)  | record the message into session memory                                |
+| `/ask <q>`    | answer from remembered context                                        |
+| `/summary`    | show a few recent records as a quick summary                          |
+| `/decisions`  | recall messages tagged as decisions, action items, or open questions  |
+| `/memory`     | inspect record/capsule/graph counts for this session                  |
+| `/audit`      | show counts plus a hint about selective deletion                      |
+| `/whoami`     | show the current transport, session id, and user id                   |
+| `/guide`      | cheat sheet of the available commands                                 |
+
+## Step 6: Attach A File
+
+Drag a small file (text, image, PDF — under 4 MB) anywhere onto the chat.
+A chip appears below the composer. Send a message with it; the agent reply
+will include `… with 1 attachment(s)`. The agent stores the file's name and
+type as metadata; this demo doesn't deeply parse contents, but the same
+wire shape is how a real product would forward documents to your agent.
+
+## Step 7: Inspect Identity
 
 Click **Identity** in the toolbar. You'll see the exact strings the agent
 receives:
 
 ```text
-Session       person:<your-uuid>      ← PersonalAgent
-              web:chat:<your-uuid>    ← TeamAgent
+Session       person:<your-uuid>      ← Personal Mode
+              web:chat:<your-uuid>    ← Team Mode
 User identity web:user:<your-uuid>
 ```
 
-Edit your display name; the agent picks it up on the next message. Identity is
-stored only in your browser's `localStorage` — clear site data to reset.
+That one difference — Personal Mode derives `session_id` from the
+identity, Team Mode trusts the caller's `session_id` — is the entire
+identity-first / session-first split made literal. Edit your display name
+and the agent picks it up on the next message. Identity is stored only in
+your browser's `localStorage` — clear site data to reset.
 
-## Transport Contract
+## Step 8: Open The Agent Graph
 
-The Next.js server forwards each message as JSON to the Hot webhook:
+In the Hot App, click into either agent and open the **Graph** tab. Each
+slash command shows up as its own typed event wired to its own handler:
+
+- `personal-agent:remember` → `remember`
+- `personal-agent:recall` → `recall`
+- `team-agent:ask` → `ask-question`
+- `team-agent:record` → `record-message`
+- …and so on, one node per command.
+
+There is no central dispatch function and no big `cond`. Add a command by
+writing one more `on-event` handler.
+
+## Wire Contract
+
+The browser parses slash commands client-side and POSTs a typed event to
+the Next.js server route, which forwards it (with the service key) to Hot's
+`/v1/streams/subscribe-with-event`:
 
 ```json
 {
-  "session_id": "person:<uuid>",
-  "user_id":    "web:user:<uuid>",
-  "user_name":  "Demo User",
-  "text":       "/recall launch notes",
-  "message_id": "web:<chat-id>:<timestamp>",
-  "reply_mode": "response",
-  "attachments": [
-    {"name": "notes.md", "type": "text/markdown", "size": 412, "text": "…"}
-  ],
-  "metadata": {"client": "hot-chat", "kind": "command"}
+  "event_type": "team-agent:ask",
+  "event_data": {
+    "session_id":  "web:chat:<uuid>",
+    "user_id":     "web:user:<uuid>",
+    "user_name":   "Demo User",
+    "message_id":  "web:<chat-id>:<timestamp>",
+    "timestamp":   1700000000,
+    "question":    "what's blocking launch?",
+    "attachments": [{"name": "notes.md", "type": "text/markdown", "size": 412, "text": "…"}],
+    "metadata":    {"client": "hot-chat", "target": "team-agent"}
+  }
 }
 ```
 
-A Telegram or Slack adapter can produce the same shape from native messages.
-That's why Hot Chat doesn't need agent-specific code: the wire contract is
-the contract.
+The matching `on-event` handler runs and emits
+`team-agent:reply:start` / `:delta` / `:end` stream events. The browser
+reads those and renders the assistant message as it arrives. A Slack or
+Telegram adapter can publish the same events from native message shapes
+— the wire contract is the contract.
+
+## Project Layout
+
+```text
+hot-chat/
+  src/                            # Next.js app
+    app/api/chat/route.ts         # SSE proxy via @hot-dev/sdk/proxy
+    lib/agent-client.ts           # demo command map + @hot-dev/sdk/agent
+  hot.hot                         # one project, two agents
+  hot/
+    src/
+      personal-agent.hot          # per-command event handlers
+      team-agent.hot              # per-command event handlers
+    test/
+      personal-agent.hot
+      team-agent.hot
+```
+
+Both agents are short, single-file projects. Diff them to see the *one*
+structural difference: Personal Mode derives `session_id` from the
+identity; Team Mode trusts the caller's `session_id`.
 
 ## Why This Architecture
 
-- **Browser → server route → Hot webhook.** Auth, CORS, and rate-limiting can
-  live in the Next.js route later without touching the browser code.
+- **Browser → server route → Hot stream.** Auth, CORS, and rate-limiting
+  can live in the Next.js route later without touching the browser code.
 - **No actions in the URL.** The UI passes free text and attachments; the
-  agent decides what to do based on slash commands.
+  agent decides what to do based on slash commands and typed events.
 - **Stable IDs.** `chatId` and `userId` come from `localStorage`, so memory
-  follows the user across page reloads. Production would replace these with
-  your auth system's identifiers.
+  follows the user across page reloads. Production would replace these
+  with your auth system's identifiers.
+- **Per-command event handlers.** Each command is one `on-event` handler.
+  The Agent Graph stays accurate as the agent grows.
 
 ## Build For Production
 
@@ -129,9 +248,18 @@ npm run build
 npm start
 ```
 
-The production build is what CI exercises. There's no agent-specific config
-in the build — point `HOT_AGENT_BASE_URL`, `HOT_ORG_SLUG`, and `HOT_ENV_NAME`
-at any deployed Hot environment.
+The production build is what CI exercises. There's no agent-specific
+config in the build — point `HOT_AGENT_BASE_URL` and `HOT_API_KEY` at any
+deployed Hot environment.
+
+## Going Further
+
+The standalone demo keeps a smaller command surface so the source stays
+readable in one file each. The **full** TeamAgent and PersonalAgent in the
+main Hot repo (`hot/hot/src/team-agent/`, `hot/hot/src/personal-agent/`)
+add `/forget`, `/why`, `/export`, `/compact`, `/search`, `/stats`,
+`/diag`, `/ai`, scheduled digests, a `Researcher` peer, and more —
+production-shaped reference implementations for when you outgrow the demo.
 
 ## Source
 
