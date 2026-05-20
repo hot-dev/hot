@@ -4,12 +4,11 @@ Agents are typed groups of event handlers, schedules, and webhooks that share id
 
 Agents group handlers by type reference, giving you compile-time validation and structured config fields.
 
-For complete runnable examples, see the [Demos](/docs/demos) section. The
-[TeamAgent demo](/docs/demos/team-agent) shows a multi-transport team memory
-agent, the [PersonalAgent demo](/docs/demos/personal-agent) shows an
-identity-first personal memory agent, and [Hot Chat](/docs/demos/hot-chat)
-shows a reusable web chat client over the same wire contract used by
-Telegram and Slack adapters.
+For a complete runnable example, see the [Hot Chat
+demo](/docs/demos/hot-chat) — one Hot project that boots two AI agents
+(session-first Team Mode and identity-first Personal Mode) behind a
+polished Next.js client, over the same typed-event wire contract a Slack
+or Telegram adapter would use.
 
 ## Defining an Agent
 

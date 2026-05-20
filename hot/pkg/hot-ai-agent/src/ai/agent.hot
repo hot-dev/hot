@@ -13,12 +13,15 @@ meta {
     - `::ai::agent::runtime` for session registries, stores, stats, and
       error logging.
     - `::ai::agent::render` for neutral reply records and text helpers.
-    - `::ai::agent::stream` for agent-level stream events.
-    - `::ai::agent::memory` for reusable memory lifecycle command shapes.
+    - `::ai::agent::stream` for agent-level stream event labels and
+      emit helpers (a thin wrapper over the engine's `::hot::stream`).
+    - `::ai::agent::memory` for reusable memory lifecycle command
+      declarations and response shapes (the command-surface sibling
+      of `::ai::memory`, which is the memory engine).
     - `::ai::agent::lifecycle` for scheduled memory lifecycle helpers.
     - `::ai::agent::mcp` for common MCP tool plumbing.
-    - `::ai::agent::ctx` for per-request session/identity bindings that
-      let statically-registered tools recover the active caller.
+    - `::ai::agent::request` for per-request session/identity bindings
+      that let statically-registered tools recover the active caller.
     - `::ai::agent::chat-turn` for the canonical memory-grounded LLM
       reply lifecycle (recall → persist user → stream → persist
       assistant) used by free-chat handlers.

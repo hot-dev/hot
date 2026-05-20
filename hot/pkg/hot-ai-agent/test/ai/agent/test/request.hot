@@ -1,0 +1,82 @@
+::ai::agent::test::request ns
+meta ["test"]
+
+::request ::ai::agent::request
+::session ::ai::session
+::hctx    ::hot::ctx
+
+Session  ::session/Session
+Identity ::session/Identity
+
+test-bind-and-recover-session-and-sender
+meta ["test"]
+fn () {
+    ::request/clear()
+    s Session({id: "person:alice"})
+    i Identity({id: "alice", name: "Alice"})
+    ::request/bind(s, i, null)
+
+    assert-eq("person:alice", ::request/session-id())
+    assert-eq("alice",        ::request/user-id())
+    assert-eq("Alice",        ::request/user-name())
+
+    recovered ::request/session()
+    assert(not(is-null(recovered)))
+    assert-eq("person:alice", recovered.id)
+
+    sender ::request/sender()
+    assert(not(is-null(sender)))
+    assert-eq("alice", sender.id)
+    assert-eq("Alice", sender.name)
+}
+
+test-sender-falls-back-to-id-when-name-missing
+meta ["test"]
+fn () {
+    ::request/clear()
+    s Session({id: "person:bob"})
+    i Identity({id: "bob"})
+    ::request/bind(s, i, null)
+
+    sender ::request/sender()
+    assert-eq("bob", sender.id)
+    assert-eq("bob", sender.name)
+}
+
+test-extras-roundtrip
+meta ["test"]
+fn () {
+    ::request/clear()
+    s Session({id: "person:carol"})
+    i Identity({id: "carol", name: "Carol"})
+    ::request/bind(s, i, {channel: "#general", transport: "web"})
+
+    extras ::request/extras()
+    assert-eq("#general", get(extras, "channel"))
+    assert-eq("web",      get(extras, "transport"))
+}
+
+test-unbound-returns-null
+meta ["test"]
+fn () {
+    ::request/clear()
+    assert(is-null(::request/session-id()))
+    assert(is-null(::request/user-id()))
+    assert(is-null(::request/user-name()))
+    assert(is-null(::request/session()))
+    assert(is-null(::request/sender()))
+    assert-eq({}, ::request/extras())
+}
+
+test-clear-removes-bindings
+meta ["test"]
+fn () {
+    s Session({id: "person:dan"})
+    i Identity({id: "dan", name: "Dan"})
+    ::request/bind(s, i, null)
+    assert-eq("dan", ::request/user-id())
+
+    ::request/clear()
+    assert(is-null(::request/user-id()))
+    assert(is-null(::request/sender()))
+}
