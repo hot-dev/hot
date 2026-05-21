@@ -814,6 +814,7 @@ async fn async_main(providers: CliProviders) {
             run_dev(
                 conf.clone(),
                 context_storage.clone(),
+                global_options.ctx_files.clone(),
                 open_browser,
                 &providers,
             )

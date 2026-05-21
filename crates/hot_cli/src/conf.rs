@@ -172,6 +172,15 @@ pub(crate) fn load_dotenv_files() {
     }
 }
 
+pub(crate) fn reload_dotenv_files() {
+    if Path::new(".env").exists() {
+        match dotenvy::from_path_override(Path::new(".env")) {
+            Ok(_) => tracing::debug!("Reloaded environment from .env"),
+            Err(e) => tracing::warn!("Failed to reload .env: {}", e),
+        }
+    }
+}
+
 // Function to load environment variables and apply them to the configuration
 pub(crate) fn apply_env_vars(conf: Val) -> Val {
     let mut conf = conf;
