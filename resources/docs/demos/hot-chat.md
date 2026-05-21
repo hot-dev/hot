@@ -34,7 +34,7 @@ local memory by default. Set `ANTHROPIC_API_KEY` for live LLM replies.
 
 - **Hot CLI** 2.0.3+ — [hot.dev/download](https://hot.dev/download)
 - **Node 20+** for the Next.js app
-- A **Hot service key** for your local dev environment (one-time, see below)
+- A **Hot API key** for your local dev environment (one-time, see below)
 
 No LLM API keys required — the demo agents answer from local memory.
 
@@ -69,9 +69,9 @@ hot dev --open
 `hot dev` opens the Hot App at <http://localhost:4681> and registers both
 agents under one project. Leave it running.
 
-While the Hot App is open, generate a service key:
+While the Hot App is open, generate an API key:
 
-> *Hot App → Service Keys → New Key.* Copy the value.
+> *Hot App → API Keys → New Key.* Copy the value.
 
 ## Step 4: Start The Chat UI
 
@@ -80,7 +80,7 @@ In a second terminal:
 ```bash
 cd hot-demos/hot-chat
 cp .env.example .env
-# paste the service key into HOT_API_KEY in .env
+# paste the API key into HOT_API_KEY in .env
 npm install
 npm run dev
 ```
@@ -183,7 +183,7 @@ writing one more `on-event` handler.
 ## Wire Contract
 
 The browser parses slash commands client-side and POSTs a typed event to
-the Next.js server route, which forwards it (with the service key) to Hot's
+the Next.js server route, which forwards it (with the API key) to Hot's
 `/v1/streams/subscribe-with-event`:
 
 ```json
