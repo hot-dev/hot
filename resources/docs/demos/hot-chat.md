@@ -34,7 +34,7 @@ local memory by default. Set `ANTHROPIC_API_KEY` for live LLM replies.
 
 - **Hot CLI** 2.0.3+ — [hot.dev/download](https://hot.dev/download)
 - **Node 20+** for the Next.js app
-- A **Hot service key** for your local dev environment (one-time, see below)
+- A **Hot API key** for your local dev environment (one-time, see below)
 
 No LLM API keys required — the demo agents answer from local memory.
 
@@ -69,9 +69,9 @@ hot dev --open
 `hot dev` opens the Hot App at <http://localhost:4681> and registers both
 agents under one project. Leave it running.
 
-While the Hot App is open, generate a service key:
+While the Hot App is open, generate an API key:
 
-> *Hot App → Service Keys → New Key.* Copy the value.
+> *Hot App → API Keys → New Key.* Copy the value.
 
 ## Step 4: Start The Chat UI
 
@@ -80,7 +80,7 @@ In a second terminal:
 ```bash
 cd hot-demos/hot-chat
 cp .env.example .env
-# paste the service key into HOT_API_KEY in .env
+# paste the API key into HOT_API_KEY in .env
 npm install
 npm run dev
 ```
@@ -102,19 +102,16 @@ across sessions and devices.
 3. Refresh the browser and ask `/recall` again. Same answer — memory is
    keyed on you, not on the chat session.
 
-Common Personal Mode commands:
+Personal Mode commands, grouped by role:
 
-| Command            | What it does                                                  |
-|--------------------|---------------------------------------------------------------|
-| `/remember <text>` | store a personal note (records attachments as metadata)       |
-| `/recall <query>`  | search identity-scoped memory                                 |
-| `/brief`           | recall preferences and tasks for a quick brief                |
-| `/tasks`           | recall commitments and next actions                           |
-| `/memory`          | inspect record/capsule/graph counts for this user             |
-| `/export`          | summarize the exportable memory bundle                        |
-| `/privacy`         | show the memory shape with a privacy-review framing           |
-| `/whoami`          | show transport, session, and user identity                    |
-| `/guide`           | cheat sheet of the available commands                         |
+| Role        | Command            | What it does                                              |
+|-------------|--------------------|-----------------------------------------------------------|
+| Write       | `/remember <text>` | store a personal note (free-chat does the same)           |
+| Read        | `/recall <query>`  | search identity-scoped memory (deterministic, works offline) |
+| Synthesis   | `/brief`           | preferences, open tasks, deadlines, projects              |
+| Synthesis   | `/tasks`           | open tasks only, rendered as a checklist                  |
+| Identity    | `/whoami`          | show transport, session, and user identity                |
+| Help        | `/guide`           | cheat sheet of the available commands                     |
 
 ### Team Mode (session-first)
 
@@ -128,18 +125,16 @@ same channel share one memory.
 3. Ask `/ask what is blocking launch?` — the reply cites the matching
    records with attribution.
 
-Common Team Mode commands:
+Team Mode commands, grouped by role:
 
-| Command       | What it does                                                          |
-|---------------|-----------------------------------------------------------------------|
-| (no command)  | record the message into session memory                                |
-| `/ask <q>`    | answer from remembered context                                        |
-| `/summary`    | show a few recent records as a quick summary                          |
-| `/decisions`  | recall messages tagged as decisions, action items, or open questions  |
-| `/memory`     | inspect record/capsule/graph counts for this session                  |
-| `/audit`      | show counts plus a hint about selective deletion                      |
-| `/whoami`     | show the current transport, session id, and user id                   |
-| `/guide`      | cheat sheet of the available commands                                 |
+| Role       | Command       | What it does                                                       |
+|------------|---------------|--------------------------------------------------------------------|
+| Write      | (no command)  | record the message into session memory                             |
+| Read       | `/ask <q>`    | LLM-backed answer grounded on channel memory                       |
+| Synthesis  | `/summary`    | distill the recent channel transcript                              |
+| Synthesis  | `/decisions`  | decisions, action items, and open questions from the transcript    |
+| Identity   | `/whoami`     | show transport, session, and user identity                         |
+| Help       | `/guide`      | cheat sheet of the available commands                              |
 
 ## Step 6: Attach A File
 
@@ -183,7 +178,7 @@ writing one more `on-event` handler.
 ## Wire Contract
 
 The browser parses slash commands client-side and POSTs a typed event to
-the Next.js server route, which forwards it (with the service key) to Hot's
+the Next.js server route, which forwards it (with the API key) to Hot's
 `/v1/streams/subscribe-with-event`:
 
 ```json

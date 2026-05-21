@@ -87,6 +87,11 @@ demo-name/
 Demos use published Hot packages from the registry — clone, run
 `hot test` or `hot dev`, and dependencies resolve automatically.
 
+Some demos include `hot/ctx.hot` as a local-development convenience.
+`hot dev` loads that file to bridge values from `.env` into context
+variables, but Hot Dev Cloud ignores it. For deployed demos, add the
+same context variables in the Hot Dev App.
+
 ## What To Look For In The Hot App
 
 Most demos include an Agent Graph walkthrough. Open the Hot App, choose
