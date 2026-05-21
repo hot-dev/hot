@@ -167,6 +167,21 @@ pub(crate) async fn run_worker_with_stream_pubsub(
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
     stream_pubsub: Option<std::sync::Arc<StreamPubSub>>,
 ) {
+    let dev_context_storage = context_storage.map(|ctx| {
+        std::sync::Arc::new(std::sync::RwLock::new(Some(ctx)))
+            as hot_worker::server::DevContextStorage
+    });
+
+    run_worker_with_stream_pubsub_shared_context(env, conf, dev_context_storage, stream_pubsub)
+        .await
+}
+
+pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
+    env: Env,
+    conf: Val,
+    dev_context_storage: Option<hot_worker::server::DevContextStorage>,
+    stream_pubsub: Option<std::sync::Arc<StreamPubSub>>,
+) {
     info!(
         "hot.dev: WORKER starting, version: {} ({})",
         build_info::VERSION,
@@ -239,7 +254,7 @@ pub(crate) async fn run_worker_with_stream_pubsub(
     full_worker_conf = full_worker_conf.set_str("runtime.profile", Some(profile.clone()), &profile);
 
     let server = tokio::spawn(async move {
-        match hot_worker::server::run_with_components(
+        match hot_worker::server::run_with_components_shared_context(
             queue_type,
             redis_uri,
             redis_cluster,
@@ -248,7 +263,7 @@ pub(crate) async fn run_worker_with_stream_pubsub(
             full_worker_conf,
             emitter,
             event_publisher,
-            context_storage,
+            dev_context_storage,
             stream_pubsub, // Pass shared stream publisher
         )
         .await
