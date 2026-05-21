@@ -9,7 +9,7 @@ Qwen models are served by [Alibaba Cloud Model Studio](https://www.alibabacloud.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/qwen": "1.0.0"
+"hot.dev/qwen": "1.0.1"
 ```
 
 ## Configuration

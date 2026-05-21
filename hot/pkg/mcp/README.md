@@ -7,7 +7,7 @@ MCP client for connecting to Model Context Protocol servers from Hot. Supports t
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/mcp": "1.3.0"
+"hot.dev/mcp": "1.3.1"
 ```
 
 This package depends on `hot.dev/json-rpc` for JSON-RPC 2.0 message framing (installed automatically).
