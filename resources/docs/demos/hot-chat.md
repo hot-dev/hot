@@ -249,7 +249,7 @@ npm start
 ```
 
 The production build is what CI exercises. There's no agent-specific
-config in the build — point `HOT_AGENT_BASE_URL` and `HOT_API_KEY` at any
+config in the build — point `HOT_API_URL` and `HOT_API_KEY` at any
 deployed Hot environment.
 
 ## Going Further
