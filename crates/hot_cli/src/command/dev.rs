@@ -15,15 +15,16 @@ use crate::command::app::run_app;
 use crate::command::deploy::setup_live_build_for_dev;
 use crate::command::init::check_and_run_init_if_needed;
 use crate::command::scheduler::run_scheduler;
-use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub};
+use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub_shared_context};
 use crate::conf::{
-    apply_env_vars, create_default_conf, get_merged_src_paths, get_merged_test_paths,
-    load_dotenv_files, reload_conf_after_init,
+    apply_env_vars, create_default_conf, get_merged_src_paths, get_merged_test_paths, load_ctx,
+    reload_conf_after_init, reload_dotenv_files,
 };
 
 pub(crate) async fn run_dev(
     conf: Val,
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
+    ctx_files: Vec<String>,
     open_browser: bool,
     providers: &crate::CliProviders,
 ) {
@@ -32,6 +33,9 @@ pub(crate) async fn run_dev(
         build_info::VERSION,
         build_info::git_sha_short()
     );
+
+    let dev_context_storage = std::sync::Arc::new(std::sync::RwLock::new(context_storage))
+        as hot_worker::server::DevContextStorage;
 
     // Check if initialization is needed
     let init_ran = match check_and_run_init_if_needed(&conf, providers).await {
@@ -77,7 +81,7 @@ pub(crate) async fn run_dev(
     // Extract global options from conf for live build setup
     let global_options = GlobalOptions {
         conf_files: vec![],
-        ctx_files: vec![],
+        ctx_files,
         project: None,
         src_paths: vec![],
         test_paths: vec![],
@@ -103,12 +107,16 @@ pub(crate) async fn run_dev(
 
     // Check context requirements before proceeding
     let project_name = hot::project::get_default_project_name(&conf);
+    let context_storage_snapshot = dev_context_storage
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone());
     if let Err(e) = hot::lang::engine::Engine::check_sources_pipeline_with_context(
         &src_paths,
         &test_paths,
         Some(&conf),
         Some(&project_name),
-        context_storage.as_ref(),
+        context_storage_snapshot.as_ref(),
         hot::env::is_local_dev(),
     ) {
         if hot::env::is_local_dev() {
@@ -244,10 +252,10 @@ pub(crate) async fn run_dev(
     // Add a small delay to let scheduler perform initial sync
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     info!("hot.dev: Starting worker...");
-    let worker_handle = tokio::spawn(run_worker_with_stream_pubsub(
+    let worker_handle = tokio::spawn(run_worker_with_stream_pubsub_shared_context(
         Env::Development,
         conf.clone(),
-        context_storage,
+        Some(dev_context_storage.clone()),
         shared_stream_pubsub,
     ));
 
@@ -260,6 +268,7 @@ pub(crate) async fn run_dev(
         global_options,
         src_paths,
         watcher_shutdown_clone,
+        dev_context_storage,
     ));
 
     // Wait for main services to complete (they will complete when Ctrl-C is pressed)
@@ -284,12 +293,53 @@ pub(crate) async fn run_dev(
     std::process::exit(0);
 }
 
+fn collect_dev_ctx_files(cli_ctx_files: &[String]) -> Vec<String> {
+    let mut ctx_files = Vec::new();
+
+    if Path::new("hot/ctx.hot").exists() {
+        ctx_files.push("hot/ctx.hot".to_string());
+    }
+
+    ctx_files.extend(cli_ctx_files.iter().cloned());
+    ctx_files
+}
+
+fn reload_dev_context_storage(
+    dev_context_storage: &hot_worker::server::DevContextStorage,
+    cli_ctx_files: &[String],
+) -> Result<Option<usize>, String> {
+    let ctx_files = collect_dev_ctx_files(cli_ctx_files);
+    if ctx_files.is_empty() {
+        let mut guard = dev_context_storage
+            .write()
+            .map_err(|_| "Failed to write dev context storage".to_string())?;
+        *guard = None;
+        return Ok(None);
+    }
+
+    let ctx_storage = load_ctx(&ctx_files)?;
+    let loaded_count = ctx_storage.len();
+    let next_storage = if ctx_storage.is_empty() {
+        None
+    } else {
+        Some(ctx_storage)
+    };
+
+    let mut guard = dev_context_storage
+        .write()
+        .map_err(|_| "Failed to write dev context storage".to_string())?;
+    *guard = next_storage;
+
+    Ok(Some(loaded_count))
+}
+
 /// File watcher for dev mode - watches source files and reloads event handlers/schedules on change
 pub(crate) async fn run_dev_file_watcher(
     conf: Val,
     global_options: GlobalOptions,
     src_paths: Vec<String>,
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    dev_context_storage: hot_worker::server::DevContextStorage,
 ) {
     use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
     use std::path::PathBuf;
@@ -495,7 +545,23 @@ pub(crate) async fn run_dev_file_watcher(
             info!("hot.dev: .env file changed, reloading environment variables...");
 
             // Reload .env files
-            load_dotenv_files();
+            reload_dotenv_files();
+
+            match reload_dev_context_storage(&dev_context_storage, &global_options.ctx_files) {
+                Ok(Some(loaded_count)) => {
+                    info!(
+                        "hot.dev: Context variables reloaded from ctx file(s): {} variable(s)",
+                        loaded_count
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        "hot.dev: Failed to reload ctx file(s) after .env change: {}",
+                        e
+                    );
+                }
+            }
 
             info!("hot.dev: Environment variables reloaded");
             last_env_reload = Instant::now();

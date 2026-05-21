@@ -15,6 +15,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+pub type DevContextStorage = Arc<RwLock<Option<AHashMap<String, hot::val::Val>>>>;
+
 // Add imports for database operations and event handler execution
 use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project};
 use hot::lang::event::ExecutionContext;
@@ -1646,7 +1648,7 @@ async fn execute_single_event_handler(
     shutdown_coordinator: Arc<ShutdownCoordinator>,
     run_id: Uuid, // Accept run_id as parameter (already registered by caller)
     build_path_cache: Arc<BuildPathCache>, // NEW: Cache for extracted build paths
-    dev_context_storage: Option<Arc<AHashMap<String, hot::val::Val>>>, // Context from hot/ctx.hot for dev mode
+    dev_context_storage: Option<DevContextStorage>, // Context from hot/ctx.hot for dev mode
     stream_publisher: Option<Arc<StreamPubSub>>, // Stream pub/sub for real-time SSE updates
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
 ) -> Result<(), String> {
@@ -2320,14 +2322,26 @@ async fn execute_single_event_handler(
         let mut storage = AHashMap::new();
 
         // 1. First, load dev context storage (from hot/ctx.hot) as the base/fallback
-        if let Some(ref dev_ctx) = dev_context_storage {
-            debug!(
-                "Loading dev context storage with {} variables for project '{}' (as fallback/defaults)",
-                dev_ctx.len(),
-                project.name
-            );
-            for (key, val) in dev_ctx.iter() {
-                storage.insert(key.clone(), val.clone());
+        if let Some(ref dev_ctx_storage) = dev_context_storage {
+            match dev_ctx_storage.read() {
+                Ok(dev_ctx_guard) => {
+                    if let Some(ref dev_ctx) = *dev_ctx_guard {
+                        debug!(
+                            "Loading dev context storage with {} variables for project '{}' (as fallback/defaults)",
+                            dev_ctx.len(),
+                            project.name
+                        );
+                        for (key, val) in dev_ctx.iter() {
+                            storage.insert(key.clone(), val.clone());
+                        }
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        "Failed to read dev context storage for project '{}'; continuing without ctx.hot values",
+                        project.name
+                    );
+                }
             }
         }
 
@@ -2988,6 +3002,41 @@ pub async fn run_with_components(
     dev_context_storage: Option<AHashMap<String, hot::val::Val>>,
     stream_publisher: Option<Arc<StreamPubSub>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dev_context_storage =
+        dev_context_storage.map(|ctx| Arc::new(RwLock::new(Some(ctx))) as DevContextStorage);
+
+    run_with_components_shared_context(
+        queue_type,
+        redis_uri,
+        redis_cluster,
+        serialization,
+        threads,
+        worker_conf,
+        emitter,
+        event_publisher,
+        dev_context_storage,
+        stream_publisher,
+    )
+    .await
+}
+
+/// Run the worker with reloadable dev context storage.
+///
+/// `hot dev` uses this so local `ctx.hot` values can be refreshed after `.env`
+/// changes without restarting the worker.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_components_shared_context(
+    queue_type: QueueType,
+    redis_uri: Option<String>,
+    redis_cluster: bool,
+    serialization: Serialization,
+    threads: Option<usize>,
+    worker_conf: Val,
+    emitter: Option<std::sync::Arc<dyn EngineEventEmitter>>,
+    event_publisher: Option<std::sync::Arc<dyn EventPublisher>>,
+    dev_context_storage: Option<DevContextStorage>,
+    stream_publisher: Option<Arc<StreamPubSub>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: WORKER starting");
 
     // Create database connection for event handler processing FIRST
@@ -3071,9 +3120,10 @@ pub async fn run_with_components(
         }
     };
 
-    // Wrap dev_context_storage in Arc for sharing across worker threads
-    let dev_context_storage = dev_context_storage.map(Arc::new);
-    if let Some(ref ctx) = dev_context_storage {
+    if let Some(ref ctx_storage) = dev_context_storage
+        && let Ok(ctx_guard) = ctx_storage.read()
+        && let Some(ref ctx) = *ctx_guard
+    {
         debug!(
             "hot.dev: WORKER using dev context storage with {} variables",
             ctx.len()
