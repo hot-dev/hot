@@ -315,6 +315,7 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
 
 use bytes::Bytes;
 use futures::StreamExt;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -333,12 +334,18 @@ pub struct HttpStreamIterator {
     pub format: String,
     /// Buffer for partial SSE events
     sse_buffer: String,
+    /// Complete SSE events parsed from the last chunk but not yet yielded
+    pending_sse_events: VecDeque<Val>,
     /// Whether the stream is exhausted
     done: bool,
 }
 
 impl HotIterator for HttpStreamIterator {
     fn next(&mut self) -> Result<(Val, bool), String> {
+        if let Some(event) = self.pending_sse_events.pop_front() {
+            return Ok((event, false));
+        }
+
         if self.done {
             return Ok((Val::Null, true));
         }
@@ -406,24 +413,26 @@ impl HttpStreamIterator {
         self.sse_buffer.push_str(&chunk_str);
 
         // Look for complete events (double newline)
-        let mut events = Vec::new();
+        let mut events = VecDeque::new();
         while let Some(pos) = self.sse_buffer.find("\n\n") {
             let event_str = self.sse_buffer[..pos].to_string();
             self.sse_buffer = self.sse_buffer[pos + 2..].to_string();
 
             if let Some(event) = self.parse_sse_event(&event_str) {
-                events.push(event);
+                events.push_back(event);
             }
         }
 
-        // Return collected events (or Null if no complete events yet)
+        // Return one event per iterator item. HTTP chunks often coalesce
+        // several SSE frames; yielding a Vec here makes consumers that expect
+        // one event per next() accidentally skip all of them.
         // The null filter in iter.rs will prevent Null from being published/stored
         if events.is_empty() {
             Val::Null
-        } else if events.len() == 1 {
-            events.pop().unwrap()
         } else {
-            Val::Vec(events)
+            let first = events.pop_front().unwrap();
+            self.pending_sse_events.extend(events);
+            first
         }
     }
 
@@ -739,6 +748,7 @@ async fn make_streaming_request(
         headers: response_headers.clone(),
         format: format.to_string(),
         sse_buffer: String::new(),
+        pending_sse_events: VecDeque::new(),
         done: false,
     };
 
@@ -917,6 +927,57 @@ mod tests {
                 let text = data_map.get(&Val::from("text")).unwrap();
                 assert_eq!(text, &Val::from("hello"));
             }
+        }
+    }
+
+    #[test]
+    fn test_http_stream_sse_coalesced_events_yield_individually() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.blocking_send(Ok(Bytes::from_static(
+            b"event: message\ndata: {\"text\":\"hello\"}\n\nevent: message\ndata: {\"text\":\"world\"}\n\n",
+        )))
+        .unwrap();
+        drop(tx);
+
+        let mut iterator = HttpStreamIterator {
+            receiver: Arc::new(Mutex::new(rx)),
+            status: 200,
+            headers: IndexMap::new(),
+            format: "sse".to_string(),
+            sse_buffer: String::new(),
+            pending_sse_events: VecDeque::new(),
+            done: false,
+        };
+
+        let (first, first_done) = iterator.next().unwrap();
+        let (second, second_done) = iterator.next().unwrap();
+        let (_, final_done) = iterator.next().unwrap();
+
+        assert!(!first_done);
+        assert!(!second_done);
+        assert!(final_done);
+
+        if let Val::Map(event) = first {
+            assert_eq!(event.get(&Val::from("event")), Some(&Val::from("message")));
+            let data = event.get(&Val::from("data")).unwrap();
+            if let Val::Map(data_map) = data {
+                assert_eq!(data_map.get(&Val::from("text")), Some(&Val::from("hello")));
+            } else {
+                panic!("Expected first event data to be a map");
+            }
+        } else {
+            panic!("Expected first SSE item to be a map");
+        }
+
+        if let Val::Map(event) = second {
+            let data = event.get(&Val::from("data")).unwrap();
+            if let Val::Map(data_map) = data {
+                assert_eq!(data_map.get(&Val::from("text")), Some(&Val::from("world")));
+            } else {
+                panic!("Expected second event data to be a map");
+            }
+        } else {
+            panic!("Expected second SSE item to be a map");
         }
     }
 
