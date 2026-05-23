@@ -462,20 +462,7 @@ impl fmt::Display for Val {
             }
 
             Val::Box(b) => {
-                // Try to downcast to FunctionRef for better display
-                if let Some(func_ref) = b
-                    .as_any()
-                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
-                {
-                    write!(f, "{}", func_ref.name)
-                } else if let Some(type_ref) =
-                    b.as_any().downcast_ref::<crate::lang::refs::TypeRef>()
-                {
-                    write!(f, "{}", type_ref.name)
-                } else {
-                    // Fallback to debug representation for other Box types
-                    write!(f, "{:?}", b)
-                }
+                write!(f, "{}", Self::format_box_display(b.as_ref()))
             }
             Val::Null => write!(f, "null"),
         }
@@ -607,16 +594,7 @@ impl Val {
                     .collect();
                 format!("{{\n{}\n{}}}", entries.join(",\n"), indent_str)
             }
-            Val::Box(b) => {
-                if let Some(func_ref) = b
-                    .as_any()
-                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
-                {
-                    func_ref.name.clone()
-                } else {
-                    format!("{:?}", b)
-                }
-            }
+            Val::Box(b) => Self::format_box_display(b.as_ref()),
             Val::Null => "null".to_string(),
         }
     }
@@ -706,16 +684,7 @@ impl Val {
                     .collect();
                 format!("{{\n{}\n{}}}", entries.join(",\n"), indent_str)
             }
-            Val::Box(b) => {
-                if let Some(func_ref) = b
-                    .as_any()
-                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
-                {
-                    func_ref.name.clone()
-                } else {
-                    format!("{:?}", b)
-                }
-            }
+            Val::Box(b) => Self::format_box_display(b.as_ref()),
             Val::Null => "null".to_string(),
         }
     }
@@ -1650,6 +1619,152 @@ impl Val {
             }
             _ => self.clone(),
         }
+    }
+
+    /// Convert runtime-only boxed values into Hot-level data.
+    ///
+    /// `Val::Box` can hold VM implementation details such as bytecode lambdas and
+    /// runtime refs. This method keeps ordinary Hot data intact while replacing
+    /// those boxed implementation values with stable, user-facing values suitable
+    /// for observability and other external JSON payloads.
+    pub fn to_hot_data_repr(&self) -> Val {
+        match self {
+            Val::Map(m) => {
+                let mapped: indexmap::IndexMap<Val, Val> = m
+                    .iter()
+                    .map(|(key, value)| (key.to_hot_data_repr(), value.to_hot_data_repr()))
+                    .collect();
+                Val::Map(Box::new(mapped))
+            }
+            Val::Vec(v) => Val::Vec(v.iter().map(|item| item.to_hot_data_repr()).collect()),
+            Val::Box(b) => Self::box_to_hot_data_repr(b.as_ref()),
+            _ => self.clone(),
+        }
+    }
+
+    fn typed_hot_data_value(type_name: &str, value: Val) -> Val {
+        let mut map = indexmap::IndexMap::new();
+        map.insert(Val::from("$type"), Val::from(type_name.to_string()));
+        map.insert(Val::from("$val"), value);
+        Val::Map(Box::new(map))
+    }
+
+    fn lambda_info_data(lambda: &crate::lang::bytecode::LambdaInfo) -> Val {
+        let mut meta = indexmap::IndexMap::new();
+        meta.insert(
+            Val::from("parameters"),
+            Val::Vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
+        );
+        meta.insert(Val::from("lazy"), Val::Bool(lambda.is_lazy_param));
+
+        if !lambda.defining_namespace.is_empty() {
+            meta.insert(
+                Val::from("namespace"),
+                Val::from(lambda.defining_namespace.clone()),
+            );
+        }
+
+        let mut capture_names = lambda.capture_vars.clone();
+        let mut extra_capture_names: Vec<String> = lambda
+            .closure_env
+            .keys()
+            .filter(|name| !capture_names.iter().any(|known| known == *name))
+            .cloned()
+            .collect();
+        extra_capture_names.sort();
+        capture_names.extend(extra_capture_names);
+
+        let captures: indexmap::IndexMap<Val, Val> = capture_names
+            .into_iter()
+            .filter_map(|name| {
+                lambda
+                    .closure_env
+                    .get(&name)
+                    .map(|value| (Val::from(name), value.to_hot_data_repr()))
+            })
+            .collect();
+
+        if !captures.is_empty() {
+            meta.insert(Val::from("captures"), Val::Map(Box::new(captures)));
+        }
+
+        Val::Map(Box::new(meta))
+    }
+
+    fn box_to_hot_data_repr(boxed: &dyn ValBox) -> Val {
+        if let Some(func_ref) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+        {
+            return Self::typed_hot_data_value("::hot::type/Fn", Val::from(func_ref.name.clone()));
+        }
+
+        if let Some(lambda) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        {
+            return Self::typed_hot_data_value("::hot::type/Fn", Self::lambda_info_data(lambda));
+        }
+
+        if let Some(ns_ref) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::refs::NamespaceRef>()
+        {
+            return Self::typed_hot_data_value(
+                "::hot::type/Namespace",
+                Val::from(ns_ref.path.clone()),
+            );
+        }
+
+        if let Some(type_ref) = boxed.as_any().downcast_ref::<crate::lang::refs::TypeRef>() {
+            return Val::from(type_ref.name.clone());
+        }
+
+        Val::from(boxed.to_string())
+    }
+
+    fn format_box_display(boxed: &dyn ValBox) -> String {
+        if let Some(func_ref) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+        {
+            return func_ref.name.clone();
+        }
+
+        if let Some(type_ref) = boxed.as_any().downcast_ref::<crate::lang::refs::TypeRef>() {
+            return type_ref.name.clone();
+        }
+
+        if let Some(ns_ref) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::refs::NamespaceRef>()
+        {
+            return ns_ref.path.clone();
+        }
+
+        if let Some(lambda) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        {
+            let mut meta = indexmap::IndexMap::new();
+            meta.insert(
+                Val::from("parameters"),
+                Val::Vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
+            );
+            meta.insert(Val::from("lazy"), Val::Bool(lambda.is_lazy_param));
+
+            if !lambda.defining_namespace.is_empty() {
+                meta.insert(
+                    Val::from("namespace"),
+                    Val::from(lambda.defining_namespace.clone()),
+                );
+            }
+
+            return Self::typed_hot_data_value("::hot::type/Fn", Val::Map(Box::new(meta)))
+                .format_hot_display(0);
+        }
+
+        boxed.to_string()
     }
 
     /// Extract a plain Val from an AST Value node (variable refs, namespace refs,
@@ -4602,5 +4717,49 @@ mod tests {
         assert_eq!(Val::from("hello").resolve_boxes(), Val::from("hello"));
         assert_eq!(Val::Bool(true).resolve_boxes(), Val::Bool(true));
         assert_eq!(Val::Null.resolve_boxes(), Val::Null);
+    }
+
+    #[test]
+    fn test_hot_data_repr_for_lambda_hides_vm_instructions() {
+        let mut closure_env = ahash::AHashMap::new();
+        closure_env.insert("value".to_string(), Val::from("captured"));
+
+        let lambda = crate::lang::bytecode::LambdaInfo {
+            parameters: vec![],
+            instructions: vec![],
+            register_count: 0,
+            capture_vars: vec!["value".to_string()],
+            closure_env,
+            defining_namespace: "::hot::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![],
+        };
+
+        let boxed = Val::Box(Box::new(lambda));
+        let display = ToString::to_string(&boxed);
+        let json = serde_json::to_string(&boxed.to_hot_data_repr()).unwrap();
+
+        assert!(!display.contains("instructions"));
+        assert!(!display.contains("register_count"));
+        assert!(!json.contains("\"$box\""));
+        assert!(!json.contains("instructions"));
+        assert!(!json.contains("register_count"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["$type"], "::hot::type/Fn");
+        assert_eq!(parsed["$val"]["lazy"], true);
+        assert_eq!(parsed["$val"]["captures"]["value"], "captured");
+    }
+
+    #[test]
+    fn test_hot_data_repr_for_function_ref() {
+        let func_ref =
+            crate::lang::runtime::function_ref::FunctionRef::new("::hot::math/add".to_string());
+        let boxed = Val::Box(Box::new(func_ref));
+        let json = serde_json::to_value(boxed.to_hot_data_repr()).unwrap();
+
+        assert_eq!(ToString::to_string(&boxed), "::hot::math/add");
+        assert_eq!(json["$type"], "::hot::type/Fn");
+        assert_eq!(json["$val"], "::hot::math/add");
     }
 }

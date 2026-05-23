@@ -713,7 +713,7 @@ pub fn checkpoint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let data_json: serde_json::Value =
-        serde_json::to_value(&args[0]).unwrap_or(serde_json::Value::Null);
+        serde_json::to_value(args[0].to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
 
     let result = tokio::runtime::Handle::current()
         .block_on(async { crate::db::Task::set_checkpoint(&db, &task_id, &data_json).await });

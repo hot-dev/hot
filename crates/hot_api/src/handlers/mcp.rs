@@ -1021,7 +1021,8 @@ async fn handle_tools_call_streaming(
     // Insert event into database BEFORE enqueueing.
     // The worker verifies that events exist in the database for security
     // (prevents spoofed messages with fake env_ids).
-    let event_data_json = serde_json::to_value(&event_data_val).unwrap_or(serde_json::Value::Null);
+    let event_data_json =
+        serde_json::to_value(event_data_val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
 
     // Create call event for the worker queue
     let call_event = hot::lang::event::Event {

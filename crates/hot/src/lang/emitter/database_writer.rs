@@ -20,7 +20,8 @@ use uuid::Uuid;
 /// serialization fails. See [`crate::lang::emitter::postgres_safety`]
 /// for the full forbidden-character rationale.
 fn val_to_jsonb_string(v: &Val) -> String {
-    let raw = serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string());
+    let storage_val = v.to_hot_data_repr();
+    let raw = serde_json::to_string(&storage_val).unwrap_or_else(|_| "{}".to_string());
     sanitize_json_for_jsonb(&raw).into_owned()
 }
 
@@ -1399,5 +1400,39 @@ ON CONFLICT (call_id) DO UPDATE SET
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lang::bytecode::LambdaInfo;
+
+    #[test]
+    fn test_val_to_jsonb_string_uses_hot_data_repr() {
+        let mut closure_env = ahash::AHashMap::new();
+        closure_env.insert("value".to_string(), Val::Bool(false));
+
+        let lazy_thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![],
+            register_count: 0,
+            capture_vars: vec!["value".to_string()],
+            closure_env,
+            defining_namespace: "::hot::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![],
+        };
+
+        let json = val_to_jsonb_string(&Val::Box(Box::new(lazy_thunk)));
+
+        assert!(!json.contains("\"$box\""));
+        assert!(!json.contains("instructions"));
+        assert!(!json.contains("register_count"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["$type"], "::hot::type/Fn");
+        assert_eq!(parsed["$val"]["lazy"], true);
+        assert_eq!(parsed["$val"]["captures"]["value"], false);
     }
 }
