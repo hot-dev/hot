@@ -1007,7 +1007,7 @@ impl ValBox for FnCall {
     fn hash(&self, _state: &mut dyn Hasher) {}
 
     fn to_string(&self) -> String {
-        "<FnCall>".to_string()
+        ToString::to_string(self)
     }
 
     fn compare(&self, other: &dyn ValBox) -> Option<Ordering> {
@@ -1052,7 +1052,7 @@ impl ValBox for AstNode {
     }
     fn hash(&self, _state: &mut dyn Hasher) {}
     fn to_string(&self) -> String {
-        "<AstNode>".to_string()
+        ToString::to_string(&self.0)
     }
     fn compare(&self, _other: &dyn ValBox) -> Option<Ordering> {
         None
@@ -1322,11 +1322,329 @@ impl<'de> serde::Deserialize<'de> for Scope {
     }
 }
 
+fn join_display<T: Display>(items: &[T], separator: &str) -> String {
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn block_expr(flow: &Flow) -> String {
+    if flow.expressions.is_empty() {
+        "{}".to_string()
+    } else if flow.expressions.len() == 1 {
+        format!("{{ {} }}", flow.expressions[0])
+    } else {
+        let expressions = flow
+            .expressions
+            .iter()
+            .map(|expr| format!("    {}", expr))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{{\n{}\n}}", expressions)
+    }
+}
+
+impl Display for DeepPath {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeepPath::Index(index) => write!(f, "[{}]", index),
+            DeepPath::Key(key) => write!(f, ".{}", key),
+            DeepPath::DynamicIndex(var) => write!(f, "[{}]", var),
+            DeepPath::Chain(left, right) => write!(f, "{}{}", left, right),
+            DeepPath::Append => write!(f, "[]"),
+        }
+    }
+}
+
+impl Display for ResultModifier {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResultModifier::One => write!(f, "one"),
+            ResultModifier::Map => write!(f, "map"),
+            ResultModifier::Vec => write!(f, "vec"),
+        }
+    }
+}
+
+impl Display for FlowType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlowType::Parallel => write!(f, "parallel"),
+            FlowType::Serial => write!(f, "serial"),
+            FlowType::Cond => write!(f, "cond"),
+            FlowType::CondAll => write!(f, "cond-all"),
+            FlowType::SerialShort => write!(f, "serial-short"),
+            FlowType::ParallelShort => write!(f, "parallel-short"),
+            FlowType::CondShort => write!(f, "cond-short"),
+            FlowType::CondAllShort => write!(f, "cond-all-short"),
+            FlowType::Pipe => write!(f, "pipe"),
+            FlowType::Match => write!(f, "match"),
+            FlowType::MatchAll => write!(f, "match-all"),
+            FlowType::MatchShort => write!(f, "match-short"),
+            FlowType::MatchAllShort => write!(f, "match-all-short"),
+        }
+    }
+}
+
+impl Display for Var {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.sym)?;
+        if let Some(deep_path) = &self.deep_path {
+            write!(f, "{}", deep_path)?;
+        }
+        if let Some(deep_set) = &self.deep_set {
+            write!(f, "{}", deep_set)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for FnArg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.lazy {
+            write!(f, "lazy ")?;
+        }
+        write!(f, "{}", self.var)?;
+        if let Some(type_annotation) = &self.type_annotation {
+            write!(f, ": {}", type_annotation)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for FnArgs {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut args = self
+            .args
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if self.variadic
+            && let Some(last) = args.last_mut()
+        {
+            *last = format!("...{}", last);
+        }
+        write!(f, "{}", args.join(", "))
+    }
+}
+
+impl Display for FnDef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fn ({})", self.args)?;
+        if let Some(return_type) = &self.return_type {
+            write!(f, ": {}", return_type)?;
+        }
+        write!(f, " {}", self.body)
+    }
+}
+
+impl Display for FnCallArg {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.spread {
+            write!(f, "...")?;
+        }
+        write!(f, "{}", self.value)
+    }
+}
+
+impl Display for FnCall {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.function, join_display(&self.args, ", "))?;
+        if let Some(result_path) = &self.result_path {
+            write!(f, "{}", result_path)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for Flow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.flow_type)?;
+        if let Some(modifier) = &self.result_modifier {
+            write!(f, "|{}", modifier)?;
+        }
+        write!(f, " {}", block_expr(self))
+    }
+}
+
+impl Display for VariantDef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self.type_ref {
+            Some(type_ref) => write!(f, "{}({})", self.name, type_ref),
+            None => write!(f, "{}", self.name),
+        }
+    }
+}
+
+impl Display for TypeDef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(variants) = &self.variants {
+            let open = if self.is_open { " open" } else { "" };
+            return write!(
+                f,
+                "{} enum{} {{ {} }}",
+                self.name,
+                open,
+                join_display(variants, ", ")
+            );
+        }
+
+        if let Some(fields) = &self.fields {
+            let field_strs = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, field.type_annotation))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return write!(f, "{} type {{ {} }}", self.name, field_strs);
+        }
+
+        if let Some(type_alias) = &self.type_alias {
+            return write!(f, "{} type {}", self.name, type_alias);
+        }
+
+        if let Some(constructors) = &self.constructor_functions {
+            return write!(f, "{} type {}", self.name, join_display(constructors, "\n"));
+        }
+
+        write!(f, "{} type", self.name)
+    }
+}
+
+impl Display for TypeImplementation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} -> {} {}",
+            self.source_type, self.target_type, self.implementation
+        )
+    }
+}
+
+impl Display for TemplateLiteral {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`")?;
+        for part in &self.parts {
+            match part {
+                TemplatePart::Text(text) => write!(f, "{}", text.replace('`', "\\`"))?,
+                TemplatePart::Expression(expr) => write!(f, "${{{}}}", expr)?,
+            }
+        }
+        write!(f, "`")
+    }
+}
+
+impl Display for Lambda {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(flow_type) = &self.flow_type {
+            write!(f, "{}({}) {}", flow_type, self.args, self.body)
+        } else {
+            write!(f, "({}) {}", self.args, self.body)
+        }
+    }
+}
+
+impl Display for MatchArm {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(value_literal) = &self.value_literal {
+            write!(f, "{}", value_literal)?;
+        } else if let Some(type_name) = &self.type_name {
+            write!(f, "{}", type_name)?;
+            if let Some(variant) = &self.variant {
+                write!(f, ".{}", variant)?;
+            }
+        } else if let Some(variant) = &self.variant {
+            write!(f, "{}", variant)?;
+        } else {
+            write!(f, "_")?;
+        }
+
+        if let Some(binding) = &self.binding {
+            write!(f, " as {}", binding)?;
+        }
+        write!(f, " => {}", self.body)
+    }
+}
+
+impl Display for MatchExpr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let keyword = if self.match_all { "match-all" } else { "match" };
+        write!(f, "{} {}", keyword, self.value)?;
+        if let Some(modifier) = &self.result_modifier {
+            write!(f, "|{}", modifier)?;
+        }
+        if self.arms.is_empty() {
+            write!(f, " {{}}")
+        } else {
+            let arms = self
+                .arms
+                .iter()
+                .map(|arm| format!("    {}", arm))
+                .collect::<Vec<_>>()
+                .join("\n");
+            write!(f, " {{\n{}\n}}", arms)
+        }
+    }
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Val(val, _) => write!(f, "{}", val.format_hot(0)),
+            Value::Ref(refv) => write!(f, "{}", refv),
+            Value::FnCall(fn_call) => write!(f, "{}", fn_call),
+            Value::Flow(flow) => write!(f, "{}", flow),
+            Value::Fn(fn_defs) => write!(f, "{}", join_display(fn_defs, "\n")),
+            Value::TypeDef(type_def) => write!(f, "{}", type_def),
+            Value::TypeImplementation(implementation) => write!(f, "{}", implementation),
+            Value::Unbound(unbound) => write!(f, "{}", unbound.name),
+            Value::Cond(label, condition, flow) => {
+                write!(f, "{}", condition)?;
+                if let Some(label) = label {
+                    write!(f, " => {} {}", label, block_expr(flow))
+                } else {
+                    write!(f, " => {}", block_expr(flow))
+                }
+            }
+            Value::CondDefault(flow) => write!(f, "_ => {}", block_expr(flow)),
+            Value::TemplateLiteral(template) => write!(f, "{}", template),
+            Value::Raw(inner) => write!(f, "!{}", inner),
+            Value::Do(inner) => write!(f, "do {}", inner),
+            Value::VariadicExpansion(name) => write!(f, "...{}", name),
+            Value::MultipleValues(values) => write!(f, "{}", join_display(values, "\n")),
+            Value::Lambda(lambda) => write!(f, "{}", lambda),
+            Value::Match(match_expr) => write!(f, "{}", match_expr),
+            Value::MatchArm(arm) => write!(f, "{}", arm),
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                let mut entries = base_entries
+                    .iter()
+                    .map(|(key, value)| format!("{}: {}", key.format_hot(0), value.format_hot(0)))
+                    .collect::<Vec<_>>();
+                for (_, value) in spread_entries {
+                    entries.push(format!("...{}", value));
+                }
+                write!(f, "{{{}}}", entries.join(", "))
+            }
+            Value::Placeholder(index) => {
+                if *index == 1 {
+                    write!(f, "%")
+                } else {
+                    write!(f, "%{}", index)
+                }
+            }
+        }
+    }
+}
+
 // Display implementations for boxable types
 impl Display for Ref {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ref::Var(var_ref) => write!(f, "VarRef({})", var_ref.var.sym),
+            Ref::Var(var_ref) => write!(f, "{}", var_ref.var),
             Ref::Ns(ns_ref) => {
                 if let Some(func_name) = &ns_ref.function_name {
                     write!(f, "{}/{}", ns_ref.ns, func_name)

@@ -778,8 +778,18 @@ mod tests {
 
         let lazy_thunk = LambdaInfo {
             parameters: vec![],
-            instructions: vec![],
-            register_count: 0,
+            instructions: vec![
+                crate::lang::bytecode::Instruction::LoadVar {
+                    dest: 0,
+                    var_name: 0,
+                },
+                crate::lang::bytecode::Instruction::LoadConst {
+                    dest: 1,
+                    constant: 0,
+                },
+                crate::lang::bytecode::Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),
@@ -826,8 +836,14 @@ mod tests {
 
         let lazy_thunk = LambdaInfo {
             parameters: vec![],
-            instructions: vec![],
-            register_count: 0,
+            instructions: vec![
+                crate::lang::bytecode::Instruction::LoadVar {
+                    dest: 0,
+                    var_name: 0,
+                },
+                crate::lang::bytecode::Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),
@@ -873,8 +889,6 @@ mod tests {
         assert!(!args.contains("register_count"));
 
         let parsed: serde_json::Value = serde_json::from_str(&args).unwrap();
-        assert_eq!(parsed[0]["$type"], "::hot::type/Fn");
-        assert_eq!(parsed[0]["$val"]["lazy"], true);
-        assert_eq!(parsed[0]["$val"]["captures"]["value"], false);
+        assert_eq!(parsed[0], false);
     }
 }

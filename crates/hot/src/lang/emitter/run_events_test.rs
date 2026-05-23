@@ -237,8 +237,9 @@ x choose(a, b)
         assert!(!normalized_json.contains("\"$box\""));
         assert!(!normalized_json.contains("instructions"));
         assert!(!normalized_json.contains("register_count"));
-        assert!(normalized_json.contains("\"$type\":\"::hot::type/Fn\""));
-        assert!(normalized_json.contains("\"captures\""));
+        assert!(normalized_json.contains("\"then\""));
+        assert!(normalized_json.contains("\"else\""));
+        assert!(!normalized_json.contains("\"captures\""));
     }
 
     fn map_get<'a>(val: &'a Val, key: &str) -> Option<&'a Val> {

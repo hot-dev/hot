@@ -1691,6 +1691,32 @@ impl Val {
         Val::Map(Box::new(meta))
     }
 
+    fn simple_lazy_capture_value(lambda: &crate::lang::bytecode::LambdaInfo) -> Option<Val> {
+        use crate::lang::bytecode::Instruction;
+
+        if !lambda.is_lazy_param || !lambda.parameters.is_empty() || lambda.capture_vars.len() != 1
+        {
+            return None;
+        }
+
+        let [
+            Instruction::LoadVar { dest, .. },
+            Instruction::Return { value },
+        ] = lambda.instructions.as_slice()
+        else {
+            return None;
+        };
+
+        if dest != value {
+            return None;
+        }
+
+        lambda
+            .closure_env
+            .get(&lambda.capture_vars[0])
+            .map(|value| value.to_hot_data_repr())
+    }
+
     fn box_to_hot_data_repr(boxed: &dyn ValBox) -> Val {
         if let Some(func_ref) = boxed
             .as_any()
@@ -1703,6 +1729,10 @@ impl Val {
             .as_any()
             .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
         {
+            if let Some(value) = Self::simple_lazy_capture_value(lambda) {
+                return value;
+            }
+
             return Self::typed_hot_data_value("::hot::type/Fn", Self::lambda_info_data(lambda));
         }
 
@@ -1746,6 +1776,10 @@ impl Val {
             .as_any()
             .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
         {
+            if let Some(value) = Self::simple_lazy_capture_value(lambda) {
+                return value.format_hot_display(0);
+            }
+
             let mut meta = indexmap::IndexMap::new();
             meta.insert(
                 Val::from("parameters"),
@@ -1767,8 +1801,9 @@ impl Val {
         boxed.to_string()
     }
 
-    /// Extract a plain Val from an AST Value node (variable refs, namespace refs,
-    /// or already-resolved literals). Returns `self.clone()` for unrecognized variants.
+    /// Extract a plain Val from an AST Value node without evaluating it.
+    /// Literals remain values; references and expressions become Hot-like source
+    /// strings so boxed AST never disappears into `null` in serialized metadata.
     fn resolve_ast_value(value: &crate::lang::ast::Value) -> Val {
         use crate::lang::ast::{Ref, Value};
         match value {
@@ -1784,7 +1819,7 @@ impl Val {
                 Val::Str(std::sync::Arc::from(full))
             }
             Value::Val(v, _) => v.resolve_boxes(),
-            _ => Val::Null,
+            _ => Val::from(ToString::to_string(value)),
         }
     }
 
@@ -4659,6 +4694,49 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_boxes_ast_node_fn_call_renders_hot_source() {
+        use crate::lang::ast::{AstNode, FnCall, FnCallArg, Ref, Sym, Value, Var, VarRef};
+
+        let var_ref = |name: &str| {
+            Value::Ref(Ref::Var(VarRef {
+                var: Var {
+                    sym: Sym::String(name.to_string()),
+                    deep_set: None,
+                    deep_path: None,
+                    meta: None,
+                    src: None,
+                },
+                data: None,
+                src: None,
+            }))
+        };
+
+        let ast = AstNode(Value::FnCall(FnCall {
+            function: Box::new(var_ref("or")),
+            args: vec![
+                FnCallArg {
+                    value: var_ref("label"),
+                    lazy: false,
+                    spread: false,
+                    src: None,
+                },
+                FnCallArg {
+                    value: Value::Val(Val::from("default"), Some("Str".to_string())),
+                    lazy: false,
+                    spread: false,
+                    src: None,
+                },
+            ],
+            result_path: None,
+            src: None,
+        }));
+
+        let boxed = Val::Box(Box::new(ast));
+        assert_eq!(ToString::to_string(&boxed), "or(label, \"default\")");
+        assert_eq!(boxed.resolve_boxes(), Val::from("or(label, \"default\")"));
+    }
+
+    #[test]
     fn test_resolve_boxes_type_ref() {
         let type_ref = crate::lang::refs::TypeRef {
             name: "::myapp/User".to_string(),
@@ -4720,14 +4798,59 @@ mod tests {
     }
 
     #[test]
-    fn test_hot_data_repr_for_lambda_hides_vm_instructions() {
+    fn test_hot_data_repr_for_simple_lazy_lambda_returns_captured_value() {
         let mut closure_env = ahash::AHashMap::new();
         closure_env.insert("value".to_string(), Val::from("captured"));
 
         let lambda = crate::lang::bytecode::LambdaInfo {
             parameters: vec![],
-            instructions: vec![],
-            register_count: 0,
+            instructions: vec![
+                crate::lang::bytecode::Instruction::LoadVar {
+                    dest: 0,
+                    var_name: 0,
+                },
+                crate::lang::bytecode::Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec!["value".to_string()],
+            closure_env,
+            defining_namespace: "::hot::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![],
+        };
+
+        let boxed = Val::Box(Box::new(lambda));
+        let display = ToString::to_string(&boxed);
+        let json = serde_json::to_string(&boxed.to_hot_data_repr()).unwrap();
+
+        assert_eq!(display, "\"captured\"");
+        assert_eq!(json, "\"captured\"");
+        assert!(!display.contains("instructions"));
+        assert!(!display.contains("register_count"));
+        assert!(!json.contains("\"$box\""));
+        assert!(!json.contains("instructions"));
+        assert!(!json.contains("register_count"));
+    }
+
+    #[test]
+    fn test_hot_data_repr_for_complex_lambda_hides_vm_instructions() {
+        let mut closure_env = ahash::AHashMap::new();
+        closure_env.insert("value".to_string(), Val::from("captured"));
+
+        let lambda = crate::lang::bytecode::LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                crate::lang::bytecode::Instruction::LoadVar {
+                    dest: 0,
+                    var_name: 0,
+                },
+                crate::lang::bytecode::Instruction::LoadConst {
+                    dest: 1,
+                    constant: 0,
+                },
+                crate::lang::bytecode::Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),
