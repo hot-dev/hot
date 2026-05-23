@@ -945,54 +945,401 @@ pub struct BytecodeProgram {
     pub variable_metadata: AHashMap<String, VariableMetadata>,
 }
 
+impl fmt::Display for FlowType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FlowType::Serial => write!(f, "serial"),
+            FlowType::Parallel => write!(f, "parallel"),
+            FlowType::Pipe => write!(f, "pipe"),
+            FlowType::Cond => write!(f, "cond"),
+            FlowType::CondAll => write!(f, "cond-all"),
+            FlowType::Match => write!(f, "match"),
+            FlowType::MatchAll => write!(f, "match-all"),
+        }
+    }
+}
+
+impl fmt::Display for FlowResultModifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FlowResultModifier::One => write!(f, "one"),
+            FlowResultModifier::Map => write!(f, "map"),
+            FlowResultModifier::Vec => write!(f, "vec"),
+        }
+    }
+}
+
+impl fmt::Display for ScopeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScopeType::Function => write!(f, "function"),
+            ScopeType::Lambda => write!(f, "lambda"),
+            ScopeType::Flow => write!(f, "flow"),
+            ScopeType::Namespace => write!(f, "namespace"),
+        }
+    }
+}
+
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Instruction::LoadConst { dest, constant } => {
                 write!(f, "LOAD_CONST r{}, c{}", dest, constant)
             }
-            Instruction::Move { dest, src } => {
-                write!(f, "MOVE r{}, r{}", dest, src)
+            Instruction::Move { dest, src } => write!(f, "MOVE r{}, r{}", dest, src),
+            Instruction::LoadFunctionRef {
+                dest,
+                function_name,
+            } => write!(f, "LOAD_FUNCTION_REF r{}, c{}", dest, function_name),
+            Instruction::LoadTypeRef { dest, type_ref } => {
+                write!(f, "LOAD_TYPE_REF r{}, c{}", dest, type_ref)
+            }
+            Instruction::BeginFlow {
+                flow_type,
+                result_modifier,
+                source,
+            } => {
+                if source.is_some() {
+                    write!(f, "BEGIN_FLOW {}|{} @source", flow_type, result_modifier)
+                } else {
+                    write!(f, "BEGIN_FLOW {}|{}", flow_type, result_modifier)
+                }
+            }
+            Instruction::EndFlow { dest } => write!(f, "END_FLOW r{}", dest),
+            Instruction::CondBranch { condition, target } => {
+                write!(f, "COND_BRANCH r{}, {}", condition, target)
+            }
+            Instruction::CondBranchStart {
+                branch_name,
+                condition,
+                skip_target,
+            } => write!(
+                f,
+                "COND_BRANCH_START c{}, r{}, {}",
+                branch_name, condition, skip_target
+            ),
+            Instruction::CondBranchEnd {
+                branch_name,
+                result,
+            } => write!(f, "COND_BRANCH_END c{}, r{}", branch_name, result),
+            Instruction::Pipe { dest, src } => write!(f, "PIPE r{}, r{}", dest, src),
+            Instruction::DefineFunction { dest, function_id } => {
+                write!(f, "DEFINE_FUNCTION r{}, f{}", dest, function_id)
             }
             Instruction::Add { dest, left, right } => {
                 write!(f, "ADD r{}, r{}, r{}", dest, left, right)
+            }
+            Instruction::Sub { dest, left, right } => {
+                write!(f, "SUB r{}, r{}, r{}", dest, left, right)
+            }
+            Instruction::Mul { dest, left, right } => {
+                write!(f, "MUL r{}, r{}, r{}", dest, left, right)
+            }
+            Instruction::Eq { dest, left, right } => {
+                write!(f, "EQ r{}, r{}, r{}", dest, left, right)
+            }
+            Instruction::StrEndsWith {
+                dest,
+                string,
+                suffix,
+            } => write!(f, "STR_ENDS_WITH r{}, r{}, r{}", dest, string, suffix),
+            Instruction::StrStartsWith {
+                dest,
+                string,
+                prefix,
+            } => write!(f, "STR_STARTS_WITH r{}, r{}, r{}", dest, string, prefix),
+            Instruction::Gt { dest, left, right } => {
+                write!(f, "GT r{}, r{}, r{}", dest, left, right)
+            }
+            Instruction::Lt { dest, left, right } => {
+                write!(f, "LT r{}, r{}, r{}", dest, left, right)
             }
             Instruction::Call {
                 dest,
                 function,
                 args_start,
                 args_count,
-            } => {
-                write!(
-                    f,
-                    "CALL r{}, f{}, r{}..{}",
-                    dest,
-                    function,
-                    args_start,
-                    args_start + *args_count as u32
-                )
-            }
-            Instruction::Return { value } => {
-                write!(f, "RETURN r{}", value)
-            }
-            Instruction::Jump { offset } => {
-                write!(f, "JUMP {}", offset)
-            }
+            } => write!(
+                f,
+                "CALL r{}, f{}, r{}..{}",
+                dest,
+                function,
+                args_start,
+                args_start + *args_count as u32
+            ),
+            Instruction::CallNative {
+                dest,
+                function,
+                args_start,
+                args_count,
+            } => write!(
+                f,
+                "CALL_NATIVE r{}, f{}, r{}..{}",
+                dest,
+                function,
+                args_start,
+                args_start + *args_count as u32
+            ),
+            Instruction::CallLambda {
+                dest,
+                lambda,
+                args_start,
+                args_count,
+            } => write!(
+                f,
+                "CALL_LAMBDA r{}, r{}, r{}..{}",
+                dest,
+                lambda,
+                args_start,
+                args_start + *args_count as u32
+            ),
+            Instruction::CallWithSpread {
+                dest,
+                function,
+                args_start,
+                args_count,
+                spread_mask,
+            } => write!(
+                f,
+                "CALL_WITH_SPREAD r{}, f{}, r{}..{}, mask={:#x}",
+                dest,
+                function,
+                args_start,
+                args_start + *args_count as u32,
+                spread_mask
+            ),
+            Instruction::CallUserFunction {
+                dest,
+                function_id,
+                args_start,
+                args_count,
+            } => write!(
+                f,
+                "CALL_USER_FUNCTION r{}, f{}, r{}..{}",
+                dest,
+                function_id,
+                args_start,
+                args_start + *args_count as u32
+            ),
             Instruction::TailCall {
                 function_id,
                 args_start,
                 args_count,
-            } => {
-                write!(
-                    f,
-                    "TAILCALL f{}, r{}..{}",
-                    function_id,
-                    args_start,
-                    args_start + *args_count as u32
-                )
+            } => write!(
+                f,
+                "TAILCALL f{}, r{}..{}",
+                function_id,
+                args_start,
+                args_start + *args_count as u32
+            ),
+            Instruction::TemplateInterpolate {
+                dest,
+                parts_start,
+                parts_count,
+            } => write!(
+                f,
+                "TEMPLATE_INTERPOLATE r{}, r{}..{}",
+                dest,
+                parts_start,
+                parts_start + *parts_count as u32
+            ),
+            Instruction::DotAccess {
+                dest,
+                object,
+                property,
+            } => write!(f, "DOT_ACCESS r{}, r{}, c{}", dest, object, property),
+            Instruction::DotAccessOrDefault {
+                dest,
+                object,
+                property,
+                default_value,
+            } => write!(
+                f,
+                "DOT_ACCESS_OR_DEFAULT r{}, r{}, c{}, c{}",
+                dest, object, property, default_value
+            ),
+            Instruction::DynamicDotAccess {
+                dest,
+                object,
+                property,
+            } => write!(
+                f,
+                "DYNAMIC_DOT_ACCESS r{}, r{}, r{}",
+                dest, object, property
+            ),
+            Instruction::DynamicDotSet {
+                object,
+                property,
+                value,
+            } => write!(f, "DYNAMIC_DOT_SET r{}, r{}, r{}", object, property, value),
+            Instruction::DotSet {
+                object,
+                property,
+                value,
+            } => write!(f, "DOT_SET r{}, c{}, r{}", object, property, value),
+            Instruction::VecAppend { vec, value } => {
+                write!(f, "VEC_APPEND r{}, r{}", vec, value)
             }
-            // Add more display implementations as needed
-            _ => write!(f, "{:?}", self),
+            Instruction::GetTypePath { dest, value } => {
+                write!(f, "GET_TYPE_PATH r{}, r{}", dest, value)
+            }
+            Instruction::CallLibBuiltin {
+                dest,
+                function,
+                args,
+            } => write!(f, "CALL_LIB_BUILTIN r{}, r{}, r{}", dest, function, args),
+            Instruction::Jump { offset } => write!(f, "JUMP {}", offset),
+            Instruction::JumpIf { condition, offset } => {
+                write!(f, "JUMP_IF r{}, {}", condition, offset)
+            }
+            Instruction::JumpIfNot { condition, offset } => {
+                write!(f, "JUMP_IF_NOT r{}, {}", condition, offset)
+            }
+            Instruction::Return { value } => write!(f, "RETURN r{}", value),
+            Instruction::ExtractInnerVal { dest, src } => {
+                write!(f, "EXTRACT_INNER_VAL r{}, r{}", dest, src)
+            }
+            Instruction::ConstructTyped {
+                dest,
+                src,
+                type_info,
+            } => write!(f, "CONSTRUCT_TYPED r{}, r{}, c{}", dest, src, type_info),
+            Instruction::IsType {
+                dest,
+                value,
+                type_path,
+            } => write!(f, "IS_TYPE r{}, r{}, r{}", dest, value, type_path),
+            Instruction::EnsureResult { dest, value } => {
+                write!(f, "ENSURE_RESULT r{}, r{}", dest, value)
+            }
+            Instruction::MakeVec {
+                dest,
+                elements_start,
+                count,
+            } => write!(
+                f,
+                "MAKE_VEC r{}, r{}..{}",
+                dest,
+                elements_start,
+                elements_start + *count as u32
+            ),
+            Instruction::VecPush { vec, value } => {
+                write!(f, "VEC_PUSH r{}, r{}", vec, value)
+            }
+            Instruction::MakeVecWithSpread {
+                dest,
+                elements_start,
+                count,
+                spread_mask,
+            } => write!(
+                f,
+                "MAKE_VEC_WITH_SPREAD r{}, r{}..{}, mask={:#x}",
+                dest,
+                elements_start,
+                elements_start + *count as u32,
+                spread_mask
+            ),
+            Instruction::SetElement {
+                collection,
+                index,
+                value,
+            } => write!(f, "SET_ELEMENT r{}, r{}, r{}", collection, index, value),
+            Instruction::MergeMaps { dest, source } => {
+                write!(f, "MERGE_MAPS r{}, r{}", dest, source)
+            }
+            Instruction::LoadVar { dest, var_name } => {
+                write!(f, "LOAD_VAR r{}, c{}", dest, var_name)
+            }
+            Instruction::LoadVarOrDefault {
+                dest,
+                var_name,
+                default_value,
+            } => write!(
+                f,
+                "LOAD_VAR_OR_DEFAULT r{}, c{}, c{}",
+                dest, var_name, default_value
+            ),
+            Instruction::StoreVar {
+                var_name,
+                value,
+                metadata,
+            } => {
+                if let Some(metadata) = metadata {
+                    write!(
+                        f,
+                        "STORE_VAR c{}, r{} metadata={}",
+                        var_name, value, metadata.name
+                    )
+                } else {
+                    write!(f, "STORE_VAR c{}, r{}", var_name, value)
+                }
+            }
+            Instruction::SetNamespace { namespace } => {
+                write!(f, "SET_NAMESPACE c{}", namespace)
+            }
+            Instruction::LoadGlobal {
+                dest,
+                namespace,
+                var_name,
+            } => write!(f, "LOAD_GLOBAL r{}, c{}, c{}", dest, namespace, var_name),
+            Instruction::StoreGlobal {
+                namespace,
+                var_name,
+                value,
+            } => write!(f, "STORE_GLOBAL c{}, c{}, r{}", namespace, var_name, value),
+            Instruction::LoadScoped {
+                dest,
+                var_name,
+                scope_depth,
+            } => write!(
+                f,
+                "LOAD_SCOPED r{}, c{}, depth={}",
+                dest, var_name, scope_depth
+            ),
+            Instruction::StoreScoped {
+                var_name,
+                value,
+                scope_depth,
+            } => write!(
+                f,
+                "STORE_SCOPED c{}, r{}, depth={}",
+                var_name, value, scope_depth
+            ),
+            Instruction::DeferredVarExpr { var_name, thunk } => {
+                write!(f, "DEFERRED_VAR_EXPR c{}, r{}", var_name, thunk)
+            }
+            Instruction::EnterScope { scope_type } => write!(f, "ENTER_SCOPE {}", scope_type),
+            Instruction::ExitScope => write!(f, "EXIT_SCOPE"),
+            Instruction::CaptureVar {
+                dest,
+                var_name,
+                scope_depth,
+            } => write!(
+                f,
+                "CAPTURE_VAR r{}, c{}, depth={}",
+                dest, var_name, scope_depth
+            ),
+            Instruction::ReturnIfErr { src } => write!(f, "RETURN_IF_ERR r{}", src),
+            Instruction::BeginErrorCapture => write!(f, "BEGIN_ERROR_CAPTURE"),
+            Instruction::EndErrorCapture => write!(f, "END_ERROR_CAPTURE"),
+            Instruction::WrapOk { dest, src } => write!(f, "WRAP_OK r{}, r{}", dest, src),
+            Instruction::RegisterLocalImplementation {
+                source_type,
+                target_type,
+                implementation_function_name,
+            } => write!(
+                f,
+                "REGISTER_LOCAL_IMPLEMENTATION c{}, c{}, c{}",
+                source_type, target_type, implementation_function_name
+            ),
+            Instruction::RegisterLocalType {
+                type_name,
+                constructor_function_name,
+            } => write!(
+                f,
+                "REGISTER_LOCAL_TYPE c{}, c{}",
+                type_name, constructor_function_name
+            ),
         }
     }
 }
@@ -1204,5 +1551,16 @@ mod tests {
             right: 1,
         };
         assert_eq!(format!("{}", inst), "ADD r2, r0, r1");
+
+        let inst = Instruction::LoadVarOrDefault {
+            dest: 1,
+            var_name: 2,
+            default_value: 3,
+        };
+        assert_eq!(format!("{}", inst), "LOAD_VAR_OR_DEFAULT r1, c2, c3");
+        assert!(!format!("{}", inst).contains("LoadVarOrDefault"));
+
+        let inst = Instruction::BeginErrorCapture;
+        assert_eq!(format!("{}", inst), "BEGIN_ERROR_CAPTURE");
     }
 }

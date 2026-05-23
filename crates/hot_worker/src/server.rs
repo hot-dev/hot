@@ -2824,7 +2824,7 @@ async fn execute_single_event_handler(
         let env_id = event_message.body.event.env_id;
 
         // Convert result to JSON for the stream event
-        let result_json = serde_json::to_value(&result).ok();
+        let result_json = serde_json::to_value(result.to_hot_data_repr()).ok();
 
         // Get run type as string for env event
         let run_type = if event_message.body.event.event_type == "hot:call" {

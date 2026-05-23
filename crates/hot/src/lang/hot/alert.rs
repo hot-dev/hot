@@ -39,7 +39,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
 
     // Extract data argument - default to empty map
     let data: serde_json::Value = if args.len() > 1 {
-        match serde_json::to_value(&args[1]) {
+        match serde_json::to_value(args[1].to_hot_data_repr()) {
             Ok(json) => json,
             Err(e) => {
                 return HotResult::Err(Val::from(format!(

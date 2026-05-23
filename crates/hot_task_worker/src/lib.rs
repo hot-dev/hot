@@ -2707,8 +2707,8 @@ async fn process_code_task(
                 maybe_retry_task(&db, &task_queue, &task_id, &request).await;
                 tracing::info!(task_id = %task_id, status = "failed", "Task finished with error result");
             } else {
-                let result_json =
-                    serde_json::to_value(&result_val).unwrap_or(serde_json::Value::Null);
+                let result_json = serde_json::to_value(result_val.to_hot_data_repr())
+                    .unwrap_or(serde_json::Value::Null);
                 complete_task_with_event(
                     &db,
                     &stream_publisher,
@@ -2822,7 +2822,7 @@ fn task_cancellation_json(msg: &str, data: Option<serde_json::Value>) -> serde_j
 /// If the VM result is already a typed Failure/Cancellation, keep it as-is.
 /// Otherwise wrap it in `::hot::task/Failure`.
 fn normalize_val_to_task_failure(val: &Val) -> serde_json::Value {
-    let json = serde_json::to_value(val).unwrap_or(serde_json::Value::Null);
+    let json = serde_json::to_value(val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
 
     // Already a typed value (::hot::run/Failure, ::hot::task/Failure, etc.) — pass through
     if json.get("$type").and_then(|t| t.as_str()).is_some() {

@@ -522,7 +522,8 @@ async fn webhook_handler_inner(
     // as the `hot.request` context variable.
     let args_val = Val::Vec(vec![http_request.clone()]);
     let event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
-    let event_data_json = serde_json::to_value(&event_data_val).unwrap_or(serde_json::Value::Null);
+    let event_data_json =
+        serde_json::to_value(event_data_val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
 
     // Create call event for the worker queue
     let call_event = hot::lang::event::Event {

@@ -399,7 +399,8 @@ impl DatabaseEngineEventEmitterProcessor {
     /// transaction batch and we'd silently drop a window of trace data.
     /// See [`super::postgres_safety`] for the full rationale.
     fn serialize_val_for_jsonb(v: &Val) -> String {
-        let raw = serde_json::to_string(v).unwrap_or_default();
+        let storage_val = v.to_hot_data_repr();
+        let raw = serde_json::to_string(&storage_val).unwrap_or_default();
         sanitize_json_for_jsonb(&raw).into_owned()
     }
 
@@ -741,7 +742,10 @@ impl Clone for DatabaseEngineEventEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lang::bytecode::LambdaInfo;
+    use crate::lang::runtime::function_ref::FunctionRef;
     use crate::val;
+    use sqlx::Row;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -765,5 +769,126 @@ mod tests {
 
         emitter.emit(start_event);
         emitter.emit(stop_event);
+    }
+
+    #[test]
+    fn test_call_value_serialization_hides_vm_instructions() {
+        let mut closure_env = ahash::AHashMap::new();
+        closure_env.insert("value".to_string(), Val::Bool(false));
+
+        let lazy_thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                crate::lang::bytecode::Instruction::LoadVar {
+                    dest: 0,
+                    var_name: 0,
+                },
+                crate::lang::bytecode::Instruction::LoadConst {
+                    dest: 1,
+                    constant: 0,
+                },
+                crate::lang::bytecode::Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
+            capture_vars: vec!["value".to_string()],
+            closure_env,
+            defining_namespace: "::hot::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![],
+        };
+
+        let args = Val::Vec(vec![
+            Val::Box(Box::new(FunctionRef::new("::hot::math/add".to_string()))),
+            Val::Box(Box::new(lazy_thunk)),
+        ]);
+
+        let json = DatabaseEngineEventEmitterProcessor::serialize_val_for_jsonb(&args);
+
+        assert!(!json.contains("\"$box\""));
+        assert!(!json.contains("instructions"));
+        assert!(!json.contains("register_count"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["$type"], "::hot::type/Fn");
+        assert_eq!(parsed[0]["$val"], "::hot::math/add");
+        assert_eq!(parsed[1]["$type"], "::hot::type/Fn");
+        assert_eq!(parsed[1]["$val"]["lazy"], true);
+        assert_eq!(parsed[1]["$val"]["captures"]["value"], false);
+    }
+
+    #[tokio::test]
+    async fn test_database_emitter_persists_hot_data_repr_for_call_args() {
+        let db = crate::db::test_db().await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let execution_context = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            crate::db::run::RunType::Run.as_id(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let call_id = Uuid::now_v7();
+
+        let mut closure_env = ahash::AHashMap::new();
+        closure_env.insert("value".to_string(), Val::Bool(false));
+
+        let lazy_thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                crate::lang::bytecode::Instruction::LoadVar {
+                    dest: 0,
+                    var_name: 0,
+                },
+                crate::lang::bytecode::Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec!["value".to_string()],
+            closure_env,
+            defining_namespace: "::hot::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![],
+        };
+
+        emitter.emit(EngineEvent::call_start(
+            &execution_context,
+            call_id,
+            None,
+            "::hot::test/f".to_string(),
+            "::hot::test/f".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![Val::Box(Box::new(lazy_thunk))],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::call_stop(
+            &execution_context,
+            call_id,
+            Some(Val::from("ok")),
+            None,
+            chrono::Utc::now(),
+            10,
+        ));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let args: String = sqlx::query("SELECT args FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("args");
+
+        assert!(!args.contains("\"$box\""));
+        assert!(!args.contains("instructions"));
+        assert!(!args.contains("register_count"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&args).unwrap();
+        assert_eq!(parsed[0], false);
     }
 }
