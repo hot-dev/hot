@@ -67,9 +67,8 @@ fn json_to_val(jv: JsonValue) -> Val {
 }
 
 fn get_store(vm: &VirtualMachine) -> Result<std::sync::Arc<dyn store::Store>, Val> {
-    vm.get_store().ok_or_else(|| {
-        Val::from("Store not configured. Use `hot dev` or configure store in hot.hot")
-    })
+    vm.get_store()
+        .ok_or_else(|| Val::from("Store not configured"))
 }
 
 fn get_store_config(vm: &VirtualMachine, map_val: &Val) -> Result<StoreMapConfig, Val> {
