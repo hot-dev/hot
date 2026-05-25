@@ -22,6 +22,23 @@ doubled mul(count, 2)
 greeting `Hello, ${name}!`
 ```
 
+### Deep Path Assignment
+
+Build nested maps and vectors by assigning to paths:
+
+```hot
+user.name "Bob"
+user.email "bob@example.com"
+user.settings.theme "dark"
+
+config.servers[0] "api.example.com"
+config.servers[1] "db.example.com"
+
+items[] "first"              // append to vector
+items[] "second"
+shopping.items[] "apple"     // append to nested vector
+```
+
 **Whitespace matters for function calls:**
 - `add(1, 2)` - calls the function `add`
 - `add (1, 2)` - assigns the tuple `(1, 2)` to variable `add`
@@ -81,6 +98,22 @@ slice fn
 (coll: Vec, start: Int, end: Int): Vec { ... }
 ```
 
+Overloads can differ by arity or parameter type:
+
+```hot
+describe fn
+(id: Int): Str { `#${id}` },
+(name: Str): Str { name }
+```
+
+Variadic parameters use `...` and must come last:
+
+```hot
+sum fn (...nums: Int): Int {
+    reduce(nums, add(%1, %2), 0)
+}
+```
+
 ### Lambdas
 
 ```hot
@@ -118,12 +151,37 @@ length(filter(items, %(gt(%, 3))))        // lambda wraps at filter, not length
 map(items, mul(%, 2))                     // only 1 level deep, works fine
 ```
 
-### Default Parameters
+### Optional Arguments
 
 ```hot
-greet fn (name: Str, greeting: Str = "Hello"): Str {
+// Hot does not use `=` default parameter syntax.
+// Define multiple arities instead.
+greet fn
+(name: Str): Str { greet(name, "Hello") },
+(name: Str, greeting: Str): Str {
     `${greeting}, ${name}!`
 }
+```
+
+`Str?` means "may be null"; it does not make the argument omittable. Pass
+`null` explicitly or define another arity.
+
+### Function Aliases
+
+Bind local names to functions or types from another namespace. Aliases can
+carry metadata, which is common for webhooks, schedules, and agent handlers:
+
+```hot
+HttpRequest ::hot::http/HttpRequest
+http-request ::hot::http/request
+
+handle-signup fn (request: HttpRequest): Map {
+    {ok: true, body: request.body}
+}
+
+signup-webhook
+meta {webhook: {service: "leads", path: "/signup"}}
+handle-signup
 ```
 
 ## Operators as Functions
@@ -314,7 +372,7 @@ fn (event) { ... }
 |------|-------------|---------|
 | `Str` | String | `"hello"`, `` `template` ``, `"""block"""`, `` ```block template``` `` |
 | `Int` | Integer | `42` |
-| `Dec` | Decimal | `3.14` |
+| `Dec` | Decimal, not floating point | `3.14` |
 | `Bool` | Boolean | `true`, `false` |
 | `Null` | Null value | `null` |
 | `Vec` | Vector/Array | `[1, 2, 3]` |

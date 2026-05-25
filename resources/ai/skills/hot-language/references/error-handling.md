@@ -27,9 +27,13 @@ failure err("Something went wrong")
 ```hot
 // Return type is Int (the Ok value), not Result
 safe-divide fn (a: Int, b: Int): Int {
-    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+    if(eq(b, 0), err("Division by zero"), div(a, b))
 }
 ```
+
+Successful return values are automatically wrapped in `Result.Ok`. You usually
+only need to write `err(...)` for expected failures; writing `ok(...)` is valid
+but often unnecessary.
 
 ## Automatic Unwrapping
 
@@ -73,6 +77,10 @@ message match result {
     Result.Err => { `Error: ${result}` }
 }
 ```
+
+Inside a `Result.Ok` or `Result.Err` match arm, using the matched variable reads
+the payload. Dot access also reaches into Ok payloads (`result.name`) without
+manual `$val` handling.
 
 ## Lazy Arguments
 
@@ -161,7 +169,8 @@ config if(is-ok(result), result, default-config())
 
 ### Pattern 4: Fail with Context
 
-Use `fail` to halt execution with a custom error:
+Use `fail` to halt execution with a custom error. Use `err` for expected,
+recoverable failures that callers may inspect as values:
 
 ```hot
 validate fn (data: Map): Map {
@@ -170,6 +179,10 @@ validate fn (data: Map): Map {
         data)
 }
 ```
+
+`fail` propagates up until a halt boundary catches it. Use
+`::hot::lang/try-call(() { ... })` when a fan-out loop must continue after one
+item fails.
 
 ### Pattern 5: Result Combinators
 

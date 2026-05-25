@@ -364,7 +364,8 @@ post fn (url: Str, body: Any): HttpResponse
 put fn (url: Str, body: Any): HttpResponse
 patch fn (url: Str, body: Any): HttpResponse
 delete fn (url: Str): HttpResponse
-request fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse
+request fn (request: HttpRequest): HttpResponse
+request fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): HttpResponse
 request-stream fn (method: Str, url: Str, headers: Map, body: Any): StreamingResponse
 request-stream fn (method: Str, url: Str, headers: Map, body: Any, format: Str): StreamingResponse
 get-stream fn (url: Str): StreamingResponse
@@ -376,6 +377,20 @@ is-ok-response fn (response: HttpResponse): Bool         // true if status is 2x
 ```
 
 Response structure: `{status: Int, headers: Map<Str, Str>, body: Any}`
+
+Use `HttpRequest` whenever you need headers, raw body control, or parity with
+webhook handlers:
+
+```hot
+HttpRequest ::hot::http/HttpRequest
+
+response ::http/request(HttpRequest({
+    method: "POST",
+    url: "https://api.example.com/users",
+    headers: {"Content-Type": "application/json"},
+    body: {name: "Alice"},
+}))
+```
 
 ### ::hot::uri
 

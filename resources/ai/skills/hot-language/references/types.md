@@ -8,7 +8,7 @@ Hot has a structural type system with type inference, custom types, enums, and t
 |------|-------------|-----------------|
 | `Str` | UTF-8 string | `"hello"`, `` `template` ``, `"""block"""`, `` ```block template``` `` |
 | `Int` | 64-bit integer | `42`, `-17` |
-| `Dec` | Decimal number | `3.14`, `-0.5` |
+| `Dec` | Decimal number, not floating point | `3.14`, `-0.5` |
 | `Bool` | Boolean | `true`, `false` |
 | `Null` | Null value | `null` |
 | `Vec` | Ordered collection | `[1, 2, 3]` |
@@ -72,6 +72,21 @@ Point type fn (x: Int, y: Int): Point {
 p Point(10, 20)
 p.x  // 10
 p.y  // 20
+```
+
+Custom constructors can have multiple arities:
+
+```hot
+Email type fn
+(value: Str): Email { Email({value}) },
+(local: Str, domain: Str): Email { Email({value: `${local}@${domain}`}) }
+```
+
+Empty marker types are useful for tags and capabilities:
+
+```hot
+Admin type {}
+Guest type {}
 ```
 
 ### Nested Types
@@ -481,6 +496,31 @@ Config type {
 process fn (cfg: Config): Int {
     if(is-null(cfg.port), 8080, cfg.port)
 }
+```
+
+`?` means the value may be `null`; it does **not** make an argument omittable.
+Callers must still pass a value or `null`. Use function overloading when you
+want a shorter call form:
+
+```hot
+greet fn
+(name: Str): Str { greet(name, null) },
+(name: Str, title: Str?): Str {
+    if(is-null(title), `Hello ${name}`, `Hello ${title} ${name}`)
+}
+```
+
+## Untyping for Serialization
+
+Typed values carry `$type` and `$val` metadata internally. Use `untype` before
+serializing typed data for JSON APIs or storage that expects plain maps:
+
+```hot
+User type { id: Str, email: Str }
+user User({id: "u1", email: "a@example.com"})
+
+to-json(user)          // includes $type/$val
+to-json(untype(user))  // {"id":"u1","email":"a@example.com"}
 ```
 
 ## Type Aliases

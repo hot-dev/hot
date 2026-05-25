@@ -67,6 +67,10 @@ hot test                  # Run Hot tests
 hot ai add                # Add AGENTS.md + Hot language skill for AI tools
 ```
 
+`hot ai add` installs the Hot language skill snapshot bundled with the CLI. The
+same skill is also published for the broader skills.sh ecosystem from
+`hot-dev/hot-skills`.
+
 ## Repository Layout
 
 ```text

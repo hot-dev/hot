@@ -9,7 +9,7 @@ description: >
 metadata:
   author: hotdev
   version: "1.0"
-  license: MIT
+  license: Apache-2.0
 ---
 
 # Hot Language Skill
@@ -30,6 +30,8 @@ Hot is a functional, expression-based language with automatic parallelization an
 | `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks |
 | `for x in items` | `map(items, ...)` or `for-each(iter, ...)` | No loops |
 | `items.0` | `items[0]` | Use brackets for array indexing |
+| `add (1, 2)` | `add(1, 2)` | No space before `(` when calling |
+| `{x}` for a map | `{x,}` or `{x: x}` | Single-key punning needs comma |
 
 ## File Structure
 
@@ -72,6 +74,16 @@ tpl ```                   // Block template string (indent-aware + interpolation
     SELECT * FROM ${table}
     WHERE id = ${id}
     ```
+```
+
+### Deep Paths
+
+```hot
+user.name "Alice"
+user.settings.theme "dark"
+servers[0] "api.example.com"
+items[] "first"           // append to vector
+shopping.items[] "apple"  // append to nested vector
 ```
 
 ### Functions
@@ -175,6 +187,24 @@ Piped value becomes the **first** argument:
 result 5 |> add(2) |> mul(3)  // add(5,2)=7, mul(7,3)=21
 ```
 
+### App and Platform Patterns
+
+```hot
+// Function aliases can carry metadata and point at another function.
+signup-webhook
+meta {webhook: {service: "leads", path: "/signup"}}
+handle-signup
+
+// Use HttpRequest for headers/raw body; simple get/post helpers have fixed arity.
+HttpRequest ::hot::http/HttpRequest
+response ::hot::http/request(HttpRequest({
+    method: "POST",
+    url: "https://api.example.com/users",
+    headers: {Authorization: `Bearer ${api-key}`},
+    body: untype(user),
+}))
+```
+
 ## Event Handlers and Schedules
 
 ```hot
@@ -214,6 +244,7 @@ This skill includes detailed reference files:
 | [references/types.md](references/types.md) | Type system, type coercion |
 | [references/error-handling.md](references/error-handling.md) | Auto-unwrapping, lazy arguments, Result patterns |
 | [references/sequences.md](references/sequences.md) | Eager collections, lazy iterators, the `Next` type |
+| [references/meta.md](references/meta.md) | Metadata for tests, events, schedules, MCP tools, webhooks, and context |
 
 ## Code Examples
 
@@ -225,6 +256,8 @@ See the [examples/](examples/) directory for working Hot code:
 - `sequences.hot` - Eager collections, lazy iterators, range functions
 - `event-handlers.hot` - Events, schedules, retry patterns
 - `http-service.hot` - HTTP requests, API integration
+- `webhooks.hot` - Inbound webhooks, function aliases, and `HttpResponse`
+- `stores.hot` - Persistent stores, list entry shape, and semantic search setup
 
 ## CLI Commands
 

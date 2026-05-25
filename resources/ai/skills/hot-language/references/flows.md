@@ -91,6 +91,18 @@ condition => { result }     // With condition
 _ => { result }             // Also valid as default (Rust-style wildcard)
 ```
 
+`cond` conditions use Hot truthiness: only `false` and `null` are false. Values
+like `0`, `""`, `[]`, and `{}` still match. This makes direct fallback patterns
+work naturally:
+
+```hot
+display-name cond {
+    user.nickname => { user.nickname }
+    user.name => { user.name }
+    => { "Anonymous" }
+}
+```
+
 ## Cond-All Flow
 
 Executes ALL branches whose conditions are true. Returns a Map keyed by branch names.
@@ -127,6 +139,15 @@ describe fn match (shape: Shape): Str {
     Shape.Circle => { `Circle with radius ${shape.radius}` }
     Shape.Rectangle => { `Rectangle ${shape.width}x${shape.height}` }
     Shape.Point => { "A point" }
+}
+```
+
+`match` functions may accept extra arguments after the matched value:
+
+```hot
+render fn match (shape: Shape, color: Str): Str {
+    Shape.Circle => { `${color} circle ${shape.radius}` }
+    Shape.Rectangle => { `${color} rectangle ${shape.width}x${shape.height}` }
 }
 ```
 
@@ -294,6 +315,18 @@ fetch-user-data fn parallel (id: Str): Map {
     friends ::http/get(`/users/${id}/friends`)
 }
 // Returns: {profile: ..., posts: ..., friends: ...}
+```
+
+Parallel flow respects dependencies. Independent bindings run concurrently, but
+a binding that references an earlier value waits for that value:
+
+```hot
+enrich-user fn parallel (id: Str): Map {
+    user fetch-user(id)
+    orders fetch-orders(user.id)
+    prefs fetch-preferences(user.id)
+    summary build-summary(orders, prefs)
+}
 ```
 
 ### As Standalone Expression

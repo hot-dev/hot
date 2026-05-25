@@ -1,0 +1,57 @@
+// Persistent store patterns
+::examples::stores ns
+
+::store ::hot::store
+
+UserProfile type {
+    id: Str,
+    name: Str,
+    email: Str,
+    tags: Vec<Str>?,
+}
+
+profiles ::store/Map({name: "skills-example-profiles"})
+knowledge ::store/Map({
+    name: "skills-example-knowledge",
+    embedding: ::store/Embedding({
+        field: "content",
+        text-search: true,
+    }),
+})
+
+save-profile fn (profile: UserProfile): UserProfile {
+    // Store typed values as plain JSON-shaped maps for external readability.
+    ::store/put(profiles, profile.id, untype(profile))
+    profile
+}
+
+tag-profile fn (id: Str, tag: Str): Map {
+    profile ::store/get(profiles, id, {
+        id,
+        tags: [],
+    })
+
+    profile.tags[] tag
+    ::store/put(profiles, id, profile)
+    profile
+}
+
+save-article fn (slug: Str, title: Str, content: Str): Map {
+    article {
+        slug,
+        title,
+        content,
+    }
+
+    ::store/put(knowledge, slug, article)
+    article
+}
+
+list-profile-keys fn (): Vec {
+    ::store/keys(profiles)
+}
+
+first-article fn (): Map? {
+    entry ::store/first(knowledge)
+    if(is-null(entry), null, entry.value)
+}

@@ -57,6 +57,9 @@ jobs:
       - name: Verify AGENTS.md sync
         run: bash ./scripts/check-agents-sync.sh
 
+      - name: Verify AI skill assets sync
+        run: bash ./scripts/check-ai-assets-sync.sh
+
       # `doc-snippets.sh check` runs `hot check --with-tests true`, which is a
       # strict superset of `hot check` and additionally validates {{snippet:...}}
       # references in docs.

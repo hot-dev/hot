@@ -5,13 +5,14 @@
 ::http ::hot::http
 ::env ::hot::env
 ::ctx ::hot::ctx
+HttpRequest ::hot::http/HttpRequest
 
 // ============================================
 // CONFIGURATION
 // ============================================
 
 api-base ::env/get("API_BASE", "https://api.example.com")
-api-key ::env/get("API_KEY")
+api-key ::env/get("API_KEY", "")
 timeout: Int 30000
 
 // ============================================
@@ -50,7 +51,11 @@ auth-headers fn (): Map {
 
 // Generic GET request (return type is the Ok value type)
 api-get fn (path: Str): Any {
-    response ::http/get(`${api-base}${path}`, auth-headers())
+    response ::http/request(HttpRequest({
+        method: "GET",
+        url: `${api-base}${path}`,
+        headers: auth-headers(),
+    }))
 
     if(eq(response.status, 200),
         ok(response.body),
@@ -59,7 +64,12 @@ api-get fn (path: Str): Any {
 
 // Generic POST request
 api-post fn (path: Str, body: Map): Any {
-    response ::http/post(`${api-base}${path}`, body, auth-headers())
+    response ::http/request(HttpRequest({
+        method: "POST",
+        url: `${api-base}${path}`,
+        headers: auth-headers(),
+        body,
+    }))
 
     cond {
         eq(response.status, 200) => { ok(response.body) }

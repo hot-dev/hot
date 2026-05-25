@@ -291,6 +291,7 @@ check-err is-err(failure)  // true
 handle-result fn match (r: Result): Str {
     Result.Ok => { `Success: ${r}` }
     Result.Err => { `Error: ${r}` }
+    _ => { `Result: ${r}` }
 }
 
 // Chain results (return type is the Ok value type)
