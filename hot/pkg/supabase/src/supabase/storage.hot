@@ -295,6 +295,17 @@ list-objects-as fn (request: ListObjectsRequest, access-token: Str): Vec<Storage
   ::api/request-as("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body, access-token)
 }
 
+list-objects-service fn (request: ListObjectsRequest): Vec<StorageObject> {
+  body {}
+    |> assoc-some("prefix", request.prefix)
+    |> assoc-some("limit", request.limit)
+    |> assoc-some("offset", request.offset)
+    |> assoc-some("search", request.search)
+    |> assoc-some("sortBy", request.sort_by)
+
+  ::api/request-service("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body)
+}
+
 MoveObjectRequest type {
   bucket_id: Str,
   source_key: Str,
@@ -349,6 +360,10 @@ delete-object-as fn (bucket: Str, path: Str, access-token: Str): Any {
   ::api/request-as("DELETE", `/storage/v1/object/${object-path(bucket, path)}`, {}, {}, access-token)
 }
 
+delete-object-service fn (bucket: Str, path: Str): Any {
+  ::api/request-service("DELETE", `/storage/v1/object/${object-path(bucket, path)}`)
+}
+
 delete-objects
 meta {
     doc: """
@@ -365,6 +380,10 @@ Delete multiple objects from a bucket.
 }
 fn (bucket: Str, prefixes: Vec<Str>): Any {
   ::api/request("DELETE", `/storage/v1/object/${bucket-path(bucket)}`, {}, {prefixes: prefixes})
+}
+
+delete-objects-service fn (bucket: Str, prefixes: Vec<Str>): Any {
+  ::api/request-service("DELETE", `/storage/v1/object/${bucket-path(bucket)}`, {}, {prefixes: prefixes})
 }
 
 // ============================================================================
@@ -411,6 +430,10 @@ fn (bucket: Str, path: Str, expires-in: Int): SignedUrlResponse {
 
 create-signed-url-as fn (bucket: Str, path: Str, expires-in: Int, access-token: Str): SignedUrlResponse {
   ::api/request-as("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in}, access-token)
+}
+
+create-signed-url-service fn (bucket: Str, path: Str, expires-in: Int): SignedUrlResponse {
+  ::api/request-service("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in})
 }
 
 create-signed-urls

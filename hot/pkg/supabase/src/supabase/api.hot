@@ -223,6 +223,6 @@ do-raw-body-request fn (method: Str, path: Str, additional-headers: Map, body-ra
     method: method,
     url: url,
     headers: final-headers,
-    body-raw: body-raw
+    body: body-raw
   }))
 }

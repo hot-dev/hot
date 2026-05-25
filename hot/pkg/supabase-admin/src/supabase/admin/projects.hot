@@ -18,6 +18,13 @@ ApiKey type {
   api_key: Str
 }
 
+ProjectHealth type {
+  name: Str,
+  healthy: Bool,
+  status: Str,
+  info: Map?
+}
+
 postgrest-path fn (project-ref: Str): Str {
   `/projects/${project-ref}/postgrest`
 }
@@ -25,6 +32,11 @@ postgrest-path fn (project-ref: Str): Str {
 database-openapi-path fn (project-ref: Str, schema: Str?): Str {
   suffix if(is-some(schema), `?schema=${::uri/encode(schema)}`, "")
   `/projects/${project-ref}/database/openapi${suffix}`
+}
+
+health-path fn (project-ref: Str, services: Vec<Str>): Str {
+  encoded-services ::uri/encode(join(services, ","))
+  `/projects/${project-ref}/health?services=${encoded-services}`
 }
 
 // ============================================================================
@@ -219,10 +231,14 @@ fn (project-ref: Str, config: Map): Map {
 
 get-project-health
 meta {
-    doc: """Get health status of all project services (database, auth, storage, etc.)."""
+    doc: """Get health status for project services. Defaults to db, auth, storage, rest, and realtime."""
 }
-fn (project-ref: Str): Vec<Map> {
-  ::api/request("GET", `/projects/${project-ref}/health`)
+fn
+(project-ref: Str): Vec<ProjectHealth> {
+  get-project-health(project-ref, ["db", "auth", "storage", "rest", "realtime"])
+},
+(project-ref: Str, services: Vec<Str>): Vec<ProjectHealth> {
+  ::api/request("GET", health-path(project-ref, services))
 }
 
 get-project-usage

@@ -264,24 +264,28 @@ hot test --conf hot.test.hot
 Run this SQL in the Supabase SQL Editor:
 
 ```sql
-CREATE TABLE test_items (
+CREATE TABLE "hot-integration-test" (
   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   name text NOT NULL,
   value integer DEFAULT 0,
   created_at timestamptz DEFAULT now()
 );
 
-ALTER TABLE test_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "hot-integration-test" ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Allow all for anon" ON test_items
+CREATE POLICY "Allow all for anon" ON "hot-integration-test"
   FOR ALL USING (true) WITH CHECK (true);
 
-CREATE UNIQUE INDEX test_items_name_idx ON test_items (name);
+CREATE UNIQUE INDEX hot_integration_test_name_idx ON "hot-integration-test" (name);
 ```
+
+If PostgREST still reports `PGRST205` after creating the table, refresh the
+schema cache from the Supabase Dashboard or wait briefly and rerun the tests.
 
 ### 3. Create a Test Storage Bucket
 
-In the Supabase Dashboard, go to **Storage** and create a bucket called `hot-test-bucket`.
+The storage object test creates and deletes a temporary bucket by default. Set
+`SUPABASE_TEST_BUCKET` only when you want to use an existing bucket instead.
 
 ### 4. Set Context Variables
 
@@ -294,17 +298,19 @@ supabase.service.key=eyJ...
 ### 5. Set Environment Variables
 
 ```
-SUPABASE_TEST_TABLE=test_items
-SUPABASE_TEST_BUCKET=hot-test-bucket
+SUPABASE_TEST_TABLE=hot-integration-test
+SUPABASE_TEST_BUCKET=hot-integration-test # optional
 SUPABASE_TEST_FUNCTION=hello-world
 ```
 
+`SUPABASE_TEST_TABLE` defaults to `hot-integration-test`.
+`SUPABASE_TEST_BUCKET` is optional; when unset, object storage tests create a temporary bucket.
 `SUPABASE_TEST_FUNCTION` is optional -- only needed if you have an edge function deployed.
 
 ### 6. Run the Tests
 
 ```bash
-hot test hot/pkg/supabase/integration-test/
+./scripts/integration/supabase.sh
 ```
 
 ### What the Tests Do
