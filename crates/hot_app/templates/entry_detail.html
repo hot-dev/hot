@@ -66,8 +66,12 @@
             <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Key</h2>
             <button type="button"
                     onclick="openContentModalWithFormats('Entry Key', decodeStoreSection('entry-key-hot'), decodeStoreSection('entry-key-json'))"
-                    class="text-xs text-blue-600 dark:text-blue-400 hover:underline">
-                Open in modal
+                    class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0"
+                    title="View full key"
+                    aria-label="View full key">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                </svg>
             </button>
         </div>
         <div class="p-4">

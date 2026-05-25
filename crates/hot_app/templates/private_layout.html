@@ -945,10 +945,12 @@
             codeElements.forEach(el => Prism.highlightElement(el));
         }
     }
+    window.applyFormatting = applyFormatting;
 
     // Global HTMX afterSwap event listener - apply formatting to swapped content
     document.body.addEventListener('htmx:afterSwap', function(event) {
-        applyFormatting(event.detail.target);
+        const swapped = event.detail && (event.detail.elt || event.detail.target);
+        applyFormatting(swapped || event.target);
     });
 
     // Initial formatting on page load

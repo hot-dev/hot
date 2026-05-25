@@ -2,7 +2,7 @@
     <button type="button"
             class="text-left hover:text-blue-600 dark:hover:text-blue-400 font-mono break-all"
             onclick="openStoreContent('{{ entry.key_encoded }}', 'value')">
-        {{ entry.value_preview }}
+        <code class="language-hot">{{ entry.value_preview }}</code>
     </button>
     <script type="application/json" id="store-val-hot-{{ entry.key_encoded }}">{{ entry.value_hot|escape }}</script>
     <script type="application/json" id="store-val-json-{{ entry.key_encoded }}">{{ entry.value_json|escape }}</script>
