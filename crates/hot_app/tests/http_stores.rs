@@ -285,7 +285,7 @@ async fn entry_detail_hides_value_until_admin_reveal() {
         Some("no-cache")
     );
     assert!(reveal.body.contains("unicode"));
-    assert!(reveal.body.contains("Open in modal"));
+    assert!(reveal.body.contains("View full value"));
 }
 
 #[tokio::test]
