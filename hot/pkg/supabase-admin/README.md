@@ -7,7 +7,7 @@ Supabase Management API bindings for Hot. Manage projects, organizations, databa
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase-admin": "1.1.0"
+"hot.dev/supabase-admin": "1.0.0"
 ```
 
 ## Configuration
@@ -15,6 +15,10 @@ Add this to the `deps` in your `hot.hot` file:
 Set the `supabase.access.token` context variable to a Personal Access Token (PAT) via the Hot app.
 
 Generate a PAT at [supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens).
+
+The package also supports explicit PAT overrides through the low-level
+`::supabase::admin::api/request` arity that accepts an `access-token`; this is
+useful for scripts and tests that should not mutate context.
 
 ## Usage
 
@@ -152,6 +156,13 @@ branches ::branches/list-branches("my-project-ref")
 | `::supabase::admin::core` | Shared configuration (BASE_URL) |
 
 ## Integration Tests
+
+Offline unit tests cover known Management API path builders:
+
+```bash
+cd hot/pkg/supabase-admin
+hot test --conf hot.test.hot
+```
 
 ### 1. Generate a Personal Access Token
 

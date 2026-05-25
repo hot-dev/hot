@@ -1,50 +1,90 @@
 ::supabase::filters ns
 
+::uri ::hot::uri
+
+encode fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+quote-string fn (value: Str): Str {
+  escaped replace(value, "\"", "\\\"")
+  `"${escaped}"`
+}
+
+needs-quote fn (value: Str): Bool {
+  or(
+    contains(value, " "),
+    contains(value, ","),
+    contains(value, "."),
+    contains(value, ":"),
+    contains(value, "("),
+    contains(value, ")"),
+    contains(value, "\"")
+  )
+}
+
+format-value fn cond (val: Any): Str {
+  is-str(val) => {
+    s Str(val)
+    if(needs-quote(s), quote-string(s), s)
+  }
+  is-null(val) => { "null" }
+  => { Str(val) }
+}
+
+format-encoded-value fn (val: Any): Str {
+  encode(format-value(val))
+}
+
+filter fn (col: Str, op: Str, val: Any): Str {
+  `${encode(col)}=${op}.${format-encoded-value(val)}`
+}
+
 eq
 meta {
     doc: """PostgREST `eq` filter. `eq("status", "active")` => `"status=eq.active"`"""
 }
-fn (col: Str, val: Any): Str { `${col}=eq.${val}` }
+fn (col: Str, val: Any): Str { filter(col, "eq", val) }
 
 neq
 meta {
     doc: """PostgREST `neq` filter (not equal). `neq("status", "draft")` => `"status=neq.draft"`"""
 }
-fn (col: Str, val: Any): Str { `${col}=neq.${val}` }
+fn (col: Str, val: Any): Str { filter(col, "neq", val) }
 
 gt
 meta {
     doc: """PostgREST `gt` filter (greater than). `gt("age", 20)` => `"age=gt.20"`"""
 }
-fn (col: Str, val: Any): Str { `${col}=gt.${val}` }
+fn (col: Str, val: Any): Str { filter(col, "gt", val) }
 
 gte
 meta {
     doc: """PostgREST `gte` filter (greater than or equal). `gte("age", 18)` => `"age=gte.18"`"""
 }
-fn (col: Str, val: Any): Str { `${col}=gte.${val}` }
+fn (col: Str, val: Any): Str { filter(col, "gte", val) }
 
 lt
 meta { doc: """PostgREST `lt` filter (less than). `lt("age", 13)` => `"age=lt.13"`""" }
-fn (col: Str, val: Any): Str { `${col}=lt.${val}` }
+fn (col: Str, val: Any): Str { filter(col, "lt", val) }
 
 lte
 meta {
     doc: """PostgREST `lte` filter (less than or equal). `lte("age", 65)` => `"age=lte.65"`"""
 }
-fn (col: Str, val: Any): Str { `${col}=lte.${val}` }
+fn (col: Str, val: Any): Str { filter(col, "lte", val) }
 
 like
 meta {
     doc: """PostgREST `like` filter (case-sensitive pattern). Use `*` for wildcards. `like("name", "John*")` => `"name=like.John*"`"""
 }
-fn (col: Str, val: Str): Str { `${col}=like.${val}` }
+fn (col: Str, val: Str): Str { filter(col, "like", val) }
 
 ilike
 meta {
     doc: """PostgREST `ilike` filter (case-insensitive pattern). `ilike("name", "*smith")` => `"name=ilike.*smith"`"""
 }
-fn (col: Str, val: Str): Str { `${col}=ilike.${val}` }
+fn (col: Str, val: Str): Str { filter(col, "ilike", val) }
 
 in_
 meta {
@@ -61,15 +101,15 @@ PostgREST `in` filter. `in_("id", [1, 2, 3])` => `"id=in.(1,2,3)"`
 """
 }
 fn (col: Str, vals: Vec): Str {
-  val-str join(map(vals, Str(%)), ",")
-  `${col}=in.(${val-str})`
+  val-str join(map(vals, format-encoded-value(%)), ",")
+  `${encode(col)}=in.(${val-str})`
 }
 
 is_
 meta {
     doc: """PostgREST `is` filter for null/bool checks. `is_("deleted", "null")` => `"deleted=is.null"`. Also: `is_("active", "true")`."""
 }
-fn (col: Str, val: Str): Str { `${col}=is.${val}` }
+fn (col: Str, val: Str): Str { `${encode(col)}=is.${encode(val)}` }
 
 not_
 meta {
@@ -85,31 +125,31 @@ Negate a filter operator. `not_("status", "eq.archived")` => `"status=not.eq.arc
 ```
 """
 }
-fn (col: Str, op: Str): Str { `${col}=not.${op}` }
+fn (col: Str, op: Str): Str { `${encode(col)}=not.${encode(op)}` }
 
 cs
 meta {
     doc: """PostgREST `cs` (contains) filter for arrays/ranges. `cs("tags", "{a,b}")` => `"tags=cs.{a,b}"`"""
 }
-fn (col: Str, val: Str): Str { `${col}=cs.${val}` }
+fn (col: Str, val: Str): Str { filter(col, "cs", val) }
 
 cd
 meta {
     doc: """PostgREST `cd` (contained by) filter. `cd("tags", "{a,b,c}")` => `"tags=cd.{a,b,c}"`"""
 }
-fn (col: Str, val: Str): Str { `${col}=cd.${val}` }
+fn (col: Str, val: Str): Str { filter(col, "cd", val) }
 
 ov
 meta {
     doc: """PostgREST `ov` (overlap) filter for arrays/ranges. `ov("tags", "{a,b}")` => `"tags=ov.{a,b}"`"""
 }
-fn (col: Str, val: Str): Str { `${col}=ov.${val}` }
+fn (col: Str, val: Str): Str { filter(col, "ov", val) }
 
 fts
 meta {
     doc: """PostgREST full-text search. `fts("description", "hot language")` => `"description=fts.hot language"`"""
 }
-fn (col: Str, val: Str): Str { `${col}=fts.${val}` }
+fn (col: Str, val: Str): Str { filter(col, "fts", val) }
 
 or_
 meta {
@@ -126,7 +166,8 @@ Combine filters with OR logic. Takes raw filter expressions (without the column 
 """
 }
 fn (filters: Vec<Str>): Str {
-  `or=(${join(filters, ",")})`
+  grouped `(${join(filters, ",")})`
+  `or=${encode(grouped)}`
 }
 
 and_
@@ -144,5 +185,6 @@ Combine filters with AND logic (explicit grouping). Takes raw filter expressions
 """
 }
 fn (filters: Vec<Str>): Str {
-  `and=(${join(filters, ",")})`
+  grouped `(${join(filters, ",")})`
+  `and=${encode(grouped)}`
 }

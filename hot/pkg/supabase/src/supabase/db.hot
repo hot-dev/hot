@@ -1,6 +1,86 @@
 ::supabase::db ns
 
 ::api ::supabase::api
+::uri ::hot::uri
+
+CountMode type "exact" | "planned" | "estimated"
+
+DbResponse type {
+  status: Int,
+  headers: Map,
+  body: Any,
+  count: Int?
+}
+
+enc fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+query-param fn (name: Str, value: Any): Str {
+  if(is-some(value), `${enc(name)}=${enc(value)}`, "")
+}
+
+join-query fn (parts: Vec<Str>): Str {
+  active filter(parts, not(is-empty(%)))
+  join(active, "&")
+}
+
+append-query fn (path: Str, parts: Vec<Str>): Str {
+  query join-query(parts)
+  if(is-empty(query), path, `${path}?${query}`)
+}
+
+filters-query fn (filters: Vec<Str>?): Str {
+  cond {
+    is-null(filters) => { "" }
+    is-empty(filters) => { "" }
+    => { join(filters, "&") }
+  }
+}
+
+read-headers fn (schema: Str?): Map {
+  {} |> assoc-some("Accept-Profile", schema)
+}
+
+write-headers fn (schema: Str?): Map {
+  {} |> assoc-some("Content-Profile", schema)
+}
+
+parse-count fn (headers: Map): Int? {
+  raw or(get(headers, "content-range"), get(headers, "Content-Range"))
+  cond {
+    is-null(raw) => { null }
+    not(contains(raw, "/")) => { null }
+    => {
+      total last(split(raw, "/"))
+      if(eq(total, "*"), null, Int(total))
+    }
+  }
+}
+
+db-response fn (response: ::api/HttpResponse): DbResponse {
+  DbResponse({
+    status: response.status,
+    headers: response.headers,
+    body: response.body,
+    count: parse-count(response.headers)
+  })
+}
+
+body-or-error fn (response: ::api/HttpResponse): Any {
+  cond {
+    not(::api/is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => { response.body }
+  }
+}
+
+table-path fn (table: Str): Str {
+  `/rest/v1/${enc(table)}`
+}
+
+rpc-path fn (fn-name: Str): Str {
+  `/rest/v1/rpc/${enc(fn-name)}`
+}
 
 // ============================================================================
 // Select (Read)
@@ -13,7 +93,8 @@ SelectRequest type {
   order: Str?,
   limit: Int?,
   offset: Int?,
-  count: Str?,
+  count: CountMode?,
+  schema: Str?,
   single: Bool?
 }
 
@@ -53,25 +134,56 @@ user ::db/select(::db/SelectRequest({
 """
 }
 fn (request: SelectRequest): Any {
+  body-or-error(select-response(request))
+}
+
+select-as fn (request: SelectRequest, access-token: Str): Any {
+  body-or-error(select-response-as(request, access-token))
+}
+
+select-service fn (request: SelectRequest): Any {
+  body-or-error(select-response-service(request))
+}
+
+select-response fn (request: SelectRequest): DbResponse {
+  db-response(select-http-response(request))
+}
+
+select-response-as fn (request: SelectRequest, access-token: Str): DbResponse {
+  db-response(select-http-response-as(request, access-token))
+}
+
+select-response-service fn (request: SelectRequest): DbResponse {
+  db-response(select-http-response-service(request))
+}
+
+select-path fn (request: SelectRequest): Str {
   select-param or(request.select, "*")
-  path `/rest/v1/${request.table}?select=${select-param}`
+  append-query(table-path(request.table), [
+    query-param("select", select-param),
+    filters-query(request.filters),
+    query-param("order", request.order),
+    query-param("limit", request.limit),
+    query-param("offset", request.offset)
+  ])
+}
 
-  filter-str if(is-some(request.filters),
-    concat("&", join(request.filters, "&")),
-    ""
-  )
-
-  order-str if(is-some(request.order), `&order=${request.order}`, "")
-  limit-str if(is-some(request.limit), `&limit=${request.limit}`, "")
-  offset-str if(is-some(request.offset), `&offset=${request.offset}`, "")
-
-  full-path `${path}${filter-str}${order-str}${limit-str}${offset-str}`
-
-  headers {}
-    |> assoc-some("Prefer", if(is-some(request.count), `count=${request.count}`, null))
+select-headers fn (request: SelectRequest): Map {
+  read-headers(request.schema)
+    |> assoc-some("Prefer", if(is-some(request.count), `count=${untype(request.count)}`, null))
     |> assoc-some("Accept", if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null))
+}
 
-  ::api/request("GET", full-path, headers, {})
+select-http-response fn (request: SelectRequest): ::api/HttpResponse {
+  ::api/request-raw("GET", select-path(request), select-headers(request), {})
+}
+
+select-http-response-as fn (request: SelectRequest, access-token: Str): ::api/HttpResponse {
+  ::api/request-raw-as("GET", select-path(request), select-headers(request), {}, access-token)
+}
+
+select-http-response-service fn (request: SelectRequest): ::api/HttpResponse {
+  ::api/request-raw-service("GET", select-path(request), select-headers(request), {})
 }
 
 // ============================================================================
@@ -83,7 +195,8 @@ InsertRequest type {
   data: Any,
   return: Bool?,
   on-conflict: Str?,
-  count: Str?,
+  count: CountMode?,
+  schema: Str?,
   missing-as-default: Bool?
 }
 
@@ -117,21 +230,46 @@ rows ::db/insert(::db/InsertRequest({
 """
 }
 fn (request: InsertRequest): Any {
-  path `/rest/v1/${request.table}`
+  body-or-error(insert-response(request))
+}
 
+insert-as fn (request: InsertRequest, access-token: Str): Any {
+  body-or-error(insert-response-as(request, access-token))
+}
+
+insert-service fn (request: InsertRequest): Any {
+  body-or-error(insert-response-service(request))
+}
+
+insert-response fn (request: InsertRequest): ::api/HttpResponse {
+  ::api/request-raw("POST", insert-path(request), insert-headers(request), request.data)
+}
+
+insert-response-as fn (request: InsertRequest, access-token: Str): ::api/HttpResponse {
+  ::api/request-raw-as("POST", insert-path(request), insert-headers(request), request.data, access-token)
+}
+
+insert-response-service fn (request: InsertRequest): ::api/HttpResponse {
+  ::api/request-raw-service("POST", insert-path(request), insert-headers(request), request.data)
+}
+
+insert-path fn (request: InsertRequest): Str {
+  append-query(table-path(request.table), [
+    query-param("on_conflict", request.on-conflict)
+  ])
+}
+
+insert-headers fn (request: InsertRequest): Map {
   should-return or(request.return, true)
-  prefer-parts []
-  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
+  prefer-parts [
+    if(should-return, "return=representation", "return=minimal")
+  ]
   prefer-parts if(is-some(request.on-conflict), concat(prefer-parts, ["resolution=merge-duplicates"]), prefer-parts)
-  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${untype(request.count)}`]), prefer-parts)
   prefer-parts if(and(is-some(request.missing-as-default), request.missing-as-default), concat(prefer-parts, ["missing=default"]), prefer-parts)
 
-  headers {Prefer: join(prefer-parts, ", ")}
-
-  on-conflict-param if(is-some(request.on-conflict), `?on_conflict=${request.on-conflict}`, "")
-  full-path `${path}${on-conflict-param}`
-
-  ::api/request("POST", full-path, headers, request.data)
+  write-headers(request.schema)
+    |> assoc("Prefer", join(prefer-parts, ", "))
 }
 
 // ============================================================================
@@ -143,7 +281,8 @@ UpdateRequest type {
   data: Map,
   filters: Vec<Str>,
   return: Bool?,
-  count: Str?
+  count: CountMode?,
+  schema: Str?
 }
 
 update
@@ -166,19 +305,61 @@ updated ::db/update(::db/UpdateRequest({
 """
 }
 fn (request: UpdateRequest): Any {
-  if(is-empty(request.filters), fail("filters are required for update to prevent full-table updates"))
+  body-or-error(update-response(request))
+}
 
-  filter-str join(request.filters, "&")
-  path `/rest/v1/${request.table}?${filter-str}`
+update-as fn (request: UpdateRequest, access-token: Str): Any {
+  body-or-error(update-response-as(request, access-token))
+}
 
-  should-return or(request.return, true)
-  prefer-parts []
-  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
-  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+update-service fn (request: UpdateRequest): Any {
+  body-or-error(update-response-service(request))
+}
 
-  headers {Prefer: join(prefer-parts, ", ")}
+update-response fn (request: UpdateRequest): ::api/HttpResponse {
+  validate-filters(request.filters, "update")
+  ::api/request-raw("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data)
+}
 
-  ::api/request("PATCH", path, headers, request.data)
+update-response-as fn (request: UpdateRequest, access-token: Str): ::api/HttpResponse {
+  validate-filters(request.filters, "update")
+  ::api/request-raw-as("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, access-token)
+}
+
+update-response-service fn (request: UpdateRequest): ::api/HttpResponse {
+  validate-filters(request.filters, "update")
+  ::api/request-raw-service("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data)
+}
+
+validate-filters fn (filters: Vec<Str>, operation: Str): Bool {
+  if(is-empty(filters), fail(`filters are required for ${operation} to prevent full-table ${operation}s`))
+  true
+}
+
+filtered-table-path fn (table: Str, filters: Vec<Str>): Str {
+  append-query(table-path(table), [filters-query(filters)])
+}
+
+mutation-headers fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
+  should-return or(return-rows, true)
+  prefer-parts [
+    if(should-return, "return=representation", "return=minimal")
+  ]
+  prefer-parts if(is-some(count), concat(prefer-parts, [`count=${untype(count)}`]), prefer-parts)
+
+  write-headers(schema)
+    |> assoc("Prefer", join(prefer-parts, ", "))
+}
+
+delete-headers fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
+  should-return or(return-rows, false)
+  prefer-parts [
+    if(should-return, "return=representation", "return=minimal")
+  ]
+  prefer-parts if(is-some(count), concat(prefer-parts, [`count=${untype(count)}`]), prefer-parts)
+
+  write-headers(schema)
+    |> assoc("Prefer", join(prefer-parts, ", "))
 }
 
 // ============================================================================
@@ -189,7 +370,8 @@ DeleteRequest type {
   table: Str,
   filters: Vec<Str>,
   return: Bool?,
-  count: Str?
+  count: CountMode?,
+  schema: Str?
 }
 
 delete
@@ -211,19 +393,30 @@ Delete rows matching the filters. `filters` is required to prevent accidental fu
 """
 }
 fn (request: DeleteRequest): Any {
-  if(is-empty(request.filters), fail("filters are required for delete to prevent full-table deletes"))
+  body-or-error(delete-response(request))
+}
 
-  filter-str join(request.filters, "&")
-  path `/rest/v1/${request.table}?${filter-str}`
+delete-as fn (request: DeleteRequest, access-token: Str): Any {
+  body-or-error(delete-response-as(request, access-token))
+}
 
-  should-return or(request.return, false)
-  prefer-parts []
-  prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
-  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+delete-service fn (request: DeleteRequest): Any {
+  body-or-error(delete-response-service(request))
+}
 
-  headers {Prefer: join(prefer-parts, ", ")}
+delete-response fn (request: DeleteRequest): ::api/HttpResponse {
+  validate-filters(request.filters, "delete")
+  ::api/request-raw("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {})
+}
 
-  ::api/request("DELETE", path, headers, {})
+delete-response-as fn (request: DeleteRequest, access-token: Str): ::api/HttpResponse {
+  validate-filters(request.filters, "delete")
+  ::api/request-raw-as("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, access-token)
+}
+
+delete-response-service fn (request: DeleteRequest): ::api/HttpResponse {
+  validate-filters(request.filters, "delete")
+  ::api/request-raw-service("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {})
 }
 
 // ============================================================================
@@ -236,7 +429,8 @@ UpsertRequest type {
   on-conflict: Str?,
   ignore-duplicates: Bool?,
   return: Bool?,
-  count: Str?,
+  count: CountMode?,
+  schema: Str?,
   missing-as-default: Bool?
 }
 
@@ -259,6 +453,36 @@ Insert rows, updating on conflict. `on-conflict` specifies the conflict column(s
 """
 }
 fn (request: UpsertRequest): Any {
+  body-or-error(upsert-response(request))
+}
+
+upsert-as fn (request: UpsertRequest, access-token: Str): Any {
+  body-or-error(upsert-response-as(request, access-token))
+}
+
+upsert-service fn (request: UpsertRequest): Any {
+  body-or-error(upsert-response-service(request))
+}
+
+upsert-response fn (request: UpsertRequest): ::api/HttpResponse {
+  ::api/request-raw("POST", upsert-path(request), upsert-headers(request), request.data)
+}
+
+upsert-response-as fn (request: UpsertRequest, access-token: Str): ::api/HttpResponse {
+  ::api/request-raw-as("POST", upsert-path(request), upsert-headers(request), request.data, access-token)
+}
+
+upsert-response-service fn (request: UpsertRequest): ::api/HttpResponse {
+  ::api/request-raw-service("POST", upsert-path(request), upsert-headers(request), request.data)
+}
+
+upsert-path fn (request: UpsertRequest): Str {
+  append-query(table-path(request.table), [
+    query-param("on_conflict", request.on-conflict)
+  ])
+}
+
+upsert-headers fn (request: UpsertRequest): Map {
   resolution if(and(is-some(request.ignore-duplicates), request.ignore-duplicates),
     "resolution=ignore-duplicates",
     "resolution=merge-duplicates"
@@ -268,15 +492,11 @@ fn (request: UpsertRequest): Any {
   prefer-parts []
   prefer-parts concat(prefer-parts, [resolution])
   prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
-  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${request.count}`]), prefer-parts)
+  prefer-parts if(is-some(request.count), concat(prefer-parts, [`count=${untype(request.count)}`]), prefer-parts)
   prefer-parts if(and(is-some(request.missing-as-default), request.missing-as-default), concat(prefer-parts, ["missing=default"]), prefer-parts)
 
-  headers {Prefer: join(prefer-parts, ", ")}
-
-  on-conflict-param if(is-some(request.on-conflict), `?on_conflict=${request.on-conflict}`, "")
-  path `/rest/v1/${request.table}${on-conflict-param}`
-
-  ::api/request("POST", path, headers, request.data)
+  write-headers(request.schema)
+    |> assoc("Prefer", join(prefer-parts, ", "))
 }
 
 // ============================================================================
@@ -286,7 +506,8 @@ fn (request: UpsertRequest): Any {
 RpcRequest type {
   fn-name: Str,
   params: Map?,
-  count: Str?,
+  count: CountMode?,
+  schema: Str?,
   single: Bool?
 }
 
@@ -317,13 +538,31 @@ user ::db/rpc(::db/RpcRequest({
 """
 }
 fn (request: RpcRequest): Any {
-  path `/rest/v1/rpc/${request.fn-name}`
+  body-or-error(rpc-response(request))
+}
 
-  headers {}
-    |> assoc-some("Prefer", if(is-some(request.count), `count=${request.count}`, null))
+rpc-as fn (request: RpcRequest, access-token: Str): Any {
+  body-or-error(rpc-response-as(request, access-token))
+}
+
+rpc-service fn (request: RpcRequest): Any {
+  body-or-error(rpc-response-service(request))
+}
+
+rpc-response fn (request: RpcRequest): ::api/HttpResponse {
+  ::api/request-raw("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}))
+}
+
+rpc-response-as fn (request: RpcRequest, access-token: Str): ::api/HttpResponse {
+  ::api/request-raw-as("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), access-token)
+}
+
+rpc-response-service fn (request: RpcRequest): ::api/HttpResponse {
+  ::api/request-raw-service("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}))
+}
+
+rpc-headers fn (request: RpcRequest): Map {
+  write-headers(request.schema)
+    |> assoc-some("Prefer", if(is-some(request.count), `count=${untype(request.count)}`, null))
     |> assoc-some("Accept", if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null))
-
-  body or(request.params, {})
-
-  ::api/request("POST", path, headers, body)
 }

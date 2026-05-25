@@ -1,6 +1,20 @@
 ::supabase::auth-admin ns
 
 ::api ::supabase::api
+AuthUser ::supabase::auth/User
+
+ListUsersResponse type {
+  users: Vec<AuthUser>,
+  aud: Str?
+}
+
+GenerateLinkResponse type {
+  action_link: Str?,
+  email_otp: Str?,
+  hashed_token: Str?,
+  redirect_to: Str?,
+  verification_type: Str?
+}
 
 // ============================================================================
 // User Management (Service Role Key)
@@ -26,7 +40,7 @@ result.users  // => [{id: "...", email: "...", ...}, ...]
 ```
 """
 }
-fn (request: ListUsersRequest): Map {
+fn (request: ListUsersRequest): ListUsersResponse {
   page or(request.page, 1)
   per-page or(request.per_page, 50)
   ::api/request-service("GET", `/auth/v1/admin/users?page=${page}&per_page=${per-page}`)
@@ -47,7 +61,7 @@ user.email  // => "alice@example.com"
 ```
 """
 }
-fn (user-id: Str): Map {
+fn (user-id: Str): AuthUser {
   ::api/request-service("GET", `/auth/v1/admin/users/${user-id}`)
 }
 
@@ -59,6 +73,7 @@ CreateUserRequest type {
   phone_confirm: Bool?,
   user_metadata: Map?,
   app_metadata: Map?,
+  role: Str?,
   ban_duration: Str?
 }
 
@@ -82,7 +97,7 @@ user.id  // => "uuid-..."
 ```
 """
 }
-fn (request: CreateUserRequest): Map {
+fn (request: CreateUserRequest): AuthUser {
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -91,6 +106,7 @@ fn (request: CreateUserRequest): Map {
     |> assoc-some("phone_confirm", request.phone_confirm)
     |> assoc-some("user_metadata", request.user_metadata)
     |> assoc-some("app_metadata", request.app_metadata)
+    |> assoc-some("role", request.role)
     |> assoc-some("ban_duration", request.ban_duration)
 
   ::api/request-service("POST", "/auth/v1/admin/users", {}, body)
@@ -105,6 +121,7 @@ UpdateUserByIdRequest type {
   phone_confirm: Bool?,
   user_metadata: Map?,
   app_metadata: Map?,
+  role: Str?,
   ban_duration: Str?
 }
 
@@ -125,7 +142,7 @@ updated ::admin/update-user-by-id(::admin/UpdateUserByIdRequest({
 ```
 """
 }
-fn (request: UpdateUserByIdRequest): Map {
+fn (request: UpdateUserByIdRequest): AuthUser {
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -134,6 +151,7 @@ fn (request: UpdateUserByIdRequest): Map {
     |> assoc-some("phone_confirm", request.phone_confirm)
     |> assoc-some("user_metadata", request.user_metadata)
     |> assoc-some("app_metadata", request.app_metadata)
+    |> assoc-some("role", request.role)
     |> assoc-some("ban_duration", request.ban_duration)
 
   ::api/request-service("PUT", `/auth/v1/admin/users/${request.user_id}`, {}, body)
@@ -184,7 +202,7 @@ result.action_link  // => "https://..."
 ```
 """
 }
-fn (request: GenerateLinkRequest): Map {
+fn (request: GenerateLinkRequest): GenerateLinkResponse {
   body {type: request.type, email: request.email}
     |> assoc-some("password", request.password)
     |> assoc-some("redirect_to", request.redirect_to)

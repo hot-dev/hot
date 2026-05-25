@@ -7,7 +7,7 @@ Supabase client SDK for Hot. Query your database (PostgREST), authenticate users
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase": "1.1.0"
+"hot.dev/supabase": "1.0.0"
 ```
 
 ## Configuration
@@ -21,6 +21,11 @@ Set these context variables via the Hot app:
 | `supabase.service.key` | For admin ops | Service role key (bypasses RLS) |
 
 Find these in your Supabase Dashboard under **Settings > API**.
+
+Most database, storage object, and edge function helpers use the anon key by
+default. Use the `*-as` variants with a user access token for RLS-protected
+resources, or the `*-service` variants for trusted server-side service role
+operations. Storage bucket management uses the service role key.
 
 ## Usage
 
@@ -51,6 +56,13 @@ user ::db/select(::db/SelectRequest({
   filters: [::f/eq("id", "abc-123")],
   single: true
 }))
+
+// RLS-aware request as an authenticated user
+my-profile ::db/select-as(::db/SelectRequest({
+  table: "profiles",
+  filters: [::f/eq("id", user-id)],
+  single: true
+}), session.access_token)
 ```
 
 ### Insert, Update, Delete
@@ -212,7 +224,8 @@ result ::storage/create-signed-url("documents", "report.pdf", 3600)
 
 result ::functions/invoke(::functions/InvokeFunctionRequest({
   name: "process-order",
-  body: {order_id: "abc-123"}
+  body: {order_id: "abc-123"},
+  access-token: session.access_token
 }))
 ```
 
@@ -228,6 +241,16 @@ result ::functions/invoke(::functions/InvokeFunctionRequest({
 | `::supabase::functions` | Edge function invocation |
 | `::supabase::api` | Low-level HTTP client with dual-header auth |
 | `::supabase::core` | Project URL and key helpers |
+
+## Local Tests
+
+Offline unit tests cover query encoding, PostgREST headers/count parsing, and
+storage path/header helpers:
+
+```bash
+cd hot/pkg/supabase
+hot test --conf hot.test.hot
+```
 
 ## Integration Tests
 

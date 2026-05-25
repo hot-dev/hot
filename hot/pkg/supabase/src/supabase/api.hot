@@ -7,6 +7,8 @@ is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
+AuthMode type "anon" | "user" | "service"
+
 HttpError type {
     status: Int,
     headers: Map,
@@ -19,6 +21,30 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
     headers: response.headers,
     body: response.body
   })
+}
+
+has-body fn (body: Any): Bool {
+  cond {
+    is-map(body) => { not(is-empty(filter-vals(body, is-some))) }
+    is-vec(body) => { not(is-empty(body)) }
+    is-str(body) => { not(eq(body, "")) }
+    => { is-some(body) }
+  }
+}
+
+encode-body fn (body: Any): Str {
+  cond {
+    not(has-body(body)) => { "" }
+    is-str(body) => { body }
+    => { to-json(untype(body)) }
+  }
+}
+
+body-or-error fn (response: HttpResponse): Any {
+  cond {
+    not(is-ok-response(response)) => { err(HttpError(response)) }
+    => { response.body }
+  }
 }
 
 request
@@ -47,6 +73,19 @@ fn
   request(method, path, {}, {})
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  body-or-error(request-raw(method, path, additional-headers, body))
+}
+
+request-raw
+meta {
+    ctx: {"supabase.url": {required: true}, "supabase.anon.key": {required: true}},
+    doc: """Make an anon Supabase project API request and return the full `HttpResponse` including status and headers."""
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request-raw(method, path, {}, {})
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
   anon-key ::core/anon-key()
   do-request(method, path, additional-headers, body, anon-key, anon-key)
 }
@@ -67,6 +106,14 @@ meta {
     """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, access-token: Str): Any {
+  body-or-error(request-raw-as(method, path, additional-headers, body, access-token))
+}
+
+request-raw-as
+meta {
+    doc: """Make a request as a specific user and return the full `HttpResponse`."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, access-token: Str): HttpResponse {
   anon-key ::core/anon-key()
   do-request(method, path, additional-headers, body, anon-key, access-token)
 }
@@ -81,11 +128,24 @@ fn
   request-service(method, path, {}, {})
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  body-or-error(request-raw-service(method, path, additional-headers, body))
+}
+
+request-raw-service
+meta {
+    ctx: {"supabase.service.key": {required: true}},
+    doc: """Make a service-role request and return the full `HttpResponse`."""
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request-raw-service(method, path, {}, {})
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
   service-key ::core/service-key()
   do-request(method, path, additional-headers, body, service-key, service-key)
 }
 
-do-request fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): Any {
+do-request fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
   base-url ::core/project-url()
   url `${base-url}${path}`
 
@@ -94,37 +154,75 @@ do-request fn (method: Str, path: Str, additional-headers: Map, body: Any, apike
     Authorization: `Bearer ${bearer-token}`
   }
 
-  has-body cond {
-    is-map(body) => { not(is-empty(filter-vals(body, is-some))) }
-    is-vec(body) => { not(is-empty(body)) }
-    is-str(body) => { not(eq(body, "")) }
-    => { is-some(body) }
-  }
-
-  headers if(has-body, merge(default-headers, {Content-Type: "application/json"}), default-headers)
+  has-request-body has-body(body)
+  headers if(has-request-body, merge(default-headers, {Content-Type: "application/json"}), default-headers)
   final-headers merge(headers, additional-headers)
 
-  encoded-body cond {
-    not(has-body) => { "" }
-    is-str(body) => { body }
-    => { to-json(untype(body)) }
-  }
-
-  response http-request(HttpRequest({
+  http-request(HttpRequest({
     method: method,
     url: url,
     headers: final-headers,
-    body: encoded-body
+    body: encode-body(body)
   }))
+}
 
-  cond {
-    not(is-ok-response(response)) => {
-      error-body response.body
-      cond {
-        is-map(error-body) => { err(merge({status: response.status}, error-body)) }
-        => { err(HttpError(response)) }
-      }
-    }
-    => { response.body }
+request-with-keys
+meta {
+    doc: """Make a Supabase request with explicit API and bearer keys. Useful for tests and scripts that do not use context."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): Any {
+  body-or-error(do-request(method, path, additional-headers, body, apikey, bearer-token))
+}
+
+request-raw-with-keys
+meta {
+    doc: """Make a Supabase request with explicit API and bearer keys and return the full `HttpResponse`."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
+  do-request(method, path, additional-headers, body, apikey, bearer-token)
+}
+
+request-raw-body
+meta {
+    doc: """Make an anon request with an already-encoded raw body. Use for storage uploads and non-JSON payloads."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body-raw: Str): HttpResponse {
+  anon-key ::core/anon-key()
+  do-raw-body-request(method, path, additional-headers, body-raw, anon-key, anon-key)
+}
+
+request-raw-body-as
+meta {
+    doc: """Make a user-authenticated request with an already-encoded raw body."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body-raw: Str, access-token: Str): HttpResponse {
+  anon-key ::core/anon-key()
+  do-raw-body-request(method, path, additional-headers, body-raw, anon-key, access-token)
+}
+
+request-raw-body-service
+meta {
+    doc: """Make a service-role request with an already-encoded raw body."""
+}
+fn (method: Str, path: Str, additional-headers: Map, body-raw: Str): HttpResponse {
+  service-key ::core/service-key()
+  do-raw-body-request(method, path, additional-headers, body-raw, service-key, service-key)
+}
+
+do-raw-body-request fn (method: Str, path: Str, additional-headers: Map, body-raw: Str, apikey: Str, bearer-token: Str): HttpResponse {
+  base-url ::core/project-url()
+  url `${base-url}${path}`
+
+  default-headers {
+    apikey: apikey,
+    Authorization: `Bearer ${bearer-token}`
   }
+  final-headers merge(default-headers, additional-headers)
+
+  http-request(HttpRequest({
+    method: method,
+    url: url,
+    headers: final-headers,
+    body-raw: body-raw
+  }))
 }

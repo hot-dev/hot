@@ -62,8 +62,8 @@ resend
 #stripe-webhooks
 
 # Backend-as-a-Service
-#supabase
-#supabase-admin
+supabase
+supabase-admin
 
 # Communication (SMS/Voice)
 #twilio

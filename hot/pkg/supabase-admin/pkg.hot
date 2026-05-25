@@ -2,8 +2,8 @@
 
 hot.pkg.supabase-admin {
   name: "hot.dev/supabase-admin",
-  version: "1.1.0",
-  hot-min-version: "1.2.0",
+  version: "1.0.0",
+  hot-min-version: "2.0.3",
   description: "Supabase Management API bindings for Hot. Manage projects, organizations, databases, edge functions, branches, and custom domains.",
   author: "Hot Dev",
   email: "support@hot.dev",

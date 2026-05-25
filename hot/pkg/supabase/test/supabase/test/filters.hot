@@ -1,0 +1,28 @@
+::supabase::test::filters ns
+meta ["test"]
+
+::f ::supabase::filters
+
+test-basic-filters
+meta ["test"]
+fn () {
+  assert-eq("status=eq.active", ::f/eq("status", "active"))
+  assert-eq("age=gte.18", ::f/gte("age", 18))
+  assert-eq("deleted_at=is.null", ::f/is_("deleted_at", "null"))
+}
+
+test-quoted-and-encoded-values
+meta ["test"]
+fn () {
+  assert-eq("email=eq.%22a%40b.com%22", ::f/eq("email", "a@b.com"))
+  assert-eq("name=eq.%22Alice%20Smith%22", ::f/eq("name", "Alice Smith"))
+  assert-eq("status=in.(active,pending)", ::f/in_("status", ["active", "pending"]))
+  assert-eq("tag=in.(%22a%2Cb%22,%22c%20d%22)", ::f/in_("tag", ["a,b", "c d"]))
+}
+
+test-logical-groups
+meta ["test"]
+fn () {
+  assert-eq("or=%28age.lt.18%2Cage.gt.65%29", ::f/or_(["age.lt.18", "age.gt.65"]))
+  assert-eq("and=%28age.gte.18%2Cage.lte.65%29", ::f/and_(["age.gte.18", "age.lte.65"]))
+}

@@ -1,6 +1,31 @@
 ::supabase::admin::projects ns
 
 ::api ::supabase::admin::api
+::uri ::hot::uri
+
+Project type {
+  id: Str,
+  name: Str?,
+  organization_id: Str?,
+  region: Str?,
+  status: Str?,
+  database: Map?,
+  created_at: Str?
+}
+
+ApiKey type {
+  name: Str,
+  api_key: Str
+}
+
+postgrest-path fn (project-ref: Str): Str {
+  `/projects/${project-ref}/postgrest`
+}
+
+database-openapi-path fn (project-ref: Str, schema: Str?): Str {
+  suffix if(is-some(schema), `?schema=${::uri/encode(schema)}`, "")
+  `/projects/${project-ref}/database/openapi${suffix}`
+}
 
 // ============================================================================
 // Project CRUD
@@ -21,7 +46,7 @@ projects ::projects/list-projects()
 ```
 """
 }
-fn (): Vec<Map> {
+fn (): Vec<Project> {
   ::api/request("GET", "/projects")
 }
 
@@ -29,7 +54,7 @@ get-project
 meta {
     doc: """Get details for a specific project by its reference ID."""
 }
-fn (project-ref: Str): Map {
+fn (project-ref: Str): Project {
   ::api/request("GET", `/projects/${project-ref}`)
 }
 
@@ -62,7 +87,7 @@ project.id  // => "new-project-ref"
 ```
 """
 }
-fn (request: CreateProjectRequest): Map {
+fn (request: CreateProjectRequest): Project {
   body {
     name: request.name,
     organization_id: request.organization_id,
@@ -122,7 +147,7 @@ keys ::projects/get-api-keys("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<Map> {
+fn (project-ref: Str): Vec<ApiKey> {
   ::api/request("GET", `/projects/${project-ref}/api-keys`)
 }
 
@@ -135,7 +160,7 @@ meta {
     doc: """Get the PostgREST configuration for a project (exposed schemas, max rows, pool size)."""
 }
 fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/config/postgrest`)
+  ::api/request("GET", postgrest-path(project-ref))
 }
 
 UpdatePostgrestConfigRequest type {
@@ -157,7 +182,19 @@ fn (request: UpdatePostgrestConfigRequest): Map {
     |> assoc-some("db_extra_search_path", request.db_extra_search_path)
     |> assoc-some("db_pool", request.db_pool)
 
-  ::api/request("PATCH", `/projects/${request.project_ref}/config/postgrest`, {}, body)
+  ::api/request("PATCH", postgrest-path(request.project_ref), {}, body)
+}
+
+get-database-openapi
+meta {
+    doc: """Get the PostgREST OpenAPI spec for a project. Optionally pass a database schema."""
+}
+fn
+(project-ref: Str): Map {
+  get-database-openapi(project-ref, null)
+},
+(project-ref: Str, schema: Str?): Map {
+  ::api/request("GET", database-openapi-path(project-ref, schema))
 }
 
 get-auth-config

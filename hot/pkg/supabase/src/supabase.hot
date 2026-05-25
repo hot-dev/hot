@@ -1,0 +1,12 @@
+::supabase ns
+meta {
+  doc: """
+Supabase client SDK for Hot. Includes PostgREST database access, GoTrue auth,
+Storage, Edge Functions, and low-level request helpers.
+"""
+}
+
+REST_PATH "/rest/v1"
+AUTH_PATH "/auth/v1"
+STORAGE_PATH "/storage/v1"
+FUNCTIONS_PATH "/functions/v1"

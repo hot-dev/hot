@@ -2,6 +2,33 @@
 
 ::api ::supabase::api
 
+AuthChannel type "sms" | "whatsapp"
+CodeChallengeMethod type "plain" | "s256"
+OtpType type "signup" | "recovery" | "invite" | "magiclink" | "email_change" | "sms" | "phone_change"
+SignOutScope type "global" | "local" | "others"
+
+User type {
+  id: Str,
+  aud: Str?,
+  role: Str?,
+  email: Str?,
+  phone: Str?,
+  app_metadata: Map?,
+  user_metadata: Map?,
+  created_at: Str?,
+  updated_at: Str?
+}
+
+AuthResponse type {
+  access_token: Str?,
+  token_type: Str?,
+  expires_in: Int?,
+  expires_at: Int?,
+  refresh_token: Str?,
+  user: User?,
+  weak_password: Map?
+}
+
 // ============================================================================
 // Sign Up
 // ============================================================================
@@ -9,8 +36,12 @@
 SignUpRequest type {
   email: Str?,
   phone: Str?,
+  channel: AuthChannel?,
   password: Str,
-  data: Map?
+  data: Map?,
+  code_challenge: Str?,
+  code_challenge_method: CodeChallengeMethod?,
+  captcha_token: Str?
 }
 
 sign-up
@@ -34,11 +65,15 @@ result.user.id  // => "uuid-..."
 ```
 """
 }
-fn (request: SignUpRequest): Map {
+fn (request: SignUpRequest): AuthResponse {
   body {password: request.password}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
+    |> assoc-some("channel", request.channel)
     |> assoc-some("data", request.data)
+    |> assoc-some("code_challenge", request.code_challenge)
+    |> assoc-some("code_challenge_method", request.code_challenge_method)
+    |> assoc-some("gotrue_meta_security", if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null))
 
   ::api/request("POST", "/auth/v1/signup", {}, body)
 }
@@ -50,7 +85,8 @@ fn (request: SignUpRequest): Map {
 SignInPasswordRequest type {
   email: Str?,
   phone: Str?,
-  password: Str
+  password: Str,
+  captcha_token: Str?
 }
 
 sign-in-password
@@ -73,10 +109,11 @@ session.user.id        // => "uuid-..."
 ```
 """
 }
-fn (request: SignInPasswordRequest): Map {
+fn (request: SignInPasswordRequest): AuthResponse {
   body {password: request.password}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
+    |> assoc-some("gotrue_meta_security", if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null))
 
   ::api/request("POST", "/auth/v1/token?grant_type=password", {}, body)
 }
@@ -84,8 +121,12 @@ fn (request: SignInPasswordRequest): Map {
 SignInOtpRequest type {
   email: Str?,
   phone: Str?,
+  channel: AuthChannel?,
   create_user: Bool?,
-  data: Map?
+  data: Map?,
+  code_challenge: Str?,
+  code_challenge_method: CodeChallengeMethod?,
+  captcha_token: Str?
 }
 
 sign-in-otp
@@ -114,8 +155,12 @@ fn (request: SignInOtpRequest): Map {
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
+    |> assoc-some("channel", request.channel)
     |> assoc-some("create_user", request.create_user)
     |> assoc-some("data", request.data)
+    |> assoc-some("code_challenge", request.code_challenge)
+    |> assoc-some("code_challenge_method", request.code_challenge_method)
+    |> assoc-some("gotrue_meta_security", if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null))
 
   ::api/request("POST", "/auth/v1/otp", {}, body)
 }
@@ -125,11 +170,12 @@ fn (request: SignInOtpRequest): Map {
 // ============================================================================
 
 VerifyOtpRequest type {
-  type: Str,
+  type: OtpType,
   token: Str?,
   token_hash: Str?,
   email: Str?,
-  phone: Str?
+  phone: Str?,
+  redirect_to: Str?
 }
 
 verify-otp
@@ -153,8 +199,15 @@ session.access_token  // => "eyJ..."
 ```
 """
 }
-fn (request: VerifyOtpRequest): Map {
-  ::api/request("POST", "/auth/v1/verify", {}, untype(request))
+fn (request: VerifyOtpRequest): AuthResponse {
+  body {type: request.type}
+    |> assoc-some("token", request.token)
+    |> assoc-some("token_hash", request.token_hash)
+    |> assoc-some("email", request.email)
+    |> assoc-some("phone", request.phone)
+    |> assoc-some("redirect_to", request.redirect_to)
+
+  ::api/request("POST", "/auth/v1/verify", {}, body)
 }
 
 // ============================================================================
@@ -177,8 +230,21 @@ session.refresh_token  // => "new-abc..."
 ```
 """
 }
-fn (refresh-token-value: Str): Map {
+fn (refresh-token-value: Str): AuthResponse {
   ::api/request("POST", "/auth/v1/token?grant_type=refresh_token", {}, {refresh_token: refresh-token-value})
+}
+
+ExchangeCodeRequest type {
+  auth_code: Str,
+  code_verifier: Str
+}
+
+exchange-code
+meta {
+    doc: """Exchange a PKCE authorization code for a session."""
+}
+fn (request: ExchangeCodeRequest): AuthResponse {
+  ::api/request("POST", "/auth/v1/token?grant_type=pkce", {}, untype(request))
 }
 
 // ============================================================================
@@ -203,7 +269,7 @@ fn
 (access-token: Str): Any {
   sign-out(access-token, "local")
 },
-(access-token: Str, scope: Str): Any {
+(access-token: Str, scope: SignOutScope): Any {
   ::api/request-as("POST", `/auth/v1/logout?scope=${scope}`, {}, {}, access-token)
 }
 
@@ -227,7 +293,7 @@ user.email  // => "alice@example.com"
 ```
 """
 }
-fn (access-token: Str): Map {
+fn (access-token: Str): User {
   ::api/request-as("GET", "/auth/v1/user", {}, {}, access-token)
 }
 
@@ -255,7 +321,7 @@ updated ::auth/update-user(::auth/UpdateUserRequest({
 ```
 """
 }
-fn (request: UpdateUserRequest, access-token: Str): Map {
+fn (request: UpdateUserRequest, access-token: Str): User {
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)

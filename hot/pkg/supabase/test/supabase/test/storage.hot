@@ -1,0 +1,18 @@
+::supabase::test::storage ns
+meta ["test"]
+
+::storage ::supabase::storage
+
+test-object-path-encoding
+meta ["test"]
+fn () {
+  assert-eq("avatars/users/Alice%20Smith%23profile.png", ::storage/object-path("avatars", "users/Alice Smith#profile.png"))
+}
+
+test-upload-headers
+meta ["test"]
+fn () {
+  headers ::storage/upload-headers("image/png", true)
+  assert-eq("image/png", get(headers, "Content-Type"))
+  assert-eq("true", get(headers, "x-upsert"))
+}
