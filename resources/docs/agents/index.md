@@ -341,6 +341,11 @@ hot.project.support.deps {
 
 Agents use [`::hot::store`](/pkg/hot.dev/hot-std/hot/store) for persistent memory. Store maps support optional embedding-based semantic search, which is useful for knowledge bases and conversation history.
 
+Store data is scoped to the current Hot organization and environment and is
+stored in the main Hot database. This means agent memory works in project,
+worker, and deployed runtime contexts; it is not a standalone filesystem-backed
+mode like `::hot::file` direct access.
+
 ### Per-Stream Memory
 
 Each stream can have its own memory, isolated by stream ID. Since the map name depends on the stream ID, create it inside the handler where `event` is available:

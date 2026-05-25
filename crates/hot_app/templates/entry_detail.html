@@ -1,0 +1,128 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="flex flex-col gap-6">
+    <!-- Summary card -->
+    <div class="p-5 bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800">
+        <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+            <div>
+                <h1 class="text-lg font-bold leading-6 text-gray-900 dark:text-gray-100">Store Entry</h1>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    in <a href="/stores/{{ store.name_url }}" class="font-mono text-blue-600 dark:text-blue-400 hover:underline">{{ store.name }}</a>
+                </p>
+            </div>
+            {% if is_admin %}
+            <form id="delete-this-entry" action="/stores/{{ store.name_url }}/entries/delete" method="post">
+                <input type="hidden" name="key_encoded" value="{{ entry.key_encoded }}">
+                <input type="hidden" name="origin" value="store">
+                <button type="button"
+                        data-store-name="{{ store.name }}"
+                        onclick="confirmDeleteThisEntry(this)"
+                        class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-md text-red-700 dark:text-red-300 border border-red-300 dark:border-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a2 2 0 012-2h2a2 2 0 012 2v3" />
+                    </svg>
+                    Delete entry
+                </button>
+            </form>
+            {% endif %}
+        </div>
+
+        <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Sequence</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white font-mono">{{ entry.seq }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Embedding</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">
+                    {% if entry.has_embedding %}
+                        {% match entry.embedding_dimensions %}
+                        {% when Some with (d) %}<span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ d }} dims</span>{% when None %}<span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">present</span>{% endmatch %}
+                    {% else %}
+                        <span class="text-gray-400 italic">none</span>
+                    {% endif %}
+                </dd>
+            </div>
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Created</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">
+                    {{ entry.created_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}
+                    <span class="text-xs text-gray-400">{{ entry.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
+                </dd>
+            </div>
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Updated</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">
+                    {{ entry.updated_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}
+                    <span class="text-xs text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
+                </dd>
+            </div>
+        </dl>
+    </div>
+
+    <!-- Key panel -->
+    <div class="bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Key</h2>
+            <button type="button"
+                    onclick="openContentModalWithFormats('Entry Key', decodeStoreSection('entry-key-hot'), decodeStoreSection('entry-key-json'))"
+                    class="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                Open in modal
+            </button>
+        </div>
+        <div class="p-4">
+            <pre class="text-xs whitespace-pre-wrap break-all"><code class="language-hot">{{ entry.key_hot }}</code></pre>
+        </div>
+        <script type="application/json" id="entry-key-hot">{{ entry.key_hot|escape }}</script>
+        <script type="application/json" id="entry-key-json">{{ entry.key_json|escape }}</script>
+    </div>
+
+    <!-- Value panel -->
+    <div id="entry-value-panel" class="bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Value</h2>
+        </div>
+        <div class="p-6">
+            {% if is_admin %}
+            <div class="max-w-xl">
+                <p class="text-sm text-gray-600 dark:text-gray-300 mb-3">
+                    Values are hidden by default to reduce accidental exposure of secrets.
+                </p>
+                <button type="button"
+                        hx-get="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}/value?view=panel"
+                        hx-target="#entry-value-panel"
+                        hx-swap="outerHTML"
+                        class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-md text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition-all">
+                    Reveal value
+                </button>
+            </div>
+            {% else %}
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+                Values are hidden. Ask an organization admin to reveal this value.
+            </p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+function decodeStoreSection(id) {
+    var el = document.getElementById(id);
+    if (!el) return '';
+    var dec = document.createElement('textarea');
+    dec.innerHTML = el.textContent || '';
+    return dec.value;
+}
+{% if is_admin %}
+function confirmDeleteThisEntry(button) {
+    var storeName = button.dataset.storeName || 'this store';
+    showConfirm(
+        'Delete Store Entry',
+        'Permanently delete this entry from ' + storeName + '? This cannot be undone.',
+        function () { document.getElementById('delete-this-entry').submit(); },
+        { confirmText: 'Delete', type: 'warning' }
+    );
+}
+{% endif %}
+</script>
+{% endblock %}

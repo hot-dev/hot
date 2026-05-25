@@ -83,6 +83,16 @@ hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
 hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
 hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
 
+// Store Configuration
+// ::hot::store data lives in the main Hot database and is scoped by org/env.
+// Backend: "sqlite" or "postgres". HOT_STORE_TYPE overrides this value.
+hot.store.type ::env/get("HOT_STORE_TYPE", "sqlite")
+// These settings control optional embedding generation for store maps.
+hot.store.embedding.provider ::env/get("HOT_STORE_EMBEDDING_PROVIDER", "local")
+hot.store.embedding.model ::env/get("HOT_STORE_EMBEDDING_MODEL", "bge-base-en-v1.5")
+hot.store.embedding.field ::env/get("HOT_STORE_EMBEDDING_FIELD", "content")
+hot.store.models.path ::env/get("HOT_STORE_MODELS_PATH", ".hot/models")
+
 // Logging Configuration
 // Level: "trace", "debug", "info", "warn", "error"
 // Target: "stdout", "file", or "none"

@@ -28,10 +28,51 @@ pub struct StoreEntry {
     pub updated_at: DateTime<Utc>,
 }
 
+impl StoreEntry {
+    pub fn to_info(&self) -> StoreEntryInfo {
+        StoreEntryInfo {
+            key: self.key.clone(),
+            seq: self.seq,
+            embedding_dimensions: self.embedding.as_ref().map(|e| e.len()),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreEntryInfo {
+    pub key: serde_json::Value,
+    pub seq: i64,
+    pub embedding_dimensions: Option<usize>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Summary of a named store map within the current `(org_id, env_id)` scope.
+/// Returned by [`Store::list_maps`] for store browsing and admin UIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreMapInfo {
+    pub name: String,
+    pub embedding_model: Option<String>,
+    pub embedding_dimensions: Option<u32>,
+    pub embedding_field: Option<String>,
+    pub text_search: bool,
+    pub entry_count: i64,
+    pub storage_bytes: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub entry: StoreEntry,
     pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchInfoPage {
+    pub entries: Vec<StoreEntryInfo>,
+    pub total_entries: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -77,6 +118,13 @@ pub trait Store: Send + Sync {
         key: &serde_json::Value,
     ) -> Result<Option<StoreEntry>, String>;
 
+    /// Get metadata for an entry without selecting its value.
+    async fn get_info(
+        &self,
+        store_name: &str,
+        key: &serde_json::Value,
+    ) -> Result<Option<StoreEntryInfo>, String>;
+
     /// Delete by key. Returns true if the key existed.
     async fn delete(&self, store_name: &str, key: &serde_json::Value) -> Result<bool, String>;
 
@@ -98,6 +146,13 @@ pub trait Store: Send + Sync {
     /// Paginated listing in insertion order.
     async fn list(&self, store_name: &str, options: ListOptions)
     -> Result<Vec<StoreEntry>, String>;
+
+    /// Paginated metadata listing in insertion order, without selecting values.
+    async fn list_info(
+        &self,
+        store_name: &str,
+        options: ListOptions,
+    ) -> Result<Vec<StoreEntryInfo>, String>;
 
     /// Remove all entries from a store (but keep the store itself).
     async fn clear(&self, store_name: &str) -> Result<(), String>;
@@ -126,10 +181,27 @@ pub trait Store: Send + Sync {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>, String>;
 
+    /// Metadata-only search for browser UIs. Implementations should search keys
+    /// and values by keyword, and may additionally include semantic matches when
+    /// `query_embedding` is present.
+    async fn search_info(
+        &self,
+        store_name: &str,
+        query_text: Option<&str>,
+        query_embedding: Option<Vec<f32>>,
+        search_options: SearchOptions,
+        list_options: ListOptions,
+    ) -> Result<SearchInfoPage, String>;
+
     /// Total bytes used by all entries across all stores for this backend instance.
     async fn storage_bytes(&self) -> Result<i64, String>;
 
     fn storage_type(&self) -> &str;
+
+    /// Enumerate all named stores in the current `(org_id, env_id)` scope.
+    /// Returned entries include cheap aggregates (entry count, total bytes) so
+    /// admin UIs can render summary tables without an extra round-trip.
+    async fn list_maps(&self) -> Result<Vec<StoreMapInfo>, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,15 +216,28 @@ pub enum StoreBackendType {
 }
 
 impl StoreBackendType {
-    pub fn from_env() -> Self {
-        match std::env::var("HOT_STORE_TYPE")
-            .unwrap_or_else(|_| "sqlite".to_string())
-            .to_lowercase()
-            .as_str()
-        {
+    fn parse(raw: &str) -> Self {
+        match raw.to_lowercase().as_str() {
             "postgres" | "pg" => StoreBackendType::Postgres,
             _ => StoreBackendType::Sqlite,
         }
+    }
+
+    pub fn from_config(conf: &Val) -> Self {
+        let env_store_type = std::env::var("HOT_STORE_TYPE").ok();
+        Self::from_config_with_env(conf, env_store_type.as_deref())
+    }
+
+    fn from_config_with_env(conf: &Val, env_store_type: Option<&str>) -> Self {
+        if let Some(store_type) = env_store_type {
+            return Self::parse(store_type);
+        }
+        conf.get("store.type")
+            .and_then(|v| match v {
+                Val::Str(s) => Some(Self::parse(s.as_ref())),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -160,28 +245,36 @@ impl StoreBackendType {
 // Factory
 // ---------------------------------------------------------------------------
 
-pub async fn store_from_config(conf: &Val) -> Result<Box<dyn Store>, String> {
-    store_from_config_with_db(conf, None, None, None).await
-}
-
 pub async fn store_from_config_with_db(
     conf: &Val,
     db_pool: Option<Arc<crate::db::DatabasePool>>,
     org_id: Option<uuid::Uuid>,
     env_id: Option<uuid::Uuid>,
 ) -> Result<Box<dyn Store>, String> {
-    let store_type = StoreBackendType::from_env();
+    let store_type = StoreBackendType::from_config(conf);
+    let eid = env_id.ok_or_else(|| {
+        "::hot::store requires an env_id because stores are environment-scoped.".to_string()
+    })?;
 
     match store_type {
         StoreBackendType::Sqlite => {
-            let path = conf
-                .get("store.path")
-                .and_then(|v| match v {
-                    Val::Str(s) => Some(s.to_string()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| ".hot/store".to_string());
-            let store = sqlite::SqliteStore::new(&path).await?;
+            let pool = db_pool.ok_or_else(|| {
+                "SQLite store requires a DatabasePool. Use store_from_config_with_db() with a pool."
+                    .to_string()
+            })?;
+            let oid = org_id.ok_or_else(|| {
+                "SQLite store requires an org_id. Use store_from_config_with_db() with the active org."
+                    .to_string()
+            })?;
+
+            // One-shot legacy import: copy rows from any pre-2.0 single-tenant
+            // .hot/store/store.db into the main hot DB on first run. No-op if the
+            // legacy file is absent or already imported.
+            if let Err(e) = sqlite::maybe_import_legacy_store(&pool, ".hot/store", oid, eid).await {
+                tracing::warn!("Legacy ::hot::store import skipped: {e}");
+            }
+
+            let store = sqlite::SqliteStore::new(pool, oid, eid);
             Ok(Box::new(store))
         }
         StoreBackendType::Postgres => {
@@ -189,7 +282,7 @@ pub async fn store_from_config_with_db(
                 "Postgres store requires a DatabasePool. Use store_from_config_with_db() with a pool.".to_string()
             })?;
             let oid = org_id.ok_or_else(|| "Postgres store requires an org_id".to_string())?;
-            let store = postgres::PgStore::new(pool, oid, env_id);
+            let store = postgres::PgStore::new(pool, oid, eid);
             Ok(Box::new(store))
         }
     }
@@ -306,6 +399,40 @@ mod tests {
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
         outer.insert(Val::from("$val"), Val::Map(Box::new(inner)));
         Val::Map(Box::new(outer))
+    }
+
+    #[test]
+    fn test_store_backend_type_from_config() {
+        let conf = crate::val!({
+            "store": {
+                "type": "postgres",
+            },
+        });
+        assert_eq!(
+            StoreBackendType::from_config_with_env(&conf, None),
+            StoreBackendType::Postgres
+        );
+    }
+
+    #[test]
+    fn test_store_backend_type_defaults_to_sqlite() {
+        assert_eq!(
+            StoreBackendType::from_config_with_env(&Val::map_empty(), None),
+            StoreBackendType::Sqlite
+        );
+    }
+
+    #[test]
+    fn test_store_backend_type_env_overrides_config() {
+        let conf = crate::val!({
+            "store": {
+                "type": "sqlite",
+            },
+        });
+        assert_eq!(
+            StoreBackendType::from_config_with_env(&conf, Some("pg")),
+            StoreBackendType::Postgres
+        );
     }
 
     #[test]

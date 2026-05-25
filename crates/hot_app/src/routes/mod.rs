@@ -369,6 +369,20 @@ pub fn routes(
         .route("/files", get(files_list_handler))
         .route("/files/{file_id}", get(file_detail_handler))
         .route("/files/{file_id}/download", get(file_download_handler))
+        .route("/stores", get(stores_list_handler))
+        .route("/stores/{store_name}", get(store_detail_handler))
+        .route(
+            "/stores/{store_name}/entries/{key_encoded}",
+            get(entry_detail_handler),
+        )
+        .route(
+            "/stores/{store_name}/entries/{key_encoded}/value",
+            get(entry_value_handler),
+        )
+        .route(
+            "/stores/{store_name}/entries/delete",
+            axum::routing::post(entry_delete_handler),
+        )
         .route(
             "/switch-org/{org_id}",
             axum::routing::post(switch_org_handler),

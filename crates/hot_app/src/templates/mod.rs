@@ -149,11 +149,7 @@ pub fn truncate_text(text: &Option<serde_json::Value>, max_len: usize) -> String
     match text {
         Some(value) => {
             let text_str = value.to_string();
-            if text_str.len() > max_len {
-                format!("{}...", &text_str[..max_len])
-            } else {
-                text_str
-            }
+            truncate_string(&text_str, max_len)
         }
         None => "null".to_string(),
     }
@@ -161,8 +157,10 @@ pub fn truncate_text(text: &Option<serde_json::Value>, max_len: usize) -> String
 
 /// Truncate a string to a maximum length, adding ellipsis if truncated
 pub fn truncate_string(text: &str, max_len: usize) -> String {
-    if text.len() > max_len {
-        format!("{}...", &text[..max_len])
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_len).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
     } else {
         text.to_string()
     }
@@ -2594,6 +2592,222 @@ pub struct FileDetail<'a> {
     pub file: FileDisplay,
 }
 
+// ---------------------------------------------------------------------------
+// Stores (`::hot::store`) browser
+// ---------------------------------------------------------------------------
+
+/// Format a byte count as a human-readable string ("1.2 KB", "3.4 MB", ...).
+pub fn format_bytes(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Encode an arbitrary JSON value (used as a store entry key) into a URL-safe
+/// path segment. Round-trippable via [`decode_entry_key`].
+pub fn encode_entry_key(key: &serde_json::Value) -> String {
+    use base64::Engine as _;
+    let bytes = serde_json::to_vec(key).unwrap_or_else(|_| b"null".to_vec());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Decode a key that was encoded with [`encode_entry_key`].
+pub fn decode_entry_key(encoded: &str) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|e| format!("Invalid encoded key: {e}"))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("Invalid encoded key JSON: {e}"))
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreMapDisplay {
+    pub name: String,
+    pub name_url: String,
+    pub embedding_model: Option<String>,
+    pub embedding_dimensions: Option<u32>,
+    pub embedding_field: Option<String>,
+    pub text_search: bool,
+    pub entry_count: i64,
+    pub storage_bytes: i64,
+    pub storage_bytes_formatted: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl StoreMapDisplay {
+    pub fn from(info: &hot::store::StoreMapInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            name_url: urlencoding::encode(&info.name).into_owned(),
+            embedding_model: info.embedding_model.clone(),
+            embedding_dimensions: info.embedding_dimensions,
+            embedding_field: info.embedding_field.clone(),
+            text_search: info.text_search,
+            entry_count: info.entry_count,
+            storage_bytes: info.storage_bytes,
+            storage_bytes_formatted: format_bytes(info.storage_bytes),
+            created_at: info.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreEntryDisplay {
+    pub key_hot: String,
+    pub key_json: String,
+    pub key_preview: String,
+    pub key_encoded: String,
+    pub value_hot: String,
+    pub value_json: String,
+    pub value_preview: String,
+    pub seq: i64,
+    pub has_embedding: bool,
+    pub embedding_dimensions: Option<usize>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl StoreEntryDisplay {
+    pub fn from(entry: &hot::store::StoreEntry) -> Self {
+        let key_hot = format_json_as_hot_literal(&entry.key, 0);
+        let value_hot = format_json_as_hot_literal(&entry.value, 0);
+        let key_json = serde_json::to_string(&entry.key).unwrap_or_else(|_| "null".to_string());
+        let value_json =
+            serde_json::to_string_pretty(&entry.value).unwrap_or_else(|_| "null".to_string());
+        let key_preview = truncate_string(&key_hot, 80);
+        let value_preview = truncate_string(&value_hot.replace('\n', " "), 120);
+
+        Self {
+            key_hot,
+            key_json,
+            key_preview,
+            key_encoded: encode_entry_key(&entry.key),
+            value_hot,
+            value_json,
+            value_preview,
+            seq: entry.seq,
+            has_embedding: entry.embedding.is_some(),
+            embedding_dimensions: entry.embedding.as_ref().map(|e| e.len()),
+            created_at: entry.created_at,
+            updated_at: entry.updated_at,
+        }
+    }
+
+    pub fn from_info(entry: &hot::store::StoreEntryInfo) -> Self {
+        let key_hot = format_json_as_hot_literal(&entry.key, 0);
+        let key_json = serde_json::to_string(&entry.key).unwrap_or_else(|_| "null".to_string());
+        let key_preview = truncate_string(&key_hot, 80);
+
+        Self {
+            key_hot,
+            key_json,
+            key_preview,
+            key_encoded: encode_entry_key(&entry.key),
+            value_hot: String::new(),
+            value_json: String::new(),
+            value_preview: String::new(),
+            seq: entry.seq,
+            has_embedding: entry.embedding_dimensions.is_some(),
+            embedding_dimensions: entry.embedding_dimensions,
+            created_at: entry.created_at,
+            updated_at: entry.updated_at,
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "stores_list.html")]
+pub struct StoresList<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub stores: Vec<StoreMapDisplay>,
+    pub total_stores: usize,
+    pub search_query: String,
+    pub error_message: Option<String>,
+    pub storage_type: String,
+}
+
+#[derive(Template)]
+#[template(path = "store_detail.html")]
+pub struct StoreDetail<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub store: StoreMapDisplay,
+    pub entries: Vec<StoreEntryDisplay>,
+    pub current_page_num: i64,
+    pub total_pages: i64,
+    pub start_page: i64,
+    pub end_page: i64,
+    pub has_next_page: bool,
+    pub has_prev_page: bool,
+    pub total_entries: i64,
+    pub is_admin: bool,
+    pub deleted_flash: bool,
+    pub error_message: Option<String>,
+    pub search_query: String,
+    pub is_searching: bool,
+    pub pagination_search_suffix: String,
+}
+
+/// Partial template returned for HTMX requests on the store detail page.
+/// Renders just the entries-area markup (matching count, desktop table, mobile cards).
+#[derive(Template)]
+#[template(path = "components/store_entries_table.html")]
+pub struct StoreEntriesTable {
+    pub page_context: PrivatePageContext,
+    pub store: StoreMapDisplay,
+    pub entries: Vec<StoreEntryDisplay>,
+    pub current_page_num: i64,
+    pub start_page: i64,
+    pub end_page: i64,
+    pub has_next_page: bool,
+    pub has_prev_page: bool,
+    pub total_entries: i64,
+    pub is_admin: bool,
+    pub is_searching: bool,
+    pub pagination_search_suffix: String,
+}
+
+#[derive(Template)]
+#[template(path = "entry_detail.html")]
+pub struct EntryDetail<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub store: StoreMapDisplay,
+    pub entry: StoreEntryDisplay,
+    pub is_admin: bool,
+}
+
+#[derive(Template)]
+#[template(path = "store_entry_value_cell.html")]
+pub struct StoreEntryValueCell {
+    pub entry: StoreEntryDisplay,
+    pub container_id: String,
+    pub view: String,
+}
+
+/// Hidden state for a value cell, rendered server-side so the column toggle
+/// can restore the same markup the initial page render produced.
+#[derive(Template)]
+#[template(path = "store_entry_value_hidden_cell.html")]
+pub struct StoreEntryValueHiddenCell {
+    pub key_encoded: String,
+    pub container_id: String,
+    pub view: String,
+}
+
+#[derive(Template)]
+#[template(path = "store_entry_value_panel.html")]
+pub struct StoreEntryValuePanel {
+    pub entry: StoreEntryDisplay,
+}
+
 // Schedule log display structure
 #[derive(Debug, Clone)]
 pub struct ScheduleLogDisplay {
@@ -3552,6 +3766,14 @@ mod tests {
             anchors.push((level, anchor));
         }
         anchors
+    }
+
+    #[test]
+    fn truncate_string_is_unicode_safe() {
+        assert_eq!(truncate_string("hello", 10), "hello");
+        assert_eq!(truncate_string("hello", 3), "hel...");
+        assert_eq!(truncate_string("🔥🔥🔥", 2), "🔥🔥...");
+        assert_eq!(truncate_string("éclair", 1), "é...");
     }
 
     /// Validate that every docs_path in DOCS_PATH_MAPPINGS points to a real

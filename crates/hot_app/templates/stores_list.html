@@ -1,0 +1,148 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="flex flex-col">
+    <!-- Filter card -->
+    <div x-data="storesListFilters"
+         data-search-query="{{ search_query }}"
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div class="relative">
+            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
+                    <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 100 13.5 6.75 6.75 0 000-13.5zM2.25 10.5a8.25 8.25 0 1114.59 5.28l4.69 4.69a.75.75 0 11-1.06 1.06l-4.69-4.69A8.25 8.25 0 012.25 10.5z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <input type="text"
+                   x-model="searchQuery"
+                   placeholder="Search by store name..."
+                   class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+        </div>
+    </div>
+
+    {% match error_message %}
+    {% when Some with (msg) %}
+    <div class="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-md p-3 text-sm text-red-700 dark:text-red-300">
+        {{ msg }}
+    </div>
+    {% when None %}
+    {% endmatch %}
+
+    <!-- Desktop table view -->
+    <div class="hidden md:flex flex-col rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+        {% if stores.len() > 0 %}
+        <div class="overflow-auto scrollbar-always">
+            <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-100 dark:bg-gray-800 sticky top-0">
+                    <tr>
+                        <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Name</th>
+                        <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Entries</th>
+                        <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Size</th>
+                        <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Embedding</th>
+                        <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Text Search</th>
+                        <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Created</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for store in stores %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <td class="px-3 md:px-6 py-4 text-xs font-medium">
+                            <a href="/stores/{{ store.name_url }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono">{{ store.name }}</a>
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">{{ store.entry_count }}</td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">{{ store.storage_bytes_formatted }}</td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs">
+                            {% match store.embedding_model %}
+                            {% when Some with (model) %}
+                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200" title="model: {{ model }}{% match store.embedding_dimensions %}{% when Some with (d) %}, dim: {{ d }}{% when None %}{% endmatch %}">{{ model }}</span>
+                            {% when None %}
+                                <span class="text-gray-400 dark:text-gray-500 italic">none</span>
+                            {% endmatch %}
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs">
+                            {% if store.text_search %}
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">on</span>
+                            {% else %}
+                            <span class="text-gray-400 dark:text-gray-500">off</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
+                            <div>{{ store.created_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}</div>
+                            <div class="text-xs text-gray-400 dark:text-gray-500">{{ store.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300">
+            Showing <span class="font-medium">{{ stores.len() }}</span> store{% if stores.len() != 1 %}s{% endif %}
+            <span class="ml-2 text-xs text-gray-400 dark:text-gray-500">backend: {{ storage_type }}</span>
+        </div>
+        {% else %}
+        <div class="flex items-center justify-center py-12">
+            <div class="text-center py-8 max-w-md">
+                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" />
+                    </svg>
+                </div>
+                <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Stores Yet</h3>
+                <p class="text-gray-500 dark:text-gray-400 text-sm">
+                    Stores are created on first <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">::hot::store/Map</code> use in your Hot code.
+                    They appear here once your code has run in this environment.
+                </p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Mobile card view -->
+    <div class="md:hidden">
+        <div class="space-y-3">
+            {% for store in stores %}
+            <a href="/stores/{{ store.name_url }}" class="block backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4 hover:border-blue-400 dark:hover:border-blue-600 transition-colors">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="font-mono text-sm text-blue-600 dark:text-blue-400 truncate">{{ store.name }}</span>
+                    <span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ store.entry_count }} entries</span>
+                </div>
+                <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                    <span>{{ store.storage_bytes_formatted }}</span>
+                    {% match store.embedding_model %}{% when Some with (m) %}<span>emb: {{ m }}</span>{% when None %}<span class="italic">no embedding</span>{% endmatch %}
+                </div>
+            </a>
+            {% endfor %}
+            {% if stores.len() == 0 %}
+            <div class="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">No stores found.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+function storesListFilters() {
+    return {
+        searchQuery: '',
+        searchTimeout: null,
+
+        init() {
+            const container = this.$el;
+            this.searchQuery = container.getAttribute('data-search-query') || '';
+            this.$watch('searchQuery', () => this.debouncedSearch());
+        },
+
+        debouncedSearch() {
+            clearTimeout(this.searchTimeout);
+            this.searchTimeout = setTimeout(() => this.applyFilters(), 300);
+        },
+
+        applyFilters() {
+            const params = new URLSearchParams();
+            if (this.searchQuery && this.searchQuery.trim() !== '') {
+                params.set('search', this.searchQuery.trim());
+            }
+            const qs = params.toString();
+            window.location.href = qs ? `/stores?${qs}` : '/stores';
+        }
+    };
+}
+</script>
+{% endblock %}

@@ -103,6 +103,30 @@ hot.set.project "my-project-name"
 
 This project is used when no `-p/--project` flag is specified.
 
+## Store Configuration
+
+`::hot::store` persists data in the main Hot database and is always scoped to
+the current organization and environment. Unlike `::hot::file` direct mode,
+store access needs a Hot project/runtime context with a migrated database and
+an active environment.
+
+The local backend defaults to SQLite. You can select the store backend in
+`hot.hot`; `HOT_STORE_TYPE` takes precedence when set:
+
+```hot
+hot.store.type ::env/get("HOT_STORE_TYPE", "sqlite") // "sqlite" or "postgres"
+```
+
+Store maps can also use embeddings for semantic search. These defaults are used
+when a map requests `embedding: true`:
+
+```hot
+hot.store.embedding.provider ::env/get("HOT_STORE_EMBEDDING_PROVIDER", "local")
+hot.store.embedding.model ::env/get("HOT_STORE_EMBEDDING_MODEL", "bge-base-en-v1.5")
+hot.store.embedding.field ::env/get("HOT_STORE_EMBEDDING_FIELD", "content")
+hot.store.models.path ::env/get("HOT_STORE_MODELS_PATH", ".hot/models")
+```
+
 ## Project Naming
 
 Project names:
