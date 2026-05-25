@@ -44,8 +44,8 @@ ApiResponse type {
 // Build headers with auth
 auth-headers fn (): Map {
     {
-        "Authorization": `Bearer ${api-key}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${api-key}`,
+        Content-Type: "application/json",
     }
 }
 
@@ -105,8 +105,8 @@ list-users fn (): Vec<User> {
 // Create user
 create-user fn (request: CreateUserRequest): User {
     body {
-        "name": request.name,
-        "email": request.email
+        name: request.name,
+        email: request.email,
     }
 
     result api-post("/users", body)
@@ -172,10 +172,10 @@ get-user-with-retry fn (id: Str, attempts: Int): User {
 // Transform API response to clean format
 format-user fn (user: User): Map {
     {
-        "id": user.id,
-        "displayName": user.name,
-        "contact": user.email,
-        "status": if(user.active, "active", "inactive")
+        id: user.id,
+        displayName: user.name,
+        contact: user.email,
+        status: if(user.active, "active", "inactive"),
     }
 }
 

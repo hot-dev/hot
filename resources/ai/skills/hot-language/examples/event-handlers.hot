@@ -141,16 +141,16 @@ fn (event) {
         Result.Ok => {
             send("user:created", created)
             send("analytics:user-signup", {
-                "user-id": user.id,
-                "source": user.signup-source
+                user-id: user.id,
+                source: user.signup-source,
             })
             created
         }
 
         Result.Err => {
             send("user:signup-failed", {
-                "user": user,
-                "error": created
+                user,
+                error: created,
             })
             err(created)
         }
@@ -163,9 +163,9 @@ fn (event) {
 
 send-welcome-email fn (email: Str, name: Str): Map {
     ::http/post("https://email.example.com/send", {
-        "to": email,
-        "template": "welcome",
-        "data": {"name": name}
+        to: email,
+        template: "welcome",
+        data: {name},
     })
 }
 
@@ -183,7 +183,7 @@ process-order fn (order: Order): Map {
         }
 
         Result.Err => {
-            send("order:failed", {"order-id": order.id, "reason": inventory-check})
+            send("order:failed", {order-id: order.id, reason: inventory-check})
             err(inventory-check)
         }
     }

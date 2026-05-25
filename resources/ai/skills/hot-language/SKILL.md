@@ -65,7 +65,7 @@ get-user fn (id: Str): Map {
 ```hot
 name "Alice"              // Inferred type
 count: Int 42             // Explicit type
-config {"key": "value"}   // Map literal
+config {key: "value"}     // Map literal
 query """                 // Block string (indent-aware, no interpolation)
     SELECT * FROM users
     WHERE active = true
@@ -142,7 +142,7 @@ process fn (data: Map): Map {
 ```hot
 // Struct type
 User type { id: Str, email: Str, active: Bool }
-user User({"id": "1", "email": "a@b.com", "active": true})
+user User({id: "1", email: "a@b.com", active: true})
 
 // Enum type — `match` must cover every variant or use a `_` default arm
 Direction enum { Up, Down, Left, Right }

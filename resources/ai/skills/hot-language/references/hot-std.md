@@ -366,6 +366,8 @@ patch fn (url: Str, body: Any): HttpResponse
 delete fn (url: Str): HttpResponse
 request fn (request: HttpRequest): HttpResponse
 request fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): HttpResponse
+try-request fn (request: HttpRequest): Result            // Catches transport errors (DNS, TLS, timeouts)
+try-request fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result
 request-stream fn (method: Str, url: Str, headers: Map, body: Any): StreamingResponse
 request-stream fn (method: Str, url: Str, headers: Map, body: Any, format: Str): StreamingResponse
 get-stream fn (url: Str): StreamingResponse
@@ -387,7 +389,7 @@ HttpRequest ::hot::http/HttpRequest
 response ::http/request(HttpRequest({
     method: "POST",
     url: "https://api.example.com/users",
-    headers: {"Content-Type": "application/json"},
+    headers: {Content-Type: "application/json"},
     body: {name: "Alice"},
 }))
 ```
@@ -537,7 +539,7 @@ ZonedDateTime(PlainDateTime(2026, 3, 8, 2, 30, 0), "US/Central") // From PlainDa
 
 ### ::hot::run
 
-Run control functions. `fail`, `cancel`, and `exit` are also core (auto-imported).
+Run control functions. `fail`, `cancel`, `exit`, and `info` are also core (auto-imported).
 
 ```hot
 fail fn (msg: Str): Failure                              // Halt with error
@@ -545,8 +547,47 @@ fail fn (msg: Str, data: Any): Failure                   // Halt with error and 
 cancel fn (msg: Str): Any                                // Cancel current run
 cancel fn (msg: Str, data: Any): Any                     // Cancel current run with data
 exit fn (code: Int): Any                                 // Exit with status code
-info fn (): Map                                          // Get run info
+info fn (): RunInfo                                      // Information about the current run
 is-inline-run fn (): Bool                                // true if running inline (not deployed)
+```
+
+`info()` returns a `RunInfo` with nested `run`, `stream`, `build`, `project`,
+`env`, `user`, and `org` fields. Common run fields: `id`, `type`
+(`"call"|"event"|"schedule"|"run"|"eval"|"repl"`), `status`, `retry-attempt`,
+`max-retries`. Useful in retry-aware handlers:
+
+```hot
+i info()
+if(gt(i.run.retry-attempt, 0),
+    log(`retry ${i.run.retry-attempt} of ${i.run.max-retries}`),
+    null)
+```
+
+### ::hot::lang
+
+Language-level helpers. `try-call` is core (auto-imported).
+
+```hot
+try-call fn (f: Fn, args: Vec<Any>): Map                 // Returns {ok: true, value} | {ok: false, error}
+try-call fn (f: Fn): Map                                 // Same as try-call(f, [])
+```
+
+> Prefer Result propagation. `try-call` is an **escape hatch** for the rare
+> cases where Hot's auto-unwrap behavior gets in the way. In almost all code,
+> let errors propagate (auto-unwrap), inspect with `is-ok`/`is-err` or `match`,
+> or use `try-request` for HTTP. Reach for `try-call` only when (a) you need to
+> catch a runtime panic, or (b) a fan-out loop must continue past a single
+> failure.
+
+When you do use it, it returns a plain Map so the result is **not** auto-unwrapped:
+
+```hot
+// Fan-out where one failure must not abort the run.
+results map(items, (item) {
+    ::hot::lang/try-call(process-item, [item])
+})
+
+failures filter(results, (r) { not(r.ok) })
 ```
 
 ### ::hot::iter
@@ -721,7 +762,7 @@ Send events for async processing:
 
 ```hot
 // Send event
-send("user:created", {"id": "123", "email": "a@b.com"})
+send("user:created", {id: "123", email: "a@b.com"})
 
 // Handle event (in another function)
 on-user-created meta {on-event: "user:created"}

@@ -12,7 +12,7 @@ Hot has a structural type system with type inference, custom types, enums, and t
 | `Bool` | Boolean | `true`, `false` |
 | `Null` | Null value | `null` |
 | `Vec` | Ordered collection | `[1, 2, 3]` |
-| `Map` | Key-value pairs | `{"a": 1, "b": 2}` |
+| `Map` | Key-value pairs | `{a: 1, b: 2}` |
 | `Fn` | Function | `(x) { x }` |
 | `Any` | Any type | - |
 | `Bytes` | Byte array | - |
@@ -36,7 +36,7 @@ add fn (a: Int, b: Int): Int {
 
 // Generic types
 numbers: Vec<Int> [1, 2, 3]
-lookup: Map<Str, Int> {"a": 1, "b": 2}
+lookup: Map<Str, Int> {a: 1, b: 2}
 ```
 
 ## Struct Types
@@ -52,7 +52,7 @@ User type {
 }
 
 // Construct (type name IS the constructor)
-user User({"id": "123", "email": "a@b.com", "active": true})
+user User({id: "123", email: "a@b.com", active: true})
 
 // Access fields with dot notation
 email user.email
@@ -65,7 +65,7 @@ Override the default constructor with a function:
 
 ```hot
 Point type fn (x: Int, y: Int): Point {
-    Point({"x": x, "y": y})
+    Point({x, y})
 }
 
 // Now construct with positional args
@@ -104,11 +104,11 @@ Person type {
 }
 
 alice Person({
-    "name": "Alice",
-    "address": Address({
-        "street": "123 Main St",
-        "city": "Springfield",
-        "zip": "12345"
+    name: "Alice",
+    address: Address({
+        street: "123 Main St",
+        city: "Springfield",
+        zip: "12345",
     })
 })
 
@@ -331,6 +331,7 @@ is-err(failure)  // true
 handle fn match (r: Result): Str {
     Result.Ok => { `Got: ${r}` }
     Result.Err => { `Error: ${r}` }
+    _ => { `Unknown: ${r}` }
 }
 
 // Common pattern (return type is the success type, not Result)
@@ -380,7 +381,7 @@ User -> Str fn (u: User): Str {
 }
 
 User -> Map fn (u: User): Map {
-    {"id": u.id, "name": u.name, "email": u.email}
+    {id: u.id, name: u.name, email: u.email}
 }
 ```
 
@@ -440,7 +441,7 @@ first fn (items: Vec<T>): T {
 
 // Multiple type parameters
 pair fn (a: A, b: B): Map {
-    {"first": a, "second": b}
+    {first: a, second: b}
 }
 ```
 
@@ -452,7 +453,7 @@ numbers: Vec<Int> [1, 2, 3]
 names: Vec<Str> ["alice", "bob"]
 
 // Map with key and value types
-scores: Map<Str, Int> {"alice": 100, "bob": 95}
+scores: Map<Str, Int> {alice: 100, bob: 95}
 
 // Nested generics
 matrix: Vec<Vec<Int>> [[1, 2], [3, 4]]
@@ -477,7 +478,7 @@ numbers [1, 2, 3]
 result add(1, 2)  // Int
 
 // Inferred from map literal
-config {"debug": true, "port": 8080}  // Map<Str, Any>
+config {debug: true, port: 8080}  // Map<Str, Any>
 ```
 
 ## Optional and Nullable Types

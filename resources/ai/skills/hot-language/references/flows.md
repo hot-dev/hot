@@ -91,17 +91,32 @@ condition => { result }     // With condition
 _ => { result }             // Also valid as default (Rust-style wildcard)
 ```
 
-`cond` conditions use Hot truthiness: only `false` and `null` are false. Values
-like `0`, `""`, `[]`, and `{}` still match. This makes direct fallback patterns
-work naturally:
+`cond` conditions use Hot truthiness: `false`, `null`, and `Err` results are
+falsy. Everything else — including `0`, `""`, `[]`, and `{}` — is truthy. An
+`Ok(x)` is truthy iff `x` is truthy. This lets you fall through on missing or
+failed values:
 
 ```hot
 display-name cond {
-    user.nickname => { user.nickname }
+    user.nickname => { user.nickname }     // skipped if null; "" still matches
     user.name => { user.name }
     => { "Anonymous" }
 }
 ```
+
+`cond` does not bind the condition's value. To act on a Result without
+auto-unwrapping it, bind first and then check with `is-ok`/`is-err`:
+
+```hot
+config fetch-config()
+result cond {
+    is-ok(config) => { use-config(config) }
+    => { use-defaults() }
+}
+```
+
+When you specifically need to handle empty strings or empty collections, use
+`is-empty(...)` rather than relying on truthiness.
 
 ## Cond-All Flow
 
@@ -250,6 +265,7 @@ process fn (result: Result): Str {
     message match result {
         Result.Ok => { `Success: ${result}` }
         Result.Err => { `Error: ${result}` }
+        _ => { `Unknown: ${result}` }
     }
     message
 }
@@ -407,6 +423,7 @@ process fn (request: Request): Response {
     response match validated {
         Result.Ok => { Response.success(validated) }
         Result.Err => { Response.error(validated) }
+        _ => { Response.error(validated) }
     }
 
     response

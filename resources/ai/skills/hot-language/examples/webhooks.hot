@@ -16,9 +16,8 @@ meta {
         service: "leads",
         path: "/signup",
         method: "POST",
-        auth: "none",
     },
-    on-event: "lead:signup",
+    secret-headers: ["x-signature"],
 }
 handle-signup
 
@@ -38,7 +37,7 @@ accept-signup fn (request: HttpRequest): HttpResponse {
 
     HttpResponse({
         status: 200,
-        headers: {"content-type": "application/json"},
+        headers: {content-type: "application/json"},
         body: {ok: true},
     })
 }

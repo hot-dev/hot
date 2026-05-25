@@ -70,7 +70,7 @@ item-count length(items)
 has-three some(items, eq(%, 3))
 
 // Map operations
-person {"name": "Alice", "age": 30, "city": "NYC"}
+person {name: "Alice", age: 30, city: "NYC"}
 person-name person.name
 person-age get(person, "age")
 has-email not(is-null(get(person, "email")))

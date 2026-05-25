@@ -54,9 +54,8 @@ meta {
         service: "leads",
         path: "/signup",
         method: "POST",
-        auth: "none",
     },
-    on-event: "lead:signup",
+    secret-headers: ["x-signature"],
 }
 fn (request: HttpRequest): HttpResponse {
     lead request.body
@@ -82,6 +81,28 @@ meta {
 fn (params: Map): Vec<Map> {
     search-order-store(or(params.query, ""))
 }
+```
+
+## Secret Headers
+
+`secret-headers` is a top-level meta field (not nested under `mcp` or `webhook`)
+that masks additional request headers in run logs. `authorization`, `cookie`,
+`proxy-authorization`, and `set-cookie` are always masked automatically:
+
+```hot
+list-invoices
+meta {
+    mcp: {service: "billing"},
+    secret-headers: ["x-api-key"],
+}
+fn (status: Str?): Vec<Map> { ... }
+
+stripe-webhook
+meta {
+    webhook: {service: "stripe", path: "/payment"},
+    secret-headers: ["stripe-signature"],
+}
+fn (request: HttpRequest): HttpResponse { ... }
 ```
 
 ## Context Requirements

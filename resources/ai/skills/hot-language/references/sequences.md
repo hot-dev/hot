@@ -198,7 +198,7 @@ for-each(range(1, 1001), (n) {
 Iterate over maps with 2-arity functions:
 
 ```hot
-scores {"alice": 100, "bob": 95, "carol": 88}
+scores {alice: 100, bob: 95, carol: 88}
 
 // map with (key, value) callback
 formatted map(scores, (name, score) { `${name}: ${score}` })
