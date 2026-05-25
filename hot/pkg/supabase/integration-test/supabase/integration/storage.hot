@@ -34,28 +34,43 @@ fn () {
 test-object-upload-download-delete
 meta ["test"]
 fn () {
-  assert(SUPABASE_TEST_BUCKET, "Set SUPABASE_TEST_BUCKET in .env (existing bucket name)")
-
   unique-id random-string(8)
+  bucket-name if(is-empty(SUPABASE_TEST_BUCKET), `hot-object-test-${unique-id}`, SUPABASE_TEST_BUCKET)
+  created-bucket is-empty(SUPABASE_TEST_BUCKET)
   file-path `test/hot-test-${unique-id}.txt`
   content "Hello from Hot integration test!"
 
+  if(created-bucket,
+    ::storage/create-bucket(::storage/CreateBucketRequest({
+      name: bucket-name,
+      public: false,
+    }))
+  )
+
   // Upload
-  result ::storage/upload(SUPABASE_TEST_BUCKET, file-path, content, "text/plain")
+  result ::storage/upload-service(bucket-name, file-path, content, "text/plain", false)
   assert(is-some(result), "upload should return a result")
 
   // List objects to verify
-  objects ::storage/list-objects(::storage/ListObjectsRequest({
-    bucket: SUPABASE_TEST_BUCKET,
-    prefix: "test/"
+  objects ::storage/list-objects-service(::storage/ListObjectsRequest({
+    bucket: bucket-name,
+    prefix: "test/",
   }))
   found some(objects, (o) { contains(o.name, unique-id) })
   assert(found, "uploaded file should appear in listing")
 
+  // Download
+  downloaded ::storage/download-service(bucket-name, file-path)
+  assert-eq(content, downloaded, "downloaded content should match")
+
   // Create signed URL
-  signed ::storage/create-signed-url(SUPABASE_TEST_BUCKET, file-path, 60)
+  signed ::storage/create-signed-url-service(bucket-name, file-path, 60)
   assert(signed.signedURL, "should return a signed URL")
 
   // Delete
-  ::storage/delete-object(SUPABASE_TEST_BUCKET, file-path)
+  ::storage/delete-object-service(bucket-name, file-path)
+
+  if(created-bucket,
+    ::storage/delete-bucket(bucket-name)
+  )
 }

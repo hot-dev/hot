@@ -2,6 +2,53 @@
 
 ::api ::supabase::api
 ::core ::supabase::core
+::uri ::hot::uri
+
+StorageBucket type {
+  id: Str?,
+  name: Str,
+  public: Bool?,
+  created_at: Str?,
+  updated_at: Str?
+}
+
+StorageObject type {
+  name: Str,
+  id: Str?,
+  updated_at: Str?,
+  created_at: Str?,
+  last_accessed_at: Str?,
+  metadata: Map?
+}
+
+SignedUrlResponse type {
+  signedURL: Str
+}
+
+SignedUploadUrlResponse type {
+  url: Str,
+  token: Str?
+}
+
+enc fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+encode-object-path fn (path: Str): Str {
+  join(map(split(path, "/"), enc(%)), "/")
+}
+
+bucket-path fn (bucket: Str): Str {
+  enc(bucket)
+}
+
+object-path fn (bucket: Str, path: Str): Str {
+  `${bucket-path(bucket)}/${encode-object-path(path)}`
+}
+
+body-or-error fn (response: ::api/HttpResponse): Any {
+  ::api/body-or-error(response)
+}
 
 // ============================================================================
 // Buckets
@@ -22,16 +69,16 @@ buckets ::storage/list-buckets()
 ```
 """
 }
-fn (): Vec<Map> {
-  ::api/request("GET", "/storage/v1/bucket")
+fn (): Vec<StorageBucket> {
+  ::api/request-service("GET", "/storage/v1/bucket")
 }
 
 get-bucket
 meta {
     doc: """Get a bucket by ID."""
 }
-fn (bucket-id: Str): Map {
-  ::api/request("GET", `/storage/v1/bucket/${bucket-id}`)
+fn (bucket-id: Str): StorageBucket {
+  ::api/request-service("GET", `/storage/v1/bucket/${bucket-path(bucket-id)}`)
 }
 
 CreateBucketRequest type {
@@ -67,7 +114,7 @@ fn (request: CreateBucketRequest): Map {
     |> assoc-some("file_size_limit", request.file_size_limit)
     |> assoc-some("allowed_mime_types", request.allowed_mime_types)
 
-  ::api/request("POST", "/storage/v1/bucket", {}, body)
+  ::api/request-service("POST", "/storage/v1/bucket", {}, body)
 }
 
 UpdateBucketRequest type {
@@ -87,7 +134,7 @@ fn (request: UpdateBucketRequest): Map {
     |> assoc-some("file_size_limit", request.file_size_limit)
     |> assoc-some("allowed_mime_types", request.allowed_mime_types)
 
-  ::api/request("PUT", `/storage/v1/bucket/${request.bucket_id}`, {}, body)
+  ::api/request-service("PUT", `/storage/v1/bucket/${bucket-path(request.bucket_id)}`, {}, body)
 }
 
 empty-bucket
@@ -95,7 +142,7 @@ meta {
     doc: """Remove all objects from a bucket without deleting the bucket itself."""
 }
 fn (bucket-id: Str): Map {
-  ::api/request("POST", `/storage/v1/bucket/${bucket-id}/empty`, {}, {})
+  ::api/request-service("POST", `/storage/v1/bucket/${bucket-path(bucket-id)}/empty`, {}, {})
 }
 
 delete-bucket
@@ -103,7 +150,7 @@ meta {
     doc: """Delete a bucket. The bucket must be empty first (use `empty-bucket`)."""
 }
 fn (bucket-id: Str): Map {
-  ::api/request("DELETE", `/storage/v1/bucket/${bucket-id}`)
+  ::api/request-service("DELETE", `/storage/v1/bucket/${bucket-path(bucket-id)}`)
 }
 
 // ============================================================================
@@ -132,10 +179,32 @@ fn
   upload(bucket, path, content, content-type, false)
 },
 (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): Map {
-  headers {Content-Type: content-type}
-  headers if(upsert, {...headers, "x-upsert": "true"}, headers)
+  body-or-error(upload-response(bucket, path, content, content-type, upsert))
+}
 
-  ::api/do-request("POST", `/storage/v1/object/${bucket}/${path}`, headers, content, ::core/anon-key(), ::core/anon-key())
+upload-as fn (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool, access-token: Str): Map {
+  body-or-error(upload-response-as(bucket, path, content, content-type, upsert, access-token))
+}
+
+upload-service fn (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): Map {
+  body-or-error(upload-response-service(bucket, path, content, content-type, upsert))
+}
+
+upload-headers fn (content-type: Str, upsert: Bool): Map {
+  headers {Content-Type: content-type}
+  if(upsert, {...headers, "x-upsert": "true"}, headers)
+}
+
+upload-response fn (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): ::api/HttpResponse {
+  ::api/request-raw-body("POST", `/storage/v1/object/${object-path(bucket, path)}`, upload-headers(content-type, upsert), content)
+}
+
+upload-response-as fn (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool, access-token: Str): ::api/HttpResponse {
+  ::api/request-raw-body-as("POST", `/storage/v1/object/${object-path(bucket, path)}`, upload-headers(content-type, upsert), content, access-token)
+}
+
+upload-response-service fn (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): ::api/HttpResponse {
+  ::api/request-raw-body-service("POST", `/storage/v1/object/${object-path(bucket, path)}`, upload-headers(content-type, upsert), content)
 }
 
 download
@@ -153,7 +222,15 @@ content ::storage/download("documents", "reports/q1.pdf")
 """
 }
 fn (bucket: Str, path: Str): Any {
-  ::api/request("GET", `/storage/v1/object/authenticated/${bucket}/${path}`)
+  ::api/request("GET", `/storage/v1/object/authenticated/${object-path(bucket, path)}`)
+}
+
+download-as fn (bucket: Str, path: Str, access-token: Str): Any {
+  ::api/request-as("GET", `/storage/v1/object/authenticated/${object-path(bucket, path)}`, {}, {}, access-token)
+}
+
+download-service fn (bucket: Str, path: Str): Any {
+  ::api/request-service("GET", `/storage/v1/object/authenticated/${object-path(bucket, path)}`)
 }
 
 get-object-info
@@ -161,7 +238,11 @@ meta {
     doc: """Get metadata about an object (size, MIME type, cache control, etc.)."""
 }
 fn (bucket: Str, path: Str): Map {
-  ::api/request("GET", `/storage/v1/object/info/${bucket}/${path}`)
+  ::api/request("GET", `/storage/v1/object/info/${object-path(bucket, path)}`)
+}
+
+get-object-info-as fn (bucket: Str, path: Str, access-token: Str): Map {
+  ::api/request-as("GET", `/storage/v1/object/info/${object-path(bucket, path)}`, {}, {}, access-token)
 }
 
 ListObjectsRequest type {
@@ -192,7 +273,7 @@ objects ::storage/list-objects(::storage/ListObjectsRequest({
 ```
 """
 }
-fn (request: ListObjectsRequest): Vec<Map> {
+fn (request: ListObjectsRequest): Vec<StorageObject> {
   body {}
     |> assoc-some("prefix", request.prefix)
     |> assoc-some("limit", request.limit)
@@ -200,7 +281,29 @@ fn (request: ListObjectsRequest): Vec<Map> {
     |> assoc-some("search", request.search)
     |> assoc-some("sortBy", request.sort_by)
 
-  ::api/request("POST", `/storage/v1/object/list/${request.bucket}`, {}, body)
+  ::api/request("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body)
+}
+
+list-objects-as fn (request: ListObjectsRequest, access-token: Str): Vec<StorageObject> {
+  body {}
+    |> assoc-some("prefix", request.prefix)
+    |> assoc-some("limit", request.limit)
+    |> assoc-some("offset", request.offset)
+    |> assoc-some("search", request.search)
+    |> assoc-some("sortBy", request.sort_by)
+
+  ::api/request-as("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body, access-token)
+}
+
+list-objects-service fn (request: ListObjectsRequest): Vec<StorageObject> {
+  body {}
+    |> assoc-some("prefix", request.prefix)
+    |> assoc-some("limit", request.limit)
+    |> assoc-some("offset", request.offset)
+    |> assoc-some("search", request.search)
+    |> assoc-some("sortBy", request.sort_by)
+
+  ::api/request-service("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body)
 }
 
 MoveObjectRequest type {
@@ -250,7 +353,15 @@ meta {
     doc: """Delete a single object from a bucket."""
 }
 fn (bucket: Str, path: Str): Any {
-  ::api/request("DELETE", `/storage/v1/object/${bucket}/${path}`)
+  ::api/request("DELETE", `/storage/v1/object/${object-path(bucket, path)}`)
+}
+
+delete-object-as fn (bucket: Str, path: Str, access-token: Str): Any {
+  ::api/request-as("DELETE", `/storage/v1/object/${object-path(bucket, path)}`, {}, {}, access-token)
+}
+
+delete-object-service fn (bucket: Str, path: Str): Any {
+  ::api/request-service("DELETE", `/storage/v1/object/${object-path(bucket, path)}`)
 }
 
 delete-objects
@@ -268,7 +379,11 @@ Delete multiple objects from a bucket.
 """
 }
 fn (bucket: Str, prefixes: Vec<Str>): Any {
-  ::api/request("DELETE", `/storage/v1/object/${bucket}`, {}, {prefixes: prefixes})
+  ::api/request("DELETE", `/storage/v1/object/${bucket-path(bucket)}`, {}, {prefixes: prefixes})
+}
+
+delete-objects-service fn (bucket: Str, prefixes: Vec<Str>): Any {
+  ::api/request-service("DELETE", `/storage/v1/object/${bucket-path(bucket)}`, {}, {prefixes: prefixes})
 }
 
 // ============================================================================
@@ -291,7 +406,7 @@ url ::storage/get-public-url("avatars", "users/alice.jpg")
 """
 }
 fn (bucket: Str, path: Str): Str {
-  `${::core/project-url()}/storage/v1/object/public/${bucket}/${path}`
+  `${::core/project-url()}/storage/v1/object/public/${object-path(bucket, path)}`
 }
 
 create-signed-url
@@ -309,8 +424,16 @@ result.signedURL  // => "/storage/v1/object/sign/documents/reports/q1.pdf?token=
 ```
 """
 }
-fn (bucket: Str, path: Str, expires-in: Int): Map {
-  ::api/request("POST", `/storage/v1/object/sign/${bucket}/${path}`, {}, {expiresIn: expires-in})
+fn (bucket: Str, path: Str, expires-in: Int): SignedUrlResponse {
+  ::api/request("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in})
+}
+
+create-signed-url-as fn (bucket: Str, path: Str, expires-in: Int, access-token: Str): SignedUrlResponse {
+  ::api/request-as("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in}, access-token)
+}
+
+create-signed-url-service fn (bucket: Str, path: Str, expires-in: Int): SignedUrlResponse {
+  ::api/request-service("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in})
 }
 
 create-signed-urls
@@ -318,5 +441,17 @@ meta {
     doc: """Create signed URLs for multiple objects in a bucket at once."""
 }
 fn (bucket: Str, paths: Vec<Str>, expires-in: Int): Vec<Map> {
-  ::api/request("POST", `/storage/v1/object/sign/${bucket}`, {}, {expiresIn: expires-in, paths: paths})
+  ::api/request("POST", `/storage/v1/object/sign/${bucket-path(bucket)}`, {}, {expiresIn: expires-in, paths: paths})
+}
+
+create-signed-upload-url
+meta {
+    doc: """Create a signed URL for uploading an object without further authentication."""
+}
+fn (bucket: Str, path: Str, expires-in: Int): SignedUploadUrlResponse {
+  ::api/request("POST", `/storage/v1/object/upload/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in})
+}
+
+create-signed-upload-url-as fn (bucket: Str, path: Str, expires-in: Int, access-token: Str): SignedUploadUrlResponse {
+  ::api/request-as("POST", `/storage/v1/object/upload/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in}, access-token)
 }

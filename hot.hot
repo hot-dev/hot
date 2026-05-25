@@ -431,6 +431,18 @@ hot.project.pkg-integration-resend.test.paths ["./hot/pkg/resend/integration-tes
 hot.project.pkg-integration-resend.test.capture true
 hot.project.pkg-integration-resend.deps {}
 
+// Supabase integration tests
+hot.project.pkg-integration-supabase.src.paths ["./hot/pkg/supabase/src"]
+hot.project.pkg-integration-supabase.test.paths ["./hot/pkg/supabase/integration-test"]
+hot.project.pkg-integration-supabase.test.capture true
+hot.project.pkg-integration-supabase.deps {}
+
+// Supabase Admin integration tests
+hot.project.pkg-integration-supabase-admin.src.paths ["./hot/pkg/supabase-admin/src"]
+hot.project.pkg-integration-supabase-admin.test.paths ["./hot/pkg/supabase-admin/integration-test"]
+hot.project.pkg-integration-supabase-admin.test.capture true
+hot.project.pkg-integration-supabase-admin.deps {}
+
 // Postmark integration tests
 hot.project.pkg-integration-postmark.src.paths ["./hot/pkg/postmark/src"]
 hot.project.pkg-integration-postmark.test.paths ["./hot/pkg/postmark/integration-test"]

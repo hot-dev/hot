@@ -7,7 +7,7 @@ Supabase client SDK for Hot. Query your database (PostgREST), authenticate users
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase": "1.1.0"
+"hot.dev/supabase": "1.0.0"
 ```
 
 ## Configuration
@@ -21,6 +21,11 @@ Set these context variables via the Hot app:
 | `supabase.service.key` | For admin ops | Service role key (bypasses RLS) |
 
 Find these in your Supabase Dashboard under **Settings > API**.
+
+Most database, storage object, and edge function helpers use the anon key by
+default. Use the `*-as` variants with a user access token for RLS-protected
+resources, or the `*-service` variants for trusted server-side service role
+operations. Storage bucket management uses the service role key.
 
 ## Usage
 
@@ -51,6 +56,13 @@ user ::db/select(::db/SelectRequest({
   filters: [::f/eq("id", "abc-123")],
   single: true
 }))
+
+// RLS-aware request as an authenticated user
+my-profile ::db/select-as(::db/SelectRequest({
+  table: "profiles",
+  filters: [::f/eq("id", user-id)],
+  single: true
+}), session.access_token)
 ```
 
 ### Insert, Update, Delete
@@ -212,7 +224,8 @@ result ::storage/create-signed-url("documents", "report.pdf", 3600)
 
 result ::functions/invoke(::functions/InvokeFunctionRequest({
   name: "process-order",
-  body: {order_id: "abc-123"}
+  body: {order_id: "abc-123"},
+  access-token: session.access_token
 }))
 ```
 
@@ -229,6 +242,16 @@ result ::functions/invoke(::functions/InvokeFunctionRequest({
 | `::supabase::api` | Low-level HTTP client with dual-header auth |
 | `::supabase::core` | Project URL and key helpers |
 
+## Local Tests
+
+Offline unit tests cover query encoding, PostgREST headers/count parsing, and
+storage path/header helpers:
+
+```bash
+cd hot/pkg/supabase
+hot test --conf hot.test.hot
+```
+
 ## Integration Tests
 
 ### 1. Create a Supabase Project
@@ -241,24 +264,28 @@ result ::functions/invoke(::functions/InvokeFunctionRequest({
 Run this SQL in the Supabase SQL Editor:
 
 ```sql
-CREATE TABLE test_items (
+CREATE TABLE "hot-integration-test" (
   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
   name text NOT NULL,
   value integer DEFAULT 0,
   created_at timestamptz DEFAULT now()
 );
 
-ALTER TABLE test_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "hot-integration-test" ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Allow all for anon" ON test_items
+CREATE POLICY "Allow all for anon" ON "hot-integration-test"
   FOR ALL USING (true) WITH CHECK (true);
 
-CREATE UNIQUE INDEX test_items_name_idx ON test_items (name);
+CREATE UNIQUE INDEX hot_integration_test_name_idx ON "hot-integration-test" (name);
 ```
+
+If PostgREST still reports `PGRST205` after creating the table, refresh the
+schema cache from the Supabase Dashboard or wait briefly and rerun the tests.
 
 ### 3. Create a Test Storage Bucket
 
-In the Supabase Dashboard, go to **Storage** and create a bucket called `hot-test-bucket`.
+The storage object test creates and deletes a temporary bucket by default. Set
+`SUPABASE_TEST_BUCKET` only when you want to use an existing bucket instead.
 
 ### 4. Set Context Variables
 
@@ -271,17 +298,19 @@ supabase.service.key=eyJ...
 ### 5. Set Environment Variables
 
 ```
-SUPABASE_TEST_TABLE=test_items
-SUPABASE_TEST_BUCKET=hot-test-bucket
+SUPABASE_TEST_TABLE=hot-integration-test
+SUPABASE_TEST_BUCKET=hot-integration-test # optional
 SUPABASE_TEST_FUNCTION=hello-world
 ```
 
+`SUPABASE_TEST_TABLE` defaults to `hot-integration-test`.
+`SUPABASE_TEST_BUCKET` is optional; when unset, object storage tests create a temporary bucket.
 `SUPABASE_TEST_FUNCTION` is optional -- only needed if you have an edge function deployed.
 
 ### 6. Run the Tests
 
 ```bash
-hot test hot/pkg/supabase/integration-test/
+./scripts/integration/supabase.sh
 ```
 
 ### What the Tests Do

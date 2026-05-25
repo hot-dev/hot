@@ -5,6 +5,7 @@
 #   ./scripts/integration/run-all.sh              # Run all packages
 #   ./scripts/integration/run-all.sh ai            # Run AI packages only
 #   ./scripts/integration/run-all.sh aws           # Run AWS packages only
+#   ./scripts/integration/run-all.sh baas          # Run backend-as-a-service packages only
 #   ./scripts/integration/run-all.sh email         # Run email packages only
 #   ./scripts/integration/run-all.sh messaging     # Run messaging packages only
 #   ./scripts/integration/run-all.sh protocols     # Run protocol packages only
@@ -23,11 +24,12 @@ PKG_DELAY=${PKG_DELAY:-5}
 
 AI_PKGS=(anthropic gemini openai xai)
 AWS_PKGS=(aws-bedrock aws-dynamodb aws-lambda aws-s3 aws-secrets-manager aws-ses aws-sns aws-sqs)
+BAAS_PKGS=(supabase supabase-admin)
 EMAIL_PKGS=(postmark resend)
 MESSAGING_PKGS=(slack telegram)
 PROTOCOL_PKGS=(json-rpc mcp)
 
-ALL_PKGS=("${AI_PKGS[@]}" "${AWS_PKGS[@]}" "${EMAIL_PKGS[@]}" "${MESSAGING_PKGS[@]}" "${PROTOCOL_PKGS[@]}")
+ALL_PKGS=("${AI_PKGS[@]}" "${AWS_PKGS[@]}" "${BAAS_PKGS[@]}" "${EMAIL_PKGS[@]}" "${MESSAGING_PKGS[@]}" "${PROTOCOL_PKGS[@]}")
 
 # ── Resolve which packages to run ──────────────────────────────
 
@@ -37,6 +39,7 @@ resolve_packages() {
         case "$arg" in
             ai)         pkgs+=("${AI_PKGS[@]}") ;;
             aws)        pkgs+=("${AWS_PKGS[@]}") ;;
+            baas)       pkgs+=("${BAAS_PKGS[@]}") ;;
             email)      pkgs+=("${EMAIL_PKGS[@]}") ;;
             messaging)  pkgs+=("${MESSAGING_PKGS[@]}") ;;
             protocols)  pkgs+=("${PROTOCOL_PKGS[@]}") ;;

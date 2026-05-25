@@ -2,6 +2,26 @@
 
 ::api ::supabase::admin::api
 
+Backup type {
+  id: Str?,
+  status: Str?,
+  created_at: Str?
+}
+
+Migration type {
+  version: Str?,
+  name: Str?,
+  inserted_at: Str?
+}
+
+pooler-path fn (project-ref: Str): Str {
+  `/projects/${project-ref}/config/database/pooler`
+}
+
+upgrade-eligibility-path fn (project-ref: Str): Str {
+  `/projects/${project-ref}/upgrade/eligibility`
+}
+
 // ============================================================================
 // Database Configuration
 // ============================================================================
@@ -34,10 +54,18 @@ fn (project-ref: Str, config: Map): Map {
 
 get-pooler-config
 meta {
-    doc: """Get the connection pooler (PgBouncer) configuration."""
+    doc: """Get the current Supavisor connection pooler configuration."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/config/database/pgbouncer`)
+fn (project-ref: Str): Vec<Map> {
+  ::api/request("GET", pooler-path(project-ref))
+}
+
+update-pooler-config
+meta {
+    doc: """Update the Supavisor connection pooler configuration."""
+}
+fn (project-ref: Str, config: Map): Map {
+  ::api/request("PATCH", pooler-path(project-ref), {}, config)
 }
 
 // ============================================================================
@@ -59,7 +87,7 @@ backups ::databases/list-backups("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Map {
+fn (project-ref: Str): Vec<Backup> {
   ::api/request("GET", `/projects/${project-ref}/database/backups`)
 }
 
@@ -71,7 +99,7 @@ list-migrations
 meta {
     doc: """List database migrations that have been run on a project."""
 }
-fn (project-ref: Str): Vec<Map> {
+fn (project-ref: Str): Vec<Migration> {
   ::api/request("GET", `/projects/${project-ref}/database/migrations`)
 }
 
@@ -142,5 +170,5 @@ meta {
     doc: """List available Postgres versions for upgrade."""
 }
 fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/upgrade/eligible`)
+  ::api/request("GET", upgrade-eligibility-path(project-ref))
 }

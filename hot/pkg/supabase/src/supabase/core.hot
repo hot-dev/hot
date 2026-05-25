@@ -1,6 +1,27 @@
 ::supabase::core ns
 
 ::ctx ::hot::ctx
+::env ::hot::env
+
+secret-value fn (value: Any): Str? {
+  s Str(or(value, ""))
+  if(is-empty(s), null, s)
+}
+
+first-secret fn (values: Vec<Any>): Str? {
+  values
+    |> map(secret-value(%))
+    |> filter(is-some(%))
+    |> first()
+}
+
+required-secret fn (values: Vec<Any>, label: Str, sources: Str): Str {
+  value first-secret(values)
+  if(is-empty(value),
+    fail(`${label} is not set. Add one of: ${sources}.`)
+  )
+  value
+}
 
 project-url
 meta {
@@ -8,7 +29,10 @@ meta {
     doc: """Return the Supabase project URL from context. Example: `https://xxxx.supabase.co`."""
 }
 fn (): Str {
-  ::ctx/get("supabase.url")
+  required-secret([
+    ::ctx/get("supabase.url"),
+    ::env/get("SUPABASE_URL", "")
+  ], "supabase.url", "supabase.url or SUPABASE_URL")
 }
 
 anon-key
@@ -17,7 +41,12 @@ meta {
     doc: """Return the Supabase anon/public key from context."""
 }
 fn (): Str {
-  ::ctx/get("supabase.anon.key")
+  required-secret([
+    ::ctx/get("supabase.anon.key"),
+    ::ctx/get("supabase.api.key"),
+    ::env/get("SUPABASE_ANON_KEY", ""),
+    ::env/get("SUPABASE_API_KEY", "")
+  ], "supabase.anon.key", "supabase.anon.key, supabase.api.key, SUPABASE_ANON_KEY, or SUPABASE_API_KEY")
 }
 
 service-key
@@ -26,9 +55,14 @@ meta {
     doc: """Return the Supabase service role key from context. Required for admin operations."""
 }
 fn (): Str {
-  key or(::ctx/get("supabase.service.key"), "")
+  key first-secret([
+    ::ctx/get("supabase.service.key"),
+    ::ctx/get("supabase.service.role.key"),
+    ::env/get("SUPABASE_SERVICE_KEY", ""),
+    ::env/get("SUPABASE_SERVICE_ROLE_KEY", "")
+  ])
   if(is-empty(key),
-    fail("supabase.service.key is not set. Add it in Context Variables for admin operations.")
+    fail("supabase.service.key is not set. Add one of: supabase.service.key, supabase.service.role.key, SUPABASE_SERVICE_KEY, or SUPABASE_SERVICE_ROLE_KEY.")
   )
   key
 }

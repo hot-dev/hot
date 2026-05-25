@@ -2,6 +2,12 @@
 
 ::api ::supabase::admin::api
 
+DomainConfig type {
+  custom_hostname: Str?,
+  status: Str?,
+  data: Map?
+}
+
 // ============================================================================
 // Custom Hostnames
 // ============================================================================
@@ -21,7 +27,7 @@ config ::domains/get-custom-hostname("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Map {
+fn (project-ref: Str): DomainConfig {
   ::api/request("GET", `/projects/${project-ref}/custom-hostname`)
 }
 

@@ -1,0 +1,17 @@
+::hot::conf ns
+
+hot.set.profile "local-dev"
+hot.set.project "supabase-tests"
+
+hot.profile.local-dev.user.email "local@hot.dev"
+hot.profile.local-dev.org.slug "local"
+hot.profile.local-dev.env.name "development"
+
+hot.project.supabase-tests.src.paths ["./src"]
+hot.project.supabase-tests.test.paths ["./test"]
+hot.project.supabase-tests.test.capture true
+
+hot.db.uri "sqlite::memory:"
+hot.db.schema "hot"
+hot.log.level "warn"
+hot.log.target "stdout"

@@ -2,6 +2,20 @@
 
 ::api ::supabase::admin::api
 
+Branch type {
+  id: Str,
+  name: Str?,
+  branch_name: Str?,
+  git_branch: Str?,
+  status: Str?,
+  persistent: Bool?,
+  reset_on_push: Bool?
+}
+
+branch-path fn (branch-id: Str): Str {
+  `/branches/${branch-id}`
+}
+
 // ============================================================================
 // Preview Branches
 // ============================================================================
@@ -21,7 +35,7 @@ branches ::branches/list-branches("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<Map> {
+fn (project-ref: Str): Vec<Branch> {
   ::api/request("GET", `/projects/${project-ref}/branches`)
 }
 
@@ -50,7 +64,7 @@ branch ::branches/create-branch(::branches/CreateBranchRequest({
 ```
 """
 }
-fn (request: CreateBranchRequest): Map {
+fn (request: CreateBranchRequest): Branch {
   body {branch_name: request.branch_name}
     |> assoc-some("git_branch", request.git_branch)
     |> assoc-some("region", request.region)
@@ -62,8 +76,8 @@ get-branch
 meta {
     doc: """Get details for a specific branch by its ID."""
 }
-fn (branch-id: Str): Map {
-  ::api/request("GET", `/branches/${branch-id}`)
+fn (branch-id: Str): Branch {
+  ::api/request("GET", branch-path(branch-id))
 }
 
 delete-branch
@@ -79,7 +93,7 @@ meta {
     doc: """Get the database configuration for a branch."""
 }
 fn (branch-id: Str): Map {
-  ::api/request("GET", `/branches/${branch-id}/config`)
+  ::api/request("GET", branch-path(branch-id))
 }
 
 UpdateBranchConfigRequest type {
@@ -101,7 +115,7 @@ fn (request: UpdateBranchConfigRequest): Map {
     |> assoc-some("persistent", request.persistent)
     |> assoc-some("status", request.status)
 
-  ::api/request("PATCH", `/branches/${request.branch_id}/config`, {}, body)
+  ::api/request("PATCH", branch-path(request.branch_id), {}, body)
 }
 
 push-branch

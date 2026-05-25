@@ -1,0 +1,43 @@
+::supabase::test::db ns
+meta ["test"]
+
+::db ::supabase::db
+::f ::supabase::filters
+
+test-select-path-encodes-query
+meta ["test"]
+fn () {
+  path ::db/select-path(::db/SelectRequest({
+    table: "users",
+    select: "id,name,posts(title)",
+    filters: [::f/eq("email", "a@b.com")],
+    order: "created_at.desc",
+    limit: 10,
+    offset: 20
+  }))
+
+  assert-eq("/rest/v1/users?select=id%2Cname%2Cposts%28title%29&email=eq.%22a%40b.com%22&order=created_at.desc&limit=10&offset=20", path)
+}
+
+test-schema-headers
+meta ["test"]
+fn () {
+  headers ::db/select-headers(::db/SelectRequest({
+    table: "items",
+    count: "exact",
+    schema: "private",
+    single: true
+  }))
+
+  assert-eq("private", headers.Accept-Profile)
+  assert-eq("count=exact", headers.Prefer)
+  assert-eq("application/vnd.pgrst.object+json", headers.Accept)
+}
+
+test-count-parser
+meta ["test"]
+fn () {
+  assert-eq(42, ::db/parse-count({"content-range": "0-9/42"}))
+  assert(is-null(::db/parse-count({"content-range": "0-9/*"})), "wildcard total should be null")
+  assert(is-null(::db/parse-count({})), "missing header should be null")
+}

@@ -8,7 +8,8 @@ test-signup-signin-signout
 meta ["test"]
 fn () {
   unique-id random-string(8)
-  test-email `hot-test-${unique-id}@example.com`
+  // Supabase normalizes email addresses to lowercase.
+  test-email lowercase(`hot-test-${unique-id}@example.com`)
   test-password `TestPass-${unique-id}!`
 
   // Step 1: Create user via admin (confirmed)

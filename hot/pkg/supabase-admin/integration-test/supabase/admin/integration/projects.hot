@@ -1,6 +1,7 @@
 ::supabase::admin::integration::projects ns
 meta ["test"]
 
+::api ::supabase::admin::api
 ::projects ::supabase::admin::projects
 
 test-list-projects
@@ -45,7 +46,11 @@ fn () {
   assert(not(is-empty(projects)), "need at least one project")
 
   project-ref first(projects).id
-  health ::projects/get-project-health(project-ref)
+  response ::api/request-raw("GET", ::projects/health-path(project-ref, ["db", "auth", "storage"]))
+  assert(lt(response.status, 400), `health request should succeed: ${to-json(response.body)}`)
+  health response.body
 
   assert(is-vec(health), "health should return an array of service statuses")
+  assert(not(is-empty(health)), "health should include requested services")
+  assert(some(health, (s) { eq(s.name, "db") }), "health should include db status")
 }

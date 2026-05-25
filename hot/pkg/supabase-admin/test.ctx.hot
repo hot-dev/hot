@@ -1,0 +1,7 @@
+// Placeholder ctx value so `hot check`/`hot test` can satisfy
+// compile-time ctx requirements without a real Supabase PAT.
+::hot::run::ctx ns
+
+::hot::ctx/set({
+  "supabase.access.token": "PLACEHOLDER"
+})

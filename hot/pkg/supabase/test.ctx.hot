@@ -1,0 +1,9 @@
+// Placeholder ctx values so `hot check`/`hot test` can satisfy
+// compile-time ctx requirements without real Supabase credentials.
+::hot::run::ctx ns
+
+::hot::ctx/set({
+  "supabase.url": "https://example.supabase.co",
+  "supabase.anon.key": "PLACEHOLDER",
+  "supabase.service.key": "PLACEHOLDER"
+})

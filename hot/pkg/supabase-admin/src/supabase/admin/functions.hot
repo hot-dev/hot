@@ -2,6 +2,16 @@
 
 ::api ::supabase::admin::api
 
+EdgeFunction type {
+  id: Str?,
+  slug: Str,
+  name: Str?,
+  status: Str?,
+  verify_jwt: Bool?,
+  created_at: Str?,
+  updated_at: Str?
+}
+
 // ============================================================================
 // Edge Functions Management
 // ============================================================================
@@ -21,7 +31,7 @@ fns ::functions/list-functions("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<Map> {
+fn (project-ref: Str): Vec<EdgeFunction> {
   ::api/request("GET", `/projects/${project-ref}/functions`)
 }
 
@@ -29,7 +39,7 @@ get-function
 meta {
     doc: """Get details for a specific edge function by slug."""
 }
-fn (project-ref: Str, function-slug: Str): Map {
+fn (project-ref: Str, function-slug: Str): EdgeFunction {
   ::api/request("GET", `/projects/${project-ref}/functions/${function-slug}`)
 }
 
@@ -64,7 +74,7 @@ fn-result ::functions/create-function(::functions/CreateFunctionRequest({
 ```
 """
 }
-fn (request: CreateFunctionRequest): Map {
+fn (request: CreateFunctionRequest): EdgeFunction {
   body {
     slug: request.slug,
     name: request.name,
@@ -103,6 +113,22 @@ fn (request: UpdateFunctionRequest): Map {
     |> assoc-some("import_map_path", request.import_map_path)
 
   ::api/request("PATCH", `/projects/${request.project_ref}/functions/${request.function_slug}`, {}, body)
+}
+
+deploy-function
+meta {
+    doc: """Deploy a function bundle through the Management API deploy endpoint."""
+}
+fn (project-ref: Str, body: Any): Map {
+  ::api/request("POST", `/projects/${project-ref}/functions/deploy`, {}, body)
+}
+
+bulk-update-functions
+meta {
+    doc: """Bulk update edge functions for a project."""
+}
+fn (project-ref: Str, body: Any): Map {
+  ::api/request("PUT", `/projects/${project-ref}/functions`, {}, body)
 }
 
 delete-function

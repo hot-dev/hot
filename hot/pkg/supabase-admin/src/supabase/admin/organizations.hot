@@ -2,6 +2,19 @@
 
 ::api ::supabase::admin::api
 
+Organization type {
+  id: Str?,
+  slug: Str?,
+  name: Str?
+}
+
+OrganizationMember type {
+  user_id: Str?,
+  user_name: Str?,
+  role_name: Str?,
+  email: Str?
+}
+
 // ============================================================================
 // Organization CRUD
 // ============================================================================
@@ -21,7 +34,7 @@ orgs ::orgs/list-organizations()
 ```
 """
 }
-fn (): Vec<Map> {
+fn (): Vec<Organization> {
   ::api/request("GET", "/organizations")
 }
 
@@ -29,7 +42,7 @@ get-organization
 meta {
     doc: """Get details for a specific organization by slug."""
 }
-fn (slug: Str): Map {
+fn (slug: Str): Organization {
   ::api/request("GET", `/organizations/${slug}`)
 }
 
@@ -54,7 +67,7 @@ org.id  // => "org-abc-123"
 ```
 """
 }
-fn (request: CreateOrganizationRequest): Map {
+fn (request: CreateOrganizationRequest): Organization {
   ::api/request("POST", "/organizations", {}, untype(request))
 }
 
@@ -77,7 +90,7 @@ members ::orgs/list-members("my-org-slug")
 ```
 """
 }
-fn (slug: Str): Vec<Map> {
+fn (slug: Str): Vec<OrganizationMember> {
   ::api/request("GET", `/organizations/${slug}/members`)
 }
 

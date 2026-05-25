@@ -1,0 +1,16 @@
+::supabase::admin::test::paths ns
+meta ["test"]
+
+::projects ::supabase::admin::projects
+::databases ::supabase::admin::databases
+::branches ::supabase::admin::branches
+
+test-fixed-management-api-paths
+meta ["test"]
+fn () {
+  assert-eq("/projects/abcdefghijklmnopqrst/postgrest", ::projects/postgrest-path("abcdefghijklmnopqrst"))
+  assert-eq("/projects/abcdefghijklmnopqrst/database/openapi?schema=private%20schema", ::projects/database-openapi-path("abcdefghijklmnopqrst", "private schema"))
+  assert-eq("/projects/abcdefghijklmnopqrst/config/database/pooler", ::databases/pooler-path("abcdefghijklmnopqrst"))
+  assert-eq("/projects/abcdefghijklmnopqrst/upgrade/eligibility", ::databases/upgrade-eligibility-path("abcdefghijklmnopqrst"))
+  assert-eq("/branches/branch-123", ::branches/branch-path("branch-123"))
+}
