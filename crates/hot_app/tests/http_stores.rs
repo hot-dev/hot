@@ -286,6 +286,7 @@ async fn entry_detail_hides_value_until_admin_reveal() {
     );
     assert!(reveal.body.contains("unicode"));
     assert!(reveal.body.contains("View full value"));
+    assert!(reveal.body.contains("language-hot"));
 }
 
 #[tokio::test]
@@ -313,6 +314,7 @@ async fn admin_can_reveal_value_from_store_detail() {
     );
     assert!(reveal.body.contains("unicode"));
     assert!(reveal.body.contains("store-val-hot-"));
+    assert!(reveal.body.contains("language-hot"));
 }
 
 #[tokio::test]

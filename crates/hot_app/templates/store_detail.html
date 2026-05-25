@@ -196,7 +196,13 @@ function confirmDeleteStoreEntryMobile(button) {
             }
             return response.text();
         }).then(function (html) {
+            var parent = cell.parentElement;
+            var id = cell.id;
             cell.outerHTML = html;
+            var updatedCell = document.getElementById(id);
+            if (window.applyFormatting) {
+                window.applyFormatting(updatedCell || parent);
+            }
         }).catch(function (error) {
             console.warn(error);
             cell.dataset.revealed = 'false';
