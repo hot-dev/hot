@@ -1,0 +1,164 @@
+::hot::store-load ns
+meta {
+ doc: """
+ Seed several `::hot::store` Maps with demo data so the hot_app store UI can
+ be reviewed against realistic content: pagination, value hiding, key
+ previews, special characters, text-search badges, and modal rendering.
+
+ Run from the rust workspace root:
+
+   cargo run -p hot_cli -- run store-load.hot
+
+ Safe to re-run; each `put` upserts in place.
+ """
+}
+
+::store ::hot::store
+
+
+// ---------------------------------------------------------------------------
+// 1. settings — small plain store with scalar values.
+// ---------------------------------------------------------------------------
+
+settings ::store/Map({name: "settings"})
+
+::store/put-many(settings, {
+ "smtp.host": "mail.example.com",
+ "smtp.port": 587,
+ "smtp.from": "team@example.com",
+ "support.email": "support@example.com",
+ "max-retries": 5,
+ "retry-delay-ms": 1000,
+ "feature.dark-mode": true,
+ "feature.beta-ui": false,
+ "feature.experimental-search": true,
+ "rate-limit.window-seconds": 60,
+ "rate-limit.max-requests": 100,
+ "log.level": "info",
+ "log.retention-days": 30,
+ "session.idle-timeout-min": 30,
+ "cache.ttl-seconds": 300,
+ "deploy.region": "us-west-2",
+})
+
+
+// ---------------------------------------------------------------------------
+// 2. users — 120 entries to exercise pagination (50 per page -> 3 pages).
+// ---------------------------------------------------------------------------
+
+users ::store/Map({name: "users"})
+
+put-user fn (i: Int): Bool {
+ role if(eq(mod(i, 17), 0), "admin", if(eq(mod(i, 5), 0), "manager", "member"))
+ active ne(mod(i, 13), 0)
+ plan cond {
+  eq(mod(i, 3), 0) => { "pro" }
+  eq(mod(i, 3), 1) => { "team" }
+  => { "free" }
+ }
+ ::store/put(users, `user-${i}`, {
+  id: i,
+  email: `user${i}@example.com`,
+  name: `User ${i}`,
+  role: role,
+  active: active,
+  plan: plan,
+  signups: i,
+  tags: ["seeded", role, plan],
+ })
+ true
+}
+
+for-each(range(1, 121), (i) { put-user(i) })
+
+
+// ---------------------------------------------------------------------------
+// 3. events — text-search-enabled audit-style payloads.
+// ---------------------------------------------------------------------------
+
+events {
+ "$type": "::hot::store/Map",
+ "$val": {
+  name: "events",
+  embedding: {text-search: true},
+ },
+}
+
+event-kind fn (i: Int): Str {
+ cond {
+  eq(mod(i, 4), 0) => { "user.signup" }
+  eq(mod(i, 4), 1) => { "billing.charge" }
+  eq(mod(i, 4), 2) => { "agent.run" }
+  => { "deploy.complete" }
+ }
+}
+
+put-event fn (i: Int): Bool {
+ kind event-kind(i)
+ ::store/put(events, i, {
+  kind: kind,
+  actor: `user-${mod(i, 30)}`,
+  at: add(1700000000, mul(i, 60)),
+  message: `${kind} for batch #${i}; completed in ${mul(i, 3)}ms with status ok.`,
+  metadata: {
+   region: if(eq(mod(i, 2), 0), "us-west-2", "eu-central-1"),
+   attempt: add(mod(i, 4), 1),
+   trace-id: `trace-${mul(i, 7919)}`,
+  },
+ })
+ true
+}
+
+for-each(range(1, 61), (i) { put-event(i) })
+
+
+// ---------------------------------------------------------------------------
+// 4. edge-cases — Unicode, special chars, long values, composite keys.
+// ---------------------------------------------------------------------------
+
+edge-cases ::store/Map({name: "edge-cases"})
+
+::store/put(edge-cases, "quote ' \" emoji 🔥", {note: "string key with quotes and emoji"})
+::store/put(edge-cases, "ascii-key", "plain string value")
+::store/put(edge-cases, "日本語キー", {note: "Japanese key", lang: "ja"})
+::store/put(edge-cases, "مفتاح-عربي", {note: "Arabic key, RTL", lang: "ar"})
+::store/put(edge-cases, "control-chars\t\n", "value with control chars")
+::store/put(edge-cases, "", {note: "empty-string key"})
+::store/put(edge-cases, [1, 2, 3], {note: "array key (composite)"})
+::store/put(edge-cases, {kind: "compound", id: 42}, {
+ note: "map key (composite)",
+ id: 42,
+})
+::store/put(edge-cases, "long-value", {
+ description: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident.",
+ tags: ["long", "lorem", "truncation-test"],
+})
+::store/put(edge-cases, "deeply-nested", {
+ a: {
+  b: {
+   c: {
+    d: {
+     e: "five levels deep",
+     numbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    },
+   },
+  },
+ },
+})
+::store/put(edge-cases, "secret-looking", {
+ api-key: "sk-FAKE-1234567890abcdef",
+ token: "ghp_FAKE_xxxxxxxxxxxxxxxxxxxx",
+ note: "fake credentials - useful for verifying value hiding in the UI",
+})
+::store/put(edge-cases, "html-injection", {
+ payload: "<script>alert('xss')</script>",
+ attr: "\" onmouseover=\"alert(1)",
+ note: "escaping smoke test",
+})
+
+
+print(`settings: ${::store/length(settings)} entries`)
+print(`users: ${::store/length(users)} entries`)
+print(`events: ${::store/length(events)} entries (text-search)`)
+print(`edge-cases: ${::store/length(edge-cases)} entries`)
+null

@@ -25,6 +25,7 @@ pub mod runs;
 pub mod schedules;
 pub mod service_keys;
 pub mod source_browser;
+pub mod stores;
 pub mod stream_graph;
 pub mod streams;
 pub mod tasks;
@@ -116,6 +117,10 @@ pub use runs::{
 };
 pub use schedules::{event_handlers_list_handler, schedule_detail_handler, schedules_list_handler};
 pub use source_browser::{source_file_handler, source_search_handler, source_tree_handler};
+pub use stores::{
+    entry_delete_handler, entry_detail_handler, entry_value_handler, store_detail_handler,
+    stores_list_handler,
+};
 pub use streams::{stream_detail_handler, streams_list_handler};
 pub use tasks::{task_detail_handler, tasks_list_handler};
 pub use teams::{

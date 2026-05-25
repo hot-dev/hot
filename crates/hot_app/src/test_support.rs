@@ -174,9 +174,22 @@ impl TestClient {
     /// GET `path`. Cookies are attached from the jar and merged from
     /// `Set-Cookie` response headers into the jar.
     pub async fn get(&mut self, path: &str) -> TestResponse {
+        self.get_with_headers(path, &[]).await
+    }
+
+    /// GET `path` with extra request headers (e.g. `HX-Request: true` for
+    /// HTMX-style partial responses).
+    pub async fn get_with_headers(
+        &mut self,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> TestResponse {
         let mut builder = Request::builder().method("GET").uri(path);
         if let Some(cookie) = self.cookies.header_value() {
             builder = builder.header(header::COOKIE, cookie);
+        }
+        for (name, value) in extra_headers {
+            builder = builder.header(*name, *value);
         }
         let req = builder.body(Body::empty()).expect("build request");
         let resp = self.app.send(req).await;

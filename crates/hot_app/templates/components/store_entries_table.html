@@ -1,0 +1,162 @@
+<!-- Store Entries Table Content (used both inline in store_detail.html and as an HTMX partial) -->
+{% if is_searching %}
+<div class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+    Showing <span class="font-medium">{{ total_entries }}</span> matching entr{% if total_entries == 1 %}y{% else %}ies{% endif %}.
+    <a href="/stores/{{ store.name_url }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Clear search</a>
+</div>
+{% endif %}
+
+<!-- Desktop entries panel -->
+<div class="hidden md:flex flex-col rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    {% if entries.len() > 0 %}
+    <div class="overflow-auto scrollbar-always">
+        <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
+            <thead class="bg-gray-100 dark:bg-gray-800 sticky top-0">
+                <tr>
+                    <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider w-16">Seq</th>
+                    <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Key</th>
+                    <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <div class="flex items-center gap-2">
+                            <span>Value</span>
+                            {% if is_admin %}
+                            <button id="store-values-column-toggle"
+                                    type="button"
+                                    aria-pressed="false"
+                                    class="normal-case tracking-normal inline-flex items-center px-2 py-0.5 text-xs font-medium rounded border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+                                Show values
+                            </button>
+                            {% endif %}
+                        </div>
+                    </th>
+                    <th class="px-3 md:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Updated</th>
+                    <th class="px-3 md:px-6 py-3 text-right text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider"><span class="sr-only">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                {% for entry in entries %}
+                <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                    <td class="px-3 md:px-6 py-3 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400 font-mono">{{ entry.seq }}</td>
+                    <td class="px-3 md:px-6 py-3 text-xs">
+                        <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-mono break-all">{{ entry.key_preview }}</a>
+                    </td>
+                    <td class="px-3 md:px-6 py-3 text-xs text-gray-700 dark:text-gray-300 break-all">
+                        {# Hidden state markup is mirrored in templates/store_entry_value_hidden_cell.html (view=cell). #}
+                        {# Keep in sync; the column toggle re-fetches that fragment to restore this state. #}
+                        <div id="entry-value-{{ entry.key_encoded }}" class="js-store-value-cell flex items-center gap-2" data-key-encoded="{{ entry.key_encoded }}" data-view="cell" data-revealed="false">
+                            {% if is_admin %}
+                            <span class="text-xs text-gray-400 dark:text-gray-500">Hidden by default</span>
+                            {% else %}
+                            <span class="text-xs text-gray-400 dark:text-gray-500 italic">Hidden</span>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td class="px-3 md:px-6 py-3 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                        <div>{{ entry.updated_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}</div>
+                        <div class="text-xs text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</div>
+                    </td>
+                    <td class="px-3 md:px-6 py-3 whitespace-nowrap text-right text-xs">
+                        <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 mr-3">View</a>
+                        {% if is_admin %}
+                        <form id="delete-entry-{{ entry.key_encoded }}" action="/stores/{{ store.name_url }}/entries/delete" method="post" class="inline">
+                            <input type="hidden" name="key_encoded" value="{{ entry.key_encoded }}">
+                            <input type="hidden" name="origin" value="store">
+                            <button type="button"
+                                    data-key-encoded="{{ entry.key_encoded }}"
+                                    data-key-preview="{{ entry.key_preview }}"
+                                    onclick="confirmDeleteStoreEntry(this)"
+                                    class="text-red-600 hover:text-red-800 dark:text-red-500 dark:hover:text-red-300">Delete</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if has_prev_page || has_next_page %}
+    <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-800">
+        <div class="flex items-center justify-between">
+            <p class="text-sm text-gray-700 dark:text-gray-300">
+                Showing <span class="font-medium">{{ entries.len() }}</span> of <span class="font-medium">{{ total_entries }}</span> entries
+            </p>
+            <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                {% if has_prev_page %}
+                <a href="/stores/{{ store.name_url }}?p={{ current_page_num - 1 }}{{ pagination_search_suffix }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                    <span class="sr-only">Previous</span>
+                    <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>
+                </a>
+                {% endif %}
+                {% for page_num in start_page..=end_page %}
+                {% if page_num == current_page_num %}
+                <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                {% else %}
+                <a href="/stores/{{ store.name_url }}?p={{ page_num }}{{ pagination_search_suffix }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
+                {% endif %}
+                {% endfor %}
+                {% if has_next_page %}
+                <a href="/stores/{{ store.name_url }}?p={{ current_page_num + 1 }}{{ pagination_search_suffix }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                    <span class="sr-only">Next</span>
+                    <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg>
+                </a>
+                {% endif %}
+            </nav>
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="flex items-center justify-center py-12">
+        <div class="text-center py-8">
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">{% if is_searching %}No Entries Found{% else %}No Entries{% endif %}</h3>
+            {% if is_searching %}
+            <p class="text-gray-500 dark:text-gray-400 text-sm">No keys or values matched your search.</p>
+            {% else %}
+            <p class="text-gray-500 dark:text-gray-400 text-sm">This store exists but has no entries in the current environment.</p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Mobile card view -->
+<div class="md:hidden space-y-3">
+    {% for entry in entries %}
+    <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+        <div class="flex items-center justify-between mb-2">
+            <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-sm font-mono text-blue-600 dark:text-blue-400 truncate">{{ entry.key_preview }}</a>
+            <span class="text-xs text-gray-400 ml-2">#{{ entry.seq }}</span>
+        </div>
+        {# Hidden state markup is mirrored in templates/store_entry_value_hidden_cell.html (view=mobile-cell). #}
+        {# Keep in sync; the column toggle re-fetches that fragment to restore this state. #}
+        <div id="m-entry-value-{{ entry.key_encoded }}" class="js-store-value-cell text-xs text-gray-700 dark:text-gray-300 break-words mb-2" data-key-encoded="{{ entry.key_encoded }}" data-view="mobile-cell" data-revealed="false">
+            {% if is_admin %}
+            <span class="text-gray-400 dark:text-gray-500">Hidden by default</span>
+            {% else %}
+            <span class="text-gray-400 dark:text-gray-500 italic">Value hidden</span>
+            {% endif %}
+        </div>
+        <div class="flex justify-between items-center text-xs text-gray-500 dark:text-gray-400">
+            <span>{{ entry.updated_at|tzf(page_context.display_timezone, "%Y-%m-%d %H:%M") }}</span>
+            <div class="flex gap-2">
+                <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-blue-600 dark:text-blue-400">View</a>
+                {% if is_admin %}
+                <form id="m-delete-entry-{{ entry.key_encoded }}" action="/stores/{{ store.name_url }}/entries/delete" method="post" class="inline">
+                    <input type="hidden" name="key_encoded" value="{{ entry.key_encoded }}">
+                    <input type="hidden" name="origin" value="store">
+                    <button type="button"
+                            data-key-encoded="{{ entry.key_encoded }}"
+                            data-key-preview="{{ entry.key_preview }}"
+                            onclick="confirmDeleteStoreEntryMobile(this)"
+                            class="text-red-600 dark:text-red-500">Delete</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+    {% if entries.len() == 0 %}
+    <div class="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">
+        {% if is_searching %}No keys or values matched your search.{% else %}No entries found.{% endif %}
+    </div>
+    {% endif %}
+</div>

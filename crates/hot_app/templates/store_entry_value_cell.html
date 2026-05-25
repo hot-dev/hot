@@ -1,0 +1,9 @@
+<div id="{{ container_id }}" class="js-store-value-cell space-y-2" data-key-encoded="{{ entry.key_encoded }}" data-view="{{ view }}" data-revealed="true">
+    <button type="button"
+            class="text-left hover:text-blue-600 dark:hover:text-blue-400 font-mono break-all"
+            onclick="openStoreContent('{{ entry.key_encoded }}', 'value')">
+        {{ entry.value_preview }}
+    </button>
+    <script type="application/json" id="store-val-hot-{{ entry.key_encoded }}">{{ entry.value_hot|escape }}</script>
+    <script type="application/json" id="store-val-json-{{ entry.key_encoded }}">{{ entry.value_json|escape }}</script>
+</div>

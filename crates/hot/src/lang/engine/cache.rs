@@ -189,13 +189,24 @@ impl Engine {
             None
         };
 
-        // Create a temporary store for tests so ::hot::store functions work
-        let temp_store_path = format!(".hot/test-store-{}", test_id);
+        // Create a temporary store for tests so ::hot::store functions work.
+        // Scope to the test execution context's org/env so the local SQLite backend
+        // matches the multi-tenant semantics of the Postgres backend. The store
+        // shares the test database pool — its tables live alongside everything
+        // else in the main migrations.
         let store: Option<Arc<dyn crate::store::Store>> =
-            match crate::store::sqlite::SqliteStore::new(&temp_store_path).await {
-                Ok(s) => Some(Arc::new(s)),
-                Err(e) => {
-                    tracing::debug!("Test store not available: {e}");
+            match (&database_pool, &test_execution_context) {
+                (Some(pool), Some(ctx)) => {
+                    let oid = ctx.org_id.unwrap_or_else(uuid::Uuid::new_v4);
+                    let eid = ctx.env_id.unwrap_or_else(uuid::Uuid::new_v4);
+                    Some(Arc::new(crate::store::sqlite::SqliteStore::new(
+                        pool.clone(),
+                        oid,
+                        eid,
+                    )))
+                }
+                _ => {
+                    tracing::debug!("Test store not available: no db pool or execution context");
                     None
                 }
             };
@@ -256,9 +267,9 @@ impl Engine {
             let _ = std::fs::remove_dir_all(path);
         }
 
-        // Clean up temporary test store
-        tracing::debug!("Cleaning up temporary test store: {}", temp_store_path);
-        let _ = std::fs::remove_dir_all(&temp_store_path);
+        // The ::hot::store backend now lives in the same SQLite file as the rest
+        // of the test database, so cleanup of `temp_db_path` above already covers
+        // its rows. There is no longer a separate `.hot/test-store-*` directory.
 
         result
     }

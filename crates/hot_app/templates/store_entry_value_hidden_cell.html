@@ -1,0 +1,9 @@
+{% if view == "mobile-cell" %}
+<div id="{{ container_id }}" class="js-store-value-cell text-xs text-gray-700 dark:text-gray-300 break-words mb-2" data-key-encoded="{{ key_encoded }}" data-view="mobile-cell" data-revealed="false">
+    <span class="text-gray-400 dark:text-gray-500">Hidden by default</span>
+</div>
+{% else %}
+<div id="{{ container_id }}" class="js-store-value-cell flex items-center gap-2" data-key-encoded="{{ key_encoded }}" data-view="cell" data-revealed="false">
+    <span class="text-xs text-gray-400 dark:text-gray-500">Hidden by default</span>
+</div>
+{% endif %}

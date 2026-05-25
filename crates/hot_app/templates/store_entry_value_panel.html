@@ -1,0 +1,15 @@
+<div id="entry-value-panel" class="bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Value</h2>
+        <button type="button"
+                onclick="openContentModalWithFormats('Entry Value', decodeStoreSection('entry-val-hot'), decodeStoreSection('entry-val-json'))"
+                class="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+            Open in modal
+        </button>
+    </div>
+    <div class="p-4">
+        <pre class="text-xs whitespace-pre-wrap break-all"><code class="language-hot">{{ entry.value_hot }}</code></pre>
+    </div>
+    <script type="application/json" id="entry-val-hot">{{ entry.value_hot|escape }}</script>
+    <script type="application/json" id="entry-val-json">{{ entry.value_json|escape }}</script>
+</div>

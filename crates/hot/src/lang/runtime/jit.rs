@@ -850,6 +850,22 @@ fn compile_supported_function(
                 .to_string(),
         );
     }
+    if function_calls_lazy_param_function(program, function_info) {
+        return Err(
+            "JIT does not yet compile functions that call lazy-parameter functions safely"
+                .to_string(),
+        );
+    }
+    if function_loads_lazy_thunk(program, function_info) {
+        return Err(
+            "JIT does not yet compile functions that materialize lazy thunks safely".to_string(),
+        );
+    }
+    if function_calls_hotlib(function_info) {
+        return Err(
+            "JIT does not yet compile functions that call hotlib functions safely".to_string(),
+        );
+    }
     for tag in &signature.args {
         if tag.raw_kind().is_none() {
             return Err(format!("Unsupported JIT specialization type: {:?}", tag));
@@ -1035,6 +1051,43 @@ fn compile_supported_function(
         result_kind,
         module,
         func_id,
+    })
+}
+
+fn function_calls_lazy_param_function(
+    program: &BytecodeProgram,
+    function_info: &FunctionInfo,
+) -> bool {
+    function_info.instructions.iter().any(|instruction| {
+        let Instruction::CallUserFunction { function_id, .. } = instruction else {
+            return false;
+        };
+        program
+            .functions
+            .get(*function_id as usize)
+            .is_some_and(|callee| callee.lazy_params.iter().any(|&lazy| lazy))
+    })
+}
+
+fn function_calls_hotlib(function_info: &FunctionInfo) -> bool {
+    function_info
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::CallLibBuiltin { .. }))
+}
+
+fn function_loads_lazy_thunk(program: &BytecodeProgram, function_info: &FunctionInfo) -> bool {
+    function_info.instructions.iter().any(|instruction| {
+        let Instruction::LoadConst { constant, .. } = instruction else {
+            return false;
+        };
+        matches!(
+            program.constants.get(*constant as usize),
+            Some(Constant::Val(Val::Box(b)))
+                if b.as_any()
+                    .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    .is_some_and(|lambda| lambda.is_lazy_param)
+        )
     })
 }
 
@@ -7377,7 +7430,13 @@ fn compile_thunk_inline(
                 Some((error_block, error_raw)) => {
                     builder.switch_to_block(error_block);
                     builder.seal_block(error_block);
-                    builder.def_var(result_var, error_raw);
+                    let error_kind = ctx.register_kind(*src)?;
+                    let owned_error = if error_kind == RawKind::OwnedVal {
+                        clone_owned_raw(builder, helper_refs, error_raw)
+                    } else {
+                        error_raw
+                    };
+                    builder.def_var(result_var, owned_error);
                     return_kind = Some(RawKind::OwnedVal);
                     builder.ins().jump(merge_block, &[]);
                 }
@@ -7385,6 +7444,22 @@ fn compile_thunk_inline(
             Instruction::Return { value } => {
                 let kind = ctx.register_kind(*value)?;
                 let val = ctx.reg_value(builder, *value)?;
+                let (kind, val) = match kind {
+                    RawKind::OwnedVal => (
+                        RawKind::OwnedVal,
+                        clone_owned_raw(builder, helper_refs, val),
+                    ),
+                    RawKind::TypeTag | RawKind::StringConst => (
+                        RawKind::OwnedVal,
+                        materialize_string_const_for_trampoline(
+                            program,
+                            instructions,
+                            *value,
+                            builder,
+                        ),
+                    ),
+                    _ => (kind, val),
+                };
                 builder.def_var(result_var, val);
                 return_kind = Some(kind);
                 builder.ins().jump(merge_block, &[]);
@@ -10159,19 +10234,15 @@ mod tests {
             source: None,
         });
 
-        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
-        let mut vm = make_test_vm(program, conf);
-        assert_eq!(
-            vm.execute_compiled_user_function(0, &[val!(10), val!(5)])
-                .unwrap(),
-            val!(10)
+        let sig = TypeSig::from_args(&[val!(10), val!(5)]);
+        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+            Ok(_) => panic!("lazy thunk callers should bail out of JIT compilation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("lazy"),
+            "expected lazy thunk bailout, got: {err}"
         );
-        assert_eq!(
-            vm.execute_compiled_user_function(0, &[val!(3), val!(7)])
-                .unwrap(),
-            val!(7)
-        );
-        assert!(vm.jit_has_compiled_function(0));
     }
 
     #[test]
@@ -10339,35 +10410,15 @@ mod tests {
             source: None,
         });
 
-        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
-        let mut vm = make_test_vm(program, conf);
-
-        // Basic correctness
-        assert_eq!(
-            vm.execute_compiled_user_function(0, &[val!(0)]).unwrap(),
-            val!(0)
+        let sig = TypeSig::from_args(&[val!(5)]);
+        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+            Ok(_) => panic!("lazy thunk callers should bail out of JIT compilation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("lazy"),
+            "expected lazy thunk bailout, got: {err}"
         );
-        assert_eq!(
-            vm.execute_compiled_user_function(0, &[val!(1)]).unwrap(),
-            val!(1)
-        );
-        assert_eq!(
-            vm.execute_compiled_user_function(0, &[val!(5)]).unwrap(),
-            val!(5)
-        );
-        assert_eq!(
-            vm.execute_compiled_user_function(0, &[val!(10)]).unwrap(),
-            val!(55)
-        );
-
-        // Benchmark
-        let start = std::time::Instant::now();
-        let result = vm.execute_compiled_user_function(0, &[val!(25)]).unwrap();
-        let elapsed = start.elapsed();
-        assert_eq!(result, val!(75025));
-        eprintln!("\n=== JIT fib-recursive(25) with if() thunk inlining ===");
-        eprintln!("  Time: {:?}", elapsed);
-        eprintln!("  (compare: VM fib-recursive(25) = ~19,700ms)");
     }
 
     #[test]

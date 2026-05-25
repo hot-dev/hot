@@ -1,0 +1,258 @@
+{% extends "private_layout.html" %}
+{% block content %}
+<div class="flex flex-col">
+    {% if deleted_flash %}
+    <div class="mb-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-md p-3 text-sm text-green-700 dark:text-green-300">
+        Entry deleted.
+    </div>
+    {% endif %}
+    {% match error_message %}
+    {% when Some with (msg) %}
+    <div class="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-md p-3 text-sm text-red-700 dark:text-red-300">
+        {{ msg }}
+    </div>
+    {% when None %}
+    {% endmatch %}
+
+    <!-- Summary card -->
+    <div class="mb-6 p-5 bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800">
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <h1 class="text-xl font-bold leading-6 text-gray-900 dark:text-gray-100 font-mono break-all">{{ store.name }}</h1>
+            <div class="flex items-center gap-2 text-xs">
+                {% if store.text_search %}
+                <span class="px-2 py-1 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">text-search</span>
+                {% endif %}
+                {% match store.embedding_model %}
+                {% when Some with (model) %}
+                <span class="px-2 py-1 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200" title="model: {{ model }}{% match store.embedding_dimensions %}{% when Some with (d) %}, dim: {{ d }}{% when None %}{% endmatch %}">embedding: {{ model }}</span>
+                {% when None %}
+                {% endmatch %}
+            </div>
+        </div>
+        <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Entries</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">{{ store.entry_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Size</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">{{ store.storage_bytes_formatted }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Embedding Field</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">
+                    {% match store.embedding_field %}{% when Some with (f) %}<span class="font-mono">{{ f }}</span>{% when None %}<span class="text-gray-400 italic">none</span>{% endmatch %}
+                </dd>
+            </div>
+            <div>
+                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Created</dt>
+                <dd class="mt-1 text-gray-900 dark:text-white">
+                    {{ store.created_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}
+                    <span class="text-xs text-gray-400">{{ store.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
+                </dd>
+            </div>
+        </dl>
+    </div>
+
+    <!-- Entry filter card -->
+    <div x-data="storeDetailFilters"
+         data-search-query="{{ search_query }}"
+         data-store-url="/stores/{{ store.name_url }}"
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div class="relative">
+            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
+                    <path fill-rule="evenodd" d="M10.5 3.75a6.75 6.75 0 100 13.5 6.75 6.75 0 000-13.5zM2.25 10.5a8.25 8.25 0 1114.59 5.28l4.69 4.69a.75.75 0 11-1.06 1.06l-4.69-4.69A8.25 8.25 0 012.25 10.5z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <input type="text"
+                   x-model="searchQuery"
+                   placeholder="Search keys and values..."
+                   class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+        </div>
+    </div>
+
+    <!-- Entries content (HTMX target for partial updates) -->
+    <div id="store-entries-content">
+        {% include "components/store_entries_table.html" %}
+    </div>
+</div>
+
+<script>
+function storeDetailFilters() {
+    return {
+        searchQuery: '',
+        searchTimeout: null,
+        storeUrl: '',
+
+        init() {
+            const container = this.$el;
+            this.searchQuery = container.getAttribute('data-search-query') || '';
+            this.storeUrl = container.getAttribute('data-store-url') || window.location.pathname;
+            this.$watch('searchQuery', () => this.debouncedSearch());
+            window.storeDetailFiltersComponent = this;
+        },
+
+        debouncedSearch() {
+            clearTimeout(this.searchTimeout);
+            this.searchTimeout = setTimeout(() => this.applyFilters(), 300);
+        },
+
+        applyFilters() {
+            const params = new URLSearchParams();
+            if (this.searchQuery && this.searchQuery.trim() !== '') {
+                params.set('search', this.searchQuery.trim());
+            }
+            const queryString = params.toString();
+            const url = queryString ? `${this.storeUrl}?${queryString}` : this.storeUrl;
+
+            // On mobile, do full page navigation since HTMX only swaps the desktop content.
+            if (window.innerWidth < 768) {
+                window.location.href = url;
+                return;
+            }
+
+            history.pushState({}, '', url);
+
+            if (window.htmx) {
+                window.htmx.ajax('GET', url, {
+                    target: '#store-entries-content',
+                    swap: 'innerHTML'
+                });
+            } else {
+                window.location.href = url;
+            }
+        }
+    };
+}
+
+function decodeStoreContent(id) {
+    var el = document.getElementById(id);
+    if (!el) return '';
+    var txt = el.textContent || '';
+    var dec = document.createElement('textarea');
+    dec.innerHTML = txt;
+    return dec.value;
+}
+function openStoreContent(keyEncoded, kind) {
+    var prefix = kind === 'key' ? 'store-key' : 'store-val';
+    var hot = decodeStoreContent(prefix + '-hot-' + keyEncoded);
+    var json = decodeStoreContent(prefix + '-json-' + keyEncoded);
+    var title = kind === 'key' ? 'Entry Key' : 'Entry Value';
+    if (hot && json) {
+        openContentModalWithFormats(title, hot, json);
+    } else if (hot) {
+        openContentModal(title, hot);
+    }
+}
+function confirmDeleteStoreEntry(button) {
+    var keyEncoded = button.dataset.keyEncoded || '';
+    var keyPreview = button.dataset.keyPreview || '';
+    showConfirm(
+        'Delete Store Entry',
+        'Permanently delete entry with key ' + keyPreview + '? This cannot be undone.',
+        function () { document.getElementById('delete-entry-' + keyEncoded).submit(); },
+        { confirmText: 'Delete', type: 'warning' }
+    );
+}
+function confirmDeleteStoreEntryMobile(button) {
+    var keyEncoded = button.dataset.keyEncoded || '';
+    var keyPreview = button.dataset.keyPreview || '';
+    showConfirm(
+        'Delete Store Entry',
+        'Permanently delete entry with key ' + keyPreview + '? This cannot be undone.',
+        function () { document.getElementById('m-delete-entry-' + keyEncoded).submit(); },
+        { confirmText: 'Delete', type: 'warning' }
+    );
+}
+{% if is_admin %}
+(function () {
+    var storeNameUrl = '{{ store.name_url }}';
+
+    function valueCells() {
+        return Array.prototype.slice.call(document.querySelectorAll('.js-store-value-cell')).filter(function (cell) {
+            return !!(cell.offsetWidth || cell.offsetHeight || cell.getClientRects().length);
+        });
+    }
+
+    function updateToggleLabel(toggle) {
+        if (!toggle) return;
+        var anyRevealed = valueCells().some(function (cell) {
+            return cell.dataset.revealed === 'true' || cell.dataset.revealed === 'pending';
+        });
+        toggle.textContent = anyRevealed ? 'Hide values' : 'Show values';
+        toggle.setAttribute('aria-pressed', anyRevealed ? 'true' : 'false');
+    }
+
+    function replaceCell(cell, url) {
+        return fetch(url, {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'X-Requested-With': 'fetch' }
+        }).then(function (response) {
+            if (!response.ok) {
+                throw new Error('Store value request failed: ' + response.status);
+            }
+            return response.text();
+        }).then(function (html) {
+            cell.outerHTML = html;
+        }).catch(function (error) {
+            console.warn(error);
+            cell.dataset.revealed = 'false';
+        });
+    }
+
+    function revealVisibleValues(toggle) {
+        var replacements = valueCells().map(function (cell) {
+            var key = cell.dataset.keyEncoded || '';
+            var view = cell.dataset.view === 'mobile-cell' ? 'mobile-cell' : 'cell';
+            var url = '/stores/' + storeNameUrl + '/entries/' + key + '/value?view=' + view;
+            cell.dataset.revealed = 'pending';
+            return replaceCell(cell, url);
+        });
+        Promise.all(replacements).then(function () { updateToggleLabel(toggle); });
+    }
+
+    function hideVisibleValues(toggle) {
+        var replacements = valueCells().map(function (cell) {
+            var key = cell.dataset.keyEncoded || '';
+            var view = cell.dataset.view === 'mobile-cell' ? 'hidden-mobile-cell' : 'hidden-cell';
+            var url = '/stores/' + storeNameUrl + '/entries/' + key + '/value?view=' + view;
+            cell.dataset.revealed = 'false';
+            return replaceCell(cell, url);
+        });
+        Promise.all(replacements).then(function () { updateToggleLabel(toggle); });
+    }
+
+    function bindToggle() {
+        var toggle = document.getElementById('store-values-column-toggle');
+        if (!toggle || toggle.dataset.toggleBound === '1') {
+            updateToggleLabel(toggle);
+            return;
+        }
+        toggle.dataset.toggleBound = '1';
+        toggle.addEventListener('click', function () {
+            var anyRevealed = valueCells().some(function (cell) {
+                return cell.dataset.revealed === 'true' || cell.dataset.revealed === 'pending';
+            });
+            if (anyRevealed) {
+                hideVisibleValues(toggle);
+            } else {
+                revealVisibleValues(toggle);
+            }
+            updateToggleLabel(toggle);
+        });
+        updateToggleLabel(toggle);
+    }
+
+    bindToggle();
+    document.body.addEventListener('htmx:afterSwap', function (event) {
+        if (event.target && event.target.id === 'store-entries-content') {
+            bindToggle();
+        }
+    });
+})();
+{% endif %}
+</script>
+{% endblock %}

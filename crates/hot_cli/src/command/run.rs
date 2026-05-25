@@ -253,9 +253,10 @@ pub(crate) async fn run_run(
     let event_publisher_clone = event_publisher.clone();
     let db_pool_clone = db_pool.clone();
 
-    // Create store and embedding provider from config
+    // Create store and embedding provider from config. Scope to the local default
+    // org/env we resolved earlier so the local SQLite store mirrors Postgres semantics.
     let store: Option<std::sync::Arc<dyn hot::store::Store>> =
-        match hot::store::store_from_config(conf).await {
+        match hot::store::store_from_config_with_db(conf, db_pool.clone(), org_id, env_id).await {
             Ok(s) => Some(std::sync::Arc::from(s)),
             Err(e) => {
                 tracing::debug!("Store not available: {e}");
