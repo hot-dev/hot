@@ -91,6 +91,33 @@ condition => { result }     // With condition
 _ => { result }             // Also valid as default (Rust-style wildcard)
 ```
 
+`cond` conditions use Hot truthiness: `false`, `null`, and `Err` results are
+falsy. Everything else — including `0`, `""`, `[]`, and `{}` — is truthy. An
+`Ok(x)` is truthy iff `x` is truthy. This lets you fall through on missing or
+failed values:
+
+```hot
+display-name cond {
+    user.nickname => { user.nickname }     // skipped if null; "" still matches
+    user.name => { user.name }
+    => { "Anonymous" }
+}
+```
+
+`cond` does not bind the condition's value. To act on a Result without
+auto-unwrapping it, bind first and then check with `is-ok`/`is-err`:
+
+```hot
+config fetch-config()
+result cond {
+    is-ok(config) => { use-config(config) }
+    => { use-defaults() }
+}
+```
+
+When you specifically need to handle empty strings or empty collections, use
+`is-empty(...)` rather than relying on truthiness.
+
 ## Cond-All Flow
 
 Executes ALL branches whose conditions are true. Returns a Map keyed by branch names.
@@ -127,6 +154,15 @@ describe fn match (shape: Shape): Str {
     Shape.Circle => { `Circle with radius ${shape.radius}` }
     Shape.Rectangle => { `Rectangle ${shape.width}x${shape.height}` }
     Shape.Point => { "A point" }
+}
+```
+
+`match` functions may accept extra arguments after the matched value:
+
+```hot
+render fn match (shape: Shape, color: Str): Str {
+    Shape.Circle => { `${color} circle ${shape.radius}` }
+    Shape.Rectangle => { `${color} rectangle ${shape.width}x${shape.height}` }
 }
 ```
 
@@ -229,6 +265,7 @@ process fn (result: Result): Str {
     message match result {
         Result.Ok => { `Success: ${result}` }
         Result.Err => { `Error: ${result}` }
+        _ => { `Unknown: ${result}` }
     }
     message
 }
@@ -294,6 +331,18 @@ fetch-user-data fn parallel (id: Str): Map {
     friends ::http/get(`/users/${id}/friends`)
 }
 // Returns: {profile: ..., posts: ..., friends: ...}
+```
+
+Parallel flow respects dependencies. Independent bindings run concurrently, but
+a binding that references an earlier value waits for that value:
+
+```hot
+enrich-user fn parallel (id: Str): Map {
+    user fetch-user(id)
+    orders fetch-orders(user.id)
+    prefs fetch-preferences(user.id)
+    summary build-summary(orders, prefs)
+}
 ```
 
 ### As Standalone Expression
@@ -374,6 +423,7 @@ process fn (request: Request): Response {
     response match validated {
         Result.Ok => { Response.success(validated) }
         Result.Err => { Response.error(validated) }
+        _ => { Response.error(validated) }
     }
 
     response

@@ -154,7 +154,7 @@ Create shorter names for frequently-used namespaces:
 ::env ::hot::env
 
 // Now use the short form
-api-url ::env/get("API_URL")
+api-url ::env/get("API_URL", "https://api.example.com")
 response ::http/get(api-url)
 ```
 

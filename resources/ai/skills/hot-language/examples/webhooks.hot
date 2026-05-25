@@ -1,0 +1,70 @@
+// Webhook, MCP, and metadata patterns
+::examples::webhooks ns
+
+::env ::hot::env
+::http ::hot::http
+
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+signing-secret ::env/get("WEBHOOK_SECRET", "")
+
+// Function aliases can carry platform metadata while pointing at shared code.
+signup-webhook
+meta {
+    webhook: {
+        service: "leads",
+        path: "/signup",
+        method: "POST",
+    },
+    secret-headers: ["x-signature"],
+}
+handle-signup
+
+handle-signup fn (request: HttpRequest): HttpResponse {
+    if(verify-signature(request.headers, request.body-raw),
+        accept-signup(request),
+        HttpResponse({
+            status: 401,
+            body: {error: "invalid signature"},
+        }))
+}
+
+accept-signup fn (request: HttpRequest): HttpResponse {
+    lead request.body
+
+    send("lead:signup", lead)
+
+    HttpResponse({
+        status: 200,
+        headers: {content-type: "application/json"},
+        body: {ok: true},
+    })
+}
+
+// Expose a tool to an MCP server.
+search-leads
+meta {
+    mcp: {
+        service: "leads",
+        name: "search_leads",
+        description: "Search recent inbound leads by email or company.",
+    },
+}
+fn (params: Map): Vec<Map> {
+    query or(params.query, "")
+    search-lead-index(query)
+}
+
+verify-signature fn (headers: Map?, raw-body: Str?): Bool {
+    not(is-empty(signing-secret))
+}
+
+search-lead-index fn (query: Str): Vec<Map> {
+    [
+        {
+            email: "alice@example.com",
+            company: "Example Co",
+        },
+    ]
+}

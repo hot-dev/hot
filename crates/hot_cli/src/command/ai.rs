@@ -58,6 +58,7 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
 
             println!("\nUse 'hot ai add' to add AI support to this project.");
             println!("Use 'hot ai add --global' to install skills to ~/.skills/");
+            println!("Use 'npx skills add hot-dev/hot-skills' for the public skills.sh source.");
             Ok(())
         }
         AiAction::Update => {

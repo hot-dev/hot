@@ -61,7 +61,7 @@ fn (event) {
 
 // Run daily at 2 AM
 daily-cleanup
-meta {schedule: "0 2 * * *"}
+meta {schedule: "every day at 2am"}
 fn (event) {
     cleanup-old-sessions()
     cleanup-temp-files()
@@ -71,7 +71,7 @@ fn (event) {
 // Run every hour
 hourly-sync
 meta {
-    schedule: "0 * * * *",
+    schedule: "@hourly",
     retry: 3
 }
 fn (event) {
@@ -80,7 +80,7 @@ fn (event) {
 
 // Run every 5 minutes
 health-check
-meta {schedule: "*/5 * * * *"}
+meta {schedule: "every 5 minutes"}
 fn (event) {
     services ["api", "database", "cache"]
 
@@ -137,27 +137,24 @@ fn (event) {
     created create-user(user)
 
     // Send downstream events
-    cond-all {
-        is-ok(created) => welcome {
-            send("user:created", unwrap(created))
-        }
-
-        is-ok(created) => analytics {
+    match created {
+        Result.Ok => {
+            send("user:created", created)
             send("analytics:user-signup", {
-                "user-id": user.id,
-                "source": user.signup-source
+                user-id: user.id,
+                source: user.signup-source,
             })
+            created
         }
 
-        is-err(created) => error {
+        Result.Err => {
             send("user:signup-failed", {
-                "user": user,
-                "error": unwrap-err(created)
+                user,
+                error: created,
             })
+            err(created)
         }
     }
-
-    created
 }
 
 // ============================================
@@ -166,9 +163,9 @@ fn (event) {
 
 send-welcome-email fn (email: Str, name: Str): Map {
     ::http/post("https://email.example.com/send", {
-        "to": email,
-        "template": "welcome",
-        "data": {"name": name}
+        to: email,
+        template: "welcome",
+        data: {name},
     })
 }
 
@@ -186,7 +183,7 @@ process-order fn (order: Order): Map {
         }
 
         Result.Err => {
-            send("order:failed", {"order-id": order.id, "reason": inventory-check})
+            send("order:failed", {order-id: order.id, reason: inventory-check})
             err(inventory-check)
         }
     }
@@ -250,4 +247,3 @@ log fn (msg: Str): Null { print(msg) }
 process-critical fn (data: Any): Any { ok(data) }
 send-escalation fn (event: Any, result: Result): Any { ok(event) }
 create-user fn (user: Any): Any { ok(user) }
-unwrap-err fn (r: Result): Str { "error" }

@@ -182,7 +182,7 @@ reduce-large-range fn (): Int {
 
 // @doc: map-iteration
 map-iteration-example fn (): Map {
-    scores {"alice": 100, "bob": 95, "carol": 88}
+    scores {alice: 100, bob: 95, carol: 88}
 
     formatted map(scores, (name, score) { `${name}: ${score}` })
 

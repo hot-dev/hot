@@ -91,6 +91,10 @@ Commit the resulting `.sqlx/` changes alongside your query change.
   `resources/ai/AGENTS.md` by `cargo run --locked --bin hot -- ai add`. Do not
   hand-edit the root file. CI verifies they are in sync via
   `scripts/check-agents-sync.sh`.
+- **AI skill assets:** `resources/ai/skills/hot-language/` is the source copy
+  bundled with the CLI. After editing it, run
+  `bash scripts/sync-ai-assets.sh ../hot-skills` to update the public
+  `hot-skills` mirror, then `bash scripts/check-ai-assets-sync.sh ../hot-skills`.
 
 ## Testing Your Changes
 

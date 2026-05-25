@@ -15,10 +15,10 @@ User type {
 
 // Create instance (type name IS the constructor)
 alice User({
-    "id": "user-1",
-    "email": "alice@example.com",
-    "name": "Alice",
-    "active": true
+    id: "user-1",
+    email: "alice@example.com",
+    name: "Alice",
+    active: true,
 })
 
 // Access fields
@@ -31,7 +31,7 @@ user-name alice.name
 
 // Type with custom constructor
 Point type fn (x: Int, y: Int): Point {
-    Point({"x": x, "y": y})
+    Point({x, y})
 }
 
 // Now use positional args
@@ -45,7 +45,7 @@ y-coord p1.y
 // Constructor with validation
 PositiveInt type fn (n: Int): PositiveInt {
     if(gt(n, 0),
-        ok(PositiveInt({"value": n})),
+        ok(PositiveInt({value: n})),
         err("Must be positive"))
 }
 
@@ -67,14 +67,14 @@ Company type {
 }
 
 acme Company({
-    "name": "Acme Corp",
-    "address": Address({
-        "street": "123 Main St",
-        "city": "Springfield",
-        "country": "USA",
-        "zip": "12345"
+    name: "Acme Corp",
+    address: Address({
+        street: "123 Main St",
+        city: "Springfield",
+        country: "USA",
+        zip: "12345",
     }),
-    "employees": [alice]
+    employees: [alice],
 })
 
 // Nested access
@@ -291,6 +291,7 @@ check-err is-err(failure)  // true
 handle-result fn match (r: Result): Str {
     Result.Ok => { `Success: ${r}` }
     Result.Err => { `Error: ${r}` }
+    _ => { `Result: ${r}` }
 }
 
 // Chain results (return type is the Ok value type)
@@ -356,7 +357,7 @@ StringPair type {
 }
 
 make-string-pair fn (a: Str, b: Str): StringPair {
-    StringPair({"first": a, "second": b})
+    StringPair({first: a, second: b})
 }
 
 // Result transformation

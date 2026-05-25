@@ -341,6 +341,14 @@ hot ai add              # Add AGENTS.md + .skills/hot-language/ to project
 hot ai add --global     # Install skills to ~/.skills/ (available in all projects)
 ```
 
+`hot ai add` installs the Hot language skill snapshot bundled with your Hot
+release, so it works offline and does not require Node or GitHub access. To
+install the latest public skill from the skills.sh ecosystem instead, use:
+
+```bash
+npx skills add hot-dev/hot-skills
+```
+
 Files created:
 - `AGENTS.md` — AI agent instructions (passive context)
 - `.skills/hot-language/` — Detailed Hot language skill with references

@@ -190,6 +190,7 @@ process-result fn (result: Result): Str {
     message match result {
         Result.Ok => { `Success: ${result}` }
         Result.Err => { `Error: ${result}` }
+        _ => { `Unknown: ${result}` }
     }
 
     message
