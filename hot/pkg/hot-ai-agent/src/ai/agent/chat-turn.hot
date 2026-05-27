@@ -51,6 +51,7 @@ Identity     ::session/Identity
 AgentRuntime ::rt/AgentRuntime
 ChatOptions  ::ai-chat/ChatOptions
 ReplyDelta   ::ai-chat/ReplyDelta
+MemoryOptions ::memory/MemoryOptions
 
 DEFAULT_RECALL_OPTS {limit: 5, min-score: 0.3}
 
@@ -69,6 +70,7 @@ type {
     stream-label: Str,
     chat-opts: ChatOptions,
     system-base: Str,
+    memory-opts: MemoryOptions?,
 }
 
 TurnInput
@@ -94,6 +96,9 @@ meta {
       caller via `::ai::agent::request/session` /
       `::ai::agent::request/sender`.
     - `ctx-extras` — additional fields stored under `ai.agent.extras`.
+    - `memory-opts` on `TurnConfig` — optional store embedding config
+      passed to every internal `::ai::memory/create-memory-with-options`
+      call so recall and persistence use the same vector provider.
     - `user-source` / `user-metadata` — source field + metadata map for
       the persisted user record. Default source is `cfg.agent-name`.
     - `assistant-source` / `assistant-metadata` — same for the
@@ -199,13 +204,19 @@ meta {
     """
 }
 fn (cfg: TurnConfig, input: TurnInput): Null {
-    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    mem ::memory/create-memory-with-options(cfg.agent-name, input.session, input.sender, cfg.memory-opts)
     p or(input.payload, {})
     default-meta {
-        message_id: or(get(p, "message_id"), ""),
-        source_id:  or(get(p, "message_id"), ""),
-        attachment_count: length(or(input.attachments, [])),
-    }
+    message_id: or(get(p,
+    "message_id"),
+    ""),
+    source_id:  or(get(p,
+    "message_id"),
+    ""),
+    attachment_count: length(or(input.attachments,
+    [])),
+}
+
     base-meta or(input.user-metadata, default-meta)
     msg ::message/Message({
         id: Str(or(get(p, "message_id"), Uuid())),
@@ -233,7 +244,7 @@ fn (cfg: TurnConfig, input: TurnInput, text: Str): Null {
     cond {
         is-empty(trim(or(text, ""))) => { null }
         => {
-            mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+            mem ::memory/create-memory-with-options(cfg.agent-name, input.session, input.sender, cfg.memory-opts)
             base-meta or(input.assistant-metadata, {})
             msg ::message/Message({
                 id: Str(Uuid()),
@@ -262,7 +273,7 @@ meta {
     """
 }
 fn (cfg: TurnConfig, input: TurnInput): Str {
-    mem ::memory/create-memory(cfg.agent-name, input.session, input.sender)
+    mem ::memory/create-memory-with-options(cfg.agent-name, input.session, input.sender, cfg.memory-opts)
     recall-opts or(input.recall-opts, DEFAULT_RECALL_OPTS)
     context ::rag/build-context-safe(mem, input.text, recall-opts)
     ::rag/with-memory-block(cfg.system-base, context, input.memory-heading)
@@ -281,6 +292,7 @@ fn (cfg: TurnConfig, payload: Map, system: Str, prompt: Str): Str {
             ReplyDelta.TextDelta => {
                 ::stream/emit-reply-delta(cfg.stream-label, {...payload, delta: delta.text})
             }
+
             _ => { null }
         }
     }

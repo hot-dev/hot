@@ -199,6 +199,7 @@ Falcon type {
     species: Str,
     wingspan: Dec
 }
+
 Falcon -> Critter.Falcon
 
 // Role-shaped variant: the variant name (Scaly) need not match the
@@ -207,6 +208,7 @@ Falcon -> Critter.Falcon
 Gecko type {
     length-cm: Dec
 }
+
 Gecko -> Critter.Scaly
 
 // Construct enrolled variants like any other.

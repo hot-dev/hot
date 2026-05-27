@@ -32,10 +32,15 @@ async fn seed_two_stores(db: &Arc<hot::db::DatabasePool>, org_id: Uuid, env_id: 
     store
         .ensure_store(&StoreMapConfig {
             name: "settings".to_string(),
+            embedding_provider: None,
             embedding_model: None,
+            embedding_conf: None,
             embedding_field: None,
             embedding_dimensions: None,
             text_search: false,
+            embedding_on_error: None,
+            embed_fn: None,
+            embed_batch_fn: None,
         })
         .await
         .unwrap();
@@ -67,10 +72,15 @@ async fn seed_two_stores(db: &Arc<hot::db::DatabasePool>, org_id: Uuid, env_id: 
     store
         .ensure_store(&StoreMapConfig {
             name: "docs".to_string(),
+            embedding_provider: Some("openai".to_string()),
             embedding_model: Some("text-embedding-3-small".to_string()),
+            embedding_conf: None,
             embedding_field: Some("body".to_string()),
             embedding_dimensions: Some(1536),
             text_search: true,
+            embedding_on_error: None,
+            embed_fn: None,
+            embed_batch_fn: None,
         })
         .await
         .unwrap();

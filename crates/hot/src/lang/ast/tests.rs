@@ -198,10 +198,12 @@ fn test_value_type_def_roundtrip() {
             TypeField {
                 name: Sym::String("id".to_string()),
                 type_annotation: "Int".to_string(),
+                type_expr: TypeExpr::Simple("Int".to_string()),
             },
             TypeField {
                 name: Sym::String("name".to_string()),
                 type_annotation: "Str".to_string(),
+                type_expr: TypeExpr::Simple("Str".to_string()),
             },
         ]),
         type_alias: None,

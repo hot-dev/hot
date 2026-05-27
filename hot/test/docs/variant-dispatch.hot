@@ -26,6 +26,7 @@ Aquatic type {
     species: Str,
     depth: Int
 }
+
 Aquatic -> Critter.Fish
 
 // -- Variant tag is what `match` dispatches on --

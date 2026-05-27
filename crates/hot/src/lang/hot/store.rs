@@ -50,6 +50,18 @@ fn call_fn_with_vm(
             {
                 vm.execute_lambda(function_val, args)
                     .map_err(|e| format!("{e:?}"))
+            } else if let Some(function_ref) = boxed
+                .as_any()
+                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>(
+            ) {
+                let name = function_ref.name();
+                if let Some(fid) = vm.find_best_user_function_overload(name, args) {
+                    return vm
+                        .execute_compiled_user_function(fid, args)
+                        .map_err(|e| format!("{e:?}"));
+                }
+                vm.execute_function_call_by_name(name, args)
+                    .map_err(|e| format!("{e:?}"))
             } else {
                 Err("Unsupported function type for store callback".to_string())
             }
@@ -74,6 +86,18 @@ fn get_store(vm: &VirtualMachine) -> Result<std::sync::Arc<dyn store::Store>, Va
 fn get_store_config(vm: &VirtualMachine, map_val: &Val) -> Result<StoreMapConfig, Val> {
     let mut config = store::store_map_config_from_val(map_val).map_err(Val::from)?;
     store::resolve_embedding_model(&mut config, Some(vm.get_conf()));
+
+    if config.embedding_model.is_some()
+        && config.embed_fn.is_none()
+        && config.embed_batch_fn.is_none()
+        && config.embedding_dimensions.is_none()
+        && let Some(provider) = vm.get_embedding_provider()
+    {
+        config.embedding_dimensions = Some(provider.dimensions());
+        store::refresh_embedding_conf(&mut config);
+    }
+
+    store::validate_provider_config(&config).map_err(Val::from)?;
     Ok(config)
 }
 
@@ -87,20 +111,203 @@ fn ensure_store(
     Ok((store, config))
 }
 
-fn maybe_embed(vm: &VirtualMachine, config: &StoreMapConfig, value: &Val) -> Option<Vec<f32>> {
-    config.embedding_model.as_ref()?;
-    let provider = vm.get_embedding_provider()?;
+fn custom_embedding_is_strict(config: &StoreMapConfig) -> bool {
+    (config.embed_fn.is_some() || config.embed_batch_fn.is_some())
+        && config.embedding_on_error.as_deref() != Some("skip")
+}
 
-    let field = config.embedding_field.as_deref().unwrap_or("content");
-    let text = extract_text_for_embedding(value, field)?;
+fn vector_from_val(value: Val, expected_dimensions: Option<u32>) -> Result<Vec<f32>, String> {
+    let Val::Vec(items) = value else {
+        return Err(format!(
+            "Embedding function must return Vec<Dec | Int>, got {value}"
+        ));
+    };
 
-    match block_on(provider.embed(&text)) {
-        Ok(emb) => Some(emb),
-        Err(e) => {
-            tracing::warn!("Embedding failed: {e}");
-            None
-        }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let n = match item {
+            Val::Int(i) => i as f32,
+            Val::Dec(d) => d.to_string().parse::<f32>().map_err(|e| {
+                format!("Embedding vector contains a Dec that cannot be converted to f32: {e}")
+            })?,
+            Val::Byte(b) => b as f32,
+            other => {
+                return Err(format!(
+                    "Embedding vector values must be Dec or Int, got {other}"
+                ));
+            }
+        };
+        out.push(n);
     }
+
+    if let Some(dimensions) = expected_dimensions
+        && out.len() != dimensions as usize
+    {
+        return Err(format!(
+            "Embedding vector has {} dimensions, expected {dimensions}",
+            out.len()
+        ));
+    }
+
+    Ok(out)
+}
+
+fn batch_vectors_from_val(
+    value: Val,
+    expected_count: usize,
+    expected_dimensions: Option<u32>,
+) -> Result<Vec<Vec<f32>>, String> {
+    let Val::Vec(items) = value else {
+        return Err(format!(
+            "Batch embedding function must return Vec<Vec<Dec | Int>>, got {value}"
+        ));
+    };
+
+    if items.len() != expected_count {
+        return Err(format!(
+            "Batch embedding function returned {} vectors, expected {expected_count}",
+            items.len()
+        ));
+    }
+
+    items
+        .into_iter()
+        .map(|item| vector_from_val(item, expected_dimensions))
+        .collect()
+}
+
+fn handle_embedding_error(
+    config: &StoreMapConfig,
+    message: String,
+) -> Result<Option<Vec<f32>>, Val> {
+    if custom_embedding_is_strict(config) {
+        Err(Val::from(message))
+    } else {
+        tracing::warn!("{message}");
+        Ok(None)
+    }
+}
+
+fn embed_text(
+    vm: &mut VirtualMachine,
+    config: &StoreMapConfig,
+    text: &str,
+    strict_missing_provider: bool,
+) -> Result<Option<Vec<f32>>, Val> {
+    if config.embedding_model.is_none() {
+        return Ok(None);
+    }
+
+    if let Some(embed_fn) = &config.embed_fn {
+        if config.embedding_dimensions.is_none() {
+            return Err(Val::from(
+                "Custom store embedding functions require a positive 'dimensions' value",
+            ));
+        }
+
+        return match call_fn_with_vm(vm, embed_fn, &[Val::from(text)]) {
+            Ok(value) => vector_from_val(value, config.embedding_dimensions)
+                .map(Some)
+                .map_err(Val::from),
+            Err(e) => handle_embedding_error(config, format!("Embedding failed: {e}")),
+        };
+    }
+
+    if let Some(provider) = vm.get_embedding_provider() {
+        match block_on(provider.embed(text)) {
+            Ok(emb) => {
+                if let Some(dimensions) = config.embedding_dimensions
+                    && emb.len() != dimensions as usize
+                {
+                    return Err(Val::from(format!(
+                        "Embedding provider returned {} dimensions, expected {dimensions}",
+                        emb.len()
+                    )));
+                }
+                Ok(Some(emb))
+            }
+            Err(e) => handle_embedding_error(config, format!("Embedding failed: {e}")),
+        }
+    } else if strict_missing_provider {
+        Err(Val::from(
+            "Embedding provider not configured but store has embeddings enabled",
+        ))
+    } else {
+        tracing::warn!("Embedding provider not configured; storing value without embedding");
+        Ok(None)
+    }
+}
+
+fn embed_value(
+    vm: &mut VirtualMachine,
+    config: &StoreMapConfig,
+    value: &Val,
+) -> Result<Option<Vec<f32>>, Val> {
+    let field = config.embedding_field.as_deref().unwrap_or("content");
+    let Some(text) = extract_text_for_embedding(value, field) else {
+        return Ok(None);
+    };
+
+    embed_text(vm, config, &text, false)
+}
+
+fn embed_values(
+    vm: &mut VirtualMachine,
+    config: &StoreMapConfig,
+    values: &[&Val],
+) -> Result<Vec<Option<Vec<f32>>>, Val> {
+    if config.embedding_model.is_none() {
+        return Ok(vec![None; values.len()]);
+    }
+
+    if let Some(embed_batch_fn) = &config.embed_batch_fn {
+        if config.embedding_dimensions.is_none() {
+            return Err(Val::from(
+                "Custom store batch embedding functions require a positive 'dimensions' value",
+            ));
+        }
+
+        let field = config.embedding_field.as_deref().unwrap_or("content");
+        let mut text_positions = Vec::new();
+        let mut texts = Vec::new();
+        for (idx, value) in values.iter().enumerate() {
+            if let Some(text) = extract_text_for_embedding(value, field) {
+                text_positions.push(idx);
+                texts.push(Val::from(text));
+            }
+        }
+
+        if texts.is_empty() {
+            return Ok(vec![None; values.len()]);
+        }
+
+        let batch_result = call_fn_with_vm(vm, embed_batch_fn, &[Val::Vec(texts)]);
+        let vectors = match batch_result {
+            Ok(value) => {
+                batch_vectors_from_val(value, text_positions.len(), config.embedding_dimensions)
+                    .map_err(Val::from)?
+            }
+            Err(e) => {
+                return if custom_embedding_is_strict(config) {
+                    Err(Val::from(format!("Batch embedding failed: {e}")))
+                } else {
+                    tracing::warn!("Batch embedding failed: {e}");
+                    Ok(vec![None; values.len()])
+                };
+            }
+        };
+
+        let mut out = vec![None; values.len()];
+        for (position, vector) in text_positions.into_iter().zip(vectors) {
+            out[position] = Some(vector);
+        }
+        return Ok(out);
+    }
+
+    values
+        .iter()
+        .map(|value| embed_value(vm, config, value))
+        .collect()
 }
 
 fn extract_text_for_embedding(value: &Val, field: &str) -> Option<String> {
@@ -162,7 +369,10 @@ pub fn put(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let key_json = val_to_json(&args[1]);
     let value_json = val_to_json(&args[2]);
-    let embedding = maybe_embed(vm, &config, &args[2]);
+    let embedding = match embed_value(vm, &config, &args[2]) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
     let text_content = extract_text_content(&args[2], &config);
 
     match block_on(store.put(&config.name, key_json, value_json, embedding, text_content)) {
@@ -304,11 +514,16 @@ pub fn merge(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    let values: Vec<&Val> = entries_map.values().collect();
+    let embeddings = match embed_values(vm, &config, &values) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
+
     let mut count = 0i64;
-    for (k, v) in entries_map.iter() {
+    for ((k, v), embedding) in entries_map.iter().zip(embeddings) {
         let key_json = val_to_json(k);
         let value_json = val_to_json(v);
-        let embedding = maybe_embed(vm, &config, v);
         let text_content = extract_text_content(v, &config);
         match block_on(store.put(&config.name, key_json, value_json, embedding, text_content)) {
             Ok(_) => count += 1,
@@ -392,17 +607,9 @@ pub fn search(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let query_embedding = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
-        if let Some(provider) = vm.get_embedding_provider() {
-            match block_on(provider.embed(&query)) {
-                Ok(emb) => Some(emb),
-                Err(e) => return HotResult::Err(Val::from(format!("Embedding query failed: {e}"))),
-            }
-        } else if config.embedding_model.is_some() {
-            return HotResult::Err(Val::from(
-                "Embedding provider not configured but store has embeddings enabled",
-            ));
-        } else {
-            None
+        match embed_text(vm, &config, &query, true) {
+            Ok(v) => v,
+            Err(e) => return HotResult::Err(e),
         }
     } else {
         None
@@ -593,5 +800,29 @@ pub fn destroy(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     match block_on(store.destroy(&config.name)) {
         Ok(()) => HotResult::Ok(Val::Bool(true)),
         Err(e) => HotResult::Err(Val::from(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_from_val_accepts_numeric_vec() {
+        let vector = vector_from_val(Val::Vec(vec![Val::Int(1), Val::Int(2)]), Some(2)).unwrap();
+        assert_eq!(vector, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn vector_from_val_rejects_dimension_mismatch() {
+        let err = vector_from_val(Val::Vec(vec![Val::Int(1)]), Some(2)).unwrap_err();
+        assert!(err.contains("expected 2"));
+    }
+
+    #[test]
+    fn batch_vectors_from_val_validates_count() {
+        let batch = Val::Vec(vec![Val::Vec(vec![Val::Int(1), Val::Int(2)])]);
+        let err = batch_vectors_from_val(batch, 2, Some(2)).unwrap_err();
+        assert!(err.contains("expected 2"));
     }
 }

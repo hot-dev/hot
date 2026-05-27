@@ -38,7 +38,7 @@ pub use runtime::vm::VirtualMachine;
 
 /// Version identifier for the implementation
 /// Used for cache validation to ensure compatibility
-pub const VERSION: &str = "2.0.0-bytecode";
+pub const VERSION: &str = "2.1.0-bytecode";
 
 /// Cache format version - increment when BytecodeProgram serialization format changes
 /// Version 4: Added pre-built HotAst with variable index for fast cached execution

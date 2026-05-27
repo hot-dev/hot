@@ -5,6 +5,20 @@ meta ["test"]
 
 settings ::store/Map({name: "test-settings"})
 
+test-embedding-shorthand-coerces-to-custom
+meta ["test"] fn () {
+    s ::store/Map({
+        name: "test-embedding-shorthand",
+        embedding: ::store/Embedding({
+            provider: "test",
+            model: "custom-v1",
+            dimensions: 2,
+        }),
+    })
+    assert-eq("test", s.embedding.$val.provider, "Embedding(...) coerces to EmbeddingOptions.Embedding")
+    assert-eq("custom-v1", s.embedding.$val.model, "custom embedding payload is preserved")
+}
+
 test-put-and-get
 meta ["test"] fn () {
     ::store/put(settings, "host", "localhost")

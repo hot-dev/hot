@@ -32,7 +32,9 @@ mod tests;
 // callers (`crate::lang::compiler::EventHandler`, etc.) keep working.
 pub use artifacts::*;
 
-use crate::lang::ast::{Flow, FlowType, FnCall, FnDef, Meta, Namespace, Program, Ref, Value, Var};
+use crate::lang::ast::{
+    BuiltinType, Flow, FlowType, FnCall, FnDef, Meta, Namespace, Program, Ref, TypeExpr, Value, Var,
+};
 use crate::lang::bytecode::{
     BytecodeProgram, CompilationStats, Constant, FunctionId, FunctionInfo, Instruction, RegisterId,
 };
@@ -4557,18 +4559,17 @@ impl Compiler {
 
             for field in fields {
                 let field_name = field.name.to_string();
-                let field_type = &field.type_annotation;
 
                 // Track all field names
                 all_fields.push(Val::from(field_name.clone()));
 
                 // Track required fields (non-optional)
-                if !field_type.ends_with('?') {
+                if !Self::type_expr_allows_null(&field.type_expr) {
                     required_fields.push(Val::from(field_name.clone()));
                 }
 
                 // Check if this field has a custom (non-builtin) type that needs construction
-                let field_type_info = self.build_field_type_info(field_type);
+                let field_type_info = self.build_field_type_info_from_expr(&field.type_expr, false);
                 if !Self::is_empty_map(&field_type_info) {
                     fields_info.insert(Val::from(field_name), field_type_info);
                 }
@@ -4593,59 +4594,103 @@ impl Compiler {
         Val::Map(Box::new(type_info))
     }
 
-    /// Build type info for a field type annotation
-    /// Returns empty map for builtin types (no construction needed)
-    fn build_field_type_info(&self, type_annotation: &str) -> Val {
-        let type_str = type_annotation.trim();
+    fn build_field_type_info_from_expr(&self, type_expr: &TypeExpr, include_builtin: bool) -> Val {
+        match type_expr {
+            TypeExpr::Union(parts) => {
+                let members = parts
+                    .iter()
+                    .map(|part| self.build_field_type_info_from_expr(part, true))
+                    .filter(|info| !Self::is_empty_map(info))
+                    .collect::<Vec<_>>();
 
-        // Handle optional types (T?)
-        let (base_type, is_optional) = if let Some(inner) = type_str.strip_suffix('?') {
-            (inner, true)
-        } else {
-            (type_str, false)
-        };
+                if members.is_empty() {
+                    return Val::map_empty();
+                }
 
-        // Check for Vec<T> - need to handle item type
-        if base_type.starts_with("Vec<") && base_type.ends_with('>') {
-            let inner_type = &base_type[4..base_type.len() - 1];
-            let item_type_info = self.build_field_type_info(inner_type);
-
-            if !Self::is_empty_map(&item_type_info) {
-                let mut vec_info = indexmap::IndexMap::new();
-                vec_info.insert(Val::from("$type"), Val::from("Vec"));
-                vec_info.insert(Val::from("$item_type"), item_type_info);
-                return Val::Map(Box::new(vec_info));
+                let mut union_info = indexmap::IndexMap::new();
+                union_info.insert(Val::from("$union"), Val::Vec(members));
+                Val::Map(Box::new(union_info))
             }
+            TypeExpr::Optional(inner) => {
+                let mut info = self.build_field_type_info_from_expr(inner, true);
+                if let Val::Map(map) = &mut info {
+                    map.insert(Val::from("$optional"), Val::Bool(true));
+                }
+                info
+            }
+            TypeExpr::Generic(name, params) if name == "Vec" && params.len() == 1 => {
+                let item_type_info = self.build_field_type_info_from_expr(&params[0], false);
+                if !Self::is_empty_map(&item_type_info) || include_builtin {
+                    let mut vec_info = indexmap::IndexMap::new();
+                    vec_info.insert(Val::from("$type"), Val::from("Vec"));
+                    if !Self::is_empty_map(&item_type_info) {
+                        vec_info.insert(Val::from("$item_type"), item_type_info);
+                    }
+                    Val::Map(Box::new(vec_info))
+                } else {
+                    Val::map_empty()
+                }
+            }
+            TypeExpr::Generic(name, _) if name == "Map" => Val::map_empty(),
+            TypeExpr::Builtin(builtin) => self.build_builtin_type_info(builtin, include_builtin),
+            TypeExpr::Any => {
+                if include_builtin {
+                    Self::simple_type_info("Any")
+                } else {
+                    Val::map_empty()
+                }
+            }
+            TypeExpr::Simple(name) | TypeExpr::Named(name) => {
+                if Self::is_builtin_type_name(name) {
+                    if include_builtin {
+                        Self::simple_type_info(name)
+                    } else {
+                        Val::map_empty()
+                    }
+                } else {
+                    self.build_custom_type_info(name)
+                }
+            }
+            TypeExpr::Literal(lit) => {
+                let mut type_info = indexmap::IndexMap::new();
+                type_info.insert(Val::from("$literal"), Val::from(lit.to_string()));
+                Val::Map(Box::new(type_info))
+            }
+            TypeExpr::Generic(name, _) => self.build_custom_type_info(name),
+        }
+    }
+
+    fn build_builtin_type_info(&self, builtin: &BuiltinType, include_builtin: bool) -> Val {
+        if !include_builtin {
             return Val::map_empty();
         }
 
-        // Check for Map<K, V> - need to handle value type
-        if base_type.starts_with("Map<") && base_type.ends_with('>') {
-            // For now, don't recursively construct Map values
-            // This could be enhanced later
-            return Val::map_empty();
-        }
+        Self::simple_type_info(&builtin.to_string())
+    }
 
-        // Check if it's a builtin type
-        if Self::is_builtin_type_name(base_type) {
-            return Val::map_empty();
-        }
-
-        // Custom type - needs construction
-        // Resolve to fully qualified name, following aliases
-        let (qualified_name, _found) = self.resolve_type_path(base_type);
+    fn build_custom_type_info(&self, type_name: &str) -> Val {
+        let (qualified_name, _found) = self.resolve_type_path(type_name);
 
         let mut type_info = indexmap::IndexMap::new();
         type_info.insert(Val::from("$type"), Val::from(qualified_name));
-
-        // Note: For enum types, the VM will infer variants at runtime by trying
-        // each variant's constructor. This avoids needing AST access here.
-
-        if is_optional {
-            type_info.insert(Val::from("$optional"), Val::Bool(true));
-        }
-
         Val::Map(Box::new(type_info))
+    }
+
+    fn simple_type_info(type_name: &str) -> Val {
+        let mut type_info = indexmap::IndexMap::new();
+        type_info.insert(Val::from("$type"), Val::from(type_name));
+        Val::Map(Box::new(type_info))
+    }
+
+    fn type_expr_allows_null(type_expr: &TypeExpr) -> bool {
+        match type_expr {
+            TypeExpr::Optional(_) => true,
+            TypeExpr::Union(parts) => parts.iter().any(Self::type_expr_allows_null),
+            TypeExpr::Literal(crate::lang::ast::LiteralType::Null) => true,
+            TypeExpr::Builtin(BuiltinType::Null) => true,
+            TypeExpr::Simple(name) | TypeExpr::Named(name) => name == "Null",
+            _ => false,
+        }
     }
 
     /// Check if a type name is a builtin type

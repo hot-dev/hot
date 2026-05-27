@@ -2638,6 +2638,7 @@ impl Parser {
                             fields.push(crate::lang::ast::TypeField {
                                 name: crate::lang::ast::Sym::String(field_name),
                                 type_annotation: field_type.to_string(),
+                                type_expr: field_type,
                             });
 
                             // Skip newlines after field type

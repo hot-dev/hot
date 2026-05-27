@@ -43,6 +43,8 @@ This registers `SupportAgent` as an agent. The type name is the identifier; `nam
 ::store ::hot::store
 ::ctx ::hot::ctx
 
+EmbeddingOptions ::store/EmbeddingOptions
+
 SupportAgent meta {
   doc: """
     Customer support agent that responds to tickets,
@@ -70,12 +72,12 @@ support-agent SupportAgent({
 })
 
 // Shared knowledge base (static name, safe at namespace level)
-kb ::store/Map({name: "support:kb", embedding: true})
+kb ::store/Map({name: "support:kb", embedding: EmbeddingOptions.Default})
 
 on-ticket meta {agent: SupportAgent, on-event: "support:ticket"}
 fn (event) {
   // Per-stream memory (needs event.stream-id, so created inside the handler)
-  memory ::store/Map({name: `support:${event.stream-id}`, embedding: true})
+  memory ::store/Map({name: `support:${event.stream-id}`, embedding: EmbeddingOptions.Default})
   context ::store/search(kb, event.data.message, {limit: 5})
   history ::store/search(memory, event.data.message, {limit: 10})
   response generate-reply(support-agent, context, history, event.data.message)
@@ -85,7 +87,7 @@ fn (event) {
 
 on-feedback meta {agent: SupportAgent, on-event: "support:feedback"}
 fn (event) {
-  memory ::store/Map({name: `support:${event.stream-id}`, embedding: true})
+  memory ::store/Map({name: `support:${event.stream-id}`, embedding: EmbeddingOptions.Default})
   ::store/put(memory, Uuid(), {type: "feedback", rating: event.data.rating})
 }
 
@@ -351,9 +353,11 @@ mode like `::hot::file` direct access.
 Each stream can have its own memory, isolated by stream ID. Since the map name depends on the stream ID, create it inside the handler where `event` is available:
 
 ```hot
+EmbeddingOptions ::hot::store/EmbeddingOptions
+
 on-ticket meta {agent: SupportAgent, on-event: "support:ticket"}
 fn (event) {
-  memory ::store/Map({name: `support:${event.stream-id}`, embedding: true})
+  memory ::store/Map({name: `support:${event.stream-id}`, embedding: EmbeddingOptions.Default})
 
   history ::store/search(memory, event.data.message, {limit: 10})
   ::store/put(memory, Uuid(), {role: "user", content: event.data.message})
@@ -368,7 +372,9 @@ fn (event) {
 A knowledge base shared across all streams uses a static name, so the map definition goes at the namespace level. Handlers search it; a separate handler or schedule populates it:
 
 ```hot
-kb ::store/Map({name: "support:kb", embedding: true})
+EmbeddingOptions ::hot::store/EmbeddingOptions
+
+kb ::store/Map({name: "support:kb", embedding: EmbeddingOptions.Default})
 
 on-ticket meta {agent: SupportAgent, on-event: "support:ticket"}
 fn (event) {

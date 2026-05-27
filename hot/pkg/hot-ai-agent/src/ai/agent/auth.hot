@@ -406,17 +406,14 @@ Verifier
 meta {
     doc: """
     A single auth check. Compose with `verify` and `protect`. Build via
-    one of the constructor helpers below — never construct by hand
-    unless you want to thread an unknown `kind`.
-
-    - `kind` — `"platform"`, `"hmac"`, `"shared-secret"`, or
-      `"anonymous"`.
-    - `options` — the typed options for the kind.
+    one of the constructor helpers below.
     """
 }
-type {
-    kind: Str,
-    options: Any,
+enum {
+    Platform(PlatformOptions),
+    Hmac(HmacOptions),
+    SharedSecret(BearerOptions),
+    Anonymous,
 }
 
 platform-verifier
@@ -437,13 +434,13 @@ meta {
 fn
 (): Verifier { platform-verifier(PlatformOptions({})) },
 (opts: PlatformOptions): Verifier {
-    Verifier({kind: "platform", options: opts})
+    Verifier.Platform(opts)
 }
 
 hmac-verifier
 meta { doc: "Build a `Verifier` for an HMAC-signed body. See `HmacOptions`." }
 fn (opts: HmacOptions): Verifier {
-    Verifier({kind: "hmac", options: opts})
+    Verifier.Hmac(opts)
 }
 
 shared-secret-verifier
@@ -451,7 +448,7 @@ meta {
     doc: "Build a `Verifier` for a shared-secret bearer token. See `BearerOptions`."
 }
 fn (opts: BearerOptions): Verifier {
-    Verifier({kind: "shared-secret", options: opts})
+    Verifier.SharedSecret(opts)
 }
 
 anonymous
@@ -463,19 +460,18 @@ meta {
     """
 }
 fn (): Verifier {
-    Verifier({kind: "anonymous", options: null})
+    Verifier.Anonymous
 }
 
 run-verifier
 meta { doc: "Internal: dispatch a single `Verifier` against a request." }
 fn (request: Any, body: Str, verifier: Verifier): AuthResult {
     headers or(get(or(request, {}), "headers"), {})
-    cond {
-        eq(verifier.kind, "platform") => { verify-platform(request, verifier.options) }
-        eq(verifier.kind, "hmac") => { verify-hmac(headers, body, verifier.options) }
-        eq(verifier.kind, "shared-secret") => { verify-shared-secret(headers, verifier.options) }
-        eq(verifier.kind, "anonymous") => { ok-result() }
-        => { fail-result(`unknown-verifier-kind:${verifier.kind}`) }
+    match verifier {
+        Verifier.Platform => { verify-platform(request, verifier.$val) }
+        Verifier.Hmac => { verify-hmac(headers, body, verifier.$val) }
+        Verifier.SharedSecret => { verify-shared-secret(headers, verifier.$val) }
+        Verifier.Anonymous => { ok-result() }
     }
 }
 

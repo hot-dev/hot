@@ -11,6 +11,7 @@ Session  ::session/Session
 Identity ::session/Identity
 Message  ::ai::message/Message
 Role     ::ai::message/Role
+EmbeddingOptions ::store/EmbeddingOptions
 
 // ============================================================================
 // AgentMemory — bundles the three scoped stores
@@ -28,6 +29,24 @@ type {
     session-store: ::hot::store/Map,
     user-store: ::hot::store/Map,
     kb-store: ::hot::store/Map,
+}
+
+MemoryOptions
+meta {
+    doc: """
+    Optional store configuration for `create-memory-with-options`.
+
+    `embedding` is the default for session and KB memory stores.
+    `session-embedding` and `kb-embedding` override that default for
+    their specific stores. Pass `::hot::store/EmbeddingOptions.Default` for
+    system defaults, `::hot::store/EmbeddingOptions.Off` to disable, or
+    `::hot::store/Embedding({...})` for Hot-level providers.
+    """
+}
+type {
+    embedding: ::hot::store/EmbeddingOptions?,
+    session-embedding: ::hot::store/EmbeddingOptions?,
+    kb-embedding: ::hot::store/EmbeddingOptions?,
 }
 
 MemoryProvenance
@@ -158,6 +177,32 @@ type {
 create-memory
 meta { doc: "Build an AgentMemory with all three scoped stores." }
 fn (agent-name: Str, session: Session, identity: Identity): AgentMemory {
+    create-memory-with-options(agent-name, session, identity, null)
+}
+
+create-memory-with-options
+meta {
+    doc: "Build an AgentMemory, optionally overriding session/KB embedding configuration."
+}
+fn (agent-name: Str, session: Session, identity: Identity, opts: MemoryOptions?): AgentMemory {
+    embedding cond {
+        is-null(opts) => { EmbeddingOptions.Default }
+        is-null(opts.embedding) => { EmbeddingOptions.Default }
+        => { opts.embedding }
+    }
+
+    session-embedding cond {
+        is-null(opts) => { embedding }
+        is-null(opts.session-embedding) => { embedding }
+        => { opts.session-embedding }
+    }
+
+    kb-embedding cond {
+        is-null(opts) => { embedding }
+        is-null(opts.kb-embedding) => { embedding }
+        => { opts.kb-embedding }
+    }
+
     // NOTE: The constructor calls below use the fully qualified
     // `::hot::store/Map(...)` form even though `::store ::hot::store`
     // is aliased at the top of this file. Hot's compiler does not
@@ -177,14 +222,14 @@ fn (agent-name: Str, session: Session, identity: Identity): AgentMemory {
         agent-name: agent-name,
         session-store: ::hot::store/Map({
             name: ::session/session-key(agent-name, session, "memory"),
-            embedding: true,
+            embedding: session-embedding,
         }),
         user-store: ::hot::store/Map({
             name: ::session/session-user-key(agent-name, session, identity, "profile"),
         }),
         kb-store: ::hot::store/Map({
             name: ::session/agent-key(agent-name, "kb"),
-            embedding: true,
+            embedding: kb-embedding,
         }),
     })
 }

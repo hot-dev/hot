@@ -1115,6 +1115,7 @@ pub struct FnArg {
 pub struct TypeField {
     pub name: Sym,
     pub type_annotation: String,
+    pub type_expr: TypeExpr,
 }
 
 /// A variant definition for tagged unions (e.g., `| Circle(Circle)` or `| Point`)

@@ -150,10 +150,12 @@ fn (rt: AgentRuntime, recipient-id: Str, opts: Map?): Vec<Notification> {
         is-null(kind-filter) => { notifs }
         => { filter(notifs, (n) { eq(n.kind, kind-filter) }) }
     }
+
     by-read cond {
         unread-only => { filter(by-kind, (n) { is-null(n.read-at) }) }
         => { by-kind }
     }
+
     cond {
         is-null(limit) => { by-read }
         gte(length(by-read), limit) => { slice(by-read, sub(length(by-read), limit), length(by-read)) }
