@@ -167,7 +167,11 @@ impl Stream {
                     sqlx::query_as::<_, Stream>("SELECT * FROM stream WHERE stream_id = $1")
                         .bind(stream_id)
                         .fetch_one(pg_pool)
-                        .await?;
+                        .await
+                        .map_err(|e| match e {
+                            sqlx::Error::RowNotFound => StreamError::NotFound,
+                            other => StreamError::Database(other),
+                        })?;
                 Ok(stream)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
@@ -175,7 +179,11 @@ impl Stream {
                     sqlx::query_as::<_, Stream>("SELECT * FROM stream WHERE stream_id = ?")
                         .bind(stream_id)
                         .fetch_one(sqlite_pool)
-                        .await?;
+                        .await
+                        .map_err(|e| match e {
+                            sqlx::Error::RowNotFound => StreamError::NotFound,
+                            other => StreamError::Database(other),
+                        })?;
                 Ok(stream)
             }
         }
@@ -371,7 +379,11 @@ impl StreamSummary {
                 )
                 .bind(stream_id)
                 .fetch_one(pg_pool)
-                .await?;
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => StreamError::NotFound,
+                    other => StreamError::Database(other),
+                })?;
                 Ok(stream)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
@@ -402,7 +414,11 @@ impl StreamSummary {
                 )
                 .bind(stream_id)
                 .fetch_one(sqlite_pool)
-                .await?;
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => StreamError::NotFound,
+                    other => StreamError::Database(other),
+                })?;
                 Ok(stream)
             }
         }
@@ -545,7 +561,9 @@ impl StreamSummary {
                 let short_id_pattern = search_term.map(|term| format!("%{}", term));
                 let search_pattern = search_term.map(|term| format!("%{}%", term));
 
-                let mut db_query = sqlx::query_as::<_, StreamSummary>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_as::<_, StreamSummary>(sqlx::AssertSqlSafe(query.as_str()))
+                        .bind(env_id);
 
                 // project_id filter removed
 
@@ -663,7 +681,9 @@ impl StreamSummary {
                 let short_id_pattern = search_term.map(|term| format!("%{}", term));
                 let search_pattern = search_term.map(|term| format!("%{}%", term));
 
-                let mut db_query = sqlx::query_as::<_, StreamSummary>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_as::<_, StreamSummary>(sqlx::AssertSqlSafe(query.as_str()))
+                        .bind(env_id);
 
                 // project_id filter removed
 
@@ -737,7 +757,8 @@ impl StreamSummary {
                     search_term.map(|term| format!("%{}%", term))
                 };
 
-                let mut db_query = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 // project_id filter removed
 
@@ -783,7 +804,8 @@ impl StreamSummary {
                     search_term.map(|term| format!("%{}%", term))
                 };
 
-                let mut db_query = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 // project_id filter removed
 

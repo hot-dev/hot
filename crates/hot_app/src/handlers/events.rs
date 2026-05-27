@@ -297,6 +297,7 @@ pub async fn events_detail_handler(
                 let graph_data = stream_graph::build_stream_graph(
                     &db,
                     &stream_id,
+                    &event.env_id,
                     stream_graph::FocusElement::Event(event_id),
                 )
                 .await;

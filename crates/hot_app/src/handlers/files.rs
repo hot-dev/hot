@@ -291,7 +291,27 @@ pub async fn run_files_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Verify the run belongs to the current org/env for security
-    let env_id = session.current_env_id();
+    let env_id = match session.current_env_id() {
+        Some(id) => id,
+        None => {
+            return Json(RunFilesResponse {
+                success: false,
+                files: Vec::new(),
+                total: 0,
+            });
+        }
+    };
+
+    match hot::db::Run::get_run(&db, &run_id).await {
+        Ok(run) if run.env_id == env_id => {}
+        Ok(_) | Err(_) => {
+            return Json(RunFilesResponse {
+                success: false,
+                files: Vec::new(),
+                total: 0,
+            });
+        }
+    }
 
     // Fetch files for this run
     let files = hot::db::file::list_files_by_run(&db, run_id, Some(100), None)
@@ -304,7 +324,7 @@ pub async fn run_files_handler(
     // Filter files to only show those in the current environment (security check)
     let files: Vec<_> = files
         .into_iter()
-        .filter(|f| env_id.is_none_or(|e| f.env_id == Some(e)))
+        .filter(|f| f.env_id == Some(env_id))
         .collect();
 
     let total = files.len() as i64;

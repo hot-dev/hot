@@ -294,8 +294,10 @@ pub async fn event_activity_timeline_handler(
                 )
             };
 
-            let mut query_builder =
-                sqlx::query_as::<_, (DateTime<Utc>, bool, i64)>(&query).bind(env_id);
+            let mut query_builder = sqlx::query_as::<_, (DateTime<Utc>, bool, i64)>(
+                sqlx::AssertSqlSafe(query.as_str()),
+            )
+            .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
@@ -400,7 +402,9 @@ pub async fn event_activity_timeline_handler(
                 )
             };
 
-            let mut query_builder = sqlx::query_as::<_, (String, i64, i64)>(&query).bind(env_id);
+            let mut query_builder =
+                sqlx::query_as::<_, (String, i64, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
@@ -564,8 +568,10 @@ pub async fn event_type_timeline_handler(
                 )
             };
 
-            let mut query_builder =
-                sqlx::query_as::<_, (DateTime<Utc>, String, i64)>(&query).bind(env_id);
+            let mut query_builder = sqlx::query_as::<_, (DateTime<Utc>, String, i64)>(
+                sqlx::AssertSqlSafe(query.as_str()),
+            )
+            .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
@@ -671,7 +677,9 @@ pub async fn event_type_timeline_handler(
                 )
             };
 
-            let mut query_builder = sqlx::query_as::<_, (String, String, i64)>(&query).bind(env_id);
+            let mut query_builder =
+                sqlx::query_as::<_, (String, String, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);

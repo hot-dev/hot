@@ -13,7 +13,11 @@ use axum::{
     response::sse::{Event as SseEvent, KeepAlive, Sse},
 };
 use futures::stream::Stream;
-use hot::db::{api_key::ApiKey, run::Run, stream::Stream as DbStream, stream::StreamSummary};
+use hot::db::{
+    api_key::ApiKey,
+    run::Run,
+    stream::{Stream as DbStream, StreamError, StreamSummary},
+};
 use hot::permission::actions;
 use hot::stream::{StreamEvent as PubSubEvent, StreamSubscriber, StreamSubscriberFactory};
 use serde::{Deserialize, Serialize};
@@ -26,6 +30,61 @@ use crate::ApiStateData;
 use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
 use crate::models::*;
+
+fn stream_not_found() -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiErrorResponse::not_found("Stream")),
+    )
+}
+
+fn stream_lookup_error(e: StreamError) -> (StatusCode, Json<ApiErrorResponse>) {
+    match e {
+        StreamError::NotFound => stream_not_found(),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&format!(
+                "Failed to look up stream: {}",
+                other
+            ))),
+        ),
+    }
+}
+
+enum StreamLookup {
+    Found(Box<StreamSummary>),
+    Missing,
+    WrongEnv,
+}
+
+async fn lookup_stream_for_env(
+    db: &hot::db::DatabasePool,
+    stream_id: &Uuid,
+    env_id: Uuid,
+) -> Result<StreamLookup, (StatusCode, Json<ApiErrorResponse>)> {
+    let stream = match StreamSummary::get_stream(db, stream_id).await {
+        Ok(stream) => stream,
+        Err(StreamError::NotFound) => return Ok(StreamLookup::Missing),
+        Err(e) => return Err(stream_lookup_error(e)),
+    };
+
+    if stream.env_id != env_id {
+        return Ok(StreamLookup::WrongEnv);
+    }
+
+    Ok(StreamLookup::Found(Box::new(stream)))
+}
+
+async fn get_stream_for_env(
+    db: &hot::db::DatabasePool,
+    stream_id: &Uuid,
+    env_id: Uuid,
+) -> Result<StreamSummary, (StatusCode, Json<ApiErrorResponse>)> {
+    match lookup_stream_for_env(db, stream_id, env_id).await? {
+        StreamLookup::Found(stream) => Ok(*stream),
+        StreamLookup::Missing | StreamLookup::WrongEnv => Err(stream_not_found()),
+    }
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct StreamSubscribeParams {
@@ -79,23 +138,10 @@ pub async fn subscribe_to_stream(
     Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
-    // Verify the stream exists and belongs to this environment
-    let stream = StreamSummary::get_stream(&db, &stream_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("Stream: {}", e))),
-            )
-        })?;
+    let env_id = auth.env_id();
 
-    // Verify ownership
-    if stream.env_id != api_key.env_id {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Stream")),
-        ));
-    }
+    // Verify the stream exists and belongs to this environment
+    let _stream = get_stream_for_env(&db, &stream_id, env_id).await?;
 
     // Permission check for scoped credentials (sessions and service keys)
     if !auth.is_api_key() {
@@ -120,7 +166,6 @@ pub async fn subscribe_to_stream(
     } else {
         None
     };
-
     let db_clone = db.clone();
 
     // Try to subscribe to pub/sub for real-time updates
@@ -189,10 +234,18 @@ pub async fn subscribe_to_stream(
                     if let Some(event) = pubsub_event {
                         // Convert pub/sub event to SSE event
                         match event {
-                            PubSubEvent::RunStart { run_id, stream_id: _, event_id: _ } => {
+                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 // For run:start, we need to fetch full run details from DB
                                 if !seen_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         seen_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -209,9 +262,17 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunStop { run_id, stream_id: _, event_id: _, result: _ } => {
+                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 if !completed_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         completed_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -228,9 +289,17 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunFail { run_id, stream_id: _, event_id: _, error: _ } => {
+                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 if !completed_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         completed_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -247,9 +316,17 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunCancel { run_id, stream_id: _, event_id: _, reason: _ } => {
+                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 if !completed_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         completed_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -267,7 +344,11 @@ pub async fn subscribe_to_stream(
                                     }
                             }
                             // Handle stream:data events - these come with full payload, no DB lookup needed
-                            PubSubEvent::StreamData { stream_data_id, run_id, stream_id: _, data_type, payload } => {
+                            PubSubEvent::StreamData { stream_data_id, run_id, stream_id: event_stream_id, data_type, payload } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 // Stream data is emitted immediately - no deduplication needed
                                 // The payload is already in the pub/sub message
                                 let sse_event = StreamEvent::StreamData {
@@ -293,7 +374,7 @@ pub async fn subscribe_to_stream(
                 // Branch 2: Poll database on interval (fallback/safety net)
                 _ = tokio::time::sleep(poll_interval) => {
                     // Poll for runs on this stream
-                    match Run::get_runs_by_stream(&db_clone, &stream_id, Some(100), Some(0)).await {
+                    match Run::get_runs_by_stream(&db_clone, &stream_id, &env_id, Some(100), Some(0)).await {
                         Ok(runs) => {
                             for run in runs {
                                 // Apply project filter if specified
@@ -463,21 +544,20 @@ pub async fn subscribe_with_event(
     Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    let env_id = auth.env_id();
+
     // Step 1: Determine stream_id - use provided or create new
     let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
 
-    // Step 2: If stream_id was provided, verify it belongs to this API key's environment
+    // Step 2: If stream_id was provided, verify it belongs to this principal's environment
     if req.stream_id.is_some() {
-        let existing_stream = StreamSummary::get_stream(&db, &stream_id).await;
-        if let Ok(stream) = existing_stream
-            && stream.env_id != api_key.env_id
-        {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found("Stream")),
-            ));
+        match lookup_stream_for_env(&db, &stream_id, env_id).await? {
+            StreamLookup::Found(_) => {}
+            StreamLookup::Missing => {
+                // If the stream doesn't exist yet, that's OK - we'll create it below.
+            }
+            StreamLookup::WrongEnv => return Err(stream_not_found()),
         }
-        // If stream doesn't exist yet, that's OK - we'll create it below
     }
 
     // Permission check for scoped credentials (sessions and service keys)
@@ -510,7 +590,7 @@ pub async fn subscribe_with_event(
 
     // Step 3: Create the stream record in the database BEFORE subscribing
     // This ensures the stream exists for the subscription and avoids race conditions
-    DbStream::create_or_get_stream(&db, stream_id, api_key.env_id)
+    DbStream::create_or_get_stream(&db, stream_id, env_id)
         .await
         .map_err(|e| {
             (
@@ -576,7 +656,6 @@ pub async fn subscribe_with_event(
     } else {
         None
     };
-
     let db_clone = db.clone();
     let event_id = published.event_id;
     let event_type = published.event_type.clone();
@@ -639,10 +718,18 @@ pub async fn subscribe_with_event(
                     if let Some(event) = pubsub_event {
                         // Convert pub/sub event to SSE event
                         match event {
-                            PubSubEvent::RunStart { run_id, stream_id: _, event_id: _ } => {
+                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 // For run:start, we need to fetch full run details from DB
                                 if !seen_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         seen_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -659,9 +746,17 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunStop { run_id, stream_id: _, event_id: _, result: _ } => {
+                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 if !completed_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         completed_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -678,9 +773,17 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunFail { run_id, stream_id: _, event_id: _, error: _ } => {
+                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 if !completed_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         completed_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -697,9 +800,17 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunCancel { run_id, stream_id: _, event_id: _, reason: _ } => {
+                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _ } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 if !completed_run_ids.contains(&run_id)
                                     && let Ok(run) = Run::get_run(&db_clone, &run_id).await {
+                                        if run.env_id != env_id || run.stream_id != stream_id {
+                                            continue;
+                                        }
+
                                         completed_run_ids.insert(run_id);
 
                                         // Apply project filter
@@ -717,7 +828,11 @@ pub async fn subscribe_with_event(
                                     }
                             }
                             // Handle stream:data events - these come with full payload, no DB lookup needed
-                            PubSubEvent::StreamData { stream_data_id, run_id, stream_id: _, data_type, payload } => {
+                            PubSubEvent::StreamData { stream_data_id, run_id, stream_id: event_stream_id, data_type, payload } => {
+                                if event_stream_id != stream_id {
+                                    continue;
+                                }
+
                                 // Stream data is emitted immediately - no deduplication needed
                                 // The payload is already in the pub/sub message
                                 let sse_event = StreamEvent::StreamData {
@@ -743,7 +858,7 @@ pub async fn subscribe_with_event(
                 // Branch 2: Poll database on interval (fallback/safety net)
                 _ = tokio::time::sleep(poll_interval) => {
                     // Poll for runs on this stream
-                    match Run::get_runs_by_stream(&db_clone, &stream_id, Some(100), Some(0)).await {
+                    match Run::get_runs_by_stream(&db_clone, &stream_id, &env_id, Some(100), Some(0)).await {
                         Ok(runs) => {
                             for run in runs {
                                 // Apply project filter if specified

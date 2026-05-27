@@ -320,6 +320,7 @@ pub async fn run_detail_handler(
             let graph_data = stream_graph::build_stream_graph(
                 &db,
                 &run.stream_id,
+                &run.env_id,
                 stream_graph::FocusElement::Run(run.run_id),
             )
             .await;

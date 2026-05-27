@@ -50,10 +50,28 @@ pub struct FlowCategory {
 pub async fn stream_flow_handler(
     Path(stream_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
-    axum::extract::Extension(_session): axum::extract::Extension<Session>,
+    axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
+    let env_id = match session.current_env_id() {
+        Some(id) => id,
+        None => {
+            return Json(serde_json::json!({"error": "No environment selected"})).into_response();
+        }
+    };
+
+    match Stream::get_stream(&db, &stream_id).await {
+        Ok(stream) if stream.env_id == env_id => {}
+        Ok(_) => {
+            return Json(serde_json::json!({"error": "Stream not found"})).into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to verify stream {} access: {}", stream_id, e);
+            return Json(serde_json::json!({"error": "Stream not found"})).into_response();
+        }
+    }
+
     // Get all runs for this stream
-    let runs = match Run::get_runs_by_stream(&db, &stream_id, None, None).await {
+    let runs = match Run::get_runs_by_stream(&db, &stream_id, &env_id, None, None).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get runs for stream {}: {}", stream_id, e);
@@ -63,7 +81,7 @@ pub async fn stream_flow_handler(
     };
 
     // Get all events for this stream
-    let events = match Event::get_events_by_stream(&db, &stream_id, None, None).await {
+    let events = match Event::get_events_by_stream(&db, &stream_id, &env_id, None, None).await {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("Failed to get events for stream {}: {}", stream_id, e);
@@ -328,7 +346,7 @@ pub async fn stream_metrics_handler(
                 {project_join_run}
                 WHERE r.env_id = $1 AND r.run_type_id != 7 {project_clause_run} {time_clause_run}"#,
             );
-            let mut run_qb = sqlx::query_as(&run_query).bind(env_id);
+            let mut run_qb = sqlx::query_as(sqlx::AssertSqlSafe(run_query.as_str())).bind(env_id);
             if let Some(ref pid) = project_id {
                 run_qb = run_qb.bind(pid);
             }
@@ -354,21 +372,22 @@ pub async fn stream_metrics_handler(
                 WHERE e.env_id = $1 {}"#,
                 time_clause_event
             );
-            let (total_events, handled_events): (i64, i64) = sqlx::query_as(&event_query)
-                .bind(env_id)
-                .fetch_one(pg_pool)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to get event metrics: {}", e);
-                    (0, 0)
-                });
+            let (total_events, handled_events): (i64, i64) =
+                sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str()))
+                    .bind(env_id)
+                    .fetch_one(pg_pool)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!("Failed to get event metrics: {}", e);
+                        (0, 0)
+                    });
 
             // Streams (environment-level, not project-filtered)
             let stream_query = format!(
                 "SELECT COUNT(*) FROM stream s WHERE s.env_id = $1 {}",
                 time_clause_stream
             );
-            let total_streams: i64 = sqlx::query_scalar(&stream_query)
+            let total_streams: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str()))
                 .bind(env_id)
                 .fetch_one(pg_pool)
                 .await
@@ -395,7 +414,7 @@ pub async fn stream_metrics_handler(
                 {project_join_task}
                 WHERE t.env_id = $1 {project_clause_task} {time_clause_task}"#,
             );
-            let mut task_qb = sqlx::query_as(&task_query).bind(env_id);
+            let mut task_qb = sqlx::query_as(sqlx::AssertSqlSafe(task_query.as_str())).bind(env_id);
             if let Some(ref pid) = project_id {
                 task_qb = task_qb.bind(pid);
             }
@@ -477,7 +496,8 @@ pub async fn stream_metrics_handler(
                 {project_join_run}
                 WHERE r.env_id = ? AND r.run_type_id != 7 {project_clause_run} {time_clause_run}"#,
             );
-            let mut run_qb = sqlx::query_as(&run_query).bind(env_id.to_string());
+            let mut run_qb =
+                sqlx::query_as(sqlx::AssertSqlSafe(run_query.as_str())).bind(env_id.to_string());
             if let Some(ref pid) = project_id {
                 run_qb = run_qb.bind(pid.to_string());
             }
@@ -502,20 +522,21 @@ pub async fn stream_metrics_handler(
                 WHERE e.env_id = ? {}"#,
                 time_clause_event
             );
-            let (total_events, handled_events): (i64, i64) = sqlx::query_as(&event_query)
-                .bind(env_id.to_string())
-                .fetch_one(sqlite_pool)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to get event metrics (sqlite): {}", e);
-                    (0, 0)
-                });
+            let (total_events, handled_events): (i64, i64) =
+                sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str()))
+                    .bind(env_id.to_string())
+                    .fetch_one(sqlite_pool)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!("Failed to get event metrics (sqlite): {}", e);
+                        (0, 0)
+                    });
 
             let stream_query = format!(
                 "SELECT COUNT(*) FROM stream s WHERE s.env_id = ? {}",
                 time_clause_stream
             );
-            let total_streams: i64 = sqlx::query_scalar(&stream_query)
+            let total_streams: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str()))
                 .bind(env_id.to_string())
                 .fetch_one(sqlite_pool)
                 .await
@@ -541,7 +562,8 @@ pub async fn stream_metrics_handler(
                 {project_join_task}
                 WHERE t.env_id = ? {project_clause_task} {time_clause_task}"#,
             );
-            let mut task_qb = sqlx::query_as(&task_query).bind(env_id.to_string());
+            let mut task_qb =
+                sqlx::query_as(sqlx::AssertSqlSafe(task_query.as_str())).bind(env_id.to_string());
             if let Some(ref pid) = project_id {
                 task_qb = task_qb.bind(pid.to_string());
             }
@@ -664,7 +686,9 @@ pub async fn stream_activity_timeline_handler(
                 )
             };
 
-            let mut query_builder = sqlx::query_as::<_, (DateTime<Utc>, i64)>(&query).bind(env_id);
+            let mut query_builder =
+                sqlx::query_as::<_, (DateTime<Utc>, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
@@ -744,7 +768,9 @@ pub async fn stream_activity_timeline_handler(
                 )
             };
 
-            let mut query_builder = sqlx::query_as::<_, (String, i64)>(&query).bind(env_id);
+            let mut query_builder =
+                sqlx::query_as::<_, (String, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
@@ -883,8 +909,10 @@ pub async fn stream_composition_handler(
                 )
             };
 
-            let mut query_builder =
-                sqlx::query_as::<_, (DateTime<Utc>, Option<f64>, Option<f64>)>(&query).bind(env_id);
+            let mut query_builder = sqlx::query_as::<_, (DateTime<Utc>, Option<f64>, Option<f64>)>(
+                sqlx::AssertSqlSafe(query.as_str()),
+            )
+            .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
@@ -978,8 +1006,10 @@ pub async fn stream_composition_handler(
                 )
             };
 
-            let mut query_builder =
-                sqlx::query_as::<_, (String, Option<f64>, Option<f64>)>(&query).bind(env_id);
+            let mut query_builder = sqlx::query_as::<_, (String, Option<f64>, Option<f64>)>(
+                sqlx::AssertSqlSafe(query.as_str()),
+            )
+            .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);

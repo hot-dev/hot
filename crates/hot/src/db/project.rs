@@ -569,22 +569,23 @@ impl Project {
                         table
                     )
                 };
-                let handlers = sqlx::query_scalar::<_, i64>(&q("event_handler"))
+                let handlers =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("event_handler")))
+                        .bind(project_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+                let webhooks = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("webhook")))
                     .bind(project_id)
                     .fetch_one(pool)
                     .await
                     .unwrap_or(0);
-                let webhooks = sqlx::query_scalar::<_, i64>(&q("webhook"))
+                let mcp_tools = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("mcp_tool")))
                     .bind(project_id)
                     .fetch_one(pool)
                     .await
                     .unwrap_or(0);
-                let mcp_tools = sqlx::query_scalar::<_, i64>(&q("mcp_tool"))
-                    .bind(project_id)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap_or(0);
-                let agents = sqlx::query_scalar::<_, i64>(&q("agent"))
+                let agents = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("agent")))
                     .bind(project_id)
                     .fetch_one(pool)
                     .await
@@ -600,22 +601,23 @@ impl Project {
                         table
                     )
                 };
-                let handlers = sqlx::query_scalar::<_, i64>(&q("event_handler"))
+                let handlers =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("event_handler")))
+                        .bind(project_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+                let webhooks = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("webhook")))
                     .bind(project_id)
                     .fetch_one(pool)
                     .await
                     .unwrap_or(0);
-                let webhooks = sqlx::query_scalar::<_, i64>(&q("webhook"))
+                let mcp_tools = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("mcp_tool")))
                     .bind(project_id)
                     .fetch_one(pool)
                     .await
                     .unwrap_or(0);
-                let mcp_tools = sqlx::query_scalar::<_, i64>(&q("mcp_tool"))
-                    .bind(project_id)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap_or(0);
-                let agents = sqlx::query_scalar::<_, i64>(&q("agent"))
+                let agents = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(q("agent")))
                     .bind(project_id)
                     .fetch_one(pool)
                     .await

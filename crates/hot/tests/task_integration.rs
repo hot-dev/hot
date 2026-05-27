@@ -359,7 +359,7 @@ async fn test_get_tasks_by_stream() {
         .unwrap();
     }
 
-    let tasks = Task::get_by_stream(&db, &td.stream_id, Some(10))
+    let tasks = Task::get_by_stream(&db, &td.stream_id, &td.env_id, Some(10))
         .await
         .unwrap();
     assert_eq!(tasks.len(), 3);

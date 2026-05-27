@@ -223,7 +223,7 @@ pub async fn stream_detail_handler(
         offset
     );
 
-    let runs = Run::get_runs_by_stream(&db, &stream_id, Some(page_size), Some(offset))
+    let runs = Run::get_runs_by_stream(&db, &stream_id, &env_id, Some(page_size), Some(offset))
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch runs for stream {}: {}", stream_id, e);
@@ -245,12 +245,13 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Get events for this stream
-    let events_raw = Event::get_events_by_stream(&db, &stream_id, Some(page_size), Some(offset))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to fetch events for stream {}: {}", stream_id, e);
-            Vec::new()
-        });
+    let events_raw =
+        Event::get_events_by_stream(&db, &stream_id, &env_id, Some(page_size), Some(offset))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to fetch events for stream {}: {}", stream_id, e);
+                Vec::new()
+            });
 
     tracing::debug!(
         "Found {} events for stream_id: {}",
@@ -271,7 +272,7 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Get tasks for this stream
-    let tasks_raw = Task::get_by_stream(&db, &stream_id, Some(page_size))
+    let tasks_raw = Task::get_by_stream(&db, &stream_id, &env_id, Some(page_size))
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch tasks for stream {}: {}", stream_id, e);
@@ -290,7 +291,7 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Total count for pagination
-    let total_runs = Run::get_count_by_stream(&db, &stream_id)
+    let total_runs = Run::get_count_by_stream(&db, &stream_id, &env_id)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to get run count for stream {}: {}", stream_id, e);
@@ -313,8 +314,13 @@ pub async fn stream_detail_handler(
     let end_page = std::cmp::min(total_pages, current_page_num + 2);
 
     // Build stream graph using unified function (no focus)
-    let graph_data =
-        stream_graph::build_stream_graph(&db, &stream_id, stream_graph::FocusElement::None).await;
+    let graph_data = stream_graph::build_stream_graph(
+        &db,
+        &stream_id,
+        &env_id,
+        stream_graph::FocusElement::None,
+    )
+    .await;
     let graph_data_json = serde_json::to_string(&graph_data).unwrap_or_else(|e| {
         tracing::error!("Failed to serialize graph data: {}", e);
         "{}".to_string()

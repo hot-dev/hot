@@ -1795,7 +1795,7 @@ async fn create_deliveries_for_alert(
                  AND s.org_id = $1
                  AND (s.env_id IS NULL OR s.env_id = $2)
                  AND sc.channel_id = ANY($3)".to_string();
-            sqlx::query_as(&query)
+            sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(org_id)
                 .bind(env_id)
                 .bind(&channel_ids)
@@ -1821,7 +1821,9 @@ async fn create_deliveries_for_alert(
                  AND sc.channel_id IN ({})",
                 placeholders.join(", ")
             );
-            let mut q = sqlx::query_as(&query).bind(org_id).bind(env_id);
+            let mut q = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+                .bind(org_id)
+                .bind(env_id);
             for id in &channel_ids {
                 q = q.bind(id);
             }

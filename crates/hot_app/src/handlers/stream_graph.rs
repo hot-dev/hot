@@ -15,6 +15,7 @@ pub enum FocusElement {
 pub async fn build_stream_graph(
     db: &DatabasePool,
     stream_id: &Uuid,
+    env_id: &Uuid,
     focus: FocusElement,
 ) -> templates::GraphNodeData {
     let mut nodes = Vec::new();
@@ -27,21 +28,21 @@ pub async fn build_stream_graph(
     tracing::debug!("Building stream graph for stream: {}", stream_id);
 
     // Get all runs and events for this stream
-    let runs = Run::get_runs_by_stream(db, stream_id, None, None)
+    let runs = Run::get_runs_by_stream(db, stream_id, env_id, None, None)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch runs for stream graph: {}", e);
             Vec::new()
         });
 
-    let events = Event::get_events_by_stream(db, stream_id, None, None)
+    let events = Event::get_events_by_stream(db, stream_id, env_id, None, None)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch events for stream graph: {}", e);
             Vec::new()
         });
 
-    let tasks = Task::get_by_stream(db, stream_id, None)
+    let tasks = Task::get_by_stream(db, stream_id, env_id, None)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch tasks for stream graph: {}", e);

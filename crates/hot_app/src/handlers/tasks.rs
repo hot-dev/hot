@@ -192,14 +192,15 @@ pub async fn task_detail_handler(
     let task_uuid: Uuid = task_id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid task ID".to_string()))?;
+    let env_id = session
+        .current_env_id()
+        .ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
 
     let task = Task::get(&db, &task_uuid)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Task not found".to_string()))?;
 
-    if let Some(env_id) = session.current_env_id()
-        && task.env_id != env_id
-    {
+    if task.env_id != env_id {
         return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
     }
 
@@ -212,6 +213,7 @@ pub async fn task_detail_handler(
     let graph_data = stream_graph::build_stream_graph(
         &db,
         &task.stream_id,
+        &task.env_id,
         stream_graph::FocusElement::Task(task_uuid),
     )
     .await;

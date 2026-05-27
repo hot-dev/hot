@@ -310,7 +310,8 @@ impl Event {
                 let short_id_pattern = search_term.map(|term| format!("%{}", term));
                 let handled_value = handled_filter;
 
-                let mut db_query = sqlx::query_as::<_, Event>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_as::<_, Event>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(handled) = handled_value {
                     db_query = db_query.bind(handled);
@@ -441,7 +442,8 @@ impl Event {
                 let short_id_pattern = search_term.map(|term| format!("%{}", term));
                 let handled_value = handled_filter;
 
-                let mut db_query = sqlx::query_as::<_, Event>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_as::<_, Event>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(handled) = handled_value {
                     let handled_int = if handled { 1 } else { 0 };
@@ -551,7 +553,8 @@ impl Event {
                 let text_pattern = search_term.map(|term| format!("%{}%", term));
                 let handled_value = handled_filter;
 
-                let mut db_query = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(handled) = handled_value {
                     db_query = db_query.bind(handled);
@@ -614,7 +617,8 @@ impl Event {
                 let text_pattern = search_term.map(|term| format!("%{}%", term));
                 let handled_value = handled_filter;
 
-                let mut db_query = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+                let mut db_query =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(handled) = handled_value {
                     let handled_int = if handled { 1 } else { 0 };
@@ -1028,6 +1032,7 @@ impl Event {
     pub async fn get_events_by_stream(
         db: &crate::db::DatabasePool,
         stream_id: &Uuid,
+        env_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<Event>, EventError> {
@@ -1037,9 +1042,10 @@ impl Event {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let events = sqlx::query_as::<_, Event>(
-                    "SELECT event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, handled FROM event WHERE stream_id = $1 ORDER BY event_time DESC LIMIT $2 OFFSET $3"
+                    "SELECT event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, handled FROM event WHERE stream_id = $1 AND env_id = $2 ORDER BY event_time DESC LIMIT $3 OFFSET $4"
                 )
                 .bind(stream_id)
+                .bind(env_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(pg_pool)
@@ -1048,9 +1054,10 @@ impl Event {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let events = sqlx::query_as::<_, Event>(
-                    "SELECT event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, handled FROM event WHERE stream_id = ? ORDER BY event_time DESC LIMIT ? OFFSET ?"
+                    "SELECT event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, handled FROM event WHERE stream_id = ? AND env_id = ? ORDER BY event_time DESC LIMIT ? OFFSET ?"
                 )
                 .bind(stream_id)
+                .bind(env_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(sqlite_pool)

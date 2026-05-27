@@ -317,7 +317,7 @@ impl Call {
                         )",
                         placeholders
                     );
-                    let mut q = sqlx::query(&query);
+                    let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()));
                     for id_str in &env_ids_str {
                         q = q.bind(id_str);
                     }

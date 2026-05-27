@@ -440,7 +440,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.run_id = $1"
                 );
-                let task = sqlx::query_as::<_, Task>(&q)
+                let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(run_id)
                     .fetch_optional(pg_pool)
                     .await?;
@@ -452,7 +452,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.run_id = ?"
                 );
-                let task = sqlx::query_as::<_, Task>(&q)
+                let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(run_id)
                     .fetch_optional(sqlite_pool)
                     .await?;
@@ -475,7 +475,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.origin_run_id = $1 ORDER BY t.created_at DESC LIMIT $2"
                 );
-                let tasks = sqlx::query_as::<_, Task>(&q)
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(origin_run_id)
                     .bind(limit)
                     .fetch_all(pg_pool)
@@ -488,7 +488,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.origin_run_id = ? ORDER BY t.created_at DESC LIMIT ?"
                 );
-                let tasks = sqlx::query_as::<_, Task>(&q)
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(origin_run_id)
                     .bind(limit)
                     .fetch_all(sqlite_pool)
@@ -507,7 +507,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.task_id = $1"
                 );
-                let task = sqlx::query_as::<_, Task>(&q)
+                let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
                     .fetch_one(pg_pool)
                     .await?;
@@ -519,7 +519,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.task_id = ?"
                 );
-                let task = sqlx::query_as::<_, Task>(&q)
+                let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
                     .fetch_one(sqlite_pool)
                     .await?;
@@ -532,6 +532,7 @@ impl Task {
     pub async fn get_by_stream(
         db: &crate::db::DatabasePool,
         stream_id: &Uuid,
+        env_id: &Uuid,
         limit: Option<i64>,
     ) -> Result<Vec<Task>, TaskError> {
         let limit = limit.unwrap_or(50);
@@ -540,10 +541,11 @@ impl Task {
                 let q = format!(
                     "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_PG} \
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
-                     {TASK_ORIGIN_JOIN} WHERE t.stream_id = $1 ORDER BY t.created_at DESC LIMIT $2"
+                     {TASK_ORIGIN_JOIN} WHERE t.stream_id = $1 AND t.env_id = $2 ORDER BY t.created_at DESC LIMIT $3"
                 );
-                let tasks = sqlx::query_as::<_, Task>(&q)
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(stream_id)
+                    .bind(env_id)
                     .bind(limit)
                     .fetch_all(pg_pool)
                     .await?;
@@ -553,10 +555,11 @@ impl Task {
                 let q = format!(
                     "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_SQLITE} \
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
-                     {TASK_ORIGIN_JOIN} WHERE t.stream_id = ? ORDER BY t.created_at DESC LIMIT ?"
+                     {TASK_ORIGIN_JOIN} WHERE t.stream_id = ? AND t.env_id = ? ORDER BY t.created_at DESC LIMIT ?"
                 );
-                let tasks = sqlx::query_as::<_, Task>(&q)
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(stream_id)
+                    .bind(env_id)
                     .bind(limit)
                     .fetch_all(sqlite_pool)
                     .await?;
@@ -861,7 +864,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.env_id = $1 ORDER BY t.created_at DESC LIMIT $2 OFFSET $3"
                 );
-                let tasks = sqlx::query_as::<_, Task>(&q)
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(env_id)
                     .bind(limit)
                     .bind(offset)
@@ -875,7 +878,7 @@ impl Task {
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
                      {TASK_ORIGIN_JOIN} WHERE t.env_id = ? ORDER BY t.created_at DESC LIMIT ? OFFSET ?"
                 );
-                let tasks = sqlx::query_as::<_, Task>(&q)
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(env_id)
                     .bind(limit)
                     .bind(offset)
@@ -997,7 +1000,8 @@ impl Task {
                     param_count + 1
                 );
 
-                let mut q = sqlx::query_as::<_, Task>(&query).bind(env_id);
+                let mut q =
+                    sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
@@ -1153,7 +1157,7 @@ impl Task {
                     where_clause
                 );
 
-                let mut q = sqlx::query_as::<_, Task>(&query);
+                let mut q = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(query.as_str()));
                 for b in &binds {
                     q = q.bind(b);
                 }
@@ -1273,7 +1277,8 @@ impl Task {
                     where_clause
                 );
 
-                let mut q = sqlx::query_as::<_, (i64,)>(&query).bind(env_id);
+                let mut q =
+                    sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
@@ -1433,7 +1438,7 @@ impl Task {
                     where_clause
                 );
 
-                let mut q = sqlx::query_as::<_, (i64,)>(&query);
+                let mut q = sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(query.as_str()));
                 for b in &binds {
                     q = q.bind(b);
                 }
@@ -1924,13 +1929,17 @@ mod tests {
         .await
         .unwrap();
 
-        let tasks_a = Task::get_by_stream(&db, &stream_a, None).await.unwrap();
+        let tasks_a = Task::get_by_stream(&db, &stream_a, &env_id, None)
+            .await
+            .unwrap();
         assert_eq!(tasks_a.len(), 3);
         for t in &tasks_a {
             assert_eq!(t.stream_id, stream_a);
         }
 
-        let tasks_b = Task::get_by_stream(&db, &stream_b, None).await.unwrap();
+        let tasks_b = Task::get_by_stream(&db, &stream_b, &env_id, None)
+            .await
+            .unwrap();
         assert_eq!(tasks_b.len(), 1);
         assert_eq!(tasks_b[0].stream_id, stream_b);
     }
@@ -1952,7 +1961,9 @@ mod tests {
             .unwrap();
         }
 
-        let tasks = Task::get_by_stream(&db, &stream_id, Some(2)).await.unwrap();
+        let tasks = Task::get_by_stream(&db, &stream_id, &env_id, Some(2))
+            .await
+            .unwrap();
         assert_eq!(tasks.len(), 2);
     }
 
