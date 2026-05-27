@@ -204,7 +204,9 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
 
     let backup_path_for_attach = backup_path.to_string_lossy().replace('\'', "''");
     let attach_sql = format!("ATTACH DATABASE '{backup_path_for_attach}' AS v1");
-    sqlx::raw_sql(&attach_sql).execute(&mut conn).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(attach_sql.as_str()))
+        .execute(&mut conn)
+        .await?;
 
     let v2_tables = list_user_tables(&mut conn, "main").await?;
 
@@ -255,7 +257,7 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
         let copy_sql = format!(
             "INSERT INTO main.\"{table}\" ({cols_sql}) SELECT {cols_sql} FROM v1.\"{table}\""
         );
-        let result = sqlx::query(&copy_sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(copy_sql.as_str()))
             .execute(&mut conn)
             .await
             .map_err(|e| {
@@ -362,7 +364,9 @@ async fn list_user_tables(
          WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' \
          ORDER BY name"
     );
-    let rows: Vec<(String,)> = sqlx::query_as(&sql).fetch_all(&mut *conn).await?;
+    let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(&mut *conn)
+        .await?;
     Ok(rows.into_iter().map(|(name,)| name).collect())
 }
 
@@ -375,7 +379,7 @@ async fn table_exists(
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?)"
     );
-    let exists: bool = sqlx::query_scalar(&sql)
+    let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(table)
         .fetch_one(&mut *conn)
         .await?;
@@ -399,7 +403,9 @@ async fn column_names(
     validate_identifier(schema, "schema")?;
     validate_identifier(table, "table")?;
     let sql = format!("SELECT name FROM pragma_table_info('{table}', '{schema}')");
-    let rows: Vec<(String,)> = sqlx::query_as(&sql).fetch_all(&mut *conn).await?;
+    let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .fetch_all(&mut *conn)
+        .await?;
     Ok(rows.into_iter().map(|(name,)| name).collect())
 }
 
@@ -421,7 +427,9 @@ async fn inspect_v1_only_tables(
             continue;
         }
         let count_sql = format!("SELECT count(*) FROM v1.\"{table}\"");
-        let rows_dropped: i64 = sqlx::query_scalar(&count_sql).fetch_one(&mut *conn).await?;
+        let rows_dropped: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_str()))
+            .fetch_one(&mut *conn)
+            .await?;
         out.push(DroppedV1Table {
             table: table.to_string(),
             rows_dropped,

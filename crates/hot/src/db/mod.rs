@@ -422,8 +422,11 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                     let schema = schema.clone();
                     Box::pin(async move {
                         // Set search_path so queries use the correct schema
-                        conn.execute(format!("set search_path = '{}', 'public'", schema).as_str())
-                            .await?;
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "set search_path = '{}', 'public'",
+                            schema
+                        )))
+                        .await?;
                         Ok(())
                     })
                 })
@@ -560,11 +563,17 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                     let schema = schema.clone();
                     Box::pin(async move {
                         tracing::debug!("Creating schema if not exists: {}", schema);
-                        conn.execute(format!("create schema if not exists {}", schema).as_str())
-                            .await?;
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "create schema if not exists {}",
+                            schema
+                        )))
+                        .await?;
                         tracing::debug!("Setting migration search path to: {}", schema);
-                        conn.execute(format!("set search_path = '{}', 'public'", schema).as_str())
-                            .await?;
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "set search_path = '{}', 'public'",
+                            schema
+                        )))
+                        .await?;
                         Ok(())
                     })
                 })

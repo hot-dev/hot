@@ -187,7 +187,10 @@ impl Store for PgStore {
                 Self::quote_literal(&self.env_id.to_string()),
                 Self::quote_literal(&config.name)
             );
-            if let Err(e) = sqlx::query(&create_idx).execute(pg).await {
+            if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(create_idx.as_str()))
+                .execute(pg)
+                .await
+            {
                 tracing::warn!(
                     "Failed to create HNSW index for store '{}': {e}",
                     config.name

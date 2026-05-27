@@ -388,7 +388,7 @@ impl Domain {
 
     async fn get_domain_sqlite(db: &Pool<Sqlite>, domain_id: &Uuid) -> Result<Domain, DomainError> {
         let query = format!("SELECT {} FROM domain WHERE domain_id = ?", DOMAIN_COLUMNS);
-        sqlx::query_as::<_, Domain>(&query)
+        sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
             .bind(domain_id)
             .fetch_one(db)
             .await
@@ -403,7 +403,7 @@ impl Domain {
         domain_id: &Uuid,
     ) -> Result<Domain, DomainError> {
         let query = format!("SELECT {} FROM domain WHERE domain_id = $1", DOMAIN_COLUMNS);
-        sqlx::query_as::<_, Domain>(&query)
+        sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
             .bind(domain_id)
             .fetch_one(db)
             .await
@@ -438,7 +438,7 @@ impl Domain {
             "SELECT {} FROM domain WHERE domain = ? AND verified_at IS NOT NULL AND deleted_at IS NULL",
             DOMAIN_COLUMNS
         );
-        sqlx::query_as::<_, Domain>(&query)
+        sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
             .bind(domain_name)
             .fetch_one(db)
             .await
@@ -456,7 +456,7 @@ impl Domain {
             "SELECT {} FROM domain WHERE domain = $1 AND verified_at IS NOT NULL AND deleted_at IS NULL",
             DOMAIN_COLUMNS
         );
-        sqlx::query_as::<_, Domain>(&query)
+        sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
             .bind(domain_name)
             .fetch_one(db)
             .await
@@ -485,10 +485,12 @@ impl Domain {
             "SELECT {} FROM domain WHERE env_id = ? ORDER BY created_at DESC",
             DOMAIN_COLUMNS
         );
-        Ok(sqlx::query_as::<_, Domain>(&query)
-            .bind(env_id)
-            .fetch_all(db)
-            .await?)
+        Ok(
+            sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                .bind(env_id)
+                .fetch_all(db)
+                .await?,
+        )
     }
 
     async fn list_by_env_postgres(
@@ -499,10 +501,12 @@ impl Domain {
             "SELECT {} FROM domain WHERE env_id = $1 ORDER BY created_at DESC",
             DOMAIN_COLUMNS
         );
-        Ok(sqlx::query_as::<_, Domain>(&query)
-            .bind(env_id)
-            .fetch_all(db)
-            .await?)
+        Ok(
+            sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                .bind(env_id)
+                .fetch_all(db)
+                .await?,
+        )
     }
 
     /// List all unverified domains (for background verification worker).
@@ -518,7 +522,11 @@ impl Domain {
             "SELECT {} FROM domain WHERE verified_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
             DOMAIN_COLUMNS
         );
-        Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+        Ok(
+            sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                .fetch_all(db)
+                .await?,
+        )
     }
 
     async fn list_unverified_postgres(db: &Pool<Postgres>) -> Result<Vec<Domain>, DomainError> {
@@ -526,7 +534,11 @@ impl Domain {
             "SELECT {} FROM domain WHERE verified_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
             DOMAIN_COLUMNS
         );
-        Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+        Ok(
+            sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                .fetch_all(db)
+                .await?,
+        )
     }
 
     /// List domains that don't yet have a certificate (need initial provisioning).
@@ -539,14 +551,22 @@ impl Domain {
                     "SELECT {} FROM domain WHERE certificate_ref IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let query = format!(
                     "SELECT {} FROM domain WHERE certificate_ref IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
         }
     }
@@ -561,14 +581,22 @@ impl Domain {
                     "SELECT {} FROM domain WHERE verified_at IS NOT NULL AND routing_ref IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let query = format!(
                     "SELECT {} FROM domain WHERE verified_at IS NOT NULL AND routing_ref IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
         }
     }
@@ -581,14 +609,22 @@ impl Domain {
                     "SELECT {} FROM domain WHERE routing_ref IS NOT NULL AND tls_provisioned_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let query = format!(
                     "SELECT {} FROM domain WHERE routing_ref IS NOT NULL AND tls_provisioned_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
         }
     }
@@ -891,14 +927,22 @@ impl Domain {
                     "SELECT {} FROM domain WHERE deleted_at IS NOT NULL ORDER BY deleted_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let query = format!(
                     "SELECT {} FROM domain WHERE deleted_at IS NOT NULL ORDER BY deleted_at ASC",
                     DOMAIN_COLUMNS
                 );
-                Ok(sqlx::query_as::<_, Domain>(&query).fetch_all(db).await?)
+                Ok(
+                    sqlx::query_as::<_, Domain>(sqlx::AssertSqlSafe(query.as_str()))
+                        .fetch_all(db)
+                        .await?,
+                )
             }
         }
     }

@@ -1099,7 +1099,7 @@ pub async fn list_files_by_env(
 
     match db {
         DatabasePool::Postgres(pool) => {
-            let mut q = sqlx::query(&query).bind(env_id);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
             if let Some(uuid) = search_uuid {
                 q = q.bind(uuid);
@@ -1184,7 +1184,7 @@ pub async fn list_files_by_env(
                 where_clause
             );
 
-            let mut q = sqlx::query(&sqlite_query).bind(env_id);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sqlite_query.as_str())).bind(env_id);
 
             if let Some(uuid) = search_uuid {
                 // Bind the UUID twice for the OR condition
@@ -1303,7 +1303,8 @@ pub async fn get_files_count_by_env(
             let where_clause = conditions.join(" AND ");
             let query = format!("SELECT COUNT(*) as count FROM file WHERE {}", where_clause);
 
-            let mut q = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+            let mut q =
+                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
             if let Some(uuid) = search_uuid {
                 q = q.bind(uuid);
@@ -1340,7 +1341,8 @@ pub async fn get_files_count_by_env(
             let where_clause = conditions.join(" AND ");
             let query = format!("SELECT COUNT(*) as count FROM file WHERE {}", where_clause);
 
-            let mut q = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+            let mut q =
+                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
             if let Some(uuid) = search_uuid {
                 // Bind the UUID twice for the OR condition

@@ -995,7 +995,7 @@ impl OrgUsageStats {
         let runs_q = format!(
             "SELECT COUNT(*) FROM run WHERE {ENV_SUB} AND start_time >= ? AND run_type_id != 7",
         );
-        let runs_fut = sqlx::query_as::<_, (i64,)>(&runs_q)
+        let runs_fut = sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(runs_q.as_str()))
             .bind(org_id)
             .bind(period_start)
             .fetch_one(pool);
@@ -1028,18 +1028,22 @@ impl OrgUsageStats {
         );
         let call_fut = async {
             if retention_days < 0 {
-                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(&call_q_all)
-                    .bind(org_id)
-                    .fetch_one(pool)
-                    .await
+                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(sqlx::AssertSqlSafe(
+                    call_q_all.as_str(),
+                ))
+                .bind(org_id)
+                .fetch_one(pool)
+                .await
             } else if retention_days == 0 {
                 Ok((0i64, 0i64, None))
             } else {
-                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(&call_q_retention)
-                    .bind(org_id)
-                    .bind(retention_days)
-                    .fetch_one(pool)
-                    .await
+                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(sqlx::AssertSqlSafe(
+                    call_q_retention.as_str(),
+                ))
+                .bind(org_id)
+                .bind(retention_days)
+                .fetch_one(pool)
+                .await
             }
         };
 
@@ -1055,10 +1059,12 @@ impl OrgUsageStats {
              FROM task
              WHERE {ENV_SUB} AND created_at >= ?",
         );
-        let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(&task_q)
-            .bind(org_id)
-            .bind(period_start)
-            .fetch_one(pool);
+        let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(sqlx::AssertSqlSafe(
+            task_q.as_str(),
+        ))
+        .bind(org_id)
+        .bind(period_start)
+        .fetch_one(pool);
 
         let schedule_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM schedule s

@@ -65,21 +65,20 @@ pub async fn task_activity_timeline_handler(
     let display_timezone = &session.display_timezone;
     let statuses = ["completed", "failed", "running", "queued"];
 
-    let pg_project_clause = if let Some(ref pid) = project_id {
-        format!(
-            "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = '{}'",
-            pid
-        )
-    } else {
-        String::new()
-    };
-    let sqlite_project_clause = pg_project_clause.clone();
-
     match db.as_ref() {
         DatabasePool::Postgres(pg_pool) => {
             let group_by_clause =
                 crate::timezone::postgres_date_trunc(time_unit, "t.created_at", display_timezone);
             let date_format = crate::timezone::postgres_date_format(time_unit);
+            let pg_project_clause = if project_id.is_some() {
+                if interval.is_some() {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = $3"
+                } else {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = $2"
+                }
+            } else {
+                ""
+            };
 
             let query = if interval.is_some() {
                 format!(
@@ -116,11 +115,16 @@ pub async fn task_activity_timeline_handler(
                 )
             };
 
-            let mut query_builder =
-                sqlx::query_as::<_, (DateTime<Utc>, String, i64)>(&query).bind(env_id);
+            let mut query_builder = sqlx::query_as::<_, (DateTime<Utc>, String, i64)>(
+                sqlx::AssertSqlSafe(query.as_str()),
+            )
+            .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(pg_pool).await {
@@ -181,6 +185,15 @@ pub async fn task_activity_timeline_handler(
         DatabasePool::Sqlite(sqlite_pool) => {
             let group_by_clause =
                 crate::timezone::sqlite_date_bucket(time_unit, "t.created_at", display_timezone);
+            let sqlite_project_clause = if project_id.is_some() {
+                if interval.is_some() {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = ?3"
+                } else {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = ?2"
+                }
+            } else {
+                ""
+            };
 
             let query = if interval.is_some() {
                 format!(
@@ -218,10 +231,14 @@ pub async fn task_activity_timeline_handler(
             };
 
             let mut query_builder =
-                sqlx::query_as::<_, (String, String, i64)>(&query).bind(env_id.to_string());
+                sqlx::query_as::<_, (String, String, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id.to_string());
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id.to_string());
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {
@@ -331,20 +348,20 @@ pub async fn task_cus_timeline_handler(
 
     let display_timezone = &session.display_timezone;
 
-    let project_join = if let Some(ref pid) = project_id {
-        format!(
-            "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = '{}'",
-            pid
-        )
-    } else {
-        String::new()
-    };
-
     match db.as_ref() {
         DatabasePool::Postgres(pg_pool) => {
             let group_by_clause =
                 crate::timezone::postgres_date_trunc(time_unit, "t.created_at", display_timezone);
             let date_format = crate::timezone::postgres_date_format(time_unit);
+            let project_join = if project_id.is_some() {
+                if interval.is_some() {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = $3"
+                } else {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = $2"
+                }
+            } else {
+                ""
+            };
 
             let cus_expr = r#"COALESCE(SUM(CASE
                 WHEN t.result->'$val'->'$err'->>'compute-units' IS NOT NULL
@@ -387,10 +404,15 @@ pub async fn task_cus_timeline_handler(
                 )
             };
 
-            let mut query_builder = sqlx::query_as::<_, (DateTime<Utc>, i64)>(&query).bind(env_id);
+            let mut query_builder =
+                sqlx::query_as::<_, (DateTime<Utc>, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(pg_pool).await {
@@ -431,6 +453,15 @@ pub async fn task_cus_timeline_handler(
         DatabasePool::Sqlite(sqlite_pool) => {
             let group_by_clause =
                 crate::timezone::sqlite_date_bucket(time_unit, "t.created_at", display_timezone);
+            let project_join = if project_id.is_some() {
+                if interval.is_some() {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = ?3"
+                } else {
+                    "JOIN build bprj ON t.build_id = bprj.build_id AND bprj.project_id = ?2"
+                }
+            } else {
+                ""
+            };
 
             let cus_expr = r#"COALESCE(SUM(CASE
                 WHEN json_extract(t.result, '$."$val"."$err"."compute-units"') IS NOT NULL
@@ -474,10 +505,14 @@ pub async fn task_cus_timeline_handler(
             };
 
             let mut query_builder =
-                sqlx::query_as::<_, (String, i64)>(&query).bind(env_id.to_string());
+                sqlx::query_as::<_, (String, i64)>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id.to_string());
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id.to_string());
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {

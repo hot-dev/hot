@@ -486,7 +486,7 @@ impl Run {
                     run_type_placeholders
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query)
+                let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(status.as_id())
                     .bind(env_id)
                     .bind(start_time);
@@ -509,7 +509,7 @@ impl Run {
                     run_type_placeholders
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query)
+                let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(status.as_id())
                     .bind(env_id)
                     .bind(start_time);
@@ -544,7 +544,7 @@ impl Run {
                     status_placeholders
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query)
+                let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(run_type.as_id())
                     .bind(env_id)
                     .bind(start_time);
@@ -567,7 +567,7 @@ impl Run {
                     status_placeholders
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query)
+                let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(run_type.as_id())
                     .bind(env_id)
                     .bind(start_time);
@@ -854,7 +854,8 @@ impl Run {
                     param_count + 1
                 );
 
-                let mut q = sqlx::query_as::<_, Run>(&query).bind(env_id);
+                let mut q =
+                    sqlx::query_as::<_, Run>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 // Bind project_id if specified
                 if let Some(proj_id) = project_id {
@@ -1055,7 +1056,8 @@ impl Run {
                     where_clause
                 );
 
-                let mut q = sqlx::query_as::<_, Run>(&query).bind(env_id);
+                let mut q =
+                    sqlx::query_as::<_, Run>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 // Bind project_id if specified
                 if let Some(proj_id) = project_id {
@@ -1281,7 +1283,8 @@ impl Run {
                     where_clause
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+                let mut q =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 // Bind project_id if specified
                 if let Some(proj_id) = project_id {
@@ -1465,7 +1468,8 @@ impl Run {
                     where_clause
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query).bind(env_id);
+                let mut q =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 // Bind project_id if specified
                 if let Some(proj_id) = project_id {
@@ -2276,7 +2280,8 @@ impl Run {
                     placeholders
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query).bind(run_id);
+                let mut q =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(run_id);
 
                 for env_id in env_ids {
                     q = q.bind(env_id);
@@ -2296,7 +2301,8 @@ impl Run {
                     placeholders
                 );
 
-                let mut q = sqlx::query_scalar::<_, i64>(&query).bind(run_id);
+                let mut q =
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(run_id);
 
                 for env_id in env_ids {
                     q = q.bind(env_id);
@@ -2507,7 +2513,9 @@ impl Run {
                     group_by_clause, run_type_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id).bind(days_ago);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id)
+                    .bind(days_ago);
                 for run_type in run_types {
                     q = q.bind(*run_type);
                 }
@@ -2550,7 +2558,9 @@ impl Run {
                     group_by_clause, run_type_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id).bind(days_ago);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id)
+                    .bind(days_ago);
                 for run_type in run_types {
                     q = q.bind(*run_type);
                 }
@@ -2621,7 +2631,7 @@ impl Run {
                     group_by_clause, time_clause, run_type_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
@@ -2682,7 +2692,7 @@ impl Run {
                     group_by_clause, time_filter, run_type_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
                 if let Some(ref c) = time_cutoff_str {
                     q = q.bind(c);
                 }
@@ -2749,7 +2759,9 @@ impl Run {
                     group_by_clause, status_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id).bind(days_ago);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id)
+                    .bind(days_ago);
                 for status in statuses {
                     q = q.bind(*status);
                 }
@@ -2792,7 +2804,9 @@ impl Run {
                     group_by_clause, status_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id).bind(days_ago);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(env_id)
+                    .bind(days_ago);
                 for status in statuses {
                     q = q.bind(*status);
                 }
@@ -2861,7 +2875,7 @@ impl Run {
                     group_by_clause, time_clause, status_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
@@ -2922,7 +2936,7 @@ impl Run {
                     group_by_clause, time_filter, status_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(ref c) = time_cutoff_str {
                     q = q.bind(c);
@@ -3039,7 +3053,7 @@ impl Run {
                     group_by_clause, time_clause, run_type_placeholders, status_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
@@ -3110,7 +3124,7 @@ impl Run {
                     group_by_clause, time_filter, run_type_placeholders, status_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(ref c) = time_cutoff_str {
                     q = q.bind(c);
@@ -3206,7 +3220,7 @@ impl Run {
                     group_by_clause, time_clause, status_placeholders, run_type_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
@@ -3277,7 +3291,7 @@ impl Run {
                     group_by_clause, time_filter, status_placeholders, run_type_placeholders
                 );
 
-                let mut q = sqlx::query(&query).bind(env_id);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(ref c) = time_cutoff_str {
                     q = q.bind(c);
@@ -3313,6 +3327,7 @@ impl Run {
     pub async fn get_runs_by_stream(
         db: &crate::db::DatabasePool,
         stream_id: &Uuid,
+        env_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<Run>, RunError> {
@@ -3322,9 +3337,10 @@ impl Run {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.stream_id = $1 ORDER BY r.start_time DESC LIMIT $2 OFFSET $3"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.stream_id = $1 AND r.env_id = $2 ORDER BY r.start_time DESC LIMIT $3 OFFSET $4"
                 )
                 .bind(stream_id)
+                .bind(env_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(pg_pool)
@@ -3333,9 +3349,10 @@ impl Run {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.stream_id = ? ORDER BY r.start_time DESC LIMIT ? OFFSET ?"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.stream_id = ? AND r.env_id = ? ORDER BY r.start_time DESC LIMIT ? OFFSET ?"
                 )
                 .bind(stream_id)
+                .bind(env_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(sqlite_pool)
@@ -3349,21 +3366,27 @@ impl Run {
     pub async fn get_count_by_stream(
         db: &crate::db::DatabasePool,
         stream_id: &Uuid,
+        env_id: &Uuid,
     ) -> Result<i64, RunError> {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let count: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM run WHERE stream_id = $1")
-                        .bind(stream_id)
-                        .fetch_one(pg_pool)
-                        .await?;
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM run WHERE stream_id = $1 AND env_id = $2",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .fetch_one(pg_pool)
+                .await?;
                 Ok(count)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run WHERE stream_id = ?")
-                    .bind(stream_id)
-                    .fetch_one(sqlite_pool)
-                    .await?;
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM run WHERE stream_id = ? AND env_id = ?",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .fetch_one(sqlite_pool)
+                .await?;
                 Ok(count)
             }
         }

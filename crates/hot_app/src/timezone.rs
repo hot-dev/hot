@@ -162,6 +162,7 @@ pub fn postgres_date_trunc(time_unit: &str, column: &str, timezone: &str) -> Str
         "month" => "month",
         _ => "day",
     };
+    let timezone = parse_timezone(timezone).name();
 
     // DATE_TRUNC with AT TIME ZONE returns a TIMESTAMP (without timezone)
     // We need to convert it back to TIMESTAMPTZ by applying the timezone again
