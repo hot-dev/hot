@@ -1,6 +1,6 @@
 ::supabase ns
 meta {
-  doc: """
+    doc: """
 Supabase client SDK for Hot. Includes PostgREST database access, GoTrue auth,
 Storage, Edge Functions, and low-level request helpers.
 """

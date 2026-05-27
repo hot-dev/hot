@@ -40,6 +40,7 @@ invoke-http-response fn (request: InvokeFunctionRequest): ::api/HttpResponse {
     and(is-some(request.service), request.service) => {
       ::api/request-raw-service("POST", function-path(request.name), invoke-headers(request), or(request.body, {}))
     }
+
     is-some(request.access-token) => {
       ::api/request-raw-as("POST", function-path(request.name), invoke-headers(request), or(request.body, {}), request.access-token)
     }

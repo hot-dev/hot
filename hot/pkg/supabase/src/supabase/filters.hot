@@ -28,6 +28,7 @@ format-value fn cond (val: Any): Str {
     s Str(val)
     if(needs-quote(s), quote-string(s), s)
   }
+
   is-null(val) => { "null" }
   => { Str(val) }
 }

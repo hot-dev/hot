@@ -32,7 +32,7 @@ impl CacheType {
     pub fn format_version(&self) -> u32 {
         match self {
             CacheType::Bytecode => 6, // Bumped to invalidate caches missing tool_specs/skill_specs
-            CacheType::Ast => 1,      // AST cache format version
+            CacheType::Ast => 2,      // Bumped for required TypeField::type_expr in AST cache
         }
     }
 }

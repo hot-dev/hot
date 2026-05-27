@@ -8,19 +8,50 @@ Embedding
 meta {
     core: true,
     doc: """
-    Configuration for overriding system-level embedding defaults on a store Map.
+    Custom embedding provider options for a store Map.
 
     **Fields**
+    - `provider` — Provider label used for compatibility checks (e.g. `"local"`, `"qwen"`)
     - `model` — Override the embedding model (e.g. `"bge-base-en-v1.5"`, `"text-embedding-3-small"`)
+    - `dimensions` — Expected vector length. Required for custom `embed-fn` values.
     - `field` — Which field of the value to embed (default: `"content"`)
     - `text-search` — Also enable keyword search (default: `false`)
+    - `embed-fn` — Custom Hot function `(text: Str) -> Vec<Dec | Int>`
+    - `embed-batch-fn` — Optional batch custom Hot function `(texts: Vec<Str>) -> Vec<Vec<Dec | Int>>`
+    - `on-error` — Custom embed failure policy: `"fail"` (default for `embed-fn`) or `"skip"`
     """
 }
 type {
+    provider: Str?,
     model: Str?,
+    dimensions: Int?,
     field: Str?,
-    text-search: Bool?
+    text-search: Bool?,
+    embed-fn: Fn?,
+    embed-batch-fn: Fn?,
+    on-error: Str?
 }
+
+
+EmbeddingOptions
+meta {
+    core: true,
+    doc: """
+    Explicit embedding mode for a store Map.
+
+    - `EmbeddingOptions.Default` — use system embedding defaults
+    - `EmbeddingOptions.Off` — disable embeddings
+    - `EmbeddingOptions.Embedding(Embedding({...}))` — use explicit provider/model/hooks
+    - `Embedding({...})` — shorthand for `EmbeddingOptions.Embedding(Embedding({...}))`
+    """
+}
+enum {
+    Off,
+    Default,
+    Embedding(Embedding)
+}
+
+Embedding -> EmbeddingOptions.Embedding
 
 
 Map
@@ -31,31 +62,35 @@ meta {
 
     **Fields**
     - `name` — Unique store name (e.g. `"settings"`, `"kb"`, `"support:${stream-id}"`)
-    - `embedding` — `null` = off (default), `true` = system defaults, `Embedding({...})` = override
+    - `embedding` — `EmbeddingOptions.Off`/`null` = off, `EmbeddingOptions.Default` = system defaults, `Embedding({...})` = override
 
     **Example**
 
     ```hot
     ::store ::hot::store
+    Embedding ::store/Embedding
+    EmbeddingOptions ::store/EmbeddingOptions
 
     // Plain persistent map
     settings ::store/Map({name: "settings"})
 
     // With semantic search
-    kb ::store/Map({name: "kb", embedding: true})
+    kb ::store/Map({name: "kb", embedding: EmbeddingOptions.Default})
 
-    // With overrides
-    docs ::store/Map({name: "docs", embedding: ::store/Embedding({
-      model: "text-embedding-3-small"
-      field: "body"
-      text-search: true
+    // With custom overrides
+    docs ::store/Map({name: "docs", embedding: Embedding({
+        provider: "openai",
+        model: "text-embedding-3-small",
+        dimensions: 1536,
+        field: "body",
+        text-search: true,
     })})
     ```
     """
 }
 type {
     name: Str,
-    embedding: Bool | Embedding?
+    embedding: EmbeddingOptions?
 }
 
 

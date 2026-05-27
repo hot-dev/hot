@@ -9,7 +9,9 @@ use crate::db::DatabasePool;
 
 use super::{
     ListOptions, SearchInfoPage, SearchMode, SearchOptions, SearchResult, Store, StoreEntry,
-    StoreEntryInfo, StoreMapConfig, StoreMapInfo,
+    StoreEntryInfo, StoreMapConfig, StoreMapInfo, effective_embedding_conf,
+    embedding_conf_dimensions, embedding_conf_field, embedding_conf_model, embedding_conf_provider,
+    validate_store_map_compatibility,
 };
 
 /// Local SQLite-backed implementation of [`Store`].
@@ -127,31 +129,69 @@ impl SqliteStore {
 #[async_trait]
 impl Store for SqliteStore {
     async fn ensure_store(&self, config: &StoreMapConfig) -> Result<(), String> {
-        {
-            let ensured = self.ensured.lock().unwrap();
-            if ensured.contains(&config.name) {
-                return Ok(());
-            }
-        }
-
         let pool = self.sqlite_pool()?;
         let store_id = Uuid::now_v7();
+        let embedding_conf = effective_embedding_conf(config)
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| format!("Failed to serialize embedding_conf: {e}"))?;
 
         sqlx::query(
-            "INSERT OR IGNORE INTO store_map (store_id, org_id, env_id, name, embedding_model, embedding_dimensions, embedding_field, text_search)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO store_map (store_id, org_id, env_id, name, embedding_conf, text_search)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(store_id)
         .bind(self.org_id)
         .bind(self.env_id)
         .bind(&config.name)
-        .bind(&config.embedding_model)
-        .bind(config.embedding_dimensions.map(|d| d as i32))
-        .bind(config.embedding_field.as_deref().unwrap_or("content"))
+        .bind(&embedding_conf)
         .bind(config.text_search as i32)
         .execute(pool)
         .await
         .map_err(|e| format!("Failed to ensure store '{}': {e}", config.name))?;
+
+        let row = sqlx::query(
+            "SELECT embedding_conf, text_search
+             FROM store_map
+             WHERE org_id = ? AND env_id = ? AND name = ?",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(&config.name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Failed to load store metadata '{}': {e}", config.name))?;
+
+        let existing_conf_raw: Option<String> =
+            row.try_get("embedding_conf").map_err(|e| e.to_string())?;
+        let existing_conf = existing_conf_raw
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| format!("Invalid embedding_conf for store '{}': {e}", config.name))?;
+        let existing_text_search: i64 = row.try_get("text_search").unwrap_or(0);
+        let action = validate_store_map_compatibility(
+            config,
+            existing_conf.as_ref(),
+            existing_text_search != 0,
+        )?;
+
+        if let super::CompatAction::UpdateConf(new_conf) = action {
+            let serialized = serde_json::to_string(&new_conf)
+                .map_err(|e| format!("Failed to serialize updated embedding_conf: {e}"))?;
+            sqlx::query(
+                "UPDATE store_map SET embedding_conf = ?
+                 WHERE org_id = ? AND env_id = ? AND name = ?",
+            )
+            .bind(&serialized)
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(&config.name)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to update embedding_conf for '{}': {e}", config.name))?;
+        }
 
         self.ensured.lock().unwrap().insert(config.name.clone());
         Ok(())
@@ -683,9 +723,7 @@ impl Store for SqliteStore {
         let rows = sqlx::query(
             "SELECT
                 m.name AS name,
-                m.embedding_model AS embedding_model,
-                m.embedding_dimensions AS embedding_dimensions,
-                m.embedding_field AS embedding_field,
+                m.embedding_conf AS embedding_conf,
                 m.text_search AS text_search,
                 m.created_at AS created_at,
                 COALESCE((
@@ -709,13 +747,13 @@ impl Store for SqliteStore {
         rows.iter()
             .map(|r| {
                 let name: String = r.try_get("name").map_err(|e| e.to_string())?;
-                let embedding_model: Option<String> =
-                    r.try_get("embedding_model").map_err(|e| e.to_string())?;
-                let embedding_dimensions: Option<i64> = r
-                    .try_get("embedding_dimensions")
-                    .map_err(|e| e.to_string())?;
-                let embedding_field: Option<String> =
-                    r.try_get("embedding_field").map_err(|e| e.to_string())?;
+                let embedding_conf_raw: Option<String> =
+                    r.try_get("embedding_conf").map_err(|e| e.to_string())?;
+                let embedding_conf = embedding_conf_raw
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|e| format!("Invalid embedding_conf for store '{name}': {e}"))?;
                 let text_search: i64 = r.try_get("text_search").unwrap_or(0);
                 let entry_count: i64 = r.try_get("entry_count").map_err(|e| e.to_string())?;
                 let storage_bytes: i64 = r.try_get("storage_bytes").unwrap_or(0);
@@ -725,9 +763,11 @@ impl Store for SqliteStore {
 
                 Ok(StoreMapInfo {
                     name,
-                    embedding_model,
-                    embedding_dimensions: embedding_dimensions.map(|d| d as u32),
-                    embedding_field,
+                    embedding_provider: embedding_conf_provider(embedding_conf.as_ref()),
+                    embedding_model: embedding_conf_model(embedding_conf.as_ref()),
+                    embedding_conf: embedding_conf.clone(),
+                    embedding_dimensions: embedding_conf_dimensions(embedding_conf.as_ref()),
+                    embedding_field: embedding_conf_field(embedding_conf.as_ref()),
                     text_search: text_search != 0,
                     entry_count,
                     storage_bytes,
@@ -909,20 +949,33 @@ pub async fn maybe_import_legacy_store(
         let embedding_model: Option<String> = row.try_get("embedding_model").ok();
         let embedding_dimensions: Option<i64> = row.try_get("embedding_dimensions").ok();
         let embedding_field: Option<String> = row.try_get("embedding_field").ok();
+        let embedding_conf = embedding_model
+            .as_ref()
+            .map(|model| {
+                serde_json::json!({
+                    "provider": "local",
+                    "model": model,
+                    "dimensions": embedding_dimensions,
+                    "field": embedding_field.as_deref().unwrap_or("content"),
+                    "version": 1,
+                })
+            })
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| format!("Failed to serialize embedding_conf for '{name}': {e}"))?;
         let text_search: i64 = row.try_get("text_search").unwrap_or(0);
         let created_at: Option<String> = row.try_get("created_at").ok();
 
         sqlx::query(
-            "INSERT OR IGNORE INTO store_map (store_id, org_id, env_id, name, embedding_model, embedding_dimensions, embedding_field, text_search, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, current_timestamp))",
+            "INSERT OR IGNORE INTO store_map (store_id, org_id, env_id, name, embedding_conf, text_search, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, current_timestamp))",
         )
         .bind(Uuid::now_v7())
         .bind(org_id)
         .bind(env_id)
         .bind(&name)
-        .bind(&embedding_model)
-        .bind(embedding_dimensions.map(|d| d as i32))
-        .bind(embedding_field.as_deref().unwrap_or("content"))
+        .bind(&embedding_conf)
         .bind(text_search as i32)
         .bind(&created_at)
         .execute(&mut *tx)
@@ -1048,10 +1101,15 @@ mod tests {
     fn plain_config(name: &str) -> StoreMapConfig {
         StoreMapConfig {
             name: name.to_string(),
+            embedding_provider: None,
             embedding_model: None,
+            embedding_conf: None,
             embedding_field: None,
             embedding_dimensions: None,
             text_search: false,
+            embedding_on_error: None,
+            embed_fn: None,
+            embed_batch_fn: None,
         }
     }
 
@@ -1370,10 +1428,21 @@ mod tests {
         store
             .ensure_store(&StoreMapConfig {
                 name: "docs".to_string(),
+                embedding_provider: Some("openai".to_string()),
                 embedding_model: Some("text-embedding-3-small".to_string()),
+                embedding_conf: Some(json!({
+                    "provider": "openai",
+                    "model": "text-embedding-3-small",
+                    "dimensions": 1536,
+                    "field": "body",
+                    "version": 1,
+                })),
                 embedding_field: Some("body".to_string()),
                 embedding_dimensions: Some(1536),
                 text_search: true,
+                embedding_on_error: None,
+                embed_fn: None,
+                embed_batch_fn: None,
             })
             .await
             .unwrap();
@@ -1412,6 +1481,7 @@ mod tests {
             maps[1].embedding_model.as_deref(),
             Some("text-embedding-3-small")
         );
+        assert_eq!(maps[1].embedding_provider.as_deref(), Some("openai"));
         assert_eq!(maps[1].embedding_field.as_deref(), Some("body"));
         assert_eq!(maps[1].embedding_dimensions, Some(1536));
         assert!(maps[1].text_search);
@@ -1422,10 +1492,15 @@ mod tests {
         let (store, _pool, _org, _env) = temp_store().await;
         let config = StoreMapConfig {
             name: "t".to_string(),
+            embedding_provider: None,
             embedding_model: None,
+            embedding_conf: None,
             embedding_field: None,
             embedding_dimensions: None,
             text_search: true,
+            embedding_on_error: None,
+            embed_fn: None,
+            embed_batch_fn: None,
         };
         store.ensure_store(&config).await.unwrap();
 

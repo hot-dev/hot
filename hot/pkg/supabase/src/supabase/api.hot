@@ -217,6 +217,7 @@ do-raw-body-request fn (method: Str, path: Str, additional-headers: Map, body-ra
     apikey: apikey,
     Authorization: `Bearer ${bearer-token}`
   }
+
   final-headers merge(default-headers, additional-headers)
 
   http-request(HttpRequest({

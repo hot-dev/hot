@@ -333,6 +333,7 @@ pub struct CacheableTypeDef {
 pub struct CacheableTypeField {
     pub name: String,
     pub type_annotation: String,
+    pub type_expr: crate::lang::ast::TypeExpr,
 }
 
 /// Cacheable TypeImplementation
@@ -647,6 +648,7 @@ impl From<&crate::lang::ast::TypeField> for CacheableTypeField {
         CacheableTypeField {
             name: tf.name.name().to_string(),
             type_annotation: tf.type_annotation.clone(),
+            type_expr: tf.type_expr.clone(),
         }
     }
 }
@@ -1094,6 +1096,7 @@ impl TryFrom<CacheableTypeField> for crate::lang::ast::TypeField {
         Ok(TypeField {
             name: Sym::String(ctf.name),
             type_annotation: ctf.type_annotation,
+            type_expr: ctf.type_expr,
         })
     }
 }
@@ -1407,7 +1410,7 @@ pub struct CacheEntry {
 }
 
 /// Current cache format version
-pub const CACHE_VERSION: u32 = 3; // Bumped for namespace aliases serialization fix
+pub const CACHE_VERSION: u32 = 4; // Bumped for required TypeField::type_expr
 
 /// Serialize namespaces to cacheable JSON
 pub fn serialize_namespaces(

@@ -19,6 +19,7 @@ meta {
     },
     secret-headers: ["x-signature"],
 }
+
 handle-signup
 
 handle-signup fn (request: HttpRequest): HttpResponse {

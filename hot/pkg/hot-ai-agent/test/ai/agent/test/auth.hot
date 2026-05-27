@@ -311,6 +311,26 @@ fn () {
     assert-eq("no-verifiers", result.error)
 }
 
+test-verifier-helpers-return-enum-variants
+meta ["test"]
+fn () {
+    platform ::auth/platform-verifier(::auth/PlatformOptions({require-types: ["api-key"]}))
+    hmac ::auth/hmac-verifier(::auth/HmacOptions({
+        secret: "shhh",
+        header: "x-hot-signature",
+    }))
+    shared ::auth/shared-secret-verifier(::auth/BearerOptions({token: "supersecret"}))
+    anon ::auth/anonymous()
+
+    assert-eq("::ai::agent::auth/Verifier.Platform", platform.$type)
+    assert-eq(["api-key"], platform.$val.require-types)
+    assert-eq("::ai::agent::auth/Verifier.Hmac", hmac.$type)
+    assert-eq("x-hot-signature", hmac.$val.header)
+    assert-eq("::ai::agent::auth/Verifier.SharedSecret", shared.$type)
+    assert-eq("supersecret", shared.$val.token)
+    assert-eq("::ai::agent::auth/Verifier.Anonymous", anon.$type)
+}
+
 test-verify-anonymous-allows
 meta ["test"]
 fn () {

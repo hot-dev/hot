@@ -9,7 +9,9 @@ use crate::db::DatabasePool;
 
 use super::{
     ListOptions, SearchInfoPage, SearchMode, SearchOptions, SearchResult, Store, StoreEntry,
-    StoreEntryInfo, StoreMapConfig, StoreMapInfo,
+    StoreEntryInfo, StoreMapConfig, StoreMapInfo, effective_embedding_conf,
+    embedding_conf_dimensions, embedding_conf_field, embedding_conf_model, embedding_conf_provider,
+    validate_store_map_compatibility,
 };
 
 pub struct PgStore {
@@ -123,30 +125,53 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 #[async_trait]
 impl Store for PgStore {
     async fn ensure_store(&self, config: &StoreMapConfig) -> Result<(), String> {
-        {
-            let ensured = self.ensured.lock().unwrap();
-            if ensured.contains(&config.name) {
-                return Ok(());
-            }
-        }
-
         let pg = self.pg_pool()?;
 
         sqlx::query(
-            "INSERT INTO store_map (name, org_id, env_id, embedding_model, embedding_dimensions, embedding_field, text_search)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO store_map (name, org_id, env_id, embedding_conf, text_search)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (org_id, env_id, name) DO NOTHING",
         )
         .bind(&config.name)
         .bind(self.org_id)
         .bind(self.env_id)
-        .bind(&config.embedding_model)
-        .bind(config.embedding_dimensions.map(|d| d as i32))
-        .bind(config.embedding_field.as_deref().unwrap_or("content"))
+        .bind(effective_embedding_conf(config))
         .bind(config.text_search)
         .execute(pg)
         .await
         .map_err(|e| format!("Failed to ensure store '{}': {e}", config.name))?;
+
+        let row = sqlx::query(
+            "SELECT embedding_conf, text_search
+             FROM store_map
+             WHERE org_id = $1 AND env_id = $2 AND name = $3",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(&config.name)
+        .fetch_one(pg)
+        .await
+        .map_err(|e| format!("Failed to load store metadata '{}': {e}", config.name))?;
+
+        let existing_conf: Option<serde_json::Value> =
+            row.try_get("embedding_conf").map_err(|e| e.to_string())?;
+        let existing_text_search: bool = row.try_get("text_search").unwrap_or(false);
+        let action =
+            validate_store_map_compatibility(config, existing_conf.as_ref(), existing_text_search)?;
+
+        if let super::CompatAction::UpdateConf(new_conf) = action {
+            sqlx::query(
+                "UPDATE store_map SET embedding_conf = $1
+                 WHERE org_id = $2 AND env_id = $3 AND name = $4",
+            )
+            .bind(&new_conf)
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(&config.name)
+            .execute(pg)
+            .await
+            .map_err(|e| format!("Failed to update embedding_conf for '{}': {e}", config.name))?;
+        }
 
         // Create a per-store HNSW index for vector search if embeddings are enabled.
         // The column is dimension-less `vector`, so the index is scoped per-store via
@@ -816,9 +841,7 @@ impl Store for PgStore {
         let rows = sqlx::query(
             "SELECT
                 m.name AS name,
-                m.embedding_model AS embedding_model,
-                m.embedding_dimensions AS embedding_dimensions,
-                m.embedding_field AS embedding_field,
+                m.embedding_conf AS embedding_conf,
                 m.text_search AS text_search,
                 m.created_at AS created_at,
                 COALESCE((
@@ -846,13 +869,8 @@ impl Store for PgStore {
         rows.iter()
             .map(|r| {
                 let name: String = r.try_get("name").map_err(|e| e.to_string())?;
-                let embedding_model: Option<String> =
-                    r.try_get("embedding_model").map_err(|e| e.to_string())?;
-                let embedding_dimensions: Option<i32> = r
-                    .try_get("embedding_dimensions")
-                    .map_err(|e| e.to_string())?;
-                let embedding_field: Option<String> =
-                    r.try_get("embedding_field").map_err(|e| e.to_string())?;
+                let embedding_conf: Option<serde_json::Value> =
+                    r.try_get("embedding_conf").map_err(|e| e.to_string())?;
                 let text_search: bool = r.try_get("text_search").unwrap_or(false);
                 let entry_count: i64 = r.try_get("entry_count").map_err(|e| e.to_string())?;
                 let storage_bytes: i64 = r.try_get("storage_bytes").unwrap_or(0);
@@ -861,9 +879,11 @@ impl Store for PgStore {
 
                 Ok(StoreMapInfo {
                     name,
-                    embedding_model,
-                    embedding_dimensions: embedding_dimensions.map(|d| d as u32),
-                    embedding_field,
+                    embedding_provider: embedding_conf_provider(embedding_conf.as_ref()),
+                    embedding_model: embedding_conf_model(embedding_conf.as_ref()),
+                    embedding_conf: embedding_conf.clone(),
+                    embedding_dimensions: embedding_conf_dimensions(embedding_conf.as_ref()),
+                    embedding_field: embedding_conf_field(embedding_conf.as_ref()),
                     text_search,
                     entry_count,
                     storage_bytes,

@@ -17,6 +17,27 @@ test-memory fn (): ::mem/AgentMemory {
     ::mem/create-memory(`test-agent:${run-id}`, s, i)
 }
 
+test-embed fn (text: Str): Vec<Int> {
+    [length(text), 1]
+}
+
+test-memory-with-custom-embedding fn (): ::mem/AgentMemory {
+    run-id Str(Uuid())
+    s Session({id: `memory-custom:${run-id}`})
+    i Identity({id: `user:${run-id}`, name: "Tester"})
+    embedding ::hot::store/Embedding({
+        provider: "test",
+        model: "length-v1",
+        dimensions: 2,
+        field: "content",
+        embed-fn: test-embed,
+    })
+    opts ::mem/MemoryOptions({
+        embedding: embedding,
+    })
+    ::mem/create-memory-with-options(`test-agent-custom:${run-id}`, s, i, opts)
+}
+
 test-message fn (id: Str, content: Str, ts: Int): Message {
     Message({
         id: id,
@@ -42,6 +63,15 @@ fn () {
     assert-eq(1, deleted)
     after ::mem/export-memory(mem)
     assert-eq(1, length(after.session))
+}
+
+test-create-memory-with-custom-embedding
+meta ["test"]
+fn () {
+    mem test-memory-with-custom-embedding()
+    ::mem/remember(mem, test-message("m1", "alpha launch decision", 100))
+    results ::mem/recall(mem, "alpha", {limit: 1, min-score: 0.0})
+    assert-eq(1, length(results))
 }
 
 test-capsule-store-and-list

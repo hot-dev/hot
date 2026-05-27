@@ -118,7 +118,7 @@ hot.store.type ::env/get("HOT_STORE_TYPE", "sqlite") // "sqlite" or "postgres"
 ```
 
 Store maps can also use embeddings for semantic search. These defaults are used
-when a map requests `embedding: true`:
+when a map requests `embedding: EmbeddingOptions.Default`:
 
 ```hot
 hot.store.embedding.provider ::env/get("HOT_STORE_EMBEDDING_PROVIDER", "local")

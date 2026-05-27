@@ -750,7 +750,7 @@ pub fn return_type_to_output_schema(return_type: Option<&str>) -> Option<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lang::ast::Sym;
+    use crate::lang::ast::{Sym, TypeExpr};
 
     #[test]
     fn test_builtin_types() {
@@ -809,14 +809,17 @@ mod tests {
                 TypeField {
                     name: Sym::String("id".to_string()),
                     type_annotation: "Int".to_string(),
+                    type_expr: TypeExpr::Simple("Int".to_string()),
                 },
                 TypeField {
                     name: Sym::String("name".to_string()),
                     type_annotation: "Str".to_string(),
+                    type_expr: TypeExpr::Simple("Str".to_string()),
                 },
                 TypeField {
                     name: Sym::String("email".to_string()),
                     type_annotation: "Str?".to_string(),
+                    type_expr: TypeExpr::Optional(Box::new(TypeExpr::Simple("Str".to_string()))),
                 },
             ]),
             type_alias: None,
@@ -858,10 +861,12 @@ mod tests {
                 TypeField {
                     name: Sym::String("street".to_string()),
                     type_annotation: "Str".to_string(),
+                    type_expr: TypeExpr::Simple("Str".to_string()),
                 },
                 TypeField {
                     name: Sym::String("city".to_string()),
                     type_annotation: "Str".to_string(),
+                    type_expr: TypeExpr::Simple("Str".to_string()),
                 },
             ]),
             type_alias: None,
@@ -879,10 +884,12 @@ mod tests {
                 TypeField {
                     name: Sym::String("name".to_string()),
                     type_annotation: "Str".to_string(),
+                    type_expr: TypeExpr::Simple("Str".to_string()),
                 },
                 TypeField {
                     name: Sym::String("address".to_string()),
                     type_annotation: "Address".to_string(),
+                    type_expr: TypeExpr::Simple("Address".to_string()),
                 },
             ]),
             type_alias: None,
@@ -981,6 +988,7 @@ mod tests {
             fields: Some(vec![TypeField {
                 name: Sym::String("radius".to_string()),
                 type_annotation: "Dec".to_string(),
+                type_expr: TypeExpr::Simple("Dec".to_string()),
             }]),
             type_alias: None,
             variants: None,
@@ -1050,10 +1058,15 @@ mod tests {
                 TypeField {
                     name: Sym::String("value".to_string()),
                     type_annotation: "Int".to_string(),
+                    type_expr: TypeExpr::Simple("Int".to_string()),
                 },
                 TypeField {
                     name: Sym::String("children".to_string()),
                     type_annotation: "Vec<Tree>".to_string(),
+                    type_expr: TypeExpr::Generic(
+                        "Vec".to_string(),
+                        vec![TypeExpr::Simple("Tree".to_string())],
+                    ),
                 },
             ]),
             type_alias: None,
@@ -1100,10 +1113,15 @@ mod tests {
                 TypeField {
                     name: Sym::String("value".to_string()),
                     type_annotation: "Int".to_string(),
+                    type_expr: TypeExpr::Simple("Int".to_string()),
                 },
                 TypeField {
                     name: Sym::String("children".to_string()),
                     type_annotation: "Vec<Tree>".to_string(),
+                    type_expr: TypeExpr::Generic(
+                        "Vec".to_string(),
+                        vec![TypeExpr::Simple("Tree".to_string())],
+                    ),
                 },
             ]),
             type_alias: None,
@@ -1123,10 +1141,12 @@ mod tests {
                 TypeField {
                     name: Sym::String("name".to_string()),
                     type_annotation: "Str".to_string(),
+                    type_expr: TypeExpr::Simple("Str".to_string()),
                 },
                 TypeField {
                     name: Sym::String("root".to_string()),
                     type_annotation: "Tree".to_string(),
+                    type_expr: TypeExpr::Simple("Tree".to_string()),
                 },
             ]),
             type_alias: None,
@@ -1183,6 +1203,7 @@ mod tests {
             fields: Some(vec![TypeField {
                 name: Sym::String("id".to_string()),
                 type_annotation: "Int".to_string(),
+                type_expr: TypeExpr::Simple("Int".to_string()),
             }]),
             type_alias: None,
             variants: None,

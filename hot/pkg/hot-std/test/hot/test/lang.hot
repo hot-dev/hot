@@ -988,6 +988,34 @@ meta ["test"] fn () {
 }
 
 
+UnionPayload type {
+    label: Str,
+}
+
+UnionHolder type {
+    value: Bool | UnionPayload?,
+}
+
+LiteralUnionHolder type {
+    value: "off" | UnionPayload?,
+}
+
+test-union-field-preserves-typed-struct
+meta ["test"] fn () {
+    payload UnionPayload({label: "custom"})
+    holder UnionHolder({value: payload})
+
+    assert-eq("custom", holder.value.label, "union field keeps typed struct branch")
+    assert-eq(true, UnionHolder({value: true}).value, "union field accepts Bool branch")
+    assert(is-null(UnionHolder({value: null}).value), "union field accepts nullable branch")
+
+    literal-holder LiteralUnionHolder({value: "off"})
+    assert-eq("off", literal-holder.value, "union field accepts literal branch")
+    custom-holder LiteralUnionHolder({value: payload})
+    assert-eq("custom", custom-holder.value.label, "literal union still keeps typed struct branch")
+}
+
+
 // _ => as default arm in cond/match
 test-underscore-default-arm
 meta ["test"] fn () {

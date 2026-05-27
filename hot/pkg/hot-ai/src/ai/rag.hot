@@ -151,10 +151,12 @@ fn (entry: Map, include-roles: Vec?, exclude-roles: Vec?): Bool {
         is-empty(inc) => { true }
         => { role-in(inc, role) }
     }
+
     exclude-pass cond {
         is-empty(exc) => { true }
         => { not(role-in(exc, role)) }
     }
+
     and(include-pass, exclude-pass)
 }
 
@@ -198,6 +200,7 @@ fn (mem: AgentMemory, opts: Map?): Str {
             })
         }
     }
+
     cond {
         is-empty(kept) => { "" }
         => {

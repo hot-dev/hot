@@ -25,6 +25,33 @@ build-cfg fn (): ::ct/TurnConfig {
         stream-label: "test-chat-turn",
         chat-opts: opts,
         system-base: "You are a test assistant.",
+        memory-opts: null,
+    })
+}
+
+test-embed fn (text: Str): Vec<Int> {
+    [length(text), 1]
+}
+
+build-custom-memory-cfg fn (): ::ct/TurnConfig {
+    run-id Str(Uuid())
+    rt ::rt/create-runtime(`chat-turn-custom:${run-id}`, {})
+    opts ChatOptions({model: "stub-model"})
+    embedding ::hot::store/Embedding({
+        provider: "test",
+        model: "length-v1",
+        dimensions: 2,
+        field: "content",
+        embed-fn: test-embed,
+    })
+    memory-opts ::memory/MemoryOptions({embedding: embedding})
+    ::ct/TurnConfig({
+        rt: rt,
+        agent-name: rt.agent-name,
+        stream-label: "test-chat-turn",
+        chat-opts: opts,
+        system-base: "You are a test assistant.",
+        memory-opts: memory-opts,
     })
 }
 
@@ -80,6 +107,18 @@ fn () {
     // role tag is required for synthesis prompts to filter user vs
     // assistant via `::ai::rag/recent-text` role filters.
     assert-eq("user", or(get(or(user-rec.metadata, {}), "role"), ""))
+}
+
+test-turn-config-memory-options-used-for-persistence
+meta ["test"]
+fn () {
+    cfg build-custom-memory-cfg()
+    input build-input("custom embedding memory", "(stub)")
+    ::ct/run-chat-turn(cfg, input)
+
+    mem ::memory/create-memory-with-options(cfg.agent-name, input.session, input.sender, cfg.memory-opts)
+    results ::memory/recall(mem, "embedding", {limit: 1, min-score: 0.0})
+    assert-eq(1, length(results))
 }
 
 test-fallback-path-persists-assistant-turn

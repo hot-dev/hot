@@ -3838,6 +3838,10 @@ impl VirtualMachine {
             return Ok(Val::Null);
         }
 
+        if let Some(Val::Vec(members)) = type_info_map.get(&Val::from("$union")) {
+            return self.construct_union_typed(data, members);
+        }
+
         // Get the type name
         let type_name = match type_info_map.get(&Val::from("$type")) {
             Some(Val::Str(s)) => (**s).to_string(),
@@ -4177,7 +4181,9 @@ impl VirtualMachine {
                             let result = self.construct_typed_recursive(value, field_type_info)?;
 
                             // Check if nested construction returned an error
-                            if result.is_err() {
+                            if result.is_err()
+                                && !Self::type_info_preserves_result_values(field_type_info)
+                            {
                                 // Propagate the error with context
                                 let inner_error = result.get("$val").unwrap_or(Val::Null);
                                 let error_msg = format!(
@@ -4249,6 +4255,192 @@ impl VirtualMachine {
         result_map.insert(Val::from("$val"), processed_val);
 
         Ok(Val::Map(Box::new(result_map)))
+    }
+
+    fn construct_union_typed(&mut self, data: &Val, members: &[Val]) -> VmResult<Val> {
+        if matches!(data, Val::Null) && members.iter().any(Self::type_info_allows_null) {
+            return Ok(Val::Null);
+        }
+
+        if let Some(existing_type) = Self::typed_value_type(data)
+            && members
+                .iter()
+                .any(|member| Self::type_info_matches_type(member, existing_type))
+        {
+            return Ok(data.clone());
+        }
+
+        if let Some(matched) = members.iter().find(|member| {
+            Self::value_matches_builtin_type(data, member)
+                || Self::value_matches_literal_type(data, member)
+        }) {
+            if Self::value_matches_literal_type(data, matched) {
+                return Ok(data.clone());
+            }
+            return self.construct_typed_recursive(data, matched);
+        }
+
+        let mut constructed_matches = Vec::new();
+        for member in members {
+            if Self::is_builtin_type_info(member) || Self::type_info_literal(member).is_some() {
+                continue;
+            }
+
+            let constructed = self.construct_typed_recursive(data, member)?;
+            if !constructed.is_err() && Self::constructed_value_matches_type(&constructed, member) {
+                constructed_matches.push(constructed);
+            }
+        }
+
+        match constructed_matches.len() {
+            1 => Ok(constructed_matches.remove(0)),
+            0 => Ok(Val::err(Val::from(format!(
+                "Value does not match any member of union {}",
+                Self::format_union_members(members)
+            )))),
+            _ => Ok(Val::err(Val::from(format!(
+                "Value ambiguously matches multiple members of union {}",
+                Self::format_union_members(members)
+            )))),
+        }
+    }
+
+    fn type_info_allows_null(type_info: &Val) -> bool {
+        let Val::Map(map) = type_info else {
+            return false;
+        };
+
+        matches!(map.get(&Val::from("$optional")), Some(Val::Bool(true)))
+            || matches!(map.get(&Val::from("$type")), Some(Val::Str(t)) if &**t == "Null")
+            || matches!(map.get(&Val::from("$literal")), Some(Val::Str(t)) if &**t == "null")
+    }
+
+    fn typed_value_type(data: &Val) -> Option<&str> {
+        let Val::Map(map) = data else {
+            return None;
+        };
+        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
+            return None;
+        };
+        Some(type_name)
+    }
+
+    fn type_info_matches_type(type_info: &Val, existing_type: &str) -> bool {
+        let Some(type_name) = Self::type_info_type_name(type_info) else {
+            return false;
+        };
+        existing_type == type_name || existing_type.starts_with(&format!("{}.", type_name))
+    }
+
+    fn constructed_value_matches_type(value: &Val, type_info: &Val) -> bool {
+        if Self::value_matches_literal_type(value, type_info) {
+            return true;
+        }
+
+        if Self::value_matches_builtin_type(value, type_info) {
+            return true;
+        }
+
+        let Some(existing_type) = Self::typed_value_type(value) else {
+            return false;
+        };
+        Self::type_info_matches_type(type_info, existing_type)
+    }
+
+    fn value_matches_builtin_type(value: &Val, type_info: &Val) -> bool {
+        let Some(type_name) = Self::type_info_type_name(type_info) else {
+            return false;
+        };
+
+        match type_name {
+            "Any" => true,
+            "Str" | "String" => matches!(value, Val::Str(_)),
+            "Int" | "Integer" => matches!(value, Val::Int(_)),
+            "Dec" | "Number" => matches!(value, Val::Dec(_) | Val::Int(_)),
+            "Bool" | "Boolean" => matches!(value, Val::Bool(_)),
+            "Null" => matches!(value, Val::Null),
+            "Vec" => matches!(value, Val::Vec(_)),
+            "Map" => matches!(value, Val::Map(_)),
+            "Byte" => matches!(value, Val::Byte(_)),
+            "Bytes" => matches!(value, Val::Bytes(_)),
+            _ => false,
+        }
+    }
+
+    fn value_matches_literal_type(value: &Val, type_info: &Val) -> bool {
+        let Some(literal) = Self::type_info_literal(type_info) else {
+            return false;
+        };
+
+        match value {
+            Val::Str(s) => literal
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .is_some_and(|lit| lit == &**s),
+            Val::Int(i) => literal == i.to_string(),
+            Val::Dec(d) => literal == d.to_string(),
+            Val::Bool(b) => literal == b.to_string(),
+            Val::Null => literal == "null",
+            _ => false,
+        }
+    }
+
+    fn is_builtin_type_info(type_info: &Val) -> bool {
+        let Some(type_name) = Self::type_info_type_name(type_info) else {
+            return false;
+        };
+        Self::is_builtin_type(type_name)
+            || matches!(
+                type_name,
+                "String" | "Integer" | "Number" | "Boolean" | "Byte" | "Bytes"
+            )
+    }
+
+    fn type_info_type_name(type_info: &Val) -> Option<&str> {
+        let Val::Map(map) = type_info else {
+            return None;
+        };
+        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
+            return None;
+        };
+        Some(type_name)
+    }
+
+    fn type_info_literal(type_info: &Val) -> Option<&str> {
+        let Val::Map(map) = type_info else {
+            return None;
+        };
+        let Some(Val::Str(literal)) = map.get(&Val::from("$literal")) else {
+            return None;
+        };
+        Some(literal)
+    }
+
+    fn type_info_preserves_result_values(type_info: &Val) -> bool {
+        if let Some(type_name) = Self::type_info_type_name(type_info) {
+            let normalized = type_name.trim_end_matches('?');
+            if normalized == "Any" || normalized.ends_with("/Any") {
+                return true;
+            }
+        }
+
+        let Val::Map(map) = type_info else {
+            return false;
+        };
+        let Some(Val::Vec(members)) = map.get(&Val::from("$union")) else {
+            return false;
+        };
+        members.iter().any(Self::type_info_preserves_result_values)
+    }
+
+    fn format_union_members(members: &[Val]) -> String {
+        members
+            .iter()
+            .filter_map(|member| {
+                Self::type_info_type_name(member).or_else(|| Self::type_info_literal(member))
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     /// Check if a type name is a builtin type (doesn't need typed construction)

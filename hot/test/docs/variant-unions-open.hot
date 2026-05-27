@@ -105,6 +105,7 @@ meta ["test"] fn () {
 Fish type {
     species: Str
 }
+
 Fish -> Animal.Fish
 
 test-bodyless-arrow-synthesizes-wrap

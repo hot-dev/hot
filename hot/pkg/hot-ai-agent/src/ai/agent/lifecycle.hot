@@ -41,7 +41,9 @@ fn (session: Session, action: Str, result: Any?): LifecycleJob {
 }
 
 job-error
-meta { doc: "Build a failed LifecycleJob result and record it in the runtime error log." }
+meta {
+    doc: "Build a failed LifecycleJob result and record it in the runtime error log."
+}
 fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
     msg Str(error)
     ::runtime/record-error(rt, action, msg)
@@ -71,10 +73,19 @@ meta {
 fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
     sessions ::runtime/list-registered-sessions(rt)
     map(sessions, (session) {
-        if-err(
-            job-ok(session, action, handler(session)),
-            (e: Any) { job-error(rt, session, action, e) }
-        )
+        attempt ::hot::lang/try-call(handler, [session])
+        cond {
+            attempt.ok => {
+                LifecycleJob({
+                    session-id: session.id,
+                    action: action,
+                    ok: true,
+                    result: attempt.value,
+                    error: null,
+                })
+            }
+            => { job-error(rt, session, action, attempt.error) }
+        }
     })
 }
 

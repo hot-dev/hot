@@ -18,6 +18,7 @@ meta ["test"]
 Inches type {
     value: Dec
 }
+
 Centimeters type {
     value: Dec
 }
@@ -57,6 +58,7 @@ Triangle type {
     base: Dec,
     height: Dec
 }
+
 Triangle -> Geom.Tri
 
 describe-geom fn (g: Geom): Str {
