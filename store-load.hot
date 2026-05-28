@@ -14,6 +14,8 @@ meta {
 }
 
 ::store ::hot::store
+Embedding ::store/Embedding
+EmbeddingOptions ::store/EmbeddingOptions
 
 
 // ---------------------------------------------------------------------------
@@ -81,7 +83,7 @@ events {
  "$type": "::hot::store/Map",
  "$val": {
   name: "events",
-  embedding: {text-search: true},
+  embedding: EmbeddingOptions.Embedding(Embedding({text-search: true})),
  },
 }
 

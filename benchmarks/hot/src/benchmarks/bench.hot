@@ -1,0 +1,222 @@
+::benchmarks ns
+meta {doc: "Hot language benchmarks"}
+
+// Aliases for convenience
+now ::hot::time/now
+epoch-millis ::hot::time/epoch-millis
+Millisecond ::hot::time/Millisecond
+
+
+// ============================================================================
+// BENCHMARK 1: Fibonacci
+// ============================================================================
+
+// Recursive fibonacci (naive)
+fib-recursive fn (n: Int): Int {
+    if(lte(n, 1), n, add(fib-recursive(sub(n, 1)), fib-recursive(sub(n, 2))))
+}
+
+// Iterative fibonacci using reduce
+fib-iterative fn (n: Int): Int {
+    if(lte(n, 1), n, {
+        result reduce(range(2, add(n, 1)), (acc, _i) {
+            [acc[1], add(acc[0], acc[1])]
+        }, [0, 1])
+        result[1]
+    })
+}
+
+// ============================================================================
+// BENCHMARK 2: Collection Operations
+// ============================================================================
+
+// Sum of squares of even numbers in a range
+sum-even-squares fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+
+// Map-filter-reduce chain
+collection-benchmark fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> map((x) { mul(x, 3) })
+    |> filter((x) { gt(x, 100) })
+    |> map((x) { add(x, 1) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+
+// ============================================================================
+// BENCHMARK 3: String Operations
+// ============================================================================
+
+// Build a string through concatenation
+string-concat-benchmark fn (n: Int): Str {
+    reduce(range(n), (acc, i) {
+        concat(acc, `item-${i}-`)
+    }, "")
+}
+
+// ============================================================================
+// BENCHMARK 4: JSON Processing
+// ============================================================================
+
+// Create, serialize, and parse JSON objects
+json-benchmark fn (n: Int): Int {
+    // Create an array of objects
+    data map(range(n), (i) {
+        {
+            id: i,
+            name: `User ${i}`,
+            active: is-zero(mod(i, 2)),
+            scores: [mul(i, 10), mul(i, 20), mul(i, 30)]
+        }
+    })
+    // Serialize to JSON
+    json-str to-json(data)
+    // Parse back
+    parsed from-json(json-str)
+    // Return length to verify
+    length(parsed)
+}
+
+// ============================================================================
+// BENCHMARK 5: Prime Numbers (Sieve of Eratosthenes)
+// ============================================================================
+
+// Simple trial division for finding primes
+is-prime fn (n: Int): Bool {
+    cond {
+        lte(n, 1) => false
+        lte(n, 3) => true
+        is-zero(mod(n, 2)) => false
+        => {
+            // Check odd divisors up to sqrt(n)
+            limit add(Int(pow(Dec(n), 0.5)), 1)
+            divisors range(3, limit, 2)
+            not(some(divisors, (d) { is-zero(mod(n, d)) }))
+        }
+    }
+}
+
+// Count primes up to n
+count-primes fn (n: Int): Int {
+    range(2, add(n, 1))
+    |> filter(is-prime)
+    |> length()
+}
+
+// ============================================================================
+// BENCHMARK 6: JIT Lazy/Flow Safety Shapes
+// ============================================================================
+
+ignore-lazy fn (pred: Bool, lazy value: Int): Int {
+    if(pred, 1, 2)
+}
+
+lazy-if-branch fn (n: Int): Int {
+    reduce(range(n), (acc, i) {
+        add(acc, if(is-zero(mod(i, 2)), 1, 2))
+    }, 0)
+}
+
+lazy-generic-ignore fn (n: Int): Int {
+    reduce(range(n), (acc, i) {
+        add(acc, ignore-lazy(is-zero(mod(i, 2)), fib-recursive(20)))
+    }, 0)
+}
+
+cond-skip-expensive fn (n: Int): Int {
+    reduce(range(n), (acc, i) {
+        selected cond {
+            lt(i, 0) => { fib-recursive(20) }
+            => { 1 }
+        }
+        add(acc, selected)
+    }, 0)
+}
+
+owned-lazy-branch fn (n: Int): Int {
+    reduce(range(n), (acc, i) {
+        picked if(is-zero(mod(i, 2)), {
+            id: i,
+            name: `item-${i}`,
+            tags: ["even", "jit"],
+        }, {
+            id: i,
+            name: `item-${i}`,
+            tags: ["odd", "jit"],
+        })
+        add(acc, length(picked.tags))
+    }, 0)
+}
+
+hotlib-json-roundtrip fn (n: Int): Int {
+    data map(range(n), (i) {
+        {
+            id: i,
+            name: `Item ${i}`,
+            active: is-zero(mod(i, 2)),
+        }
+    })
+    parsed from-json(to-json(data))
+    length(parsed)
+}
+
+// ============================================================================
+// BENCHMARK RUNNER
+// ============================================================================
+
+// Helper to measure execution time
+measure fn (name: Str, f: Fn): Map {
+    start now()
+    result f()
+    end now()
+    elapsed sub(epoch-millis(end), epoch-millis(start))
+    println(`${name}: ${elapsed}ms (result: ${result})`)
+    {
+        name: name,
+        elapsed: elapsed,
+        result: result,
+    }
+}
+
+// Run all benchmarks
+run-benchmarks fn (): Vec<Map> {
+    println("=== Hot Language Benchmarks ===")
+    println("")
+
+    results [
+        // Fibonacci
+        measure("fib-recursive(25)", () { fib-recursive(25) }),
+        measure("fib-iterative(70)", () { fib-iterative(70) }),
+
+        // Collection operations
+        measure("sum-even-squares(10000)", () { sum-even-squares(10000) }),
+        measure("collection-benchmark(10000)", () { collection-benchmark(10000) }),
+
+        // String operations
+        measure("string-concat(1000)", () { length(string-concat-benchmark(1000)) }),
+
+        // JSON processing
+        measure("json-benchmark(1000)", () { json-benchmark(1000) }),
+
+        // Prime numbers
+        measure("count-primes(1000)", () { count-primes(1000) }),
+
+        // JIT lazy/flow safety shapes
+        measure("lazy-if-branch(5000)", () { lazy-if-branch(5000) }),
+        measure("lazy-generic-ignore(1000)", () { lazy-generic-ignore(1000) }),
+        measure("cond-skip-expensive(1000)", () { cond-skip-expensive(1000) }),
+        measure("owned-lazy-branch(1000)", () { owned-lazy-branch(1000) }),
+        measure("hotlib-json-roundtrip(200)", () { hotlib-json-roundtrip(200) })
+    ]
+
+    println("")
+    println("=== Benchmarks Complete ===")
+    null
+}
+
+// Main entry point - execute when file is loaded
+run-benchmarks()

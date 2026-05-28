@@ -8,11 +8,6 @@ use indexmap::IndexMap;
 // Removed placeholder sanitizer; placeholders are no longer emitted.
 use crate::validate_args;
 
-// ---------------------------------------------------------------------------
-// Fast-path helpers for the VM hot loop.
-// These handle common type specializations with zero overhead.
-// ---------------------------------------------------------------------------
-
 #[inline(always)]
 pub fn fast_is_empty_vec(v: &[Val]) -> Val {
     Val::Bool(v.is_empty())
@@ -182,7 +177,12 @@ pub fn call_function_with_vm(
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
             {
-                // It's a lambda - execute it directly
+                if let Ok(Some(result)) =
+                    vm.try_jit_lambda_call(function_val, std::slice::from_ref(arg))
+                {
+                    return Ok(result);
+                }
+
                 match vm.execute_lambda(function_val, std::slice::from_ref(arg)) {
                     Ok(result) => Ok(result),
                     Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),
@@ -431,7 +431,10 @@ pub fn call_function_with_vm_multi_args(
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
             {
-                // It's a lambda - execute it directly
+                if let Ok(Some(result)) = vm.try_jit_lambda_call(function_val, args) {
+                    return Ok(result);
+                }
+
                 match vm.execute_lambda(function_val, args) {
                     Ok(result) => Ok(result),
                     Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),

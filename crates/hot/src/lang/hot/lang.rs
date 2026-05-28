@@ -157,7 +157,7 @@ pub fn call_lib(args: &[Val]) -> HotResult<Val> {
             super::HotLibFn::LibFn(func) => {
                 return func(&arg_vals);
             }
-            super::HotLibFn::VmAwareFn(_) => {
+            super::HotLibFn::VmAwareFn(_) | super::HotLibFn::VmAwareJitFn(_, _) => {
                 return HotResult::Err(Val::from(format!(
                     "Function '{}' requires VM access and cannot be called from call-lib context",
                     function_name

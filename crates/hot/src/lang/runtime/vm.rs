@@ -5051,7 +5051,9 @@ impl VirtualMachine {
                             Err(VmError::runtime(err_val.to_string()))
                         }
                     },
-                    crate::lang::hot::libmap::HotLibFn::VmAwareFn(f) => match f(self, args) {
+                    crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
+                    | crate::lang::hot::libmap::HotLibFn::VmAwareJitFn(f, _) => match f(self, args)
+                    {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
                             Err(VmError::runtime(err_val.to_string()))
@@ -5222,7 +5224,9 @@ impl VirtualMachine {
                             Err(VmError::runtime(err_val.to_string()))
                         }
                     },
-                    crate::lang::hot::libmap::HotLibFn::VmAwareFn(f) => match f(self, args) {
+                    crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
+                    | crate::lang::hot::libmap::HotLibFn::VmAwareJitFn(f, _) => match f(self, args)
+                    {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
                             Err(VmError::runtime(err_val.to_string()))
@@ -5270,7 +5274,8 @@ impl VirtualMachine {
                         Err(VmError::runtime(err_val.to_string()))
                     }
                 },
-                crate::lang::hot::libmap::HotLibFn::VmAwareFn(f) => match f(self, args) {
+                crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
+                | crate::lang::hot::libmap::HotLibFn::VmAwareJitFn(f, _) => match f(self, args) {
                     crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                     crate::lang::hot::r#type::HotResult::Err(err_val) => {
                         Err(VmError::runtime(err_val.to_string()))
@@ -5848,7 +5853,8 @@ impl VirtualMachine {
                             }
                         }
                     }
-                    crate::lang::hot::HotLibFn::VmAwareFn(func) => {
+                    crate::lang::hot::HotLibFn::VmAwareFn(func)
+                    | crate::lang::hot::HotLibFn::VmAwareJitFn(func, _) => {
                         tracing::trace!("Calling VM-aware hotlib function: '{}'", function_name);
                         match func(self, args) {
                             crate::lang::hot::r#type::HotResult::Ok(val) => return Ok(val),
@@ -6360,7 +6366,8 @@ impl VirtualMachine {
                         }
                     }
                 }
-                crate::lang::hot::HotLibFn::VmAwareFn(func) => {
+                crate::lang::hot::HotLibFn::VmAwareFn(func)
+                | crate::lang::hot::HotLibFn::VmAwareJitFn(func, _) => {
                     tracing::trace!(
                         "VM: Calling VM-aware hotlib overload: {}",
                         type_signature_key
@@ -6387,7 +6394,8 @@ impl VirtualMachine {
                         }
                     }
                 }
-                crate::lang::hot::HotLibFn::VmAwareFn(func) => {
+                crate::lang::hot::HotLibFn::VmAwareFn(func)
+                | crate::lang::hot::HotLibFn::VmAwareJitFn(func, _) => {
                     tracing::trace!("VM: Calling VM-aware hotlib arity overload: {}", arity_key);
                     match func(self, args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
@@ -6410,7 +6418,8 @@ impl VirtualMachine {
                         }
                     }
                 }
-                crate::lang::hot::HotLibFn::VmAwareFn(func) => {
+                crate::lang::hot::HotLibFn::VmAwareFn(func)
+                | crate::lang::hot::HotLibFn::VmAwareJitFn(func, _) => {
                     tracing::trace!("VM: Calling VM-aware hotlib function: {}", qualified_name);
                     match func(self, args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
@@ -6777,7 +6786,8 @@ impl VirtualMachine {
                     tracing::trace!("VM: Calling regular hotlib function '{}'", function_name);
                     func(args)
                 }
-                crate::lang::hot::HotLibFn::VmAwareFn(func) => {
+                crate::lang::hot::HotLibFn::VmAwareFn(func)
+                | crate::lang::hot::HotLibFn::VmAwareJitFn(func, _) => {
                     // VM-aware function - pass mutable reference to VM
                     func(self, args)
                 }
@@ -6854,6 +6864,8 @@ impl VirtualMachine {
 
     /// Execute a lambda
     pub fn execute_lambda(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Val> {
+        super::jit::increment_lambda_interpreter_call_count();
+
         // Extract lambda information from the value - use Cow pattern to avoid clone when possible
         let lambda_info_ref = match lambda_val {
             Val::Box(boxed_val) => {
@@ -7299,6 +7311,48 @@ impl VirtualMachine {
         result
     }
 
+    pub fn try_jit_lambda_call(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Option<Val>> {
+        let lambda_info = match lambda_val {
+            Val::Box(boxed_val) => boxed_val
+                .as_any()
+                .downcast_ref::<crate::lang::bytecode::LambdaInfo>(),
+            _ => None,
+        };
+        let Some(lambda_info) = lambda_info else {
+            return Ok(None);
+        };
+        if lambda_info.is_lazy_param {
+            return Ok(None);
+        }
+
+        let normalized_args: Vec<Val> = lambda_info
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| args.get(idx).cloned().unwrap_or(Val::Null))
+            .collect();
+
+        let mut captures = Vec::with_capacity(lambda_info.capture_vars.len());
+        for name in &lambda_info.capture_vars {
+            let Some(value) = lambda_info.closure_env.get(name) else {
+                return Ok(None);
+            };
+            captures.push(value.clone());
+        }
+
+        let program = Arc::clone(&self.program);
+        let saved_namespace = self.current_namespace.clone();
+        self.current_namespace = lambda_info.defining_namespace.clone();
+        let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+        let result =
+            self.jit
+                .try_call_compiled_lambda(&program, lambda_info, &normalized_args, &captures);
+        crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        self.current_namespace = saved_namespace;
+
+        result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))
+    }
+
     fn execute_user_function(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
         if self.jit.config.is_enabled() {
             self.jit.record_call(function_id, args);
@@ -7338,13 +7392,18 @@ impl VirtualMachine {
                         }
                     }
                     Err(err) => {
+                        let reason = super::jit::jit_bailout_reason(&err);
                         tracing::debug!(
-                            "[JIT] compilation skipped for '{}': {}",
+                            "[JIT] compilation skipped for '{}' (id={}, reason={}): {}",
                             function_name,
+                            function_id,
+                            reason,
                             err
                         );
                         super::jit::increment_jit_bailout_count();
-                        self.jit.mark_do_not_jit(function_id);
+                        if !super::jit::is_retryable_jit_bailout(&err) {
+                            self.jit.mark_do_not_jit(function_id);
+                        }
                     }
                 }
             }
@@ -8906,7 +8965,8 @@ impl VirtualMachine {
                     // Regular function - call directly
                     func(args)
                 }
-                crate::lang::hot::HotLibFn::VmAwareFn(func) => {
+                crate::lang::hot::HotLibFn::VmAwareFn(func)
+                | crate::lang::hot::HotLibFn::VmAwareJitFn(func, _) => {
                     // VM-aware function - pass mutable reference to VM
                     func(self, args)
                 }
