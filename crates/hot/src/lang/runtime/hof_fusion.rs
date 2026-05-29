@@ -134,10 +134,25 @@ pub enum PureExpr {
 pub struct LoweredLambda {
     pub param_count: usize,
     pub expr: PureExpr,
+    /// Flat postfix program compiled from `expr`, evaluated by the reusable
+    /// stack machine in the hot loop.
+    pub code: Vec<MicroOp>,
     /// Static type of the result where known (`Bool` for predicates, otherwise
     /// `Other`/`Int`). Used only as a hint; evaluation dispatches on the runtime
     /// value.
     pub result_type: ExprType,
+}
+
+impl LoweredLambda {
+    fn new(param_count: usize, expr: PureExpr, result_type: ExprType) -> Self {
+        let code = flatten_program(&expr);
+        LoweredLambda {
+            param_count,
+            expr,
+            code,
+            result_type,
+        }
+    }
 }
 
 /// A runtime value handled by the Stage 1 fused evaluator. `Int`/`Bool` are kept
@@ -466,11 +481,11 @@ pub fn lower_lambda(
     }
 
     let (expr, result_type) = result.ok_or(Bailout::UnsupportedInstruction("no-return"))?;
-    Ok(LoweredLambda {
-        param_count: lambda.parameters.len(),
+    Ok(LoweredLambda::new(
+        lambda.parameters.len(),
         expr,
         result_type,
-    })
+    ))
 }
 
 fn lower_binop(
@@ -536,14 +551,10 @@ pub fn eval_expr(expr: &PureExpr, args: &[PureValue]) -> EvalOutcome {
     }
 }
 
-/// Field/property projection. The base must evaluate to a record (`Val::Map`);
-/// anything else (or a missing key) de-opts so the interpreter reproduces exact
-/// access semantics.
-fn eval_field(base: &PureExpr, key: &str, args: &[PureValue]) -> EvalOutcome {
-    let base_val = match eval_expr(base, args) {
-        EvalOutcome::Value(v) => v.into_val(),
-        deopt => return deopt,
-    };
+/// Evaluate `base.key` given the already-evaluated `base` value. The base must
+/// be a record (`Val::Map`); anything else (or a missing key) de-opts so the
+/// interpreter reproduces exact access semantics.
+fn field_of(base_val: Val, key: &str) -> EvalOutcome {
     match base_val {
         Val::Map(map) => match map.get(&Val::from(key)) {
             Some(v) => EvalOutcome::Value(PureValue::from_val(v.clone())),
@@ -553,17 +564,22 @@ fn eval_field(base: &PureExpr, key: &str, args: &[PureValue]) -> EvalOutcome {
     }
 }
 
-/// Template interpolation. Each part is stringified exactly as the interpreter's
-/// non-typed path does (`str_internal`); a record/typed `Map` part de-opts
-/// because it could dispatch to a user-defined `Str` implementation.
-fn eval_template(parts: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
+fn eval_field(base: &PureExpr, key: &str, args: &[PureValue]) -> EvalOutcome {
+    match eval_expr(base, args) {
+        EvalOutcome::Value(v) => field_of(v.into_val(), key),
+        deopt => deopt,
+    }
+}
+
+/// Interpolate a template from already-evaluated part values. Each part is
+/// stringified exactly as the interpreter's non-typed path does
+/// (`str_internal`); a record/typed `Map` part de-opts because it could
+/// dispatch to a user-defined `Str` implementation.
+fn template_of(parts: &[PureValue]) -> EvalOutcome {
     let max_bytes = crate::lang::runtime::limits::max_string_bytes();
     let mut out = String::new();
     for part in parts {
-        let v = match eval_expr(part, args) {
-            EvalOutcome::Value(v) => v.into_val(),
-            deopt => return deopt,
-        };
+        let v = part.to_val();
         if matches!(v, Val::Map(_)) {
             return EvalOutcome::DeoptToInterpreter;
         }
@@ -580,8 +596,18 @@ fn eval_template(parts: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
     EvalOutcome::Value(PureValue::Other(Val::from(out)))
 }
 
+fn eval_template(parts: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
+    let mut vals: Vec<PureValue> = Vec::with_capacity(parts.len());
+    for part in parts {
+        match eval_expr(part, args) {
+            EvalOutcome::Value(v) => vals.push(v),
+            deopt => return deopt,
+        }
+    }
+    template_of(&vals)
+}
+
 fn eval_op(op: PureOp, full_name: &str, operands: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
-    // Evaluate operands first.
     let mut vals: Vec<PureValue> = Vec::with_capacity(operands.len());
     for o in operands {
         match eval_expr(o, args) {
@@ -589,29 +615,26 @@ fn eval_op(op: PureOp, full_name: &str, operands: &[PureExpr], args: &[PureValue
             deopt => return deopt,
         }
     }
+    apply_op(op, full_name, &vals)
+}
 
-    // Inlined fast path for the common `Int`/`Bool` case. Returns `None` to fall
-    // through to the exact hotlib implementation (mixed/`Dec`/`Str` operands,
-    // integer overflow, divide/modulo by zero, ...), guaranteeing parity.
-    if let Some(out) = fast_op(op, &vals) {
+/// Apply an op to already-evaluated operand values. Uses an inlined fast path
+/// for the common `Int`/`Bool` case and otherwise calls the exact registered
+/// hotlib `LibFn`, guaranteeing parity (mixed/`Dec`/`Str` operands, integer
+/// overflow, divide/modulo by zero, error values).
+fn apply_op(op: PureOp, full_name: &str, vals: &[PureValue]) -> EvalOutcome {
+    if let Some(out) = fast_op(op, vals) {
         return out;
     }
-
-    // Parity fallback: call the registered pure `LibFn` with the operand values.
     let arg_vals: Vec<Val> = vals.iter().map(PureValue::to_val).collect();
     match libmap::call_pure_lib(full_name, &arg_vals) {
         Some(HotResult::Ok(v)) => {
-            // Error values (divide/modulo by zero, type errors, ...) carry
-            // interpreter-specific propagation semantics; de-opt so they are
-            // reproduced exactly.
             if v.is_err() {
                 EvalOutcome::DeoptToInterpreter
             } else {
                 EvalOutcome::Value(PureValue::from_val(v))
             }
         }
-        // `HotResult::Err` or a non-pure/unknown function: defer to the
-        // interpreter.
         _ => EvalOutcome::DeoptToInterpreter,
     }
 }
@@ -664,6 +687,132 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
         PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg | PureOp::Concat => {
             None
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flat stack program
+//
+// The recursive `PureExpr` tree is flattened once (per pipeline build) into a
+// postfix `MicroOp` sequence evaluated by [`run_program`] against a value stack
+// that is reused across every element. This removes the per-element recursion
+// and per-operator `Vec` allocation of the tree-walker while preserving exactly
+// the same semantics (and de-opt points) as [`eval_expr`].
+// ---------------------------------------------------------------------------
+
+/// A single postfix instruction. `Apply`/`Template` consume their top-of-stack
+/// operands and push one result; `Field` consumes one and pushes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MicroOp {
+    PushParam(usize),
+    PushInt(i64),
+    PushBool(bool),
+    PushVal(Val),
+    Apply {
+        op: PureOp,
+        full_name: &'static str,
+        argc: usize,
+    },
+    Field(Arc<str>),
+    Template(usize),
+}
+
+/// Flatten a lowered expression tree into a postfix `MicroOp` program.
+pub fn flatten_program(expr: &PureExpr) -> Vec<MicroOp> {
+    let mut out = Vec::new();
+    flatten_into(expr, &mut out);
+    out
+}
+
+fn flatten_into(expr: &PureExpr, out: &mut Vec<MicroOp>) {
+    match expr {
+        PureExpr::Param(i) => out.push(MicroOp::PushParam(*i)),
+        PureExpr::ConstInt(i) => out.push(MicroOp::PushInt(*i)),
+        PureExpr::ConstBool(b) => out.push(MicroOp::PushBool(*b)),
+        PureExpr::ConstVal(v) => out.push(MicroOp::PushVal(v.clone())),
+        PureExpr::Op {
+            op,
+            full_name,
+            args,
+        } => {
+            for a in args {
+                flatten_into(a, out);
+            }
+            out.push(MicroOp::Apply {
+                op: *op,
+                full_name,
+                argc: args.len(),
+            });
+        }
+        PureExpr::Field { base, key } => {
+            flatten_into(base, out);
+            out.push(MicroOp::Field(key.clone()));
+        }
+        PureExpr::Template(parts) => {
+            for p in parts {
+                flatten_into(p, out);
+            }
+            out.push(MicroOp::Template(parts.len()));
+        }
+    }
+}
+
+/// Evaluate a flat program against `args`, reusing `stack` (cleared on entry).
+/// Returns the single top-of-stack result, or a de-opt.
+fn run_program(code: &[MicroOp], args: &[PureValue], stack: &mut Vec<PureValue>) -> EvalOutcome {
+    stack.clear();
+    for mop in code {
+        match mop {
+            MicroOp::PushParam(i) => match args.get(*i) {
+                Some(v) => stack.push(v.clone()),
+                None => return EvalOutcome::DeoptToInterpreter,
+            },
+            MicroOp::PushInt(i) => stack.push(PureValue::Int(*i)),
+            MicroOp::PushBool(b) => stack.push(PureValue::Bool(*b)),
+            MicroOp::PushVal(v) => stack.push(PureValue::from_val(v.clone())),
+            MicroOp::Apply {
+                op,
+                full_name,
+                argc,
+            } => {
+                if stack.len() < *argc {
+                    return EvalOutcome::DeoptToInterpreter;
+                }
+                let base = stack.len() - *argc;
+                let v = match apply_op(*op, full_name, &stack[base..]) {
+                    EvalOutcome::Value(v) => v,
+                    deopt => return deopt,
+                };
+                stack.truncate(base);
+                stack.push(v);
+            }
+            MicroOp::Field(key) => {
+                let Some(base_val) = stack.pop() else {
+                    return EvalOutcome::DeoptToInterpreter;
+                };
+                let v = match field_of(base_val.into_val(), key) {
+                    EvalOutcome::Value(v) => v,
+                    deopt => return deopt,
+                };
+                stack.push(v);
+            }
+            MicroOp::Template(n) => {
+                if stack.len() < *n {
+                    return EvalOutcome::DeoptToInterpreter;
+                }
+                let base = stack.len() - *n;
+                let v = match template_of(&stack[base..]) {
+                    EvalOutcome::Value(v) => v,
+                    deopt => return deopt,
+                };
+                stack.truncate(base);
+                stack.push(v);
+            }
+        }
+    }
+    match stack.pop() {
+        Some(v) => EvalOutcome::Value(v),
+        None => EvalOutcome::DeoptToInterpreter,
     }
 }
 
@@ -831,11 +980,7 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
             let lowered = if sc.stage == HofStage::Length {
                 // length has no lambda; represent with an identity-less marker by
                 // skipping lowering. We encode it as a Param(0) Int passthrough.
-                LoweredLambda {
-                    param_count: 1,
-                    expr: PureExpr::Param(0),
-                    result_type: ExprType::Int,
-                }
+                LoweredLambda::new(1, PureExpr::Param(0), ExprType::Int)
             } else {
                 match lambda_from_const(program, sc.lambda_id)
                     .ok_or(Bailout::PipelineShape)
@@ -921,27 +1066,34 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
         }
     }
 
+    // Value stack reused across every element/stage (no per-element allocation).
+    let mut stack: Vec<PureValue> = Vec::with_capacity(8);
+
     for item in items {
         let mut cur = PureValue::from_val(item.clone());
 
         let mut keep = true;
         for t in transforms {
             match t.stage {
-                HofStage::Filter => match eval_expr(&t.lambda.expr, std::slice::from_ref(&cur)) {
-                    EvalOutcome::Value(PureValue::Bool(b)) => {
-                        if !b {
-                            keep = false;
-                            break;
+                HofStage::Filter => {
+                    match run_program(&t.lambda.code, std::slice::from_ref(&cur), &mut stack) {
+                        EvalOutcome::Value(PureValue::Bool(b)) => {
+                            if !b {
+                                keep = false;
+                                break;
+                            }
                         }
+                        // A non-`Bool` predicate result or a de-opt means the
+                        // interpreter must decide truthiness/errors.
+                        _ => return FusedRun::Deopt,
                     }
-                    // A non-`Bool` predicate result or a de-opt means the
-                    // interpreter must decide truthiness/errors.
-                    _ => return FusedRun::Deopt,
-                },
-                HofStage::Map => match eval_expr(&t.lambda.expr, std::slice::from_ref(&cur)) {
-                    EvalOutcome::Value(v) if !value_is_err(&v) => cur = v,
-                    _ => return FusedRun::Deopt,
-                },
+                }
+                HofStage::Map => {
+                    match run_program(&t.lambda.code, std::slice::from_ref(&cur), &mut stack) {
+                        EvalOutcome::Value(v) if !value_is_err(&v) => cur = v,
+                        _ => return FusedRun::Deopt,
+                    }
+                }
                 _ => return FusedRun::Deopt,
             }
         }
@@ -953,7 +1105,8 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
         match terminal.stage {
             HofStage::Reduce => {
                 let acc = reduce_acc.take().expect("reduce acc initialized");
-                match eval_expr(&terminal.lambda.expr, &[acc, cur]) {
+                let pair = [acc, cur];
+                match run_program(&terminal.lambda.code, &pair, &mut stack) {
                     EvalOutcome::Value(v) if !value_is_err(&v) => reduce_acc = Some(v),
                     _ => return FusedRun::Deopt,
                 }
@@ -1351,6 +1504,45 @@ f fn (n: Int): Str {
             eval_expr(&template, &[PureValue::Int(3)]),
             EvalOutcome::Value(PureValue::Other(Val::from("item-3-")))
         );
+    }
+
+    #[test]
+    fn flat_program_matches_tree_walker() {
+        // is-zero(mod(add(x, 1), 2)) over a range of inputs, plus a field+template.
+        let expr = op(
+            PureOp::IsZero,
+            vec![op(
+                PureOp::Mod,
+                vec![
+                    op(PureOp::Add, vec![PureExpr::Param(0), PureExpr::ConstInt(1)]),
+                    PureExpr::ConstInt(2),
+                ],
+            )],
+        );
+        let code = flatten_program(&expr);
+        let mut stack = Vec::new();
+        for x in -5..=5 {
+            let args = [PureValue::Int(x)];
+            assert_eq!(
+                run_program(&code, &args, &mut stack),
+                eval_expr(&expr, &args),
+                "mismatch at x={}",
+                x
+            );
+        }
+        // A template program reused across the same stack must stay correct.
+        let tmpl = PureExpr::Template(vec![
+            PureExpr::ConstVal(Val::from("n=")),
+            PureExpr::Param(0),
+        ]);
+        let tcode = flatten_program(&tmpl);
+        for x in 0..3 {
+            let args = [PureValue::Int(x)];
+            assert_eq!(
+                run_program(&tcode, &args, &mut stack),
+                eval_expr(&tmpl, &args)
+            );
+        }
     }
 
     #[test]
