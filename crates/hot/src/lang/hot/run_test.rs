@@ -102,6 +102,39 @@ f fn (n: Int): Str {
     reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
 }
 length(f(200))"#,
+            // --- Some/All terminals ---
+            r#"::t ns
+f fn (n: Int): Bool {
+    range(1, add(n, 1))
+    |> filter((x) { gt(x, 10) })
+    |> some((x) { eq(x, 42) })
+}
+f(100)"#,
+            r#"::t ns
+f fn (n: Int): Bool {
+    range(1, add(n, 1))
+    |> map((x) { mul(x, 2) })
+    |> all((x) { is-zero(mod(x, 2)) })
+}
+f(100)"#,
+            // --- Named-function stage callables ---
+            r#"::t ns
+is-even fn (x: Int): Bool {
+    is-zero(mod(x, 2))
+}
+square fn (x: Int): Int {
+    mul(x, x)
+}
+sum fn (acc: Int, x: Int): Int {
+    add(acc, x)
+}
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter(is-even)
+    |> map(square)
+    |> reduce(sum, 0)
+}
+f(100)"#,
         ];
         for src in programs {
             let on = compile_and_run_with_std_conf(

@@ -170,6 +170,13 @@ pub fn hof_role(name: &str) -> Option<HofRole> {
         .copied()
 }
 
+/// True when a hotlib identity is the eager collection `range` producer that can
+/// be replaced by a fused non-allocating range source. Kept here (with the
+/// registry metadata) so fusion does not hard-code Hot function names locally.
+pub fn is_fusible_range_source(name: &str) -> bool {
+    matches!(name, "::hot::coll/range" | "range")
+}
+
 /// Look up the pure-op lowering descriptor of a hotlib by its stable registry key.
 pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
     PURE_OP_MAP

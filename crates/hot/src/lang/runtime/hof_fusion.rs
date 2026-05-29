@@ -312,18 +312,26 @@ pub fn lower_lambda(
     program: &BytecodeProgram,
     lambda: &LambdaInfo,
 ) -> Result<LoweredLambda, Bailout> {
+    lower_callable_body(program, &lambda.parameters, &lambda.instructions)
+}
+
+fn lower_callable_body(
+    program: &BytecodeProgram,
+    params: &[String],
+    instructions: &[Instruction],
+) -> Result<LoweredLambda, Bailout> {
     use std::collections::HashMap;
 
     // Parameter name -> index.
     let mut param_index: HashMap<&str, usize> = HashMap::new();
-    for (i, p) in lambda.parameters.iter().enumerate() {
+    for (i, p) in params.iter().enumerate() {
         param_index.insert(p.as_str(), i);
     }
 
     let mut regs: HashMap<RegisterId, RegContent> = HashMap::new();
     let mut result: Option<(PureExpr, ExprType)> = None;
 
-    for ins in &lambda.instructions {
+    for ins in instructions {
         match ins {
             Instruction::LoadConst { dest, constant } => {
                 match program.constants.get(*constant as usize) {
@@ -481,11 +489,7 @@ pub fn lower_lambda(
     }
 
     let (expr, result_type) = result.ok_or(Bailout::UnsupportedInstruction("no-return"))?;
-    Ok(LoweredLambda::new(
-        lambda.parameters.len(),
-        expr,
-        result_type,
-    ))
+    Ok(LoweredLambda::new(params.len(), expr, result_type))
 }
 
 fn lower_binop(
@@ -829,6 +833,18 @@ pub struct FusedStage {
     pub initial: Option<Val>,
 }
 
+/// An eager `::hot::coll/range` call that can be replaced by direct integer
+/// iteration when its result is consumed only by this fused pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeSource {
+    /// ip of the original range call.
+    pub call_ip: usize,
+    /// First contiguous argument register for the range call.
+    pub args_start: RegisterId,
+    /// Number of range arguments (1..=3).
+    pub args_count: u8,
+}
+
 /// A recognized fusible pipeline within a function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelinePlan {
@@ -838,6 +854,9 @@ pub struct PipelinePlan {
     pub last_stage_ip: usize,
     /// Register holding the input collection at the first stage.
     pub source_reg: RegisterId,
+    /// Optional eager range source that can be streamed without materializing a
+    /// `Vec`. When present, `first_stage_ip` is the range call ip.
+    pub range_source: Option<RangeSource>,
     /// Register receiving the final result.
     pub result_reg: RegisterId,
     pub stages: Vec<FusedStage>,
@@ -849,8 +868,16 @@ struct StageCall {
     stage: HofStage,
     dest: RegisterId,
     input_reg: RegisterId,
-    lambda_id: u32,
+    input_arg_reg: RegisterId,
+    callable: StageCallable,
     initial: Option<Val>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StageCallable {
+    LambdaConst(u32),
+    FunctionId(u32),
+    None,
 }
 
 /// Detect fusible pipelines in a function's instruction stream. Returns a
@@ -883,14 +910,15 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
                 None => continue,
             };
             // `length` takes only the collection (no lambda).
-            let (lambda_id, initial) = if role.stage == HofStage::Length {
-                (u32::MAX, None)
+            let (callable, initial) = if role.stage == HofStage::Length {
+                (StageCallable::None, None)
             } else {
                 if *args_count < 2 {
                     continue;
                 }
                 let lam_reg = args_start + 1;
-                let Some(id) = trace_lambda_const(instrs, ip, lam_reg) else {
+                let Some(callable) = trace_stage_callable(instrs, program, ip, lam_reg, role.stage)
+                else {
                     continue;
                 };
                 let initial = if role.stage == HofStage::Reduce && *args_count >= 3 {
@@ -898,14 +926,15 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
                 } else {
                     None
                 };
-                (id, initial)
+                (callable, initial)
             };
             stage_calls.push(StageCall {
                 ip,
                 stage: role.stage,
                 dest: *dest,
                 input_reg,
-                lambda_id,
+                input_arg_reg: *args_start,
+                callable,
                 initial,
             });
         }
@@ -982,10 +1011,7 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
                 // skipping lowering. We encode it as a Param(0) Int passthrough.
                 LoweredLambda::new(1, PureExpr::Param(0), ExprType::Int)
             } else {
-                match lambda_from_const(program, sc.lambda_id)
-                    .ok_or(Bailout::PipelineShape)
-                    .and_then(|l| lower_lambda(program, l))
-                {
+                match lower_stage_callable(program, sc.callable, sc.stage) {
                     Ok(l) => l,
                     Err(_) => {
                         ok = false;
@@ -1006,16 +1032,157 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
         for &ci in &chain {
             consumed[ci] = true;
         }
+        let start_stage = &stage_calls[chain[0]];
+        let terminal_stage = &stage_calls[*chain.last().unwrap()];
+        let range_source = trace_range_source(instrs, program, start_stage, terminal_stage.ip);
         plans.push(PipelinePlan {
-            first_stage_ip: stage_calls[chain[0]].ip,
-            last_stage_ip: stage_calls[*chain.last().unwrap()].ip,
-            source_reg: stage_calls[chain[0]].input_reg,
-            result_reg: stage_calls[*chain.last().unwrap()].dest,
+            first_stage_ip: range_source
+                .as_ref()
+                .map(|s| s.call_ip)
+                .unwrap_or(start_stage.ip),
+            last_stage_ip: terminal_stage.ip,
+            source_reg: start_stage.input_reg,
+            range_source,
+            result_reg: terminal_stage.dest,
             stages,
         });
     }
 
     plans
+}
+
+fn trace_range_source(
+    instrs: &[Instruction],
+    program: &BytecodeProgram,
+    start_stage: &StageCall,
+    last_stage_ip: usize,
+) -> Option<RangeSource> {
+    let source_reg = start_stage.input_reg;
+    for ip in (0..start_stage.ip).rev() {
+        match &instrs[ip] {
+            Instruction::Call {
+                dest,
+                function,
+                args_start,
+                args_count,
+            } if *dest == source_reg => {
+                if !(1..=3).contains(args_count) {
+                    return None;
+                }
+                let name = resolve_fn_name(instrs, program, ip, *function)?;
+                if !libmap::is_fusible_range_source(&name) {
+                    return None;
+                }
+                if !range_source_window_is_safe(instrs, ip, start_stage, last_stage_ip) {
+                    return None;
+                }
+                return Some(RangeSource {
+                    call_ip: ip,
+                    args_start: *args_start,
+                    args_count: *args_count,
+                });
+            }
+            _ => {
+                if writes_register(&instrs[ip], source_reg) {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn range_source_window_is_safe(
+    instrs: &[Instruction],
+    range_ip: usize,
+    start_stage: &StageCall,
+    last_stage_ip: usize,
+) -> bool {
+    let source_reg = start_stage.input_reg;
+
+    for (ip, ins) in instrs
+        .iter()
+        .enumerate()
+        .take(start_stage.ip)
+        .skip(range_ip + 1)
+    {
+        match ins {
+            // These are pure setup instructions for the original HOF call chain.
+            Instruction::LoadConst { .. }
+            | Instruction::LoadFunctionRef { .. }
+            | Instruction::Move { .. } => {}
+            // A range error check may be skipped only because the fused range
+            // runner de-opts on every range shape that the eager call would turn
+            // into an error; the interpreter then executes this check normally.
+            Instruction::ReturnIfErr { src } if *src == source_reg => {}
+            _ => return false,
+        }
+
+        if reads_register(ins, source_reg) {
+            match ins {
+                Instruction::Move { dest, src }
+                    if *src == source_reg && *dest == start_stage.input_arg_reg => {}
+                Instruction::ReturnIfErr { src } if *src == source_reg => {}
+                _ => return false,
+            }
+        }
+
+        if let Some(written) = single_written_register(ins)
+            && written != source_reg
+            && register_read_after(instrs, last_stage_ip + 1, written)
+        {
+            return false;
+        }
+
+        // Keep the loop variable used in debug assertions if this grows.
+        let _ = ip;
+    }
+
+    !register_read_between_except_range_setup(
+        instrs,
+        source_reg,
+        range_ip + 1,
+        last_stage_ip + 1,
+        start_stage.input_arg_reg,
+    ) && !register_read_after(instrs, last_stage_ip + 1, source_reg)
+}
+
+fn register_read_between_except_range_setup(
+    instrs: &[Instruction],
+    reg: RegisterId,
+    start: usize,
+    end: usize,
+    stage_input_arg: RegisterId,
+) -> bool {
+    instrs
+        .iter()
+        .take(end.min(instrs.len()))
+        .skip(start)
+        .any(|ins| {
+            if !reads_register(ins, reg) {
+                return false;
+            }
+            !matches!(
+                ins,
+                Instruction::Move { dest, src } if *src == reg && *dest == stage_input_arg
+            ) && !matches!(ins, Instruction::ReturnIfErr { src } if *src == reg)
+        })
+}
+
+fn register_read_after(instrs: &[Instruction], start: usize, reg: RegisterId) -> bool {
+    instrs
+        .iter()
+        .skip(start)
+        .any(|ins| reads_register(ins, reg))
+}
+
+fn single_written_register(ins: &Instruction) -> Option<RegisterId> {
+    match ins {
+        Instruction::LoadConst { dest, .. }
+        | Instruction::LoadFunctionRef { dest, .. }
+        | Instruction::Move { dest, .. } => Some(*dest),
+        _ => None,
+    }
 }
 
 /// Outcome of attempting to run a fused pipeline.
@@ -1034,13 +1201,29 @@ pub enum FusedRun {
 ///
 /// Supports `Vec` sources of any element type (`Int`/`Bool` on the fast path,
 /// `Dec`/`Str`/records via the hotlib parity fallback), `filter`/`map`
-/// transform stages, and `reduce`/`length` terminal stages.
+/// transform stages, and `reduce`/`length`/`some`/`all` terminal stages.
 pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
     let items = match source {
         Val::Vec(items) => items,
         _ => return FusedRun::Deopt,
     };
+    run_pipeline_items(plan, items.iter().cloned())
+}
 
+/// Run a fused pipeline over an eager `range(...)` source without materializing
+/// the intermediate `Vec`. Invalid/non-Int range args de-opt so the interpreter
+/// can reproduce the eager `::hot::coll/range` result or error exactly.
+pub fn run_pipeline_range(plan: &PipelinePlan, args: &[Val]) -> FusedRun {
+    let Some(iter) = range_iter_from_args(args) else {
+        return FusedRun::Deopt;
+    };
+    run_pipeline_items(plan, iter)
+}
+
+fn run_pipeline_items<I>(plan: &PipelinePlan, items: I) -> FusedRun
+where
+    I: IntoIterator<Item = Val>,
+{
     let Some((terminal, transforms)) = plan.stages.split_last() else {
         return FusedRun::Deopt;
     };
@@ -1052,13 +1235,15 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
         }
     }
     match terminal.stage {
-        HofStage::Reduce | HofStage::Length => {}
+        HofStage::Reduce | HofStage::Length | HofStage::Some | HofStage::All => {}
         _ => return FusedRun::Deopt,
     }
 
     // Terminal accumulators.
     let mut reduce_acc: Option<PureValue> = None;
     let mut count: i64 = 0;
+    let mut some_result = false;
+    let mut all_result = true;
     if terminal.stage == HofStage::Reduce {
         match &terminal.initial {
             Some(v) => reduce_acc = Some(PureValue::from_val(v.clone())),
@@ -1070,7 +1255,7 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
     let mut stack: Vec<PureValue> = Vec::with_capacity(8);
 
     for item in items {
-        let mut cur = PureValue::from_val(item.clone());
+        let mut cur = PureValue::from_val(item);
 
         let mut keep = true;
         for t in transforms {
@@ -1114,6 +1299,34 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
             HofStage::Length => {
                 count += 1;
             }
+            HofStage::Some => {
+                match run_program(
+                    &terminal.lambda.code,
+                    std::slice::from_ref(&cur),
+                    &mut stack,
+                ) {
+                    EvalOutcome::Value(PureValue::Bool(true)) => {
+                        some_result = true;
+                        break;
+                    }
+                    EvalOutcome::Value(PureValue::Bool(false)) => {}
+                    _ => return FusedRun::Deopt,
+                }
+            }
+            HofStage::All => {
+                match run_program(
+                    &terminal.lambda.code,
+                    std::slice::from_ref(&cur),
+                    &mut stack,
+                ) {
+                    EvalOutcome::Value(PureValue::Bool(true)) => {}
+                    EvalOutcome::Value(PureValue::Bool(false)) => {
+                        all_result = false;
+                        break;
+                    }
+                    _ => return FusedRun::Deopt,
+                }
+            }
             _ => return FusedRun::Deopt,
         }
     }
@@ -1121,9 +1334,54 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
     let result = match terminal.stage {
         HofStage::Reduce => reduce_acc.expect("reduce acc").into_val(),
         HofStage::Length => Val::Int(count),
+        HofStage::Some => Val::Bool(some_result),
+        HofStage::All => Val::Bool(all_result),
         _ => return FusedRun::Deopt,
     };
     FusedRun::Produced(result)
+}
+
+struct RangeValueIter {
+    current: i64,
+    step: i64,
+    remaining: usize,
+}
+
+impl Iterator for RangeValueIter {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let value = self.current;
+        self.remaining -= 1;
+        if self.remaining > 0 {
+            self.current = self.current.checked_add(self.step)?;
+        }
+        Some(Val::Int(value))
+    }
+}
+
+fn range_iter_from_args(args: &[Val]) -> Option<RangeValueIter> {
+    let (start, end, step) = match args {
+        [Val::Int(end)] => (0, *end, 1),
+        [Val::Int(start), Val::Int(end)] => (*start, *end, 1),
+        [Val::Int(start), Val::Int(end), Val::Int(step)] => (*start, *end, *step),
+        _ => return None,
+    };
+    if step == 0 {
+        return None;
+    }
+    let count = crate::lang::runtime::limits::range_element_count(start, end, step)?;
+    if crate::lang::runtime::limits::check_collection_size("range", count).is_err() {
+        return None;
+    }
+    Some(RangeValueIter {
+        current: start,
+        step,
+        remaining: count,
+    })
 }
 
 /// True if a produced value is an `Result.Err` error value, which carries
@@ -1181,8 +1439,13 @@ fn trace_move_src(instrs: &[Instruction], call_ip: usize, reg: RegisterId) -> Op
     None
 }
 
-/// Walk back to find the LambdaInfo constant id loaded into `reg`.
-fn trace_lambda_const(instrs: &[Instruction], call_ip: usize, reg: RegisterId) -> Option<u32> {
+fn trace_stage_callable(
+    instrs: &[Instruction],
+    program: &BytecodeProgram,
+    call_ip: usize,
+    reg: RegisterId,
+    stage: HofStage,
+) -> Option<StageCallable> {
     let mut cur = reg;
     for i in (0..call_ip).rev() {
         match &instrs[i] {
@@ -1190,7 +1453,28 @@ fn trace_lambda_const(instrs: &[Instruction], call_ip: usize, reg: RegisterId) -
                 cur = *src;
             }
             Instruction::LoadConst { dest, constant } if *dest == cur => {
-                return Some(*constant);
+                if lambda_from_const(program, *constant).is_some() {
+                    return Some(StageCallable::LambdaConst(*constant));
+                }
+                let name = const_str(program, *constant)?;
+                let arity = stage_callable_arity(stage)?;
+                return find_unambiguous_function(program, &name, arity)
+                    .map(|id| StageCallable::FunctionId(id as u32));
+            }
+            Instruction::LoadFunctionRef {
+                dest,
+                function_name,
+            } if *dest == cur => {
+                let name = const_str(program, *function_name)?;
+                let arity = stage_callable_arity(stage)?;
+                return find_unambiguous_function(program, &name, arity)
+                    .map(|id| StageCallable::FunctionId(id as u32));
+            }
+            Instruction::LoadVar { dest, var_name } if *dest == cur => {
+                let name = const_str(program, *var_name)?;
+                let arity = stage_callable_arity(stage)?;
+                return find_unambiguous_function(program, &name, arity)
+                    .map(|id| StageCallable::FunctionId(id as u32));
             }
             _ => {
                 if writes_register(&instrs[i], cur) {
@@ -1200,6 +1484,56 @@ fn trace_lambda_const(instrs: &[Instruction], call_ip: usize, reg: RegisterId) -
         }
     }
     None
+}
+
+fn stage_callable_arity(stage: HofStage) -> Option<u8> {
+    match stage {
+        HofStage::Map | HofStage::Filter | HofStage::Some | HofStage::All => Some(1),
+        HofStage::Reduce => Some(2),
+        HofStage::Length => None,
+    }
+}
+
+fn find_unambiguous_function(program: &BytecodeProgram, name: &str, arity: u8) -> Option<usize> {
+    let suffix = format!("/{}", name);
+    let mut matches = program.functions.iter().enumerate().filter(|(_, f)| {
+        f.arity == arity
+            && !f.is_variadic
+            && (f.name == name || (!name.starts_with("::") && f.name.ends_with(&suffix)))
+    });
+    let (id, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(id)
+}
+
+fn lower_stage_callable(
+    program: &BytecodeProgram,
+    callable: StageCallable,
+    stage: HofStage,
+) -> Result<LoweredLambda, Bailout> {
+    match callable {
+        StageCallable::LambdaConst(id) => lambda_from_const(program, id)
+            .ok_or(Bailout::PipelineShape)
+            .and_then(|l| lower_lambda(program, l)),
+        StageCallable::FunctionId(id) => {
+            let func = program
+                .functions
+                .get(id as usize)
+                .ok_or(Bailout::PipelineShape)?;
+            let expected_arity = stage_callable_arity(stage).ok_or(Bailout::PipelineShape)?;
+            if func.arity != expected_arity
+                || func.is_variadic
+                || func.flow_type.is_some()
+                || func.lazy_params.iter().any(|lazy| *lazy)
+            {
+                return Err(Bailout::PipelineShape);
+            }
+            lower_callable_body(program, &func.param_names, &func.instructions)
+        }
+        StageCallable::None => Err(Bailout::PipelineShape),
+    }
 }
 
 /// Walk back to find a constant `Val` loaded into `reg` (used for the `reduce`
@@ -1618,6 +1952,110 @@ f fn (n: Int): Int {
     }
 
     #[test]
+    fn detects_range_source_for_pipeline() {
+        let prog = compile(
+            r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plans = detect_pipelines(&func.instructions, &prog);
+        assert!(
+            !plans.is_empty(),
+            "expected named-function pipeline; functions={:#?}; instrs={:#?}",
+            prog.functions,
+            func.instructions
+        );
+        let plan = &plans[0];
+        let range = plan.range_source.expect("range source");
+        assert_eq!(plan.first_stage_ip, range.call_ip);
+        assert!(range.args_count >= 2);
+    }
+
+    #[test]
+    fn run_pipeline_range_source_sum_even_squares() {
+        let prog = compile(
+            r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        assert!(plan.range_source.is_some());
+        assert_eq!(
+            run_pipeline_range(plan, &[Val::Int(1), Val::Int(11)]),
+            FusedRun::Produced(Val::Int(220))
+        );
+        assert_eq!(
+            run_pipeline_range(plan, &[Val::Int(11), Val::Int(1), Val::Int(-1)]),
+            FusedRun::Produced(Val::Int(220))
+        );
+        assert_eq!(
+            run_pipeline_range(plan, &[Val::Int(1), Val::Int(11), Val::Int(0)]),
+            FusedRun::Deopt
+        );
+    }
+
+    #[test]
+    fn run_pipeline_named_function_stages() {
+        let prog = compile(
+            r#"::t ns
+is-even fn (x: Int): Bool {
+    is-zero(mod(x, 2))
+}
+square fn (x: Int): Int {
+    mul(x, x)
+}
+sum fn (acc: Int, x: Int): Int {
+    add(acc, x)
+}
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter(is-even)
+    |> map(square)
+    |> reduce(sum, 0)
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plans = detect_pipelines(&func.instructions, &prog);
+        assert!(
+            !plans.is_empty(),
+            "expected named-function pipeline; functions={:#?}; instrs={:#?}",
+            prog.functions,
+            func.instructions
+        );
+        let plan = &plans[0];
+        assert_eq!(plan.stages.len(), 3);
+        let source = Val::Vec((1..=10).map(Val::Int).collect());
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::Int(220))
+        );
+    }
+
+    #[test]
     fn run_pipeline_deopts_on_non_int_source() {
         let prog = compile(
             r#"::t ns
@@ -1636,6 +2074,70 @@ f fn (n: Int): Int {
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         let source = Val::Vec(vec![Val::Int(2), Val::from("oops"), Val::Int(4)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
+    }
+
+    #[test]
+    fn run_pipeline_some_terminal() {
+        let prog = compile(
+            r#"::t ns
+f fn (n: Int): Bool {
+    range(1, add(n, 1))
+    |> filter((x) { gt(x, 2) })
+    |> some((x) { eq(x, 4) })
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        assert_eq!(plan.stages.len(), 2);
+        assert_eq!(plan.stages[1].stage, HofStage::Some);
+        let source = Val::Vec((1..=5).map(Val::Int).collect());
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::Bool(true))
+        );
+
+        let source = Val::Vec((1..=3).map(Val::Int).collect());
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::Bool(false))
+        );
+    }
+
+    #[test]
+    fn run_pipeline_all_terminal() {
+        let prog = compile(
+            r#"::t ns
+f fn (n: Int): Bool {
+    range(1, add(n, 1))
+    |> map((x) { mul(x, 2) })
+    |> all((x) { gt(x, 0) })
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        assert_eq!(plan.stages.len(), 2);
+        assert_eq!(plan.stages[1].stage, HofStage::All);
+        let source = Val::Vec((1..=5).map(Val::Int).collect());
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::Bool(true))
+        );
+
+        let source = Val::Vec(vec![Val::Int(1), Val::Int(-1), Val::Int(3)]);
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::Bool(false))
+        );
     }
 
     #[test]

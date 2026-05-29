@@ -9263,8 +9263,17 @@ impl VirtualMachine {
             if !fused_plans.is_empty()
                 && let Some(plan) = fused_plans.iter().find(|p| p.first_stage_ip == func_ip)
             {
-                let source = self.get_register(plan.source_reg)?.clone();
-                match crate::lang::runtime::hof_fusion::run_pipeline(plan, &source) {
+                let fused_result = if let Some(range) = plan.range_source {
+                    let mut args = Vec::with_capacity(range.args_count as usize);
+                    for i in 0..range.args_count {
+                        args.push(self.get_register(range.args_start + u32::from(i))?.clone());
+                    }
+                    crate::lang::runtime::hof_fusion::run_pipeline_range(plan, &args)
+                } else {
+                    let source = self.get_register(plan.source_reg)?.clone();
+                    crate::lang::runtime::hof_fusion::run_pipeline(plan, &source)
+                };
+                match fused_result {
                     crate::lang::runtime::hof_fusion::FusedRun::Produced(result) => {
                         crate::lang::runtime::hof_fusion::record_fused_run();
                         self.set_register(plan.result_reg, result.clone())?;
