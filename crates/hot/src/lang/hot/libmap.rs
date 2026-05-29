@@ -42,6 +42,170 @@ impl HotLibFn {
     }
 }
 
+// ---------------------------------------------------------------------------
+// JIT classification metadata
+//
+// The JIT recognizes fusible higher-order functions and lowerable scalar ops by
+// the declared capability metadata below, never by matching function-name
+// strings in JIT logic. The registry is the single source of truth: a literal
+// name appears only as the lookup key in these tables. Adding or renaming a
+// hotlib updates one entry here and requires no JIT-side changes.
+// ---------------------------------------------------------------------------
+
+/// Semantic role a collection HOF plays inside a fusible pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HofStage {
+    Map,
+    Filter,
+    Reduce,
+    Some,
+    All,
+    Length,
+}
+
+impl HofStage {
+    /// Terminal stages consume a stream and yield a scalar/aggregate; transform
+    /// stages produce another stream.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            HofStage::Reduce | HofStage::Some | HofStage::All | HofStage::Length
+        )
+    }
+}
+
+/// Whether a HOF runs sequentially (fusible) or in parallel (never fused).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HofExecution {
+    Sequential,
+    Parallel,
+}
+
+/// Declared pipeline capability of a collection HOF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HofRole {
+    pub stage: HofStage,
+    pub execution: HofExecution,
+}
+
+/// A pure scalar operation the JIT can lower directly into Cranelift IR inside a
+/// fused pipeline lambda.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PureOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Neg,
+    Abs,
+    Min,
+    Max,
+    IsZero,
+    Eq,
+    Ne,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Not,
+}
+
+/// Declared lowering capability of a pure scalar op.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PureOpDescriptor {
+    pub op: PureOp,
+    /// True if the op traps on a zero divisor and therefore needs a runtime
+    /// zero-check (or a proven non-zero divisor) before fusion.
+    pub traps_on_zero_divisor: bool,
+}
+
+static HOF_ROLE_MAP: OnceLock<ahash::AHashMap<&'static str, HofRole>> = OnceLock::new();
+static PURE_OP_MAP: OnceLock<ahash::AHashMap<&'static str, PureOpDescriptor>> = OnceLock::new();
+
+/// Look up the pipeline role of a hotlib by its stable registry key.
+pub fn hof_role(name: &str) -> Option<HofRole> {
+    HOF_ROLE_MAP
+        .get_or_init(|| {
+            use HofExecution::*;
+            use HofStage::*;
+            let seq = |stage| HofRole {
+                stage,
+                execution: Sequential,
+            };
+            let mut m: ahash::AHashMap<&'static str, HofRole> = ahash::AHashMap::new();
+            // Both the fully-qualified registry key and the bare name are mapped.
+            // A bare name in a `Call` instruction is safe to treat as the core
+            // hotlib: a user-defined function with the same name compiles to
+            // `CallUserFunction` with a resolved id, so a bare `Call` name here
+            // is the core function. This mirrors `known_core_call` in the JIT.
+            m.insert("::hot::coll/map", seq(Map));
+            m.insert("map", seq(Map));
+            m.insert("::hot::coll/filter", seq(Filter));
+            m.insert("filter", seq(Filter));
+            m.insert("::hot::coll/reduce", seq(Reduce));
+            m.insert("reduce", seq(Reduce));
+            m.insert("::hot::coll/some", seq(Some));
+            m.insert("some", seq(Some));
+            m.insert("::hot::coll/all", seq(All));
+            m.insert("all", seq(All));
+            m.insert("::hot::coll/length", seq(Length));
+            m.insert("length", seq(Length));
+            // pmap is true-parallel and must never be fused.
+            let parallel_map = HofRole {
+                stage: Map,
+                execution: Parallel,
+            };
+            m.insert("::hot::coll/pmap", parallel_map);
+            m.insert("pmap", parallel_map);
+            m
+        })
+        .get(name)
+        .copied()
+}
+
+/// Look up the pure-op lowering descriptor of a hotlib by its stable registry key.
+pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
+    PURE_OP_MAP
+        .get_or_init(|| {
+            use PureOp::*;
+            let d = |op, traps_on_zero_divisor| PureOpDescriptor {
+                op,
+                traps_on_zero_divisor,
+            };
+            // Fully-qualified registry keys plus bare names (see hof_role for the
+            // bare-name safety rationale).
+            let entries: &[(&'static str, &'static str, PureOpDescriptor)] = &[
+                ("::hot::math/add", "add", d(Add, false)),
+                ("::hot::math/sub", "sub", d(Sub, false)),
+                ("::hot::math/mul", "mul", d(Mul, false)),
+                ("::hot::math/div", "div", d(Div, true)),
+                ("::hot::math/mod", "mod", d(Mod, true)),
+                ("::hot::math/abs", "abs", d(Abs, false)),
+                ("::hot::math/min", "min", d(Min, false)),
+                ("::hot::math/max", "max", d(Max, false)),
+                ("::hot::math/is-zero", "is-zero", d(IsZero, false)),
+                ("::hot::cmp/eq", "eq", d(Eq, false)),
+                ("::hot::cmp/ne", "ne", d(Ne, false)),
+                ("::hot::cmp/lt", "lt", d(Lt, false)),
+                ("::hot::cmp/lte", "lte", d(Lte, false)),
+                ("::hot::cmp/gt", "gt", d(Gt, false)),
+                ("::hot::cmp/gte", "gte", d(Gte, false)),
+                ("::hot::bool/not", "not", d(Not, false)),
+            ];
+            let mut m: ahash::AHashMap<&'static str, PureOpDescriptor> = ahash::AHashMap::new();
+            for (full, bare, desc) in entries {
+                m.insert(full, *desc);
+                m.insert(bare, *desc);
+            }
+            // `modulo` is an alternate registry key for the same op.
+            m.insert("::hot::math/modulo", d(Mod, true));
+            m
+        })
+        .get(name)
+        .copied()
+}
+
 pub type HotLibMap = ahash::AHashMap<String, HotLibFn>;
 
 static HOTLIB_MAP: OnceLock<HotLibMap> = OnceLock::new();

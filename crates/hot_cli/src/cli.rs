@@ -106,6 +106,14 @@ pub(crate) struct GlobalOptions {
     pub(crate) jit_threshold: Option<u32>,
 
     #[arg(
+        long = "jit.hof.fusion",
+        value_name = "BOOL",
+        help = "JIT higher-order-function pipeline fusion (default: true)",
+        global = true
+    )]
+    pub(crate) jit_hof_fusion: Option<bool>,
+
+    #[arg(
         long = "db.uri",
         value_name = "URI",
         help = "Database connection URI",

@@ -79,6 +79,11 @@ pub enum JitMode {
 pub struct JitConfig {
     pub mode: JitMode,
     pub threshold: u32,
+    /// Kill switch for higher-order-function pipeline fusion. Defaults on; can
+    /// be disabled via conf `jit.hof.fusion`, CLI `--jit-hof-fusion`, or env
+    /// `HOT_JIT_HOF_FUSION`. Disabling falls back to the per-element lambda-JIT
+    /// / interpreter path with no behavior change.
+    pub hof_fusion: bool,
 }
 
 impl Default for JitConfig {
@@ -86,6 +91,7 @@ impl Default for JitConfig {
         Self {
             mode: JitMode::Enabled,
             threshold: 100,
+            hof_fusion: true,
         }
     }
 }
@@ -115,6 +121,7 @@ impl JitConfig {
         };
 
         cfg.threshold = conf.get_int_or_default("jit.threshold", 100).max(1) as u32;
+        cfg.hof_fusion = conf.get_bool_or_default("jit.hof.fusion", true);
 
         // Gate on platform availability — disable on unsupported targets
         // regardless of what conf says.
@@ -128,6 +135,11 @@ impl JitConfig {
 
     pub fn is_enabled(&self) -> bool {
         matches!(self.mode, JitMode::Enabled)
+    }
+
+    /// HOF pipeline fusion requires JIT enabled and the fusion kill switch on.
+    pub fn hof_fusion_enabled(&self) -> bool {
+        self.is_enabled() && self.hof_fusion
     }
 }
 

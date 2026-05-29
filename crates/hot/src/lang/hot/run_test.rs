@@ -34,8 +34,67 @@ mod run_tests {
         vm.execute().map_err(|e| format!("{:?}", e))
     }
 
+    /// Fused HOF pipelines must produce identical results to the interpreter for
+    /// the supported Tier 1 shapes.
+    #[test]
+    fn hof_fusion_parity_with_interpreter() {
+        let programs = [
+            // sum-even-squares
+            r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(100)"#,
+            // collection-benchmark (map -> filter -> map -> reduce)
+            r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> map((x) { mul(x, 3) })
+    |> filter((x) { gt(x, 100) })
+    |> map((x) { add(x, 1) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(500)"#,
+            // filter -> length (count of evens)
+            r#"::t ns
+f fn (n: Int): Int {
+    range(2, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> length()
+}
+f(1000)"#,
+        ];
+        for src in programs {
+            let on = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"hof": {"fusion": true}}})),
+            )
+            .expect("fusion-on run");
+            let off = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"hof": {"fusion": false}}})),
+            )
+            .expect("fusion-off run");
+            assert_eq!(on, off, "fusion parity mismatch for:\n{}", src);
+            // sanity: results are non-null ints
+            assert!(matches!(on, Val::Int(_)), "expected Int result, got {:?}", on);
+        }
+    }
+
     /// Helper to compile and execute Hot code with hot-std included
     pub(super) fn compile_and_run_with_std(source: &str) -> Result<Val, String> {
+        compile_and_run_with_std_conf(source, None)
+    }
+
+    /// Helper to compile and execute Hot code with hot-std included and an
+    /// explicit conf (e.g. to toggle the `jit.hof.fusion` kill switch).
+    pub(super) fn compile_and_run_with_std_conf(
+        source: &str,
+        conf: Option<Val>,
+    ) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -84,7 +143,7 @@ mod run_tests {
             compiler.get_core_functions_arc(),
             compiler.get_type_implementations_arc(),
             compiler.get_core_variables_arc(),
-            None,
+            conf,
         );
 
         vm.execute().map_err(|e| format!("{:?}", e))

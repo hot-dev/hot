@@ -9037,6 +9037,16 @@ impl VirtualMachine {
         // Track base flow depth for this function to avoid cross-function mismatches
         let base_flow_depth = self.flow_contexts.len();
 
+        // Detect fusible HOF pipelines once for this function body. Gated behind
+        // the `jit.hof.fusion` kill switch; empty when disabled or none found.
+        let fused_plans: Vec<crate::lang::runtime::hof_fusion::PipelinePlan> =
+            if self.jit.config.hof_fusion_enabled() {
+                let program = self.program.clone();
+                crate::lang::runtime::hof_fusion::detect_pipelines(instructions, &program)
+            } else {
+                Vec::new()
+            };
+
         // Use a local instruction pointer for function execution
         let mut func_ip: usize = 0;
 
@@ -9243,6 +9253,30 @@ impl VirtualMachine {
                 // last_result remains unchanged
                 func_ip += 1;
                 continue;
+            }
+
+            // HOF pipeline fusion: when execution reaches the first stage of a
+            // recognized pure pipeline, run the whole chain in one fused pass and
+            // skip the original stage instructions. The fused run is pure and
+            // writes nothing until it succeeds, so a guard failure (`Deopt`)
+            // safely falls through to normal instruction-by-instruction execution.
+            if !fused_plans.is_empty()
+                && let Some(plan) = fused_plans.iter().find(|p| p.first_stage_ip == func_ip)
+            {
+                let source = self.get_register(plan.source_reg)?.clone();
+                match crate::lang::runtime::hof_fusion::run_pipeline(plan, &source) {
+                    crate::lang::runtime::hof_fusion::FusedRun::Produced(result) => {
+                        crate::lang::runtime::hof_fusion::record_fused_run();
+                        self.set_register(plan.result_reg, result.clone())?;
+                        last_result = result;
+                        func_ip = plan.last_stage_ip + 1;
+                        continue;
+                    }
+                    crate::lang::runtime::hof_fusion::FusedRun::Deopt => {
+                        // Fall through to execute the original instructions.
+                        crate::lang::runtime::hof_fusion::record_fused_deopt();
+                    }
+                }
             }
 
             // Handle jump instructions specially - they control the instruction pointer
