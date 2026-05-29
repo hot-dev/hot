@@ -583,21 +583,43 @@ fn template_of(parts: &[PureValue]) -> EvalOutcome {
     let max_bytes = crate::lang::runtime::limits::max_string_bytes();
     let mut out = String::new();
     for part in parts {
-        let v = part.to_val();
-        if matches!(v, Val::Map(_)) {
+        if matches!(part, PureValue::Other(Val::Map(_))) {
             return EvalOutcome::DeoptToInterpreter;
         }
-        let piece = match str_internal(std::slice::from_ref(&v)) {
-            HotResult::Ok(Val::Str(s)) => s.to_string(),
-            HotResult::Ok(other) => other.to_string(),
-            HotResult::Err(_) => return EvalOutcome::DeoptToInterpreter,
-        };
-        match out.len().checked_add(piece.len()) {
-            Some(total) if total <= max_bytes => out.push_str(&piece),
-            _ => return EvalOutcome::DeoptToInterpreter,
+        if !push_template_part(&mut out, part, max_bytes) {
+            return EvalOutcome::DeoptToInterpreter;
         }
     }
     EvalOutcome::Value(PureValue::Other(Val::from(out)))
+}
+
+fn push_checked(out: &mut String, piece: &str, max_bytes: usize) -> bool {
+    match out.len().checked_add(piece.len()) {
+        Some(total) if total <= max_bytes => {
+            out.push_str(piece);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn push_template_part(out: &mut String, part: &PureValue, max_bytes: usize) -> bool {
+    match part {
+        PureValue::Int(i) => push_checked(out, &i.to_string(), max_bytes),
+        PureValue::Bool(b) => push_checked(out, &b.to_string(), max_bytes),
+        PureValue::Other(Val::Str(s)) => push_checked(out, s, max_bytes),
+        PureValue::Other(Val::Dec(d)) => push_checked(out, &d.to_string(), max_bytes),
+        PureValue::Other(Val::Byte(b)) => push_checked(out, &b.to_string(), max_bytes),
+        PureValue::Other(Val::Null) => push_checked(out, "null", max_bytes),
+        PureValue::Other(v) => {
+            let piece = match str_internal(std::slice::from_ref(v)) {
+                HotResult::Ok(Val::Str(s)) => s.to_string(),
+                HotResult::Ok(other) => other.to_string(),
+                HotResult::Err(_) => return false,
+            };
+            push_checked(out, &piece, max_bytes)
+        }
+    }
 }
 
 fn eval_template(parts: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
@@ -686,11 +708,18 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
         PureOp::Gt => ok(PureValue::Bool(vals[0].as_int()? > vals[1].as_int()?)),
         PureOp::Gte => ok(PureValue::Bool(vals[0].as_int()? >= vals[1].as_int()?)),
         PureOp::Not => ok(PureValue::Bool(!vals[0].as_bool()?)),
-        // `Div` can yield a `Dec`; `Abs`/`Min`/`Max`/`Neg`/`Concat` are handled
-        // by the hotlib fallback for full parity.
-        PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg | PureOp::Concat => {
-            None
-        }
+        PureOp::Concat => match vals {
+            [PureValue::Other(Val::Str(a)), PureValue::Other(Val::Str(b))] => {
+                let mut s = String::with_capacity(a.len() + b.len());
+                s.push_str(a);
+                s.push_str(b);
+                ok(PureValue::Other(Val::from(s)))
+            }
+            _ => None,
+        },
+        // `Div` can yield a `Dec`; `Abs`/`Min`/`Max`/`Neg` are handled by the
+        // hotlib fallback for full parity.
+        PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg => None,
     }
 }
 
@@ -726,6 +755,16 @@ pub fn flatten_program(expr: &PureExpr) -> Vec<MicroOp> {
     let mut out = Vec::new();
     flatten_into(expr, &mut out);
     out
+}
+
+fn expr_uses_param(expr: &PureExpr, param: usize) -> bool {
+    match expr {
+        PureExpr::Param(idx) => *idx == param,
+        PureExpr::ConstInt(_) | PureExpr::ConstBool(_) | PureExpr::ConstVal(_) => false,
+        PureExpr::Op { args, .. } => args.iter().any(|arg| expr_uses_param(arg, param)),
+        PureExpr::Field { base, .. } => expr_uses_param(base, param),
+        PureExpr::Template(parts) => parts.iter().any(|part| expr_uses_param(part, param)),
+    }
 }
 
 fn flatten_into(expr: &PureExpr, out: &mut Vec<MicroOp>) {
@@ -1195,6 +1234,12 @@ pub enum FusedRun {
     Deopt,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StringAppendPlan {
+    Program(Vec<MicroOp>),
+    Template(Vec<Vec<MicroOp>>),
+}
+
 /// Run a fused pipeline in a single pass over `source`. Pure: reads `source`,
 /// writes nothing. Returns `Deopt` (discarding any partial work) whenever a
 /// runtime guard fails so the interpreter can reproduce exact semantics.
@@ -1244,7 +1289,8 @@ where
     let mut count: i64 = 0;
     let mut some_result = false;
     let mut all_result = true;
-    if terminal.stage == HofStage::Reduce {
+    let mut string_reduce = string_reduce_builder(terminal);
+    if terminal.stage == HofStage::Reduce && string_reduce.is_none() {
         match &terminal.initial {
             Some(v) => reduce_acc = Some(PureValue::from_val(v.clone())),
             None => return FusedRun::Deopt,
@@ -1289,11 +1335,18 @@ where
 
         match terminal.stage {
             HofStage::Reduce => {
-                let acc = reduce_acc.take().expect("reduce acc initialized");
-                let pair = [acc, cur];
-                match run_program(&terminal.lambda.code, &pair, &mut stack) {
-                    EvalOutcome::Value(v) if !value_is_err(&v) => reduce_acc = Some(v),
-                    _ => return FusedRun::Deopt,
+                if let Some((out, append_plan)) = &mut string_reduce {
+                    let args = [PureValue::Other(Val::from("")), cur];
+                    if !push_string_append(out, append_plan, &args, &mut stack) {
+                        return FusedRun::Deopt;
+                    }
+                } else {
+                    let acc = reduce_acc.take().expect("reduce acc initialized");
+                    let pair = [acc, cur];
+                    match run_program(&terminal.lambda.code, &pair, &mut stack) {
+                        EvalOutcome::Value(v) if !value_is_err(&v) => reduce_acc = Some(v),
+                        _ => return FusedRun::Deopt,
+                    }
                 }
             }
             HofStage::Length => {
@@ -1332,13 +1385,98 @@ where
     }
 
     let result = match terminal.stage {
-        HofStage::Reduce => reduce_acc.expect("reduce acc").into_val(),
+        HofStage::Reduce => match string_reduce {
+            Some((out, _)) => Val::from(out),
+            None => reduce_acc.expect("reduce acc").into_val(),
+        },
         HofStage::Length => Val::Int(count),
         HofStage::Some => Val::Bool(some_result),
         HofStage::All => Val::Bool(all_result),
         _ => return FusedRun::Deopt,
     };
     FusedRun::Produced(result)
+}
+
+fn string_reduce_builder(terminal: &FusedStage) -> Option<(String, StringAppendPlan)> {
+    if terminal.stage != HofStage::Reduce {
+        return None;
+    }
+
+    let seed = match terminal.initial.as_ref()? {
+        Val::Str(s) => s.to_string(),
+        _ => return None,
+    };
+
+    let PureExpr::Op {
+        op: PureOp::Concat,
+        args,
+        ..
+    } = &terminal.lambda.expr
+    else {
+        return None;
+    };
+
+    match args.as_slice() {
+        [PureExpr::Param(0), append_expr] if !expr_uses_param(append_expr, 0) => {
+            let append = match append_expr {
+                PureExpr::Template(parts) => {
+                    StringAppendPlan::Template(parts.iter().map(flatten_program).collect())
+                }
+                _ => StringAppendPlan::Program(flatten_program(append_expr)),
+            };
+            Some((seed, append))
+        }
+        _ => None,
+    }
+}
+
+fn push_string_append(
+    out: &mut String,
+    append: &StringAppendPlan,
+    args: &[PureValue],
+    stack: &mut Vec<PureValue>,
+) -> bool {
+    match append {
+        StringAppendPlan::Program(code) => match run_program(code, args, stack) {
+            EvalOutcome::Value(v) if !value_is_err(&v) => push_concat_part(out, &v),
+            _ => false,
+        },
+        StringAppendPlan::Template(parts) => {
+            let max_bytes = crate::lang::runtime::limits::max_string_bytes();
+            for code in parts {
+                match run_program(code, args, stack) {
+                    EvalOutcome::Value(v) if !value_is_err(&v) => {
+                        if matches!(v, PureValue::Other(Val::Map(_))) {
+                            return false;
+                        }
+                        if !push_template_part(out, &v, max_bytes) {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            true
+        }
+    }
+}
+
+fn push_concat_part(out: &mut String, value: &PureValue) -> bool {
+    match value {
+        PureValue::Int(i) => out.push_str(&i.to_string()),
+        PureValue::Bool(b) => out.push_str(&b.to_string()),
+        PureValue::Other(Val::Int(i)) => out.push_str(&i.to_string()),
+        PureValue::Other(Val::Bool(b)) => out.push_str(&b.to_string()),
+        PureValue::Other(Val::Str(s)) => out.push_str(s),
+        PureValue::Other(Val::Dec(d)) => out.push_str(&d.to_string()),
+        PureValue::Other(Val::Null) => {}
+        PureValue::Other(Val::Byte(b)) => out.push_str(&b.to_string()),
+        PureValue::Other(Val::Bytes(bytes)) => out.push_str(&format!("{:?}", bytes)),
+        PureValue::Other(Val::Vec(v)) => out.push_str(&format!("{:?}", v)),
+        PureValue::Other(Val::Map(m)) => out.push_str(&format!("{:?}", m)),
+        PureValue::Other(Val::Box(b)) => out.push_str(&b.to_string()),
+    }
+    true
 }
 
 struct RangeValueIter {
@@ -2211,10 +2349,55 @@ f fn (items: Vec<Str>): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        assert!(
+            string_reduce_builder(plan.stages.last().expect("terminal")).is_some(),
+            "string concat reduce should use the builder specialization"
+        );
         let source = Val::Vec(vec![Val::from("a"), Val::from("b"), Val::from("c")]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("a!b!c!"))
         );
+    }
+
+    #[test]
+    fn run_pipeline_string_concat_mixed_append_values() {
+        let prog = compile(
+            r#"::t ns
+f fn (items: Vec<Int>): Str {
+    items |> reduce((acc, i) { concat(acc, i) }, "")
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        let source = Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::from("123"))
+        );
+    }
+
+    #[test]
+    fn run_pipeline_template_map_part_deopts() {
+        let prog = compile(
+            r#"::t ns
+f fn (items: Vec<Map>): Str {
+    items |> reduce((acc, row) { concat(acc, `count=${row}`) }, "")
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        let source = Val::Vec(vec![record(1)]);
+        assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
     }
 }

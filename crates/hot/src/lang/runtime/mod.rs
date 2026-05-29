@@ -11,8 +11,8 @@
 
 pub mod error;
 pub mod function_ref;
-pub mod hof_fusion;
 pub mod jit;
+pub mod jit_hof;
 pub mod limits;
 pub mod oom_logger;
 pub mod resolution;

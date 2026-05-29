@@ -2004,7 +2004,10 @@ impl VirtualMachine {
                 let right = *right;
                 let left_val = self.get_register(left)?;
                 let right_val = self.get_register(right)?;
-                let result = self.add_values(left_val, right_val)?;
+                let result = match (left_val, right_val) {
+                    (Val::Int(a), Val::Int(b)) => crate::lang::hot::math::fast_add_int(*a, *b),
+                    _ => self.add_values(left_val, right_val)?,
+                };
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
             }
@@ -2108,11 +2111,7 @@ impl VirtualMachine {
                     let arg_reg = args_start + i as RegisterId;
                     let arg_val = self.get_register(arg_reg)?.clone();
                     tracing::trace!("VM: Call arg {}: {:?}", i, arg_val);
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
+                    args.push(self.prepare_call_arg(arg_val)?);
                 }
 
                 // Get function information from the program
@@ -4805,6 +4804,24 @@ impl VirtualMachine {
 
         // Not a Result type, return as-is
         Ok(val.clone())
+    }
+
+    fn prepare_call_arg(&mut self, val: Val) -> VmResult<Val> {
+        match val {
+            Val::Int(_)
+            | Val::Dec(_)
+            | Val::Str(_)
+            | Val::Bool(_)
+            | Val::Byte(_)
+            | Val::Bytes(_)
+            | Val::Null => Ok(val),
+            other => {
+                // Preserve the slower semantic path for Results, boxed AST
+                // references, and nested collections that may need resolution.
+                let unwrapped_arg = self.unwrap_result_if_ok(&other)?;
+                self.resolve_variable_references_in_val(&unwrapped_arg)
+            }
+        }
     }
 
     /// Helper to decrement function call depth only for non-dispatch functions
@@ -9039,10 +9056,10 @@ impl VirtualMachine {
 
         // Detect fusible HOF pipelines once for this function body. Gated behind
         // the `jit.hof.fusion` kill switch; empty when disabled or none found.
-        let fused_plans: Vec<crate::lang::runtime::hof_fusion::PipelinePlan> =
+        let fused_plans: Vec<crate::lang::runtime::jit_hof::PipelinePlan> =
             if self.jit.config.hof_fusion_enabled() {
                 let program = self.program.clone();
-                crate::lang::runtime::hof_fusion::detect_pipelines(instructions, &program)
+                crate::lang::runtime::jit_hof::detect_pipelines(instructions, &program)
             } else {
                 Vec::new()
             };
@@ -9268,22 +9285,22 @@ impl VirtualMachine {
                     for i in 0..range.args_count {
                         args.push(self.get_register(range.args_start + u32::from(i))?.clone());
                     }
-                    crate::lang::runtime::hof_fusion::run_pipeline_range(plan, &args)
+                    crate::lang::runtime::jit_hof::run_pipeline_range(plan, &args)
                 } else {
                     let source = self.get_register(plan.source_reg)?.clone();
-                    crate::lang::runtime::hof_fusion::run_pipeline(plan, &source)
+                    crate::lang::runtime::jit_hof::run_pipeline(plan, &source)
                 };
                 match fused_result {
-                    crate::lang::runtime::hof_fusion::FusedRun::Produced(result) => {
-                        crate::lang::runtime::hof_fusion::record_fused_run();
+                    crate::lang::runtime::jit_hof::FusedRun::Produced(result) => {
+                        crate::lang::runtime::jit_hof::record_fused_run();
                         self.set_register(plan.result_reg, result.clone())?;
                         last_result = result;
                         func_ip = plan.last_stage_ip + 1;
                         continue;
                     }
-                    crate::lang::runtime::hof_fusion::FusedRun::Deopt => {
+                    crate::lang::runtime::jit_hof::FusedRun::Deopt => {
                         // Fall through to execute the original instructions.
-                        crate::lang::runtime::hof_fusion::record_fused_deopt();
+                        crate::lang::runtime::jit_hof::record_fused_deopt();
                     }
                 }
             }

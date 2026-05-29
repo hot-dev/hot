@@ -4,6 +4,7 @@ meta {doc: "Hot language benchmarks"}
 // Aliases for convenience
 now ::hot::time/now
 epoch-millis ::hot::time/epoch-millis
+epoch-nanos ::hot::time/epoch-nanos
 Millisecond ::hot::time/Millisecond
 
 
@@ -169,17 +170,26 @@ hotlib-json-roundtrip fn (n: Int): Int {
 // ============================================================================
 
 // Helper to measure execution time
-measure fn (name: Str, f: Fn): Map {
+measure-repeat fn (name: Str, iterations: Int, f: Fn): Map {
     start now()
-    result f()
+    result reduce(range(iterations), (_acc, _i) {
+        f()
+    }, null)
     end now()
-    elapsed sub(epoch-millis(end), epoch-millis(start))
+    elapsed-nanos sub(epoch-nanos(end), epoch-nanos(start))
+    avg-micros Int(div(elapsed-nanos, mul(iterations, 1000)))
+    elapsed div(Dec(avg-micros), 1000)
     println(`${name}: ${elapsed}ms (result: ${result})`)
     {
         name: name,
+        iterations: iterations,
         elapsed: elapsed,
         result: result,
     }
+}
+
+measure fn (name: Str, f: Fn): Map {
+    measure-repeat(name, 1, f)
 }
 
 // Run all benchmarks
@@ -190,27 +200,27 @@ run-benchmarks fn (): Vec<Map> {
     results [
         // Fibonacci
         measure("fib-recursive(25)", () { fib-recursive(25) }),
-        measure("fib-iterative(70)", () { fib-iterative(70) }),
+        measure-repeat("fib-iterative(70)", 100, () { fib-iterative(70) }),
 
         // Collection operations
-        measure("sum-even-squares(10000)", () { sum-even-squares(10000) }),
-        measure("collection-benchmark(10000)", () { collection-benchmark(10000) }),
+        measure-repeat("sum-even-squares(10000)", 50, () { sum-even-squares(10000) }),
+        measure-repeat("collection-benchmark(10000)", 50, () { collection-benchmark(10000) }),
 
         // String operations
-        measure("string-concat(1000)", () { length(string-concat-benchmark(1000)) }),
+        measure-repeat("string-concat(1000)", 20, () { length(string-concat-benchmark(1000)) }),
 
         // JSON processing
-        measure("json-benchmark(1000)", () { json-benchmark(1000) }),
+        measure-repeat("json-benchmark(1000)", 10, () { json-benchmark(1000) }),
 
         // Prime numbers
-        measure("count-primes(1000)", () { count-primes(1000) }),
+        measure-repeat("count-primes(1000)", 3, () { count-primes(1000) }),
 
         // JIT lazy/flow safety shapes
-        measure("lazy-if-branch(5000)", () { lazy-if-branch(5000) }),
-        measure("lazy-generic-ignore(1000)", () { lazy-generic-ignore(1000) }),
-        measure("cond-skip-expensive(1000)", () { cond-skip-expensive(1000) }),
-        measure("owned-lazy-branch(1000)", () { owned-lazy-branch(1000) }),
-        measure("hotlib-json-roundtrip(200)", () { hotlib-json-roundtrip(200) })
+        measure-repeat("lazy-if-branch(5000)", 10, () { lazy-if-branch(5000) }),
+        measure-repeat("lazy-generic-ignore(1000)", 5, () { lazy-generic-ignore(1000) }),
+        measure-repeat("cond-skip-expensive(1000)", 20, () { cond-skip-expensive(1000) }),
+        measure-repeat("owned-lazy-branch(1000)", 10, () { owned-lazy-branch(1000) }),
+        measure-repeat("hotlib-json-roundtrip(200)", 20, () { hotlib-json-roundtrip(200) })
     ]
 
     println("")

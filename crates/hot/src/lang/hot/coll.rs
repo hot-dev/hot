@@ -1,6 +1,7 @@
 // Collection functions for bytecode engine
 
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::runtime::limits;
 use crate::lang::runtime::vm::{CancellationState, FailureState};
 use crate::val::Val;
 use ahash::AHashSet;
@@ -88,22 +89,24 @@ pub fn fast_concat_vec(a: &[Val], b: &[Val]) -> Val {
 /// Build an Int range [0..end) — the most common range call.
 #[inline(always)]
 pub fn fast_range_1_int(end: i64) -> Val {
-    Val::Vec((0..end).map(Val::Int).collect())
+    Val::Vec(build_int_range(0, end, 1).unwrap_or_default())
 }
 
 /// Build an Int range [start..end) with step 1.
 #[inline(always)]
 pub fn fast_range_2_int(start: i64, end: i64) -> Val {
-    Val::Vec((start..end).map(Val::Int).collect())
+    Val::Vec(build_int_range(start, end, 1).unwrap_or_default())
 }
 
 /// Build an Int range [start..end) with explicit step.
 #[inline(always)]
 pub fn fast_range_3_int(start: i64, end: i64, step: i64) -> Option<Val> {
-    if step == 0 {
-        return None;
-    }
-    let mut result = Vec::new();
+    build_int_range(start, end, step).map(Val::Vec)
+}
+
+fn build_int_range(start: i64, end: i64, step: i64) -> Option<Vec<Val>> {
+    let count = limits::range_element_count(start, end, step)?;
+    let mut result = Vec::with_capacity(count);
     let mut current = start;
     if step > 0 {
         while current < end {
@@ -124,7 +127,103 @@ pub fn fast_range_3_int(start: i64, end: i64, step: i64) -> Option<Val> {
             }
         }
     }
-    Some(Val::Vec(result))
+    Some(result)
+}
+
+enum PreparedFunction<'a> {
+    Named(&'a str),
+    CallableVal(&'a Val),
+    Invalid,
+}
+
+fn prepare_function(function_val: &Val) -> PreparedFunction<'_> {
+    let mut cur = function_val;
+    loop {
+        if let Val::Map(m) = cur
+            && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
+        {
+            if &**tn == "::hot::type/Fn"
+                && let Some(inner) = m.get(&Val::from("$val"))
+            {
+                cur = inner;
+                continue;
+            }
+            if &**tn == "::hot::type/FunctionAlias"
+                && let Some(Val::Str(target)) = m.get(&Val::from("$target"))
+            {
+                return PreparedFunction::Named(target);
+            }
+        }
+
+        return match cur {
+            Val::Str(name) => PreparedFunction::Named(name),
+            Val::Box(boxed)
+                if boxed
+                    .as_any()
+                    .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    .is_some() =>
+            {
+                PreparedFunction::CallableVal(cur)
+            }
+            Val::Box(boxed) => {
+                if let Some(fr) = boxed
+                    .as_any()
+                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+                {
+                    PreparedFunction::Named(fr.name())
+                } else {
+                    PreparedFunction::Invalid
+                }
+            }
+            _ => PreparedFunction::Invalid,
+        };
+    }
+}
+
+fn call_prepared_with_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    function: &PreparedFunction<'_>,
+    arg: &Val,
+) -> Result<Val, String> {
+    call_prepared_with_vm_multi_args(vm, function, std::slice::from_ref(arg))
+}
+
+fn call_prepared_with_vm_multi_args(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    function: &PreparedFunction<'_>,
+    args: &[Val],
+) -> Result<Val, String> {
+    match function {
+        PreparedFunction::Named(name) => {
+            if let Some(function_id) = vm.find_best_user_function_overload(name, args) {
+                match vm.execute_compiled_user_function(function_id, args) {
+                    Ok(result) => return Ok(result),
+                    Err(vm_error) => {
+                        return Err(format!("Compiled function call failed: {:?}", vm_error));
+                    }
+                }
+            }
+
+            match vm.execute_function_call_by_name(name, args) {
+                Ok(result) => Ok(result),
+                Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
+            }
+        }
+        PreparedFunction::CallableVal(function_val) => {
+            if let Ok(Some(result)) = vm.try_jit_lambda_call(function_val, args) {
+                return Ok(result);
+            }
+
+            match vm.execute_lambda(function_val, args) {
+                Ok(result) => Ok(result),
+                Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),
+            }
+        }
+        PreparedFunction::Invalid => Err(
+            "Invalid function type. Expected string function name, function reference, or lambda."
+                .to_string(),
+        ),
+    }
 }
 
 /// Helper function to call a function with VM context
@@ -133,89 +232,8 @@ pub fn call_function_with_vm(
     function_val: &Val,
     arg: &Val,
 ) -> Result<Val, String> {
-    // Unwrap typed Fn: {"$type": "::hot::type/Fn", "$val": inner}
-    if let Val::Map(m) = function_val
-        && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-        && &**tn == "::hot::type/Fn"
-        && let Some(inner) = m.get(&Val::from("$val"))
-    {
-        return call_function_with_vm(vm, inner, arg);
-    }
-
-    // Handle FunctionAlias: {"$type": "::hot::type/FunctionAlias", "$target": "ns/fn"}
-    if let Val::Map(m) = function_val
-        && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-        && &**tn == "::hot::type/FunctionAlias"
-        && let Some(Val::Str(target)) = m.get(&Val::from("$target"))
-    {
-        return call_function_with_vm(vm, &Val::from(target.clone()), arg);
-    }
-
-    match function_val {
-        Val::Str(name) => {
-            // Prefer compiled user function dispatch to avoid unified lookup recursion/overhead
-            if let Some(function_id) =
-                vm.find_best_user_function_overload(name, std::slice::from_ref(arg))
-            {
-                match vm.execute_compiled_user_function(function_id, std::slice::from_ref(arg)) {
-                    Ok(result) => return Ok(result),
-                    Err(vm_error) => {
-                        return Err(format!("Compiled function call failed: {:?}", vm_error));
-                    }
-                }
-            }
-
-            match vm.execute_function_call_by_name(name, std::slice::from_ref(arg)) {
-                Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
-            }
-        }
-        Val::Box(boxed) => {
-            // Check if it's a lambda (LambdaInfo)
-            if boxed
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-                .is_some()
-            {
-                if let Ok(Some(result)) =
-                    vm.try_jit_lambda_call(function_val, std::slice::from_ref(arg))
-                {
-                    return Ok(result);
-                }
-
-                match vm.execute_lambda(function_val, std::slice::from_ref(arg)) {
-                    Ok(result) => Ok(result),
-                    Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),
-                }
-            } else if let Some(fr) = boxed
-                .as_any()
-                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
-            {
-                let function_name = fr.name();
-                if let Some(function_id) =
-                    vm.find_best_user_function_overload(function_name, std::slice::from_ref(arg))
-                {
-                    match vm.execute_compiled_user_function(function_id, std::slice::from_ref(arg))
-                    {
-                        Ok(result) => return Ok(result),
-                        Err(vm_error) => {
-                            return Err(format!("Compiled function call failed: {:?}", vm_error));
-                        }
-                    }
-                }
-                match vm.execute_function_call_by_name(function_name, std::slice::from_ref(arg)) {
-                    Ok(result) => Ok(result),
-                    Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
-                }
-            } else {
-                Err("Invalid boxed function reference (expected Lambda or FunctionRef)".to_string())
-            }
-        }
-        _ => Err(format!(
-            "Invalid function type: {:?}. Expected string function name, function reference, or lambda.",
-            function_val
-        )),
-    }
+    let function = prepare_function(function_val);
+    call_prepared_with_vm(vm, &function, arg)
 }
 
 /// Count elements in a collection
@@ -320,12 +338,13 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
     match collection {
         Val::Vec(items) => {
-            let mut result = Vec::new();
+            let function = prepare_function(function_val);
+            let mut result = Vec::with_capacity(items.len());
 
             // Apply function to each item and concatenate results
             for item in items {
                 // Call the function with the item using VM context
-                let function_result = match call_function_with_vm(vm, function_val, item) {
+                let function_result = match call_prepared_with_vm(vm, &function, item) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -349,14 +368,15 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             HotResult::Ok(Val::Vec(result))
         }
         Val::Map(map) => {
-            let mut result = Vec::new();
+            let function = prepare_function(function_val);
+            let mut result = Vec::with_capacity(map.len());
 
             // Apply function to each key-value pair and concatenate results
             for (key, value) in map.iter() {
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
 
                 // Call the function with the key-value pair using VM context
-                let function_result = match call_function_with_vm(vm, function_val, &pair) {
+                let function_result = match call_prepared_with_vm(vm, &function, &pair) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -389,83 +409,8 @@ pub fn call_function_with_vm_multi_args(
     function_val: &Val,
     args: &[Val],
 ) -> Result<Val, String> {
-    // Unwrap typed Fn: {"$type": "::hot::type/Fn", "$val": inner}
-    if let Val::Map(m) = function_val
-        && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-        && &**tn == "::hot::type/Fn"
-        && let Some(inner) = m.get(&Val::from("$val"))
-    {
-        return call_function_with_vm_multi_args(vm, inner, args);
-    }
-
-    // Handle FunctionAlias: {"$type": "::hot::type/FunctionAlias", "$target": "ns/fn"}
-    if let Val::Map(m) = function_val
-        && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-        && &**tn == "::hot::type/FunctionAlias"
-        && let Some(Val::Str(target)) = m.get(&Val::from("$target"))
-    {
-        return call_function_with_vm_multi_args(vm, &Val::from(target.clone()), args);
-    }
-
-    match function_val {
-        Val::Str(name) => {
-            // Prefer compiled user function dispatch to avoid unified lookup recursion/overhead
-            if let Some(function_id) = vm.find_best_user_function_overload(name, args) {
-                match vm.execute_compiled_user_function(function_id, args) {
-                    Ok(result) => return Ok(result),
-                    Err(vm_error) => {
-                        return Err(format!("Compiled function call failed: {:?}", vm_error));
-                    }
-                }
-            }
-
-            match vm.execute_function_call_by_name(name, args) {
-                Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
-            }
-        }
-        Val::Box(boxed) => {
-            // Check if it's a lambda (LambdaInfo)
-            if boxed
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-                .is_some()
-            {
-                if let Ok(Some(result)) = vm.try_jit_lambda_call(function_val, args) {
-                    return Ok(result);
-                }
-
-                match vm.execute_lambda(function_val, args) {
-                    Ok(result) => Ok(result),
-                    Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),
-                }
-            } else if let Some(fr) = boxed
-                .as_any()
-                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
-            {
-                let function_name = fr.name();
-                if let Some(function_id) = vm.find_best_user_function_overload(function_name, args)
-                {
-                    match vm.execute_compiled_user_function(function_id, args) {
-                        Ok(result) => return Ok(result),
-                        Err(vm_error) => {
-                            return Err(format!("Compiled function call failed: {:?}", vm_error));
-                        }
-                    }
-                }
-                match vm.execute_function_call_by_name(function_name, args) {
-                    Ok(result) => Ok(result),
-                    Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
-                }
-            } else {
-                Err("Invalid boxed function reference (expected Lambda or FunctionRef)".to_string())
-            }
-        }
-        _ => Err(format!(
-            "Invalid function type: {:?}. Expected string function name, function reference, or lambda.",
-            function_val
-        )),
-    }
+    let function = prepare_function(function_val);
+    call_prepared_with_vm_multi_args(vm, &function, args)
 }
 
 /// Filter a collection using a predicate function (VM-aware version)
@@ -495,12 +440,13 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
     match collection {
         Val::Vec(items) => {
-            let mut result = Vec::new();
+            let predicate = prepare_function(predicate_val);
+            let mut result = Vec::with_capacity(items.len());
 
             // Apply predicate to each item and keep those that return truthy
             for item in items {
                 // Call the predicate function with the item using VM context
-                let predicate_result = match call_function_with_vm(vm, predicate_val, item) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, item) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -533,14 +479,15 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             HotResult::Ok(Val::Vec(result))
         }
         Val::Map(map) => {
-            let mut result = Vec::new();
+            let predicate = prepare_function(predicate_val);
+            let mut result = Vec::with_capacity(map.len());
 
             // Apply predicate to each key-value pair and keep those that return truthy
             for (key, value) in map.iter() {
                 // Call the predicate function with key and value using VM context
-                let predicate_result = match call_function_with_vm_multi_args(
+                let predicate_result = match call_prepared_with_vm_multi_args(
                     vm,
-                    predicate_val,
+                    &predicate,
                     &[key.clone(), value.clone()],
                 ) {
                     Ok(val) => val,
@@ -564,6 +511,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             HotResult::Ok(Val::Vec(result))
         }
         Val::Str(s) => {
+            let predicate = prepare_function(predicate_val);
             let mut result = Vec::new();
 
             // Apply predicate to each character and keep those that return truthy
@@ -571,7 +519,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 let char_val = Val::from(ch.to_string());
 
                 // Call the predicate function with the character using VM context
-                let predicate_result = match call_function_with_vm(vm, predicate_val, &char_val) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, &char_val) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -597,6 +545,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 .as_any()
                 .downcast_ref::<crate::lang::hot::iter::IteratorBox>()
             {
+                let predicate = prepare_function(predicate_val);
                 let mut result = Vec::new();
 
                 // Iterate over all values from the iterator
@@ -627,7 +576,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     }
 
                     // Apply the predicate to each value
-                    let predicate_result = match call_function_with_vm(vm, predicate_val, &value) {
+                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value) {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -684,12 +633,13 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 
     match collection {
         Val::Vec(items) => {
-            let mut result = Vec::new();
+            let function = prepare_function(function_val);
+            let mut result = Vec::with_capacity(items.len());
 
             // Apply function to each item
             for item in items {
                 // Call the function with the item using VM context
-                let function_result = match call_function_with_vm(vm, function_val, item) {
+                let function_result = match call_prepared_with_vm(vm, &function, item) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -705,14 +655,15 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
             HotResult::Ok(Val::Vec(result))
         }
         Val::Map(map) => {
-            let mut result = Vec::new();
+            let function = prepare_function(function_val);
+            let mut result = Vec::with_capacity(map.len());
 
             // Apply function to each key-value pair
             for (key, value) in map.iter() {
                 // Call the function with key and value using VM context
-                let function_result = match call_function_with_vm_multi_args(
+                let function_result = match call_prepared_with_vm_multi_args(
                     vm,
-                    function_val,
+                    &function,
                     &[key.clone(), value.clone()],
                 ) {
                     Ok(val) => val,
@@ -730,6 +681,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
             HotResult::Ok(Val::Vec(result))
         }
         Val::Str(s) => {
+            let function = prepare_function(function_val);
             let mut result = Vec::new();
 
             // Apply function to each character
@@ -737,7 +689,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 let char_val = Val::from(ch.to_string());
 
                 // Call the function with the character using VM context
-                let function_result = match call_function_with_vm(vm, function_val, &char_val) {
+                let function_result = match call_prepared_with_vm(vm, &function, &char_val) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -758,6 +710,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 .as_any()
                 .downcast_ref::<crate::lang::hot::iter::IteratorBox>()
             {
+                let function = prepare_function(function_val);
                 let mut result = Vec::new();
 
                 // Iterate over all values from the iterator
@@ -788,7 +741,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                     }
 
                     // Apply the function to each value
-                    let function_result = match call_function_with_vm(vm, function_val, &value) {
+                    let function_result = match call_prepared_with_vm(vm, &function, &value) {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -1097,14 +1050,15 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
         return HotResult::Ok(init_val.clone());
     }
 
+    let function = prepare_function(function_val);
     match collection {
         Val::Vec(items) => {
             let mut accumulator = init_val.clone();
 
             for item in items {
-                let function_result = match call_function_with_vm_multi_args(
+                let function_result = match call_prepared_with_vm_multi_args(
                     vm,
-                    function_val,
+                    &function,
                     &[accumulator.clone(), item.clone()],
                 ) {
                     Ok(val) => val,
@@ -1131,9 +1085,9 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             for (key, value) in map.iter() {
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
 
-                let function_result = match call_function_with_vm_multi_args(
+                let function_result = match call_prepared_with_vm_multi_args(
                     vm,
-                    function_val,
+                    &function,
                     &[accumulator.clone(), pair],
                 ) {
                     Ok(val) => val,
@@ -1189,9 +1143,9 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                         break;
                     }
 
-                    let function_result = match call_function_with_vm_multi_args(
+                    let function_result = match call_prepared_with_vm_multi_args(
                         vm,
-                        function_val,
+                        &function,
                         &[accumulator.clone(), value],
                     ) {
                         Ok(val) => val,
@@ -1254,12 +1208,13 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         return HotResult::Ok(Val::Bool(false));
     }
 
+    let predicate = prepare_function(predicate_val);
     match collection {
         Val::Vec(items) => {
             // Apply predicate to each item and return true if any is truthy
             for item in items {
                 // Call the predicate with the item using VM context
-                let predicate_result = match call_function_with_vm(vm, predicate_val, item) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, item) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1283,7 +1238,7 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
 
                 // Call the predicate with the key-value pair using VM context
-                let predicate_result = match call_function_with_vm(vm, predicate_val, &pair) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, &pair) {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1332,7 +1287,7 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                         break;
                     }
 
-                    let predicate_result = match call_function_with_vm(vm, predicate_val, &value) {
+                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value) {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -2686,10 +2641,11 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         collection
     );
 
+    let predicate = prepare_function(predicate_val);
     match collection {
         Val::Vec(items) => {
             for item in items {
-                match call_function_with_vm(vm, predicate_val, item) {
+                match call_prepared_with_vm(vm, &predicate, item) {
                     Ok(predicate_result) => {
                         if !is_truthy(&predicate_result) {
                             return HotResult::Ok(Val::Bool(false));
@@ -2708,7 +2664,7 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         Val::Map(map) => {
             for (key, value) in map.iter() {
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
-                match call_function_with_vm(vm, predicate_val, &pair) {
+                match call_prepared_with_vm(vm, &predicate, &pair) {
                     Ok(predicate_result) => {
                         if !is_truthy(&predicate_result) {
                             return HotResult::Ok(Val::Bool(false));
@@ -2755,7 +2711,7 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                         break;
                     }
 
-                    let predicate_result = match call_function_with_vm(vm, predicate_val, &value) {
+                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value) {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -2925,12 +2881,12 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
                     // Guard: refuse to allocate gigantic vectors. range(2^31)
                     // would otherwise OOM the worker before catch_unwind sees
                     // anything.
-                    if let Some(n) = limits::range_element_count(0, *end_int, 1)
-                        && let Err(e) = limits::check_collection_size("range", n)
-                    {
+                    let n = limits::range_element_count(0, *end_int, 1).unwrap_or(0);
+                    if let Err(e) = limits::check_collection_size("range", n) {
                         return HotResult::Err(e);
                     }
-                    let result: Vec<Val> = (0..*end_int).map(Val::Int).collect();
+                    let mut result = Vec::with_capacity(n);
+                    result.extend((0..*end_int).map(Val::Int));
                     HotResult::Ok(Val::Vec(result))
                 }
                 Val::Dec(end_dec) => {
@@ -2974,12 +2930,11 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
                 // Guard against memory-bombing range arguments before we start
                 // allocating. Saturated arithmetic in range_element_count avoids
                 // a panic on extreme i64 values.
-                if let Some(n) = limits::range_element_count(*start_int, *end_int, *step_int)
-                    && let Err(e) = limits::check_collection_size("range", n)
-                {
+                let n = limits::range_element_count(*start_int, *end_int, *step_int).unwrap_or(0);
+                if let Err(e) = limits::check_collection_size("range", n) {
                     return HotResult::Err(e);
                 }
-                let mut result = Vec::new();
+                let mut result = Vec::with_capacity(n);
                 let mut current = *start_int;
                 if *step_int > 0 {
                     while current < *end_int {

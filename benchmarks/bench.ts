@@ -81,18 +81,23 @@ function countPrimes(n: number): number {
 
 interface BenchmarkResult {
     name: string;
+    iterations: number;
     elapsed: number;
     result: number;
 }
 
-function measure(name: string, f: () => number): BenchmarkResult {
+function measure(name: string, iterations: number, f: () => number): BenchmarkResult {
     const start = performance.now();
-    const result = f();
+    let result = 0;
+    for (let i = 0; i < iterations; i++) {
+        result = f();
+    }
     const end = performance.now();
-    const elapsed = end - start;
-    console.log(`${name}: ${elapsed.toFixed(2)}ms (result: ${result})`);
+    const elapsed = (end - start) / iterations;
+    console.log(`${name}: ${elapsed.toFixed(6)}ms (result: ${result})`);
     return {
         name,
+        iterations,
         elapsed,
         result,
     };
@@ -103,13 +108,13 @@ function runBenchmarks(): BenchmarkResult[] {
     console.log();
 
     const results: BenchmarkResult[] = [
-        measure("fib-recursive(25)", () => fibRecursive(25)),
-        measure("fib-iterative(70)", () => fibIterative(70)),
-        measure("sum-even-squares(10000)", () => sumEvenSquares(10000)),
-        measure("collection-benchmark(10000)", () => collectionBenchmark(10000)),
-        measure("string-concat(1000)", () => stringConcatBenchmark(1000).length),
-        measure("json-benchmark(1000)", () => jsonBenchmark(1000)),
-        measure("count-primes(1000)", () => countPrimes(1000)),
+        measure("fib-recursive(25)", 1, () => fibRecursive(25)),
+        measure("fib-iterative(70)", 100, () => fibIterative(70)),
+        measure("sum-even-squares(10000)", 50, () => sumEvenSquares(10000)),
+        measure("collection-benchmark(10000)", 50, () => collectionBenchmark(10000)),
+        measure("string-concat(1000)", 20, () => stringConcatBenchmark(1000).length),
+        measure("json-benchmark(1000)", 10, () => jsonBenchmark(1000)),
+        measure("count-primes(1000)", 3, () => countPrimes(1000)),
     ];
 
     console.log();

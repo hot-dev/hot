@@ -128,6 +128,12 @@ def format_time(ms: float) -> str:
         return f"{ms/1000:.2f}s"
     if ms >= 10:
         return f"{ms:.0f}ms"
+    if ms >= 1:
+        return f"{ms:.2f}ms"
+    if ms > 0:
+        return f"{ms:.3f}ms"
+    if ms == 0:
+        return "<0.001ms"
     return f"{ms:.2f}ms"
 
 

@@ -82,14 +82,21 @@ def count_primes(n: int) -> int:
     return sum(1 for x in range(2, n + 1) if is_prime(x))
 
 
-def measure(name: str, f: Callable[[], Any]) -> dict:
+def measure(name: str, iterations: int, f: Callable[[], Any]) -> dict:
     """Measure execution time of a function."""
     start = time.perf_counter()
-    result = f()
+    result = None
+    for _ in range(iterations):
+        result = f()
     end = time.perf_counter()
-    elapsed = (end - start) * 1000
-    print(f"{name}: {elapsed:.2f}ms (result: {result})")
-    return {"name": name, "elapsed": elapsed, "result": result}
+    elapsed = ((end - start) * 1000) / iterations
+    print(f"{name}: {elapsed:.6f}ms (result: {result})")
+    return {
+        "name": name,
+        "iterations": iterations,
+        "elapsed": elapsed,
+        "result": result,
+    }
 
 
 def run_benchmarks():
@@ -98,13 +105,13 @@ def run_benchmarks():
     print()
 
     results = [
-        measure("fib-recursive(25)", lambda: fib_recursive(25)),
-        measure("fib-iterative(70)", lambda: fib_iterative(70)),
-        measure("sum-even-squares(10000)", lambda: sum_even_squares(10000)),
-        measure("collection-benchmark(10000)", lambda: collection_benchmark(10000)),
-        measure("string-concat(1000)", lambda: len(string_concat_benchmark(1000))),
-        measure("json-benchmark(1000)", lambda: json_benchmark(1000)),
-        measure("count-primes(1000)", lambda: count_primes(1000)),
+        measure("fib-recursive(25)", 1, lambda: fib_recursive(25)),
+        measure("fib-iterative(70)", 100, lambda: fib_iterative(70)),
+        measure("sum-even-squares(10000)", 50, lambda: sum_even_squares(10000)),
+        measure("collection-benchmark(10000)", 50, lambda: collection_benchmark(10000)),
+        measure("string-concat(1000)", 20, lambda: len(string_concat_benchmark(1000))),
+        measure("json-benchmark(1000)", 10, lambda: json_benchmark(1000)),
+        measure("count-primes(1000)", 3, lambda: count_primes(1000)),
     ]
 
     print()
