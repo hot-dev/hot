@@ -2,7 +2,7 @@ name: "Rust setup with cache, sccache, and Tailwind"
 description: "Installs Rust toolchain, enables rust-cache and sccache, and installs Tailwind CLI without npm"
 inputs:
   rust-toolchain:
-    description: "Rust toolchain version (e.g., 1.95.0)"
+    description: "Rust toolchain version (e.g., 1.96.0)"
     required: true
   tailwind-version:
     description: "Tailwind CLI version (e.g., v3.4.13)"

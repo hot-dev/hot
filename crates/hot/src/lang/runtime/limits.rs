@@ -239,7 +239,7 @@ pub fn check_regex_input(op: &str, input_len: usize) -> Result<(), Val> {
 // taking down the worker.
 //
 // NOTE: a true alloc-error hook (`std::alloc::set_alloc_error_hook`) is still
-// nightly-only as of Rust 1.95. Until it is stabilized, the cleanest defense
+// nightly-only as of Rust 1.96. Until it is stabilized, the cleanest defense
 // is to use `try_reserve` at any site whose capacity is user-controlled.
 
 /// Try to reserve capacity, returning a Hot-friendly error on failure.

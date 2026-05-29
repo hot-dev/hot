@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: 1.95.0
+  RUST_TOOLCHAIN: 1.96.0
   TAILWIND_VERSION: v4.1.18
   # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
   # strips before saving anyway) and reduces sccache hit rates. CI does clean
