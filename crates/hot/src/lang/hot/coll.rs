@@ -86,16 +86,20 @@ pub fn fast_concat_vec(a: &[Val], b: &[Val]) -> Val {
     Val::Vec(result)
 }
 
-/// Build an Int range [0..end) — the most common range call.
+/// Build an Int range [0..end) — the most common range call. Returns `None` if
+/// the element count cannot be represented (so the caller falls back to the
+/// hotlib `range` for exact semantics rather than silently yielding an empty
+/// `Vec`).
 #[inline(always)]
-pub fn fast_range_1_int(end: i64) -> Val {
-    Val::Vec(build_int_range(0, end, 1).unwrap_or_default())
+pub fn fast_range_1_int(end: i64) -> Option<Val> {
+    build_int_range(0, end, 1).map(Val::Vec)
 }
 
-/// Build an Int range [start..end) with step 1.
+/// Build an Int range [start..end) with step 1. Returns `None` on an
+/// unrepresentable element count (see [`fast_range_1_int`]).
 #[inline(always)]
-pub fn fast_range_2_int(start: i64, end: i64) -> Val {
-    Val::Vec(build_int_range(start, end, 1).unwrap_or_default())
+pub fn fast_range_2_int(start: i64, end: i64) -> Option<Val> {
+    build_int_range(start, end, 1).map(Val::Vec)
 }
 
 /// Build an Int range [start..end) with explicit step.

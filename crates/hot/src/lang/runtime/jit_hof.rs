@@ -30,6 +30,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Telemetry: count successful fused passes vs runtime de-opts (guard failures).
+//
+// These are process-global, monotonic, `Relaxed` counters intended only for
+// diagnostics/observability. They are NOT a reliable signal for assertions:
+// `cargo test` runs many fusion tests concurrently in one process, so a
+// before/after delta around a single call can be polluted by other threads.
+// Tests that need to prove fusion fired should assert on a deterministic,
+// local signal instead (e.g. the detected `PipelinePlan`), not on these deltas.
 static FUSED_RUNS: AtomicU64 = AtomicU64::new(0);
 static FUSED_DEOPTS: AtomicU64 = AtomicU64::new(0);
 
@@ -169,6 +176,10 @@ impl PureValue {
     pub fn as_int(&self) -> Option<i64> {
         match self {
             PureValue::Int(i) => Some(*i),
+            // `from_val` normally canonicalizes `Int` to the unboxed variant,
+            // but accept a boxed `Int` too so a hand-constructed `Other(Int)`
+            // still takes the fast path instead of silently de-opting.
+            PureValue::Other(Val::Int(i)) => Some(*i),
             _ => None,
         }
     }
@@ -176,6 +187,7 @@ impl PureValue {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             PureValue::Bool(b) => Some(*b),
+            PureValue::Other(Val::Bool(b)) => Some(*b),
             _ => None,
         }
     }
@@ -1346,7 +1358,12 @@ where
                         return FusedRun::Deopt;
                     }
                 } else {
-                    let acc = reduce_acc.take().expect("reduce acc initialized");
+                    // Invariant: `reduce_acc` is `Some` here (initialized before
+                    // the loop and re-set every iteration). De-opt rather than
+                    // panic if a future refactor ever breaks that invariant.
+                    let Some(acc) = reduce_acc.take() else {
+                        return FusedRun::Deopt;
+                    };
                     let pair = [acc, cur];
                     match run_program(&terminal.lambda.code, &pair, &mut stack) {
                         EvalOutcome::Value(v) if !value_is_err(&v) => reduce_acc = Some(v),
@@ -1392,7 +1409,13 @@ where
     let result = match terminal.stage {
         HofStage::Reduce => match string_reduce {
             Some((out, _)) => Val::from(out),
-            None => reduce_acc.expect("reduce acc").into_val(),
+            // `reduce_acc` is always `Some` for a non-string reduce (initialized
+            // before the loop, re-set each iteration). De-opt instead of
+            // panicking if that ever fails to hold.
+            None => match reduce_acc {
+                Some(acc) => acc.into_val(),
+                None => return FusedRun::Deopt,
+            },
         },
         HofStage::Length => Val::Int(count),
         HofStage::Some => Val::Bool(some_result),

@@ -5621,7 +5621,10 @@ impl VirtualMachine {
                             {
                                 fast_return_hr!(HR::Err(e));
                             }
-                            fast_return!(coll::fast_range_1_int(*end))
+                            match coll::fast_range_1_int(*end) {
+                                Some(val) => fast_return!(val),
+                                None => fast_return_hr!(coll::range(args)),
+                            }
                         }
                         _ => fast_return_hr!(coll::range(args)),
                     },
@@ -5675,7 +5678,10 @@ impl VirtualMachine {
                                 {
                                     fast_return_hr!(HR::Err(e));
                                 }
-                                fast_return!(coll::fast_range_2_int(*start, *end))
+                                match coll::fast_range_2_int(*start, *end) {
+                                    Some(val) => fast_return!(val),
+                                    None => fast_return_hr!(coll::range(args)),
+                                }
                             }
                             _ => fast_return_hr!(coll::range(args)),
                         },
@@ -9485,5 +9491,44 @@ mod tests {
             "VM execution with AST failed: {:?}",
             result.err()
         );
+    }
+
+    /// The scalar fast path in `prepare_call_arg` skips `unwrap_result_if_ok`
+    /// and `resolve_variable_references_in_val`. That is only correct if scalar
+    /// `Val`s never carry a `Result` wrapper or an unresolved variable
+    /// reference (those are represented as tagged `Map`/`Box`, which take the
+    /// slow path). Lock the invariant: every scalar must pass through unchanged.
+    #[test]
+    fn prepare_call_arg_passes_scalars_through_unchanged() {
+        let program = Arc::new(BytecodeProgram::new());
+        let mut vm = VirtualMachine::new(
+            program,
+            None,
+            Arc::new(IndexMap::new()),
+            Arc::new(IndexMap::new()),
+            Arc::new(IndexMap::new()),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        );
+
+        let scalars = [
+            crate::val::Val::Int(42),
+            crate::val::Val::Dec(fastnum::D256::from(7)),
+            crate::val::Val::from("a string that is not a var ref"),
+            crate::val::Val::Bool(true),
+            crate::val::Val::Byte(0xAB),
+            crate::val::Val::Bytes(vec![1, 2, 3]),
+            crate::val::Val::Null,
+        ];
+
+        for scalar in scalars {
+            let prepared = vm
+                .prepare_call_arg(scalar.clone())
+                .expect("scalar prepare_call_arg should not error");
+            assert_eq!(
+                prepared, scalar,
+                "scalar {scalar:?} must pass through prepare_call_arg unchanged"
+            );
+        }
     }
 }
