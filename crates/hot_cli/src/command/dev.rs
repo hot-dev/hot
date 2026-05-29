@@ -90,6 +90,7 @@ pub(crate) async fn run_dev(
         engine_threads: None,
         jit_mode: None,
         jit_threshold: None,
+        jit_hof_fusion: None,
         db_uri: None,
         log_level: None,
         log_target: None,

@@ -17,6 +17,217 @@ pub enum HotLibFn {
     LibFn(LibFnType),
     /// VM-aware function that needs mutable access to the VM
     VmAwareFn(VmAwareFnType),
+    /// VM-aware function with an explicit JIT safety policy.
+    VmAwareJitFn(VmAwareFnType, HotLibJitPolicy),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotLibJitPolicy {
+    JitSafe,
+    JitViaVmCallback,
+    JitBailout,
+}
+
+impl HotLibFn {
+    fn vm_callback(func: VmAwareFnType) -> Self {
+        HotLibFn::VmAwareJitFn(func, HotLibJitPolicy::JitViaVmCallback)
+    }
+
+    pub fn jit_policy(&self) -> HotLibJitPolicy {
+        match self {
+            HotLibFn::LibFn(_) => HotLibJitPolicy::JitSafe,
+            HotLibFn::VmAwareFn(_) => HotLibJitPolicy::JitBailout,
+            HotLibFn::VmAwareJitFn(_, policy) => *policy,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JIT classification metadata
+//
+// The JIT recognizes fusible higher-order functions and lowerable scalar ops by
+// the declared capability metadata below, never by matching function-name
+// strings in JIT logic. The registry is the single source of truth: a literal
+// name appears only as the lookup key in these tables. Adding or renaming a
+// hotlib updates one entry here and requires no JIT-side changes.
+// ---------------------------------------------------------------------------
+
+/// Semantic role a collection HOF plays inside a fusible pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HofStage {
+    Map,
+    Filter,
+    Reduce,
+    Some,
+    All,
+    Length,
+}
+
+impl HofStage {
+    /// Terminal stages consume a stream and yield a scalar/aggregate; transform
+    /// stages produce another stream.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            HofStage::Reduce | HofStage::Some | HofStage::All | HofStage::Length
+        )
+    }
+}
+
+/// Whether a HOF runs sequentially (fusible) or in parallel (never fused).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HofExecution {
+    Sequential,
+    Parallel,
+}
+
+/// Declared pipeline capability of a collection HOF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HofRole {
+    pub stage: HofStage,
+    pub execution: HofExecution,
+}
+
+/// A pure scalar operation the JIT can lower directly into Cranelift IR inside a
+/// fused pipeline lambda.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PureOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Neg,
+    Abs,
+    Min,
+    Max,
+    IsZero,
+    Eq,
+    Ne,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Not,
+    /// String/collection concatenation (`::hot::coll/concat`).
+    Concat,
+}
+
+/// Declared lowering capability of a pure scalar op.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PureOpDescriptor {
+    pub op: PureOp,
+    /// Fully-qualified registry key of the backing hotlib `LibFn`, used by the
+    /// fused evaluator to call the exact implementation for non-`Int` operands
+    /// (guaranteeing parity with the interpreter).
+    pub full_name: &'static str,
+    /// True if the op traps on a zero divisor and therefore needs a runtime
+    /// zero-check (or a proven non-zero divisor) before fusion.
+    pub traps_on_zero_divisor: bool,
+}
+
+static HOF_ROLE_MAP: OnceLock<ahash::AHashMap<&'static str, HofRole>> = OnceLock::new();
+static PURE_OP_MAP: OnceLock<ahash::AHashMap<&'static str, PureOpDescriptor>> = OnceLock::new();
+
+/// Look up the pipeline role of a hotlib by its stable registry key.
+pub fn hof_role(name: &str) -> Option<HofRole> {
+    HOF_ROLE_MAP
+        .get_or_init(|| {
+            use HofExecution::*;
+            use HofStage::*;
+            let seq = |stage| HofRole {
+                stage,
+                execution: Sequential,
+            };
+            let mut m: ahash::AHashMap<&'static str, HofRole> = ahash::AHashMap::new();
+            // Both the fully-qualified registry key and the bare name are mapped.
+            // A bare name in a `Call` instruction is safe to treat as the core
+            // hotlib: a user-defined function with the same name compiles to
+            // `CallUserFunction` with a resolved id, so a bare `Call` name here
+            // is the core function. This mirrors `known_core_call` in the JIT.
+            m.insert("::hot::coll/map", seq(Map));
+            m.insert("map", seq(Map));
+            m.insert("::hot::coll/filter", seq(Filter));
+            m.insert("filter", seq(Filter));
+            m.insert("::hot::coll/reduce", seq(Reduce));
+            m.insert("reduce", seq(Reduce));
+            m.insert("::hot::coll/some", seq(Some));
+            m.insert("some", seq(Some));
+            m.insert("::hot::coll/all", seq(All));
+            m.insert("all", seq(All));
+            m.insert("::hot::coll/length", seq(Length));
+            m.insert("length", seq(Length));
+            // pmap is true-parallel and must never be fused.
+            let parallel_map = HofRole {
+                stage: Map,
+                execution: Parallel,
+            };
+            m.insert("::hot::coll/pmap", parallel_map);
+            m.insert("pmap", parallel_map);
+            m
+        })
+        .get(name)
+        .copied()
+}
+
+/// True when a hotlib identity is the eager collection `range` producer that can
+/// be replaced by a fused non-allocating range source. Kept here (with the
+/// registry metadata) so fusion does not hard-code Hot function names locally.
+pub fn is_fusible_range_source(name: &str) -> bool {
+    matches!(name, "::hot::coll/range" | "range")
+}
+
+/// Look up the pure-op lowering descriptor of a hotlib by its stable registry key.
+pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
+    PURE_OP_MAP
+        .get_or_init(|| {
+            use PureOp::*;
+            let d = |op, full_name: &'static str, traps_on_zero_divisor| PureOpDescriptor {
+                op,
+                full_name,
+                traps_on_zero_divisor,
+            };
+            // Fully-qualified registry keys plus bare names (see hof_role for the
+            // bare-name safety rationale). Both keys carry the same `full_name`
+            // so the evaluator can fetch the backing `LibFn`.
+            let entries: &[(&'static str, &'static str, PureOpDescriptor)] = &[
+                ("::hot::math/add", "add", d(Add, "::hot::math/add", false)),
+                ("::hot::math/sub", "sub", d(Sub, "::hot::math/sub", false)),
+                ("::hot::math/mul", "mul", d(Mul, "::hot::math/mul", false)),
+                ("::hot::math/div", "div", d(Div, "::hot::math/div", true)),
+                ("::hot::math/mod", "mod", d(Mod, "::hot::math/mod", true)),
+                ("::hot::math/abs", "abs", d(Abs, "::hot::math/abs", false)),
+                ("::hot::math/min", "min", d(Min, "::hot::math/min", false)),
+                ("::hot::math/max", "max", d(Max, "::hot::math/max", false)),
+                (
+                    "::hot::math/is-zero",
+                    "is-zero",
+                    d(IsZero, "::hot::math/is-zero", false),
+                ),
+                ("::hot::cmp/eq", "eq", d(Eq, "::hot::cmp/eq", false)),
+                ("::hot::cmp/ne", "ne", d(Ne, "::hot::cmp/ne", false)),
+                ("::hot::cmp/lt", "lt", d(Lt, "::hot::cmp/lt", false)),
+                ("::hot::cmp/lte", "lte", d(Lte, "::hot::cmp/lte", false)),
+                ("::hot::cmp/gt", "gt", d(Gt, "::hot::cmp/gt", false)),
+                ("::hot::cmp/gte", "gte", d(Gte, "::hot::cmp/gte", false)),
+                ("::hot::bool/not", "not", d(Not, "::hot::bool/not", false)),
+                (
+                    "::hot::coll/concat",
+                    "concat",
+                    d(Concat, "::hot::coll/concat", false),
+                ),
+            ];
+            let mut m: ahash::AHashMap<&'static str, PureOpDescriptor> = ahash::AHashMap::new();
+            for (full, bare, desc) in entries {
+                m.insert(full, *desc);
+                m.insert(bare, *desc);
+            }
+            // `modulo` is an alternate registry key for the same op.
+            m.insert("::hot::math/modulo", d(Mod, "::hot::math/mod", true));
+            m
+        })
+        .get(name)
+        .copied()
 }
 
 pub type HotLibMap = ahash::AHashMap<String, HotLibFn>;
@@ -29,6 +240,22 @@ pub fn get_hotlib_functions() -> Vec<String> {
 }
 
 /// Get the hotlib map with functions (cached, built only once)
+/// Call a pure (non-VM) hotlib `LibFn` by its fully-qualified registry name.
+///
+/// Returns `None` when the name is not registered or is VM-aware (the caller
+/// must then fall back to the interpreter). Used by the fused HOF evaluator to
+/// run the exact registered implementation for operands it does not handle on
+/// its inlined fast path, guaranteeing semantic parity.
+pub fn call_pure_lib(
+    full_name: &str,
+    args: &[Val],
+) -> Option<crate::lang::hot::r#type::HotResult<Val>> {
+    match get_hotlib_map().get(full_name)? {
+        HotLibFn::LibFn(f) => Some(f(args)),
+        _ => None,
+    }
+}
+
 pub fn get_hotlib_map() -> &'static HotLibMap {
     HOTLIB_MAP.get_or_init(|| {
         let mut map = ahash::AHashMap::new();
@@ -57,27 +284,27 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         map.insert("::hot::coll/nth".to_string(), HotLibFn::LibFn(coll::nth));
         map.insert(
             "::hot::coll/mapcat".to_string(),
-            HotLibFn::VmAwareFn(coll::mapcat),
+            HotLibFn::vm_callback(coll::mapcat),
         );
         map.insert(
             "::hot::coll/filter".to_string(),
-            HotLibFn::VmAwareFn(coll::filter),
+            HotLibFn::vm_callback(coll::filter),
         );
         map.insert(
             "::hot::coll/map".to_string(),
-            HotLibFn::VmAwareFn(coll::map),
+            HotLibFn::vm_callback(coll::map),
         );
         map.insert(
             "::hot::coll/pmap".to_string(),
-            HotLibFn::VmAwareFn(coll::pmap),
+            HotLibFn::vm_callback(coll::pmap),
         );
         map.insert(
             "::hot::coll/map-indexed".to_string(),
-            HotLibFn::VmAwareFn(coll::map_indexed),
+            HotLibFn::vm_callback(coll::map_indexed),
         );
         map.insert(
             "::hot::coll/mapcat".to_string(),
-            HotLibFn::VmAwareFn(coll::mapcat),
+            HotLibFn::vm_callback(coll::mapcat),
         );
         map.insert(
             "::hot::coll/length".to_string(),
@@ -98,7 +325,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::coll/update-in".to_string(),
-            HotLibFn::VmAwareFn(coll::update_in),
+            HotLibFn::vm_callback(coll::update_in),
         );
         map.insert(
             "::hot::coll/concat".to_string(),
@@ -110,19 +337,19 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::coll/reduce".to_string(),
-            HotLibFn::VmAwareFn(coll::reduce),
+            HotLibFn::vm_callback(coll::reduce),
         );
         map.insert(
             "::hot::coll/some".to_string(),
-            HotLibFn::VmAwareFn(coll::some),
+            HotLibFn::vm_callback(coll::some),
         );
         map.insert(
             "::hot::coll/find_first".to_string(),
-            HotLibFn::VmAwareFn(coll::find_first),
+            HotLibFn::vm_callback(coll::find_first),
         );
         map.insert(
             "::hot::coll/remove".to_string(),
-            HotLibFn::VmAwareFn(coll::remove),
+            HotLibFn::vm_callback(coll::remove),
         );
         map.insert(
             "::hot::coll/delete".to_string(),
@@ -139,11 +366,11 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::coll/partition".to_string(),
-            HotLibFn::VmAwareFn(coll::partition),
+            HotLibFn::vm_callback(coll::partition),
         );
         map.insert(
             "::hot::coll/partition-by".to_string(),
-            HotLibFn::VmAwareFn(coll::partition_by),
+            HotLibFn::vm_callback(coll::partition_by),
         );
         map.insert(
             "::hot::coll/distinct".to_string(),
@@ -156,7 +383,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         map.insert("::hot::coll/sort".to_string(), HotLibFn::LibFn(coll::sort));
         map.insert(
             "::hot::coll/sort-by".to_string(),
-            HotLibFn::VmAwareFn(coll::sort_by),
+            HotLibFn::vm_callback(coll::sort_by),
         );
         map.insert(
             "::hot::coll/shuffle".to_string(),
@@ -180,7 +407,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::coll/all".to_string(),
-            HotLibFn::VmAwareFn(coll::all),
+            HotLibFn::vm_callback(coll::all),
         );
         map.insert(
             "::hot::coll/slice".to_string(),
@@ -205,19 +432,19 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::coll/walk".to_string(),
-            HotLibFn::VmAwareFn(coll::walk),
+            HotLibFn::vm_callback(coll::walk),
         );
         map.insert(
             "::hot::coll/prewalk".to_string(),
-            HotLibFn::VmAwareFn(coll::prewalk),
+            HotLibFn::vm_callback(coll::prewalk),
         );
         map.insert(
             "::hot::coll/postwalk".to_string(),
-            HotLibFn::VmAwareFn(coll::postwalk),
+            HotLibFn::vm_callback(coll::postwalk),
         );
         map.insert(
             "::hot::coll/postwalk-replace".to_string(),
-            HotLibFn::VmAwareFn(coll::postwalk_replace),
+            HotLibFn::vm_callback(coll::postwalk_replace),
         );
 
         // String functions
@@ -246,28 +473,31 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
 
         // Environment functions
-        map.insert("::hot::env/get".to_string(), HotLibFn::VmAwareFn(env::get));
+        map.insert(
+            "::hot::env/get".to_string(),
+            HotLibFn::vm_callback(env::get),
+        );
         map.insert(
             "::hot::env/get-all".to_string(),
-            HotLibFn::VmAwareFn(env::get_all),
+            HotLibFn::vm_callback(env::get_all),
         );
 
         // Result functions (now in ::hot::type)
         map.insert(
             "::hot::type/is-ok".to_string(),
-            HotLibFn::VmAwareFn(r#type::result_is_ok),
+            HotLibFn::vm_callback(r#type::result_is_ok),
         );
         map.insert(
             "::hot::type/is-err".to_string(),
-            HotLibFn::VmAwareFn(r#type::result_is_err),
+            HotLibFn::vm_callback(r#type::result_is_err),
         );
         map.insert(
             "::hot::type/if-ok".to_string(),
-            HotLibFn::VmAwareFn(r#type::result_if_ok),
+            HotLibFn::vm_callback(r#type::result_if_ok),
         );
         map.insert(
             "::hot::type/if-err".to_string(),
-            HotLibFn::VmAwareFn(r#type::result_if_err),
+            HotLibFn::vm_callback(r#type::result_if_err),
         );
         map.insert(
             "::hot::type/ok".to_string(),
@@ -298,11 +528,11 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Iterator functions
         map.insert(
             "::hot::iter/next".to_string(),
-            HotLibFn::VmAwareFn(iter::next),
+            HotLibFn::vm_callback(iter::next),
         );
         map.insert(
             "::hot::iter/collect".to_string(),
-            HotLibFn::VmAwareFn(iter::collect),
+            HotLibFn::vm_callback(iter::collect),
         );
         map.insert("::hot::iter/Iter".to_string(), HotLibFn::LibFn(iter::iter));
         map.insert(
@@ -411,11 +641,11 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Language introspection functions (VM-aware)
         map.insert(
             "::hot::lang/namespaces".to_string(),
-            HotLibFn::VmAwareFn(lang::namespaces),
+            HotLibFn::vm_callback(lang::namespaces),
         );
         map.insert(
             "::hot::lang/functions-in-namespace".to_string(),
-            HotLibFn::VmAwareFn(lang::functions_in_namespace),
+            HotLibFn::vm_callback(lang::functions_in_namespace),
         );
 
         // Math functions
@@ -461,7 +691,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::run/info".to_string(),
-            HotLibFn::VmAwareFn(run::info),
+            HotLibFn::vm_callback(run::info),
         );
         // Info functions
         map.insert(
@@ -706,19 +936,19 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Type constructor functions
         map.insert(
             "::hot::type/Str".to_string(),
-            HotLibFn::VmAwareFn(r#type::str_constructor),
+            HotLibFn::vm_callback(r#type::str_constructor),
         );
         map.insert(
             "::hot::type/Int".to_string(),
-            HotLibFn::VmAwareFn(r#type::int_constructor),
+            HotLibFn::vm_callback(r#type::int_constructor),
         );
         map.insert(
             "::hot::type/Dec".to_string(),
-            HotLibFn::VmAwareFn(r#type::dec_constructor),
+            HotLibFn::vm_callback(r#type::dec_constructor),
         );
         map.insert(
             "::hot::type/Bool".to_string(),
-            HotLibFn::VmAwareFn(r#type::bool_constructor),
+            HotLibFn::vm_callback(r#type::bool_constructor),
         );
         map.insert(
             "::hot::type/Null".to_string(),
@@ -759,7 +989,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // is-type implementation (VM-aware for lazy argument evaluation)
         map.insert(
             "::hot::type/is-type".to_string(),
-            HotLibFn::VmAwareFn(r#type::is_type),
+            HotLibFn::vm_callback(r#type::is_type),
         );
         map.insert(
             "::hot::type/typed-map".to_string(),
@@ -773,17 +1003,17 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Meta functions (VM-aware)
         map.insert(
             "::hot::meta/get".to_string(),
-            HotLibFn::VmAwareFn(meta::get),
+            HotLibFn::vm_callback(meta::get),
         );
 
         // Test functions (VM-aware) - override Hot language implementations
         map.insert(
             "::hot::test/is-test".to_string(),
-            HotLibFn::VmAwareFn(meta::is_test),
+            HotLibFn::vm_callback(meta::is_test),
         );
         map.insert(
             "::hot::meta/source".to_string(),
-            HotLibFn::VmAwareFn(meta::source),
+            HotLibFn::vm_callback(meta::source),
         );
 
         // Function execution functions
@@ -801,7 +1031,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::lang/resolve".to_string(),
-            HotLibFn::VmAwareFn(lang::resolve),
+            HotLibFn::vm_callback(lang::resolve),
         );
 
         // Lambda execution functions
@@ -1124,7 +1354,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
 
         // Context functions (VM-specific context storage)
-        map.insert("::hot::ctx/get".to_string(), HotLibFn::VmAwareFn(ctx::get));
+        map.insert(
+            "::hot::ctx/get".to_string(),
+            HotLibFn::vm_callback(ctx::get),
+        );
         map.insert("::hot::ctx/set".to_string(), HotLibFn::VmAwareFn(ctx::set));
         map.insert(
             "::hot::ctx/set-secret".to_string(),
@@ -1143,7 +1376,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Core do: force-evaluate lazy thunks once
         map.insert(
             "::hot::core/do".to_string(),
-            HotLibFn::VmAwareFn(core::do_eval),
+            HotLibFn::vm_callback(core::do_eval),
         );
 
         // Map functions
@@ -1153,19 +1386,19 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Core type constructors - VM-aware (for implements dispatch)
         map.insert(
             "::hot::type/Str".to_string(),
-            HotLibFn::VmAwareFn(r#type::str_constructor),
+            HotLibFn::vm_callback(r#type::str_constructor),
         );
         map.insert(
             "::hot::type/Int".to_string(),
-            HotLibFn::VmAwareFn(r#type::int_constructor),
+            HotLibFn::vm_callback(r#type::int_constructor),
         );
         map.insert(
             "::hot::type/Dec".to_string(),
-            HotLibFn::VmAwareFn(r#type::dec_constructor),
+            HotLibFn::vm_callback(r#type::dec_constructor),
         );
         map.insert(
             "::hot::type/Bool".to_string(),
-            HotLibFn::VmAwareFn(r#type::bool_constructor),
+            HotLibFn::vm_callback(r#type::bool_constructor),
         );
         map.insert(
             "::hot::type/Byte".to_string(),
@@ -1349,19 +1582,19 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert(
             "::hot::box/stats".to_string(),
-            HotLibFn::VmAwareFn(r#box::stats),
+            HotLibFn::vm_callback(r#box::stats),
         );
         map.insert(
             "::hot::box/enabled".to_string(),
-            HotLibFn::VmAwareFn(r#box::enabled),
+            HotLibFn::vm_callback(r#box::enabled),
         );
         map.insert(
             "::hot::box/quota".to_string(),
-            HotLibFn::VmAwareFn(r#box::quota),
+            HotLibFn::vm_callback(r#box::quota),
         );
         map.insert(
             "::hot::box/limits".to_string(),
-            HotLibFn::VmAwareFn(r#box::limits),
+            HotLibFn::vm_callback(r#box::limits),
         );
 
         // File functions

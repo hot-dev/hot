@@ -515,6 +515,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 engine_threads: None,
                 jit_mode: None,
                 jit_threshold: None,
+                jit_hof_fusion: None,
                 db_uri: None,
                 log_level: None,
                 log_target: None,
@@ -578,6 +579,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 engine_threads: None,
                 jit_mode: None,
                 jit_threshold: None,
+                jit_hof_fusion: None,
                 db_uri: None,
                 log_level: None,
                 log_target: None,
@@ -619,6 +621,9 @@ pub(crate) fn apply_configuration_options(
     }
     if let Some(threshold) = global.jit_threshold {
         conf = conf.set_int("jit.threshold", Some(threshold as i64), 0);
+    }
+    if let Some(hof_fusion) = global.jit_hof_fusion {
+        conf = conf.set_bool("jit.hof.fusion", Some(hof_fusion), true);
     }
     if let Some(ref db_uri) = global.db_uri {
         conf = conf.set_str("db.uri", Some(db_uri.clone()), "");

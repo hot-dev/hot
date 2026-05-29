@@ -31,7 +31,7 @@ impl<T> HotResult<T> {
 }
 
 /// Core Str type constructor
-fn str_internal(args: &[Val]) -> HotResult<Val> {
+pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
     if args.is_empty() {
         return HotResult::Ok(Val::from(""));
     }

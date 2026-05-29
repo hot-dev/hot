@@ -1,0 +1,16 @@
+::hot::conf ns
+
+hot.set.profile "benchmarks"
+hot.set.project "benchmarks"
+
+hot.profile.benchmarks.user.email "benchmarks@hot.dev"
+hot.profile.benchmarks.org.slug "benchmarks"
+hot.profile.benchmarks.env.name "benchmarks"
+
+hot.project.benchmarks.src.paths ["./hot/src"]
+hot.project.benchmarks.test.paths []
+
+hot.db.uri ""
+hot.emitter.type "none"
+hot.queue.type "none"
+hot.log.level "warn"

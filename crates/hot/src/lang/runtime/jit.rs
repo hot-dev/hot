@@ -1,5 +1,6 @@
 use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
+    LambdaInfo,
 };
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
@@ -14,12 +15,17 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use fastnum::D256;
 use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static GLOBAL_JIT_COMPILE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_JIT_BAILOUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_LAMBDA_JIT_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_LAMBDA_JIT_FALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static JIT_VM_PTR: Cell<*mut VirtualMachine> = const { Cell::new(std::ptr::null_mut()) };
@@ -73,6 +79,11 @@ pub enum JitMode {
 pub struct JitConfig {
     pub mode: JitMode,
     pub threshold: u32,
+    /// Kill switch for higher-order-function pipeline fusion. Defaults on; can
+    /// be disabled via conf `jit.hof.fusion`, CLI `--jit-hof-fusion`, or env
+    /// `HOT_JIT_HOF_FUSION`. Disabling falls back to the per-element lambda-JIT
+    /// / interpreter path with no behavior change.
+    pub hof_fusion: bool,
 }
 
 impl Default for JitConfig {
@@ -80,6 +91,7 @@ impl Default for JitConfig {
         Self {
             mode: JitMode::Enabled,
             threshold: 100,
+            hof_fusion: true,
         }
     }
 }
@@ -109,6 +121,7 @@ impl JitConfig {
         };
 
         cfg.threshold = conf.get_int_or_default("jit.threshold", 100).max(1) as u32;
+        cfg.hof_fusion = conf.get_bool_or_default("jit.hof.fusion", true);
 
         // Gate on platform availability — disable on unsupported targets
         // regardless of what conf says.
@@ -122,6 +135,11 @@ impl JitConfig {
 
     pub fn is_enabled(&self) -> bool {
         matches!(self.mode, JitMode::Enabled)
+    }
+
+    /// HOF pipeline fusion requires JIT enabled and the fusion kill switch on.
+    pub fn hof_fusion_enabled(&self) -> bool {
+        self.is_enabled() && self.hof_fusion
     }
 }
 
@@ -274,6 +292,51 @@ pub struct JitFunctionProfile {
     pub deopts: u32,
     pub cumulative_compile_time_ms: u64,
     pub do_not_jit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LambdaJitKey {
+    structural_hash: u64,
+    register_count: u32,
+    is_lazy_param: bool,
+    args_signature: TypeSig,
+    capture_signature: TypeSig,
+    capture_function_names: Vec<Option<String>>,
+}
+
+impl LambdaJitKey {
+    fn new(lambda: &LambdaInfo, args: &[Val], captures: &[Val]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        lambda.parameters.hash(&mut hasher);
+        lambda.instructions.hash(&mut hasher);
+        lambda.register_count.hash(&mut hasher);
+        lambda.capture_vars.hash(&mut hasher);
+        lambda.defining_namespace.hash(&mut hasher);
+        lambda.is_lazy_param.hash(&mut hasher);
+
+        Self {
+            structural_hash: hasher.finish(),
+            register_count: lambda.register_count,
+            is_lazy_param: lambda.is_lazy_param,
+            args_signature: TypeSig::from_args(args),
+            capture_signature: TypeSig::from_args(captures),
+            capture_function_names: captures
+                .iter()
+                .map(capture_function_ref_name)
+                .collect::<Vec<_>>(),
+        }
+    }
+}
+
+fn capture_function_ref_name(capture: &Val) -> Option<String> {
+    if let Val::Box(boxed) = capture
+        && let Some(function_ref) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+    {
+        return Some(function_ref.name().to_string());
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,6 +495,66 @@ impl JitCompiledFunction {
     }
 }
 
+fn synthetic_function_info_from_lambda(
+    program: &mut BytecodeProgram,
+    lambda: &LambdaInfo,
+    captures: &[Val],
+    effective_arity: usize,
+) -> Result<FunctionInfo, String> {
+    let arity = u8::try_from(effective_arity)
+        .map_err(|_| unsupported_jit_bailout("lambda_arity", "lambda arity exceeds u8"))?;
+    let mut param_names = Vec::with_capacity(lambda.capture_vars.len() + lambda.parameters.len());
+    param_names.extend(lambda.capture_vars.iter().cloned());
+    param_names.extend(lambda.parameters.iter().cloned());
+
+    let mut captured_functions = AHashMap::new();
+    for (capture_name, capture_value) in lambda.capture_vars.iter().zip(captures.iter()) {
+        if let Val::Box(boxed) = capture_value
+            && let Some(function_ref) = boxed
+                .as_any()
+                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>(
+            )
+        {
+            captured_functions.insert(capture_name.clone(), function_ref.name().to_string());
+        }
+    }
+
+    let mut instructions = lambda.instructions.clone();
+    if !captured_functions.is_empty() {
+        for instruction in &mut instructions {
+            if let Instruction::LoadVar { dest, var_name } = instruction
+                && let Some(Constant::Val(Val::Str(name))) =
+                    program.constants.get(*var_name as usize)
+                && let Some(function_name) = captured_functions.get(name.as_ref())
+            {
+                let function_const = program.constants.len() as u32;
+                program
+                    .constants
+                    .push(Constant::FunctionRef(function_name.clone().into()));
+                *instruction = Instruction::LoadConst {
+                    dest: *dest,
+                    constant: function_const,
+                };
+            }
+        }
+    }
+
+    Ok(FunctionInfo {
+        name: "<lambda>".to_string(),
+        namespace: lambda.defining_namespace.clone(),
+        arity,
+        is_variadic: false,
+        param_names,
+        param_types: Vec::new(),
+        return_type: 0,
+        lazy_params: vec![false; effective_arity],
+        flow_type: None,
+        instructions,
+        register_count: lambda.register_count,
+        source: None,
+    })
+}
+
 impl Default for JitFunctionProfile {
     fn default() -> Self {
         Self {
@@ -467,6 +590,8 @@ pub struct JitRuntimeState {
     pub code_memory_status: CodeMemoryStatus,
     pub function_profiles: Vec<JitFunctionProfile>,
     compiled_functions: Vec<Option<JitCompiledFunction>>,
+    lambda_profiles: AHashMap<LambdaJitKey, JitFunctionProfile>,
+    compiled_lambdas: AHashMap<LambdaJitKey, JitCompiledFunction>,
 }
 
 impl JitRuntimeState {
@@ -478,6 +603,8 @@ impl JitRuntimeState {
             compiled_functions: std::iter::repeat_with(|| None)
                 .take(function_count)
                 .collect(),
+            lambda_profiles: AHashMap::new(),
+            compiled_lambdas: AHashMap::new(),
         }
     }
 
@@ -598,6 +725,116 @@ impl JitRuntimeState {
         Ok(())
     }
 
+    pub fn try_call_compiled_lambda(
+        &mut self,
+        program: &BytecodeProgram,
+        lambda: &LambdaInfo,
+        args: &[Val],
+        captures: &[Val],
+    ) -> Result<Option<Val>, String> {
+        if !self.config.is_enabled()
+            || matches!(
+                self.code_memory_status.availability,
+                JitAvailability::Unsupported
+            )
+            || lambda.is_lazy_param
+        {
+            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+
+        let mut effective_args = Vec::with_capacity(args.len() + captures.len());
+        effective_args.extend_from_slice(captures);
+        effective_args.extend_from_slice(args);
+        let signature = TypeSig::from_args(&effective_args);
+        let key = LambdaJitKey::new(lambda, args, captures);
+
+        if let Some(compiled) = self.compiled_lambdas.get(&key) {
+            if compiled.matches_args(&effective_args) {
+                return match compiled.call(&effective_args) {
+                    Ok(val) => {
+                        GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                        Ok(Some(val))
+                    }
+                    Err(e) if e == "JIT_STACK_EXHAUSTED" => {
+                        GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                };
+            }
+
+            if let Some(profile) = self.lambda_profiles.get_mut(&key) {
+                profile.guard_failures = profile.guard_failures.saturating_add(1);
+            }
+        }
+
+        let profile = self.lambda_profiles.entry(key.clone()).or_default();
+        if profile.do_not_jit || profile.call_count > self.config.threshold {
+            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        profile.record_call(&effective_args);
+
+        if profile.call_count < self.config.threshold
+            || profile.stable_signature.as_ref() != Some(&signature)
+        {
+            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+
+        let mut synthetic_program = program.clone();
+        let function_info = synthetic_function_info_from_lambda(
+            &mut synthetic_program,
+            lambda,
+            captures,
+            effective_args.len(),
+        )?;
+        let start = std::time::Instant::now();
+        match compile_supported_function(&synthetic_program, u32::MAX, &function_info, &signature) {
+            Ok(compiled) => {
+                GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
+                if let Some(profile) = self.lambda_profiles.get_mut(&key) {
+                    profile.cumulative_compile_time_ms = profile
+                        .cumulative_compile_time_ms
+                        .saturating_add(start.elapsed().as_millis() as u64);
+                }
+                self.compiled_lambdas.insert(key.clone(), compiled);
+                if let Some(compiled) = self.compiled_lambdas.get(&key) {
+                    match compiled.call(&effective_args) {
+                        Ok(val) => {
+                            GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                            Ok(Some(val))
+                        }
+                        Err(e) if e == "JIT_STACK_EXHAUSTED" => {
+                            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                            Ok(None)
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                    Ok(None)
+                }
+            }
+            Err(err) => {
+                tracing::debug!(
+                    "[JIT] lambda compilation skipped (reason={}): {}",
+                    jit_bailout_reason(&err),
+                    err
+                );
+                increment_jit_bailout_count();
+                if !is_retryable_jit_bailout(&err)
+                    && let Some(profile) = self.lambda_profiles.get_mut(&key)
+                {
+                    profile.do_not_jit = true;
+                }
+                GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+        }
+    }
+
     pub fn mark_do_not_jit(&mut self, function_id: FunctionId) {
         if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
             profile.do_not_jit = true;
@@ -617,25 +854,58 @@ pub fn increment_jit_bailout_count() {
     GLOBAL_JIT_BAILOUT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_lambda_interpreter_call_count() {
+    GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn jit_bailout_reason(error: &str) -> &str {
+    error
+        .split_once(':')
+        .map(|(reason, _)| reason)
+        .unwrap_or("compile-error")
+}
+
+pub fn is_retryable_jit_bailout(error: &str) -> bool {
+    jit_bailout_reason(error).starts_with("unsupported.")
+}
+
+fn unsupported_jit_bailout(reason: &'static str, message: impl Into<String>) -> String {
+    format!("unsupported.{}: {}", reason, message.into())
+}
+
 pub struct JitStats {
     pub compilations: usize,
     pub bailouts: usize,
+    pub lambda_interpreter_calls: usize,
+    pub lambda_jit_calls: usize,
+    pub lambda_jit_fallbacks: usize,
 }
 
 pub fn global_jit_stats() -> JitStats {
     JitStats {
         compilations: GLOBAL_JIT_COMPILE_COUNT.load(Ordering::Relaxed),
         bailouts: GLOBAL_JIT_BAILOUT_COUNT.load(Ordering::Relaxed),
+        lambda_interpreter_calls: GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT.load(Ordering::Relaxed),
+        lambda_jit_calls: GLOBAL_LAMBDA_JIT_CALL_COUNT.load(Ordering::Relaxed),
+        lambda_jit_fallbacks: GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.load(Ordering::Relaxed),
     }
 }
 
 pub fn log_jit_stats_summary() {
     let stats = global_jit_stats();
-    if stats.compilations > 0 || stats.bailouts > 0 {
+    if stats.compilations > 0
+        || stats.bailouts > 0
+        || stats.lambda_interpreter_calls > 0
+        || stats.lambda_jit_calls > 0
+        || stats.lambda_jit_fallbacks > 0
+    {
         tracing::debug!(
-            "[JIT] stats: {} compiled, {} bailed out",
+            "[JIT] stats: {} compiled, {} bailed out, lambda: {} jitted, {} interpreted, {} fallback probes",
             stats.compilations,
-            stats.bailouts
+            stats.bailouts,
+            stats.lambda_jit_calls,
+            stats.lambda_interpreter_calls,
+            stats.lambda_jit_fallbacks
         );
     }
 }
@@ -842,33 +1112,36 @@ fn compile_supported_function(
         // `is-empty(rest)` returns true for `[]` even though the real rest is
         // `[[]]`), producing wrong results. Skip JIT for variadic functions
         // until we pack rest args before invocation.
-        return Err("JIT does not yet compile variadic functions".to_string());
+        return Err(unsupported_jit_bailout(
+            "variadic",
+            "JIT does not yet compile variadic functions",
+        ));
     }
     if function_info.lazy_params.iter().any(|&lp| lp) {
-        return Err(
+        return Err(unsupported_jit_bailout(
+            "lazy_params",
             "JIT does not yet compile functions with lazy parameters (scope visibility gap)"
                 .to_string(),
-        );
+        ));
     }
-    if function_calls_lazy_param_function(program, function_info) {
-        return Err(
-            "JIT does not yet compile functions that call lazy-parameter functions safely"
-                .to_string(),
-        );
+    if function_has_unsupported_lazy_paths(program, function_info) {
+        return Err(unsupported_jit_bailout(
+            "lazy_thunk_shape",
+            "JIT does not yet compile this lazy thunk bytecode shape safely",
+        ));
     }
-    if function_loads_lazy_thunk(program, function_info) {
-        return Err(
-            "JIT does not yet compile functions that materialize lazy thunks safely".to_string(),
-        );
-    }
-    if function_calls_hotlib(function_info) {
-        return Err(
-            "JIT does not yet compile functions that call hotlib functions safely".to_string(),
-        );
+    if function_has_jit_bailout_hotlib_dependency(program, function_id, function_info) {
+        return Err(unsupported_jit_bailout(
+            "hotlib_policy",
+            "JIT policy marks a hotlib dependency as interpreter-only",
+        ));
     }
     for tag in &signature.args {
         if tag.raw_kind().is_none() {
-            return Err(format!("Unsupported JIT specialization type: {:?}", tag));
+            return Err(unsupported_jit_bailout(
+                "specialization_type",
+                format!("Unsupported JIT specialization type: {:?}", tag),
+            ));
         }
     }
 
@@ -1054,41 +1327,214 @@ fn compile_supported_function(
     })
 }
 
-fn function_calls_lazy_param_function(
+fn function_has_unsupported_lazy_paths(
     program: &BytecodeProgram,
     function_info: &FunctionInfo,
 ) -> bool {
-    function_info.instructions.iter().any(|instruction| {
-        let Instruction::CallUserFunction { function_id, .. } = instruction else {
-            return false;
-        };
-        program
-            .functions
-            .get(*function_id as usize)
-            .is_some_and(|callee| callee.lazy_params.iter().any(|&lazy| lazy))
+    let mut lazy_root_by_reg: AHashMap<u32, u32> = AHashMap::new();
+    let mut used_lazy_roots = std::collections::HashSet::new();
+
+    for (ip, instruction) in function_info.instructions.iter().enumerate() {
+        match instruction {
+            Instruction::LoadConst { dest, constant } => {
+                if matches!(
+                    program.constants.get(*constant as usize),
+                    Some(Constant::Val(Val::Box(b)))
+                        if b.as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                            .is_some_and(|lambda| lambda.is_lazy_param)
+                ) {
+                    lazy_root_by_reg.insert(*dest, *dest);
+                }
+            }
+            Instruction::Move { dest, src } => {
+                if let Some(root) = lazy_root_by_reg.get(src).copied() {
+                    lazy_root_by_reg.insert(*dest, root);
+                }
+            }
+            Instruction::CallUserFunction {
+                function_id,
+                args_start,
+                args_count,
+                ..
+            } => {
+                let Some(callee) = program.functions.get(*function_id as usize) else {
+                    continue;
+                };
+                if !callee.lazy_params.iter().any(|&lazy| lazy) {
+                    continue;
+                }
+                if !lazy_call_args_match_params(callee, *args_start, *args_count, &lazy_root_by_reg)
+                {
+                    return true;
+                }
+                for idx in 0..usize::from(*args_count) {
+                    if callee.lazy_params.get(idx).copied().unwrap_or(false) {
+                        let reg = *args_start + idx as u32;
+                        if let Some(root) = lazy_root_by_reg.get(&reg).copied() {
+                            used_lazy_roots.insert(root);
+                        }
+                    }
+                }
+            }
+            Instruction::Call {
+                function: fn_reg,
+                args_start,
+                args_count,
+                ..
+            } => {
+                let Some(fn_name) =
+                    resolve_const_function_name(&function_info.instructions, program, ip, *fn_reg)
+                else {
+                    continue;
+                };
+                let callee_id = if fn_name.starts_with("::") {
+                    find_function_exact(program, &fn_name, Some(*args_count))
+                } else {
+                    find_function_by_suffix(program, &fn_name, Some(*args_count))
+                };
+                let Some(callee_id) = callee_id else {
+                    continue;
+                };
+                let Some(callee) = program.functions.get(callee_id) else {
+                    continue;
+                };
+                if !callee.lazy_params.iter().any(|&lazy| lazy) {
+                    continue;
+                }
+                if !lazy_call_args_match_params(callee, *args_start, *args_count, &lazy_root_by_reg)
+                {
+                    return true;
+                }
+                for idx in 0..usize::from(*args_count) {
+                    if callee.lazy_params.get(idx).copied().unwrap_or(false) {
+                        let reg = *args_start + idx as u32;
+                        if let Some(root) = lazy_root_by_reg.get(&reg).copied() {
+                            used_lazy_roots.insert(root);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    lazy_root_by_reg
+        .values()
+        .any(|root| !used_lazy_roots.contains(root))
+}
+
+fn lazy_call_args_match_params(
+    callee: &FunctionInfo,
+    args_start: u32,
+    args_count: u8,
+    lazy_root_by_reg: &AHashMap<u32, u32>,
+) -> bool {
+    let count = usize::from(args_count);
+    if callee.lazy_params.len() < count {
+        return false;
+    }
+    (0..count).all(|idx| {
+        let reg = args_start + idx as u32;
+        if callee.lazy_params[idx] {
+            lazy_root_by_reg.contains_key(&reg)
+        } else {
+            !lazy_root_by_reg.contains_key(&reg)
+        }
     })
 }
 
-fn function_calls_hotlib(function_info: &FunctionInfo) -> bool {
-    function_info
-        .instructions
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::CallLibBuiltin { .. }))
+fn function_has_jit_bailout_hotlib_dependency(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    function_info: &FunctionInfo,
+) -> bool {
+    let mut visited = std::collections::HashSet::new();
+    function_has_jit_bailout_hotlib_dependency_inner(
+        program,
+        function_id as usize,
+        function_info,
+        &mut visited,
+    )
 }
 
-fn function_loads_lazy_thunk(program: &BytecodeProgram, function_info: &FunctionInfo) -> bool {
-    function_info.instructions.iter().any(|instruction| {
-        let Instruction::LoadConst { constant, .. } = instruction else {
-            return false;
-        };
-        matches!(
-            program.constants.get(*constant as usize),
-            Some(Constant::Val(Val::Box(b)))
-                if b.as_any()
-                    .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-                    .is_some_and(|lambda| lambda.is_lazy_param)
-        )
-    })
+fn function_has_jit_bailout_hotlib_dependency_inner(
+    program: &BytecodeProgram,
+    function_id: usize,
+    function_info: &FunctionInfo,
+    visited: &mut std::collections::HashSet<usize>,
+) -> bool {
+    if !visited.insert(function_id) {
+        return false;
+    }
+
+    for (ip, instruction) in function_info.instructions.iter().enumerate() {
+        match instruction {
+            Instruction::CallLibBuiltin { function, .. }
+                if resolve_const_function_name(
+                    &function_info.instructions,
+                    program,
+                    ip,
+                    *function,
+                )
+                .is_some_and(|name| hotlib_jit_policy_bails_out(&name)) =>
+            {
+                return true;
+            }
+            Instruction::CallUserFunction {
+                function_id: callee_id,
+                ..
+            } => {
+                let callee_id = *callee_id as usize;
+                if let Some(callee) = program.functions.get(callee_id)
+                    && function_has_jit_bailout_hotlib_dependency_inner(
+                        program, callee_id, callee, visited,
+                    )
+                {
+                    return true;
+                }
+            }
+            Instruction::Call {
+                function: fn_reg,
+                args_count,
+                ..
+            } => {
+                let Some(fn_name) =
+                    resolve_const_function_name(&function_info.instructions, program, ip, *fn_reg)
+                else {
+                    continue;
+                };
+                if hotlib_jit_policy_bails_out(&fn_name) {
+                    return true;
+                }
+                let callee_id = if fn_name.starts_with("::") {
+                    find_function_exact(program, &fn_name, Some(*args_count))
+                } else {
+                    find_function_by_suffix(program, &fn_name, Some(*args_count))
+                };
+                if let Some(callee_id) = callee_id
+                    && let Some(callee) = program.functions.get(callee_id)
+                    && function_has_jit_bailout_hotlib_dependency_inner(
+                        program, callee_id, callee, visited,
+                    )
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn hotlib_jit_policy_bails_out(name: &str) -> bool {
+    matches!(
+        crate::lang::hot::get_hotlib_map()
+            .get(name)
+            .map(crate::lang::hot::HotLibFn::jit_policy),
+        Some(crate::lang::hot::libmap::HotLibJitPolicy::JitBailout)
+    )
 }
 
 const NUMERIC_KIND_INT: i64 = 1;
@@ -4002,9 +4448,9 @@ impl<'a> EmitCtx<'a> {
         } else {
             find_function_by_suffix(self.program, &fn_name, Some(args_count))
         };
-        // 2. Try thunk inlining (only with deterministically resolved ID)
+        // 2. Try lazy branch inlining (only with deterministically resolved ID)
         if let Some(called_fid) = resolved_fid
-            && let Some((result_kind, result_val)) = try_inline_thunk_call(
+            && let Some((result_kind, result_val)) = try_inline_lazy_branch_call(
                 builder,
                 self.program,
                 self.function_id,
@@ -4095,8 +4541,8 @@ impl<'a> EmitCtx<'a> {
         if called_function_id == self.function_id {
             return Ok(false);
         }
-        // Try thunk inlining
-        if let Some((result_kind, result_val)) = try_inline_thunk_call(
+        // Try lazy branch inlining
+        if let Some((result_kind, result_val)) = try_inline_lazy_branch_call(
             builder,
             self.program,
             self.function_id,
@@ -5180,22 +5626,15 @@ impl<'a> EmitCtx<'a> {
                 args_start,
                 args_count,
             } => {
-                let lambda_kind = self.register_kind(*lambda)?;
-                let lambda_raw = self.reg_value(builder, *lambda)?;
-                let lambda_ptr = if lambda_kind == RawKind::OwnedVal {
-                    lambda_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, lambda_kind, lambda_raw)?
-                };
-                self.emit_vm_callback_by_name_raw(
+                self.emit_call(
                     builder,
+                    ip,
                     *dest,
-                    lambda_ptr,
+                    *lambda,
                     *args_start,
                     *args_count,
                     instructions,
                 )?;
-                self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
             Instruction::Pipe { .. } => Ok(EmitResult::Unhandled),
@@ -7671,10 +8110,13 @@ fn find_function_exact(program: &BytecodeProgram, name: &str, arity: Option<u8>)
     first_match
 }
 
-/// Try to inline a function call that has lazy (thunk) arguments.
+/// Try to inline a lazy branch-selector call.
+///
+/// This is intentionally keyed to bytecode shape rather than function name:
+/// one eager selector parameter followed by one or two lazy thunk parameters.
 /// Returns Some((kind, value)) if inlining succeeded, None if not applicable.
 #[allow(clippy::too_many_arguments)]
-fn try_inline_thunk_call(
+fn try_inline_lazy_branch_call(
     builder: &mut FunctionBuilder<'_>,
     program: &BytecodeProgram,
     parent_function_id: FunctionId,
@@ -7699,14 +8141,19 @@ fn try_inline_thunk_call(
     };
     let count = usize::from(args_count);
 
-    // Check if this function has lazy params with thunk args in the registry
+    // Check if this function has lazy params with thunk args in the registry.
     let lazy_params = &callee.lazy_params;
     if lazy_params.is_empty() || !lazy_params.iter().any(|&lp| lp) {
         return Ok(None);
     }
+    if !is_known_lazy_branch_selector(callee) {
+        return Ok(None);
+    }
 
-    // Identify: if-like pattern (pred, lazy then) or (pred, lazy then, lazy else)
-    // The pred must NOT be a thunk; then/else must be thunks.
+    // Identify: branch-selector pattern (selector, lazy then) or
+    // (selector, lazy then, lazy else). The selector must not be a thunk;
+    // lazy branches must be thunk registers. This does not require the
+    // callee to be named `if`.
     if (2..=3).contains(&count)
         && (lazy_params.len() >= count)
         && !lazy_params[0]
@@ -7837,6 +8284,12 @@ fn try_inline_thunk_call(
     Ok(None)
 }
 
+fn is_known_lazy_branch_selector(callee: &FunctionInfo) -> bool {
+    callee.name == "::hot::bool/if"
+        && callee.arity == 3
+        && callee.lazy_params == [false, true, true]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -7918,6 +8371,173 @@ mod tests {
                 | JitAvailability::Experimental
                 | JitAvailability::Available
         ));
+    }
+
+    #[test]
+    fn jit_compiles_capture_free_lambda_callback() {
+        let mut program = BytecodeProgram::new();
+        let x_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("x")));
+        let one_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(1)));
+
+        let lambda = crate::lang::bytecode::LambdaInfo {
+            parameters: vec!["x".to_string()],
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: x_name,
+                },
+                Instruction::LoadConst {
+                    dest: 1,
+                    constant: one_const,
+                },
+                Instruction::Add {
+                    dest: 2,
+                    left: 0,
+                    right: 1,
+                },
+                Instruction::Return { value: 2 },
+            ],
+            register_count: 3,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: false,
+            used_registers: vec![0, 1, 2],
+        };
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let result = jit
+            .try_call_compiled_lambda(&program, &lambda, &[val!(41)], &[])
+            .unwrap();
+
+        assert_eq!(result, Some(val!(42)));
+    }
+
+    #[test]
+    fn jit_compiles_lambda_callback_with_captures() {
+        let mut program = BytecodeProgram::new();
+        let offset_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("offset")));
+        let x_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("x")));
+
+        let mut closure_env = AHashMap::new();
+        closure_env.insert("offset".to_string(), val!(10));
+
+        let lambda = crate::lang::bytecode::LambdaInfo {
+            parameters: vec!["x".to_string()],
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: offset_name,
+                },
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: x_name,
+                },
+                Instruction::Add {
+                    dest: 2,
+                    left: 0,
+                    right: 1,
+                },
+                Instruction::Return { value: 2 },
+            ],
+            register_count: 3,
+            capture_vars: vec!["offset".to_string()],
+            closure_env,
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: false,
+            used_registers: vec![0, 1, 2],
+        };
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let result = jit
+            .try_call_compiled_lambda(&program, &lambda, &[val!(5)], &[val!(10)])
+            .unwrap();
+
+        assert_eq!(result, Some(val!(15)));
+    }
+
+    #[test]
+    fn jit_compiles_lambda_callback_with_captured_core_function_ref() {
+        let mut program = BytecodeProgram::new();
+        let add_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("add")));
+        let x_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("x")));
+        let one_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(1)));
+
+        let add_ref =
+            crate::lang::runtime::function_ref::function_ref("::hot::math/add".to_string());
+        let mut closure_env = AHashMap::new();
+        closure_env.insert("add".to_string(), add_ref.clone());
+
+        let lambda = crate::lang::bytecode::LambdaInfo {
+            parameters: vec!["x".to_string()],
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: add_name,
+                },
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: x_name,
+                },
+                Instruction::LoadConst {
+                    dest: 2,
+                    constant: one_const,
+                },
+                Instruction::CallLambda {
+                    dest: 3,
+                    lambda: 0,
+                    args_start: 1,
+                    args_count: 2,
+                },
+                Instruction::Return { value: 3 },
+            ],
+            register_count: 4,
+            capture_vars: vec!["add".to_string()],
+            closure_env,
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: false,
+            used_registers: vec![0, 1, 2, 3],
+        };
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let result = jit
+            .try_call_compiled_lambda(&program, &lambda, &[val!(41)], &[add_ref])
+            .unwrap();
+
+        assert_eq!(result, Some(val!(42)));
+    }
+
+    #[test]
+    fn jit_does_not_compile_lazy_param_lambda_callback() {
+        let program = BytecodeProgram::new();
+        let lambda = crate::lang::bytecode::LambdaInfo {
+            parameters: vec![],
+            instructions: vec![Instruction::Return { value: 0 }],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+        };
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let result = jit
+            .try_call_compiled_lambda(&program, &lambda, &[], &[])
+            .unwrap();
+
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -8212,6 +8832,131 @@ mod tests {
             val!(2)
         );
         assert!(vm.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jitted_cond_flow_skips_unselected_branch_work() {
+        let mut program = BytecodeProgram::new();
+        let null_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(Val::Null));
+        let false_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(false)));
+        let true_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(true)));
+        let one_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(1)));
+        let zero_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(0)));
+        let ok_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(42)));
+        let skipped_branch = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::StringRef("skipped".into()));
+        let selected_branch = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::StringRef("selected".into()));
+
+        program.functions.push(FunctionInfo {
+            name: "::hot::math/div".to_string(),
+            namespace: "::hot::math".to_string(),
+            arity: 2,
+            is_variadic: false,
+            param_names: vec!["a".to_string(), "b".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false, false],
+            flow_type: None,
+            instructions: vec![],
+            register_count: 0,
+            source: None,
+        });
+
+        program.functions.push(FunctionInfo {
+            name: "::test/skips_branch".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::BeginFlow {
+                    flow_type: FlowType::Cond,
+                    result_modifier: FlowResultModifier::One,
+                    source: None,
+                },
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: null_const,
+                },
+                Instruction::LoadConst {
+                    dest: 1,
+                    constant: false_const,
+                },
+                Instruction::CondBranchStart {
+                    branch_name: skipped_branch,
+                    condition: 1,
+                    skip_target: 0,
+                },
+                Instruction::EnterScope {
+                    scope_type: crate::lang::bytecode::ScopeType::Flow,
+                },
+                Instruction::LoadConst {
+                    dest: 2,
+                    constant: one_const,
+                },
+                Instruction::LoadConst {
+                    dest: 3,
+                    constant: zero_const,
+                },
+                Instruction::CallUserFunction {
+                    dest: 4,
+                    function_id: 0,
+                    args_start: 2,
+                    args_count: 2,
+                },
+                Instruction::ExitScope,
+                Instruction::CondBranchEnd {
+                    branch_name: skipped_branch,
+                    result: 4,
+                },
+                Instruction::LoadConst {
+                    dest: 5,
+                    constant: true_const,
+                },
+                Instruction::CondBranchStart {
+                    branch_name: selected_branch,
+                    condition: 5,
+                    skip_target: 0,
+                },
+                Instruction::EnterScope {
+                    scope_type: crate::lang::bytecode::ScopeType::Flow,
+                },
+                Instruction::LoadConst {
+                    dest: 6,
+                    constant: ok_const,
+                },
+                Instruction::ExitScope,
+                Instruction::CondBranchEnd {
+                    branch_name: selected_branch,
+                    result: 6,
+                },
+                Instruction::EndFlow { dest: 0 },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 7,
+            source: None,
+        });
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut vm = make_test_vm(program, conf);
+
+        assert_eq!(vm.execute_compiled_user_function(1, &[]).unwrap(), val!(42));
+        assert!(vm.jit_has_compiled_function(1));
     }
 
     #[test]
@@ -10113,15 +10858,19 @@ mod tests {
     }
 
     #[test]
-    fn jit_inlines_if_thunks_for_simple_branch() {
+    fn jit_inlines_known_lazy_branch_call() {
         use crate::lang::bytecode::LambdaInfo;
 
-        // Test: max(a, b) = if(gt(a, b), a, b) — using thunks for the lazy branches
+        // Test: max(a, b) = if(gt(a, b), a, b) — using thunks for the lazy branches.
+        // Generic lazy calls can compile through the VM callback, but inlining
+        // a branch selector is only sound for a function whose semantics are known.
         let mut program = BytecodeProgram::new();
         let a_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("a")));
         let b_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("b")));
+        let if_name = program.constants.len() as u32;
+        program.constants.push(Constant::FunctionRef("if".into()));
 
         // Thunk for "then" branch: { a }  (just returns captured var a)
         let then_thunk = LambdaInfo {
@@ -10204,21 +10953,25 @@ mod tests {
                     dest: 4,
                     constant: else_const,
                 },
-                // r5 = if(r2, r3, r4) — call to function 1 (if)
-                Instruction::CallUserFunction {
+                // r6 = if(r2, r3, r4) — named call that resolves to function 1.
+                Instruction::LoadConst {
                     dest: 5,
-                    function_id: 1,
+                    constant: if_name,
+                },
+                Instruction::Call {
+                    dest: 6,
+                    function: 5,
                     args_start: 2,
                     args_count: 3,
                 },
-                Instruction::Return { value: 5 },
+                Instruction::Return { value: 6 },
             ],
-            register_count: 6,
+            register_count: 7,
             source: None,
         });
 
         // Function 1: if(pred, lazy then, lazy else)
-        // This needs to exist in the program so the JIT can read lazy_params
+        // This needs to exist in the program so the JIT can read lazy_params.
         program.functions.push(FunctionInfo {
             name: "::hot::bool/if".to_string(),
             namespace: "::hot::bool".to_string(),
@@ -10234,15 +10987,19 @@ mod tests {
             source: None,
         });
 
-        let sig = TypeSig::from_args(&[val!(10), val!(5)]);
-        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
-            Ok(_) => panic!("lazy thunk callers should bail out of JIT compilation"),
-            Err(err) => err,
-        };
-        assert!(
-            err.contains("lazy"),
-            "expected lazy thunk bailout, got: {err}"
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut vm = make_test_vm(program, conf);
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(10), val!(5)])
+                .unwrap(),
+            val!(10)
         );
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(3), val!(7)])
+                .unwrap(),
+            val!(7)
+        );
+        assert!(vm.jit_has_compiled_function(0));
     }
 
     #[test]
@@ -10410,14 +11167,581 @@ mod tests {
             source: None,
         });
 
-        let sig = TypeSig::from_args(&[val!(5)]);
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut vm = make_test_vm(program, conf);
+
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(0)]).unwrap(),
+            val!(0)
+        );
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(1)]).unwrap(),
+            val!(1)
+        );
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(5)]).unwrap(),
+            val!(5)
+        );
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(10)]).unwrap(),
+            val!(55)
+        );
+        assert!(vm.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_returns_owned_values_for_lazy_branch_results() {
+        use crate::lang::bytecode::LambdaInfo;
+
+        let mut program = BytecodeProgram::new();
+        let flag_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("flag")));
+        let admin_value = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!({"role": "admin"})));
+        let member_value = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!({"role": "member"})));
+
+        let then_thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: admin_value,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+        };
+        let else_thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: member_value,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+        };
+        let then_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(Val::Box(Box::new(then_thunk))));
+        let else_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(Val::Box(Box::new(else_thunk))));
+
+        program.functions.push(FunctionInfo {
+            name: "::test/choose-role".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["flag".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: flag_name,
+                },
+                Instruction::LoadConst {
+                    dest: 1,
+                    constant: then_const,
+                },
+                Instruction::LoadConst {
+                    dest: 2,
+                    constant: else_const,
+                },
+                Instruction::CallUserFunction {
+                    dest: 3,
+                    function_id: 1,
+                    args_start: 0,
+                    args_count: 3,
+                },
+                Instruction::Return { value: 3 },
+            ],
+            register_count: 4,
+            source: None,
+        });
+
+        program.functions.push(FunctionInfo {
+            name: "::hot::bool/if".to_string(),
+            namespace: "::hot::bool".to_string(),
+            arity: 3,
+            is_variadic: false,
+            param_names: vec!["pred".to_string(), "then".to_string(), "else".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false, true, true],
+            flow_type: None,
+            instructions: vec![],
+            register_count: 0,
+            source: None,
+        });
+
+        let jit_conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut jit_vm = make_test_vm(program, jit_conf);
+
+        let admin = jit_vm
+            .execute_compiled_user_function(0, &[val!(true)])
+            .unwrap();
+        assert_eq!(admin, val!({"role": "admin"}));
+
+        let member = jit_vm
+            .execute_compiled_user_function(0, &[val!(false)])
+            .unwrap();
+        assert_eq!(member, val!({"role": "member"}));
+        assert!(jit_vm.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_compiles_generic_lazy_call_via_vm_callback() {
+        use crate::lang::bytecode::LambdaInfo;
+
+        let mut program = BytecodeProgram::new();
+        let pred_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("pred")));
+        let ignored_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("ignored")));
+        let result_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(99)));
+
+        let lazy_arg = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: ignored_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+        };
+        let lazy_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(Val::Box(Box::new(lazy_arg))));
+
+        program.functions.push(FunctionInfo {
+            name: "::test/calls-lazy-helper".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["pred".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: pred_name,
+                },
+                Instruction::LoadConst {
+                    dest: 1,
+                    constant: lazy_const,
+                },
+                Instruction::CallUserFunction {
+                    dest: 2,
+                    function_id: 1,
+                    args_start: 0,
+                    args_count: 2,
+                },
+                Instruction::Return { value: 2 },
+            ],
+            register_count: 3,
+            source: None,
+        });
+
+        program.functions.push(FunctionInfo {
+            name: "::test/lazy-helper".to_string(),
+            namespace: "::test".to_string(),
+            arity: 2,
+            is_variadic: false,
+            param_names: vec!["pred".to_string(), "value".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false, true],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: result_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            source: None,
+        });
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut vm = make_test_vm(program, conf);
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(true)]).unwrap(),
+            val!(99)
+        );
+        assert!(vm.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_bails_on_unconsumed_lazy_thunk_shape() {
+        use crate::lang::bytecode::LambdaInfo;
+
+        let mut program = BytecodeProgram::new();
+        let value_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("unused")));
+        let thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: value_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+        };
+        let thunk_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(Val::Box(Box::new(thunk))));
+        program.functions.push(FunctionInfo {
+            name: "::test/returns-thunk".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: thunk_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            source: None,
+        });
+
+        let sig = TypeSig::from_args(&[]);
         let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
-            Ok(_) => panic!("lazy thunk callers should bail out of JIT compilation"),
+            Ok(_) => panic!("unconsumed lazy thunk should not compile"),
             Err(err) => err,
         };
         assert!(
-            err.contains("lazy"),
-            "expected lazy thunk bailout, got: {err}"
+            err.contains("lazy thunk bytecode shape"),
+            "unexpected bailout: {err}"
+        );
+    }
+
+    #[test]
+    fn jit_bails_when_lazy_thunk_escapes_into_vec() {
+        use crate::lang::bytecode::LambdaInfo;
+
+        let mut program = BytecodeProgram::new();
+        let value_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("escaped")));
+        let thunk = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: value_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+        };
+        let thunk_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(Val::Box(Box::new(thunk))));
+        program.functions.push(FunctionInfo {
+            name: "::test/vec-with-thunk".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: thunk_const,
+                },
+                Instruction::MakeVec {
+                    dest: 1,
+                    elements_start: 0,
+                    count: 1,
+                },
+                Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
+            source: None,
+        });
+
+        let sig = TypeSig::from_args(&[]);
+        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+            Ok(_) => panic!("lazy thunk escape should not compile"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("lazy thunk bytecode shape"),
+            "unexpected bailout: {err}"
+        );
+    }
+
+    #[test]
+    fn jit_matches_interpreter_for_owned_const_return() {
+        let mut program = BytecodeProgram::new();
+        let value_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!({"kind": "owned"})));
+        program.functions.push(FunctionInfo {
+            name: "::test/owned-return".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: value_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            source: None,
+        });
+
+        let interp_conf = val!({"jit": {"mode": "disabled", "threshold": 1}});
+        let jit_conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut interp_vm = make_test_vm(program.clone(), interp_conf);
+        let mut jit_vm = make_test_vm(program, jit_conf);
+
+        let interp = interp_vm.execute_compiled_user_function(0, &[]).unwrap();
+        let jitted = jit_vm.execute_compiled_user_function(0, &[]).unwrap();
+        assert_eq!(jitted, interp);
+        assert!(jit_vm.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_matches_interpreter_for_non_lazy_hotlib_call() {
+        let mut program = BytecodeProgram::new();
+        let function_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!("::hot::coll/length")));
+        let xs_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("xs")));
+        program.functions.push(FunctionInfo {
+            name: "::test/length-of".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["xs".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: function_const,
+                },
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: xs_name,
+                },
+                Instruction::MakeVec {
+                    dest: 2,
+                    elements_start: 1,
+                    count: 1,
+                },
+                Instruction::CallLibBuiltin {
+                    dest: 3,
+                    function: 0,
+                    args: 2,
+                },
+                Instruction::Return { value: 3 },
+            ],
+            register_count: 4,
+            source: None,
+        });
+
+        let interp_conf = val!({"jit": {"mode": "disabled", "threshold": 1}});
+        let jit_conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut interp_vm = make_test_vm(program.clone(), interp_conf);
+        let mut jit_vm = make_test_vm(program, jit_conf);
+        let args = [val!([1, 2, 3, 4])];
+
+        let interp = interp_vm.execute_compiled_user_function(0, &args).unwrap();
+        let jitted = jit_vm.execute_compiled_user_function(0, &args).unwrap();
+        assert_eq!(jitted, interp);
+        assert_eq!(jitted, val!(4));
+        assert!(jit_vm.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_bails_on_jit_bailout_hotlib_policy() {
+        let mut program = BytecodeProgram::new();
+        let function_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!("::hot::store/put")));
+        program.functions.push(FunctionInfo {
+            name: "::test/store-put-wrapper".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: function_const,
+                },
+                Instruction::MakeVec {
+                    dest: 1,
+                    elements_start: 0,
+                    count: 0,
+                },
+                Instruction::CallLibBuiltin {
+                    dest: 2,
+                    function: 0,
+                    args: 1,
+                },
+                Instruction::Return { value: 2 },
+            ],
+            register_count: 3,
+            source: None,
+        });
+
+        let sig = TypeSig::from_args(&[]);
+        let err = match compile_supported_function(&program, 0, &program.functions[0], &sig) {
+            Ok(_) => panic!("JIT bailout hotlib wrapper should not compile"),
+            Err(err) => err,
+        };
+        assert!(err.contains("hotlib_policy"), "unexpected bailout: {err}");
+
+        program.functions.push(FunctionInfo {
+            name: "::test/calls-vm-aware-hotlib-wrapper".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::CallUserFunction {
+                    dest: 0,
+                    function_id: 0,
+                    args_start: 0,
+                    args_count: 0,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            source: None,
+        });
+        let err = match compile_supported_function(&program, 1, &program.functions[1], &sig) {
+            Ok(_) => panic!("caller of JIT bailout hotlib wrapper should not compile"),
+            Err(err) => err,
+        };
+        assert!(err.contains("hotlib_policy"), "unexpected bailout: {err}");
+    }
+
+    #[test]
+    fn jit_allows_vm_callback_hotlib_policy() {
+        let mut program = BytecodeProgram::new();
+        let function_const = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!("::hot::coll/reduce")));
+        program.functions.push(FunctionInfo {
+            name: "::test/reduce-wrapper".to_string(),
+            namespace: "::test".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: function_const,
+                },
+                Instruction::MakeVec {
+                    dest: 1,
+                    elements_start: 0,
+                    count: 0,
+                },
+                Instruction::CallLibBuiltin {
+                    dest: 2,
+                    function: 0,
+                    args: 1,
+                },
+                Instruction::Return { value: 2 },
+            ],
+            register_count: 3,
+            source: None,
+        });
+
+        let sig = TypeSig::from_args(&[]);
+        let result = compile_supported_function(&program, 0, &program.functions[0], &sig);
+        assert!(
+            result.is_ok(),
+            "VM callback hotlib policy should compile: {:?}",
+            result.err()
         );
     }
 

@@ -34,8 +34,161 @@ mod run_tests {
         vm.execute().map_err(|e| format!("{:?}", e))
     }
 
+    /// Fused HOF pipelines must produce identical results to the interpreter for
+    /// every supported shape (Tier 1 numeric/boolean and Tier 2 property access,
+    /// `Dec`, and strings).
+    #[test]
+    fn hof_fusion_parity_with_interpreter() {
+        let programs = [
+            // --- Tier 1: Int / Bool ---
+            // sum-even-squares
+            r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(100)"#,
+            // collection-benchmark (map -> filter -> map -> reduce)
+            r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> map((x) { mul(x, 3) })
+    |> filter((x) { gt(x, 100) })
+    |> map((x) { add(x, 1) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(500)"#,
+            // filter -> length (count of evens)
+            r#"::t ns
+f fn (n: Int): Int {
+    range(2, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> length()
+}
+f(1000)"#,
+            // --- Tier 2: Dec (division promotes Int -> Dec, mixed reduce) ---
+            r#"::t ns
+f fn (n: Int): Dec {
+    range(1, add(n, 1))
+    |> map((x) { div(x, 2) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(50)"#,
+            // --- Tier 2: property access / record projection ---
+            r#"::t ns
+make fn (n: Int): Vec<Map> {
+    range(1, add(n, 1)) |> map((i) { {count: i} })
+}
+f fn (n: Int): Int {
+    make(n)
+    |> filter((x) { gt(x.count, 5) })
+    |> map((x) { x.count })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(20)"#,
+            // --- Tier 2: strings (concat + template interpolation) ---
+            r#"::t ns
+f fn (n: Int): Str {
+    range(1, add(n, 1))
+    |> map((i) { `item-${i}` })
+    |> reduce((acc, s) { concat(acc, concat(s, ",")) }, "")
+}
+f(10)"#,
+            // --- Single-stage terminal reduce (matches string-concat-benchmark) ---
+            r#"::t ns
+f fn (n: Int): Str {
+    reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
+}
+length(f(200))"#,
+            // --- Some/All terminals ---
+            r#"::t ns
+f fn (n: Int): Bool {
+    range(1, add(n, 1))
+    |> filter((x) { gt(x, 10) })
+    |> some((x) { eq(x, 42) })
+}
+f(100)"#,
+            r#"::t ns
+f fn (n: Int): Bool {
+    range(1, add(n, 1))
+    |> map((x) { mul(x, 2) })
+    |> all((x) { is-zero(mod(x, 2)) })
+}
+f(100)"#,
+            // --- Named-function stage callables ---
+            r#"::t ns
+is-even fn (x: Int): Bool {
+    is-zero(mod(x, 2))
+}
+square fn (x: Int): Int {
+    mul(x, x)
+}
+sum fn (acc: Int, x: Int): Int {
+    add(acc, x)
+}
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter(is-even)
+    |> map(square)
+    |> reduce(sum, 0)
+}
+f(100)"#,
+        ];
+        for src in programs {
+            let on = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"hof": {"fusion": true}}})),
+            )
+            .expect("fusion-on run");
+            let off = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"hof": {"fusion": false}}})),
+            )
+            .expect("fusion-off run");
+            assert_eq!(on, off, "fusion parity mismatch for:\n{}", src);
+            // sanity: never null/error
+            assert!(
+                !matches!(on, Val::Null) && !on.is_err(),
+                "unexpected result {:?} for:\n{}",
+                on,
+                src
+            );
+        }
+    }
+
     /// Helper to compile and execute Hot code with hot-std included
     pub(super) fn compile_and_run_with_std(source: &str) -> Result<Val, String> {
+        compile_and_run_with_std_conf(source, None)
+    }
+
+    /// End-to-end smoke for the `string-concat` benchmark shape with fusion on:
+    /// the result must match the interpreter exactly. The deterministic guard
+    /// that the pipeline actually fuses (rather than de-opting on every call)
+    /// lives in `jit_hof::tests::detect_reads_source_from_live_arg_register`,
+    /// which does not depend on process-global telemetry counters.
+    #[test]
+    fn string_concat_benchmark_shape_correct() {
+        let src = r#"::t ns
+f fn (n: Int): Str {
+    reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
+}
+length(f(200))"#;
+        let out = compile_and_run_with_std_conf(
+            src,
+            Some(crate::val!({"jit": {"hof": {"fusion": true}}})),
+        )
+        .expect("run");
+        assert_eq!(out, Val::Int(1690), "unexpected concat length");
+    }
+
+    /// Helper to compile and execute Hot code with hot-std included and an
+    /// explicit conf (e.g. to toggle the `jit.hof.fusion` kill switch).
+    pub(super) fn compile_and_run_with_std_conf(
+        source: &str,
+        conf: Option<Val>,
+    ) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -84,7 +237,7 @@ mod run_tests {
             compiler.get_core_functions_arc(),
             compiler.get_type_implementations_arc(),
             compiler.get_core_variables_arc(),
-            None,
+            conf,
         );
 
         vm.execute().map_err(|e| format!("{:?}", e))
