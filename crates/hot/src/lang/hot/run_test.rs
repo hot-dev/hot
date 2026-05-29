@@ -163,6 +163,26 @@ f(100)"#,
         compile_and_run_with_std_conf(source, None)
     }
 
+    /// End-to-end smoke for the `string-concat` benchmark shape with fusion on:
+    /// the result must match the interpreter exactly. The deterministic guard
+    /// that the pipeline actually fuses (rather than de-opting on every call)
+    /// lives in `jit_hof::tests::detect_reads_source_from_live_arg_register`,
+    /// which does not depend on process-global telemetry counters.
+    #[test]
+    fn string_concat_benchmark_shape_correct() {
+        let src = r#"::t ns
+f fn (n: Int): Str {
+    reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
+}
+length(f(200))"#;
+        let out = compile_and_run_with_std_conf(
+            src,
+            Some(crate::val!({"jit": {"hof": {"fusion": true}}})),
+        )
+        .expect("run");
+        assert_eq!(out, Val::Int(1690), "unexpected concat length");
+    }
+
     /// Helper to compile and execute Hot code with hot-std included and an
     /// explicit conf (e.g. to toggle the `jit.hof.fusion` kill switch).
     pub(super) fn compile_and_run_with_std_conf(

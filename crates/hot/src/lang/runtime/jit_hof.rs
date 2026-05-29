@@ -891,7 +891,12 @@ pub struct PipelinePlan {
     pub first_stage_ip: usize,
     /// ip of the last (terminal) stage `Call`.
     pub last_stage_ip: usize,
-    /// Register holding the input collection at the first stage.
+    /// Register holding the input collection at the first stage. This is the
+    /// first stage call's `args_start` register, which is guaranteed live at
+    /// `first_stage_ip` (the calling convention reads arguments from there).
+    /// Note: a register traced *back* through `Move`s can be reused for an
+    /// unrelated value before the stage executes, so the argument register —
+    /// not the traced source — must be read at dispatch.
     pub source_reg: RegisterId,
     /// Optional eager range source that can be streamed without materializing a
     /// `Vec`. When present, `first_stage_ip` is the range call ip.
@@ -1080,7 +1085,7 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
                 .map(|s| s.call_ip)
                 .unwrap_or(start_stage.ip),
             last_stage_ip: terminal_stage.ip,
-            source_reg: start_stage.input_reg,
+            source_reg: start_stage.input_arg_reg,
             range_source,
             result_reg: terminal_stage.dest,
             stages,
@@ -2332,6 +2337,39 @@ f fn (rows: Vec<Map>): Int {
         // counts: 3, -1 (dropped), 0 (dropped), 5  -> 3 + 5 = 8
         let source = Val::Vec(vec![record(3), record(-1), record(0), record(5)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Produced(Val::Int(8)));
+    }
+
+    /// Register reuse around a direct `reduce(range(n), lambda, "")` call must
+    /// not leave `source_reg` pointing at a register that is clobbered before
+    /// the call executes. For a single-stage pipeline the runtime source is the
+    /// terminal call's `args_start` (guaranteed live at dispatch); tracing the
+    /// argument *back* through `Move`s can land on a register later reused for
+    /// the lambda, which previously forced a de-opt on every invocation.
+    #[test]
+    fn detect_reads_source_from_live_arg_register() {
+        let prog = compile(
+            r#"::t ns
+f fn (n: Int): Str {
+    reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plans = detect_pipelines(&func.instructions, &prog);
+        assert_eq!(plans.len(), 1, "expected exactly one pipeline");
+        let plan = &plans[0];
+        let terminal_args_start = match &func.instructions[plan.last_stage_ip] {
+            Instruction::Call { args_start, .. } => *args_start,
+            other => panic!("expected terminal Call, got {other:?}"),
+        };
+        assert_eq!(
+            plan.source_reg, terminal_args_start,
+            "source must be read from the live args_start register"
+        );
     }
 
     #[test]
