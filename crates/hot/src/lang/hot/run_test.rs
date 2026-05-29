@@ -35,10 +35,12 @@ mod run_tests {
     }
 
     /// Fused HOF pipelines must produce identical results to the interpreter for
-    /// the supported Tier 1 shapes.
+    /// every supported shape (Tier 1 numeric/boolean and Tier 2 property access,
+    /// `Dec`, and strings).
     #[test]
     fn hof_fusion_parity_with_interpreter() {
         let programs = [
+            // --- Tier 1: Int / Bool ---
             // sum-even-squares
             r#"::t ns
 f fn (n: Int): Int {
@@ -66,6 +68,40 @@ f fn (n: Int): Int {
     |> length()
 }
 f(1000)"#,
+            // --- Tier 2: Dec (division promotes Int -> Dec, mixed reduce) ---
+            r#"::t ns
+f fn (n: Int): Dec {
+    range(1, add(n, 1))
+    |> map((x) { div(x, 2) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(50)"#,
+            // --- Tier 2: property access / record projection ---
+            r#"::t ns
+make fn (n: Int): Vec<Map> {
+    range(1, add(n, 1)) |> map((i) { {count: i} })
+}
+f fn (n: Int): Int {
+    make(n)
+    |> filter((x) { gt(x.count, 5) })
+    |> map((x) { x.count })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(20)"#,
+            // --- Tier 2: strings (concat + template interpolation) ---
+            r#"::t ns
+f fn (n: Int): Str {
+    range(1, add(n, 1))
+    |> map((i) { `item-${i}` })
+    |> reduce((acc, s) { concat(acc, concat(s, ",")) }, "")
+}
+f(10)"#,
+            // --- Single-stage terminal reduce (matches string-concat-benchmark) ---
+            r#"::t ns
+f fn (n: Int): Str {
+    reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
+}
+length(f(200))"#,
         ];
         for src in programs {
             let on = compile_and_run_with_std_conf(
@@ -79,8 +115,13 @@ f(1000)"#,
             )
             .expect("fusion-off run");
             assert_eq!(on, off, "fusion parity mismatch for:\n{}", src);
-            // sanity: results are non-null ints
-            assert!(matches!(on, Val::Int(_)), "expected Int result, got {:?}", on);
+            // sanity: never null/error
+            assert!(
+                !matches!(on, Val::Null) && !on.is_err(),
+                "unexpected result {:?} for:\n{}",
+                on,
+                src
+            );
         }
     }
 

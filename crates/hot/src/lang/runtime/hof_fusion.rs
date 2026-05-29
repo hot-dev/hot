@@ -24,7 +24,9 @@
 
 use crate::lang::bytecode::{BytecodeProgram, Constant, Instruction, LambdaInfo, RegisterId};
 use crate::lang::hot::libmap::{self, HofExecution, HofStage, PureOp};
+use crate::lang::hot::r#type::{HotResult, str_internal};
 use crate::val::Val;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Telemetry: count successful fused passes vs runtime de-opts (guard failures).
@@ -60,18 +62,14 @@ pub enum Bailout {
     UnsupportedInstruction(&'static str),
     /// A hotlib call whose op is not a fusible pure op.
     UnsupportedHotlib(String),
-    /// A pure op that exists in the registry but is not lowerable in Tier 1.
-    UnsupportedOp(PureOp),
     /// Wrong operand arity for an op.
     BadArity(PureOp),
     /// A `LoadVar` of something that is not a known parameter (unknown capture).
     UnknownCapture(String),
-    /// A constant kind that is not an `Int`/`Bool`.
+    /// A constant kind that is not lowerable as a value.
     UnsupportedConst,
     /// A register was read before being defined within the lambda/region.
     UndefinedRegister(RegisterId),
-    /// Operand types did not match the op (e.g. arithmetic on a Bool).
-    TypeMismatch,
     /// The pipeline shape (sources/stages/uses) was not a fusible chain.
     PipelineShape,
 }
@@ -82,23 +80,27 @@ impl Bailout {
         match self {
             Bailout::UnsupportedInstruction(_) => "unsupported.hof_instruction",
             Bailout::UnsupportedHotlib(_) => "unsupported.hof_hotlib",
-            Bailout::UnsupportedOp(_) => "unsupported.hof_op",
             Bailout::BadArity(_) => "unsupported.hof_arity",
             Bailout::UnknownCapture(_) => "unsupported.hof_capture",
             Bailout::UnsupportedConst => "unsupported.hof_const",
             Bailout::UndefinedRegister(_) => "unsupported.hof_undef_reg",
-            Bailout::TypeMismatch => "unsupported.hof_type",
             Bailout::PipelineShape => "unsupported.hof_pipeline_shape",
         }
     }
 }
 
-/// Inferred static type of a lowered expression. Tier 1 is closed over `Int`
-/// and `Bool` only.
+/// Inferred static type of a lowered expression.
+///
+/// `Int`/`Bool` enable the inlined numeric/boolean fast path. `Other` covers
+/// values whose static type the lowering does not track (parameters, `Dec`,
+/// `Str`, records, and the results of arithmetic/concat/field ops); these are
+/// evaluated dynamically and, when the inline path does not apply, delegated to
+/// the exact registered hotlib for parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExprType {
     Int,
     Bool,
+    Other,
 }
 
 /// Pure expression IR for a lowered lambda body.
@@ -108,8 +110,23 @@ pub enum PureExpr {
     Param(usize),
     ConstInt(i64),
     ConstBool(bool),
-    /// A pure op applied to operands.
-    Op(PureOp, Vec<PureExpr>),
+    /// Any other constant value (`Str`, `Dec`, `Null`, ...) used as a value.
+    ConstVal(Val),
+    /// A pure op applied to operands. `full_name` is the fully-qualified registry
+    /// key of the backing hotlib `LibFn`, used for the parity fallback when the
+    /// inline fast path does not apply.
+    Op {
+        op: PureOp,
+        full_name: &'static str,
+        args: Vec<PureExpr>,
+    },
+    /// Field/property projection from a record (`base.key`).
+    Field {
+        base: Box<PureExpr>,
+        key: Arc<str>,
+    },
+    /// Template-literal interpolation: stringify each part and concatenate.
+    Template(Vec<PureExpr>),
 }
 
 /// A lambda body lowered to pure expression IR.
@@ -117,36 +134,56 @@ pub enum PureExpr {
 pub struct LoweredLambda {
     pub param_count: usize,
     pub expr: PureExpr,
-    /// Static type of the result (`Int` for map/reduce, `Bool` for filter).
+    /// Static type of the result where known (`Bool` for predicates, otherwise
+    /// `Other`/`Int`). Used only as a hint; evaluation dispatches on the runtime
+    /// value.
     pub result_type: ExprType,
 }
 
-/// A runtime scalar value handled by the Stage 1 fused evaluator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A runtime value handled by the Stage 1 fused evaluator. `Int`/`Bool` are kept
+/// unboxed for the fast path; everything else (`Dec`, `Str`, records, ...) is
+/// carried as an owned [`Val`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PureValue {
     Int(i64),
     Bool(bool),
+    Other(Val),
 }
 
 impl PureValue {
-    pub fn as_int(self) -> Option<i64> {
+    pub fn as_int(&self) -> Option<i64> {
         match self {
-            PureValue::Int(i) => Some(i),
-            PureValue::Bool(_) => None,
+            PureValue::Int(i) => Some(*i),
+            _ => None,
         }
     }
 
-    pub fn as_bool(self) -> Option<bool> {
+    pub fn as_bool(&self) -> Option<bool> {
         match self {
-            PureValue::Bool(b) => Some(b),
-            PureValue::Int(_) => None,
+            PureValue::Bool(b) => Some(*b),
+            _ => None,
         }
     }
 
-    pub fn to_val(self) -> Val {
+    pub fn into_val(self) -> Val {
         match self {
             PureValue::Int(i) => Val::Int(i),
             PureValue::Bool(b) => Val::Bool(b),
+            PureValue::Other(v) => v,
+        }
+    }
+
+    pub fn to_val(&self) -> Val {
+        self.clone().into_val()
+    }
+
+    /// Wrap a `Val` produced by a source element or a hotlib call. Keeps `Int`
+    /// and `Bool` on the fast path; everything else becomes `Other`.
+    pub fn from_val(v: Val) -> PureValue {
+        match v {
+            Val::Int(i) => PureValue::Int(i),
+            Val::Bool(b) => PureValue::Bool(b),
+            other => PureValue::Other(other),
         }
     }
 }
@@ -155,8 +192,9 @@ impl PureValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalOutcome {
     Value(PureValue),
-    /// A runtime condition (e.g. divide/modulo by zero) requires falling back
-    /// to the interpreter so the exact error value/message is produced.
+    /// A runtime condition (overflow into a different domain, divide/modulo by
+    /// zero, an error value, a type the fast path does not handle, ...) requires
+    /// falling back to the interpreter so exact semantics are reproduced.
     DeoptToInterpreter,
 }
 
@@ -164,45 +202,20 @@ pub enum EvalOutcome {
 // Lambda lowering
 // ---------------------------------------------------------------------------
 
-/// True if a pure op is lowerable by the Tier 1 evaluator.
-///
-/// `Div` is excluded because integer division can yield a `Dec` (non-whole
-/// results), breaking the `Int`-closed assumption. `Abs`/`Min`/`Max` are
-/// deferred.
-fn op_is_tier1(op: PureOp) -> bool {
-    matches!(
-        op,
-        PureOp::Add
-            | PureOp::Sub
-            | PureOp::Mul
-            | PureOp::Mod
-            | PureOp::IsZero
-            | PureOp::Eq
-            | PureOp::Ne
-            | PureOp::Lt
-            | PureOp::Lte
-            | PureOp::Gt
-            | PureOp::Gte
-            | PureOp::Not
-    )
-}
-
-/// Result type and operand-type expectation of an op.
-fn op_types(op: PureOp) -> (ExprType, ExprType) {
-    // (result_type, operand_type)
+/// Statically-known result type of an op. Predicates are `Bool`; numeric and
+/// string ops are `Other` because the concrete runtime type (`Int`/`Dec`/`Str`)
+/// is decided dynamically.
+fn op_result_type(op: PureOp) -> ExprType {
     match op {
-        PureOp::Add | PureOp::Sub | PureOp::Mul | PureOp::Mod | PureOp::Div => {
-            (ExprType::Int, ExprType::Int)
-        }
-        PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg => (ExprType::Int, ExprType::Int),
         PureOp::IsZero
         | PureOp::Eq
         | PureOp::Ne
         | PureOp::Lt
         | PureOp::Lte
         | PureOp::Gt
-        | PureOp::Gte => (ExprType::Bool, ExprType::Int),
-        PureOp::Not => (ExprType::Bool, ExprType::Bool),
+        | PureOp::Gte
+        | PureOp::Not => ExprType::Bool,
+        _ => ExprType::Other,
     }
 }
 
@@ -211,6 +224,32 @@ fn op_arity(op: PureOp) -> usize {
     match op {
         PureOp::IsZero | PureOp::Not | PureOp::Abs | PureOp::Neg => 1,
         _ => 2,
+    }
+}
+
+/// Fully-qualified registry key for an op produced by a dedicated bytecode
+/// instruction (operator forms compile to `Add`/`Eq`/... rather than a `Call`).
+/// Used to fetch the backing `LibFn` for the parity fallback.
+fn op_full_name(op: PureOp) -> &'static str {
+    match op {
+        PureOp::Add => "::hot::math/add",
+        PureOp::Sub => "::hot::math/sub",
+        PureOp::Mul => "::hot::math/mul",
+        PureOp::Div => "::hot::math/div",
+        PureOp::Mod => "::hot::math/mod",
+        PureOp::Abs => "::hot::math/abs",
+        PureOp::Min => "::hot::math/min",
+        PureOp::Max => "::hot::math/max",
+        PureOp::IsZero => "::hot::math/is-zero",
+        PureOp::Eq => "::hot::cmp/eq",
+        PureOp::Ne => "::hot::cmp/ne",
+        PureOp::Lt => "::hot::cmp/lt",
+        PureOp::Lte => "::hot::cmp/lte",
+        PureOp::Gt => "::hot::cmp/gt",
+        PureOp::Gte => "::hot::cmp/gte",
+        PureOp::Not => "::hot::bool/not",
+        PureOp::Neg => "::hot::math/neg",
+        PureOp::Concat => "::hot::coll/concat",
     }
 }
 
@@ -234,8 +273,23 @@ fn lambda_from_const(program: &BytecodeProgram, id: u32) -> Option<&LambdaInfo> 
 #[derive(Clone)]
 enum RegContent {
     Expr(PureExpr, ExprType),
-    /// A loaded function name (used as a `Call` target).
-    FnName(String),
+    /// A loaded string constant. Depending on its use it is either a `Call`
+    /// target (function name) or a string *value* (e.g. a `concat` operand or a
+    /// template part).
+    Str(String),
+}
+
+/// Resolve a register to a value expression. A bare string constant becomes a
+/// `Str` value; an already-lowered expression is cloned through.
+fn reg_as_expr(
+    regs: &std::collections::HashMap<RegisterId, RegContent>,
+    reg: RegisterId,
+) -> Result<(PureExpr, ExprType), Bailout> {
+    match regs.get(&reg) {
+        Some(RegContent::Expr(e, ty)) => Ok((e.clone(), *ty)),
+        Some(RegContent::Str(s)) => Ok((PureExpr::ConstVal(Val::from(s.clone())), ExprType::Other)),
+        None => Err(Bailout::UndefinedRegister(reg)),
+    }
 }
 
 /// Lower a lambda body to pure expression IR, or bail with a reason.
@@ -271,15 +325,22 @@ pub fn lower_lambda(
                         );
                     }
                     Some(Constant::Val(Val::Str(s))) => {
-                        regs.insert(*dest, RegContent::FnName(s.to_string()));
+                        regs.insert(*dest, RegContent::Str(s.to_string()));
                     }
                     Some(Constant::StringRef(s)) | Some(Constant::FunctionRef(s)) => {
-                        regs.insert(*dest, RegContent::FnName(s.to_string()));
+                        regs.insert(*dest, RegContent::Str(s.to_string()));
+                    }
+                    // Other constant values (`Dec`, `Null`, ...) are usable as
+                    // values directly.
+                    Some(Constant::Val(v)) => {
+                        regs.insert(
+                            *dest,
+                            RegContent::Expr(PureExpr::ConstVal(v.clone()), ExprType::Other),
+                        );
                     }
                     _ => {
-                        // Unsupported constant kind; only an error if later used,
-                        // but recording nothing means a later use will bail with
-                        // UndefinedRegister. Be explicit instead.
+                        // Unknown constant kind; drop so a later use bails as an
+                        // undefined register.
                         regs.remove(dest);
                     }
                 }
@@ -288,8 +349,12 @@ pub fn lower_lambda(
                 let name = const_str(program, *var_name)
                     .ok_or(Bailout::UnsupportedInstruction("LoadVar:badname"))?;
                 if let Some(&idx) = param_index.get(name.as_str()) {
-                    // Parameters are assumed Int in Tier 1 (range elements / acc).
-                    regs.insert(*dest, RegContent::Expr(PureExpr::Param(idx), ExprType::Int));
+                    // A parameter's runtime type is unknown statically (could be
+                    // an `Int` range element, a record, a `Str` accumulator, ...).
+                    regs.insert(
+                        *dest,
+                        RegContent::Expr(PureExpr::Param(idx), ExprType::Other),
+                    );
                 } else {
                     return Err(Bailout::UnknownCapture(name));
                 }
@@ -319,6 +384,40 @@ pub fn lower_lambda(
             Instruction::Lt { dest, left, right } => {
                 lower_binop(&mut regs, *dest, *left, *right, PureOp::Lt)?;
             }
+            Instruction::DotAccess {
+                dest,
+                object,
+                property,
+            } => {
+                let (base, _ty) = reg_as_expr(&regs, *object)?;
+                let key = const_str(program, *property)
+                    .ok_or(Bailout::UnsupportedInstruction("DotAccess:badkey"))?;
+                regs.insert(
+                    *dest,
+                    RegContent::Expr(
+                        PureExpr::Field {
+                            base: Box::new(base),
+                            key: Arc::from(key.as_str()),
+                        },
+                        ExprType::Other,
+                    ),
+                );
+            }
+            Instruction::TemplateInterpolate {
+                dest,
+                parts_start,
+                parts_count,
+            } => {
+                let mut parts = Vec::with_capacity(*parts_count as usize);
+                for i in 0..*parts_count as u32 {
+                    let (e, _ty) = reg_as_expr(&regs, parts_start + i)?;
+                    parts.push(e);
+                }
+                regs.insert(
+                    *dest,
+                    RegContent::Expr(PureExpr::Template(parts), ExprType::Other),
+                );
+            }
             Instruction::Call {
                 dest,
                 function,
@@ -326,42 +425,38 @@ pub fn lower_lambda(
                 args_count,
             } => {
                 let name = match regs.get(function) {
-                    Some(RegContent::FnName(n)) => n.clone(),
-                    _ => return Err(Bailout::UndefinedRegister(*function)),
+                    Some(RegContent::Str(n)) => n.clone(),
+                    Some(RegContent::Expr(_, _)) => {
+                        return Err(Bailout::UndefinedRegister(*function));
+                    }
+                    None => return Err(Bailout::UndefinedRegister(*function)),
                 };
                 let desc = libmap::pure_op(&name)
                     .ok_or_else(|| Bailout::UnsupportedHotlib(name.clone()))?;
                 let op = desc.op;
-                if !op_is_tier1(op) {
-                    return Err(Bailout::UnsupportedOp(op));
-                }
                 if *args_count as usize != op_arity(op) {
                     return Err(Bailout::BadArity(op));
                 }
                 let mut operands = Vec::with_capacity(*args_count as usize);
-                let (_res_ty, operand_ty) = op_types(op);
                 for i in 0..*args_count as u32 {
-                    let reg = args_start + i;
-                    match regs.get(&reg) {
-                        Some(RegContent::Expr(e, ty)) => {
-                            if *ty != operand_ty {
-                                return Err(Bailout::TypeMismatch);
-                            }
-                            operands.push(e.clone());
-                        }
-                        _ => return Err(Bailout::UndefinedRegister(reg)),
-                    }
+                    let (e, _ty) = reg_as_expr(&regs, args_start + i)?;
+                    operands.push(e);
                 }
-                let (res_ty, _) = op_types(op);
-                regs.insert(*dest, RegContent::Expr(PureExpr::Op(op, operands), res_ty));
+                regs.insert(
+                    *dest,
+                    RegContent::Expr(
+                        PureExpr::Op {
+                            op,
+                            full_name: desc.full_name,
+                            args: operands,
+                        },
+                        op_result_type(op),
+                    ),
+                );
             }
             Instruction::Return { value } => {
-                match regs.get(value) {
-                    Some(RegContent::Expr(e, ty)) => {
-                        result = Some((e.clone(), *ty));
-                    }
-                    _ => return Err(Bailout::UndefinedRegister(*value)),
-                }
+                let (e, ty) = reg_as_expr(&regs, *value)?;
+                result = Some((e, ty));
                 break;
             }
             other => {
@@ -385,18 +480,19 @@ fn lower_binop(
     right: RegisterId,
     op: PureOp,
 ) -> Result<(), Bailout> {
-    let (res_ty, operand_ty) = op_types(op);
-    let l = match regs.get(&left) {
-        Some(RegContent::Expr(e, ty)) if *ty == operand_ty => e.clone(),
-        Some(RegContent::Expr(_, _)) => return Err(Bailout::TypeMismatch),
-        _ => return Err(Bailout::UndefinedRegister(left)),
-    };
-    let r = match regs.get(&right) {
-        Some(RegContent::Expr(e, ty)) if *ty == operand_ty => e.clone(),
-        Some(RegContent::Expr(_, _)) => return Err(Bailout::TypeMismatch),
-        _ => return Err(Bailout::UndefinedRegister(right)),
-    };
-    regs.insert(dest, RegContent::Expr(PureExpr::Op(op, vec![l, r]), res_ty));
+    let (l, _) = reg_as_expr(regs, left)?;
+    let (r, _) = reg_as_expr(regs, right)?;
+    regs.insert(
+        dest,
+        RegContent::Expr(
+            PureExpr::Op {
+                op,
+                full_name: op_full_name(op),
+                args: vec![l, r],
+            },
+            op_result_type(op),
+        ),
+    );
     Ok(())
 }
 
@@ -424,108 +520,149 @@ fn instruction_name(ins: &Instruction) -> &'static str {
 pub fn eval_expr(expr: &PureExpr, args: &[PureValue]) -> EvalOutcome {
     match expr {
         PureExpr::Param(i) => match args.get(*i) {
-            Some(v) => EvalOutcome::Value(*v),
+            Some(v) => EvalOutcome::Value(v.clone()),
             None => EvalOutcome::DeoptToInterpreter,
         },
         PureExpr::ConstInt(i) => EvalOutcome::Value(PureValue::Int(*i)),
         PureExpr::ConstBool(b) => EvalOutcome::Value(PureValue::Bool(*b)),
-        PureExpr::Op(op, operands) => eval_op(*op, operands, args),
+        PureExpr::ConstVal(v) => EvalOutcome::Value(PureValue::from_val(v.clone())),
+        PureExpr::Op {
+            op,
+            full_name,
+            args: operands,
+        } => eval_op(*op, full_name, operands, args),
+        PureExpr::Field { base, key } => eval_field(base, key, args),
+        PureExpr::Template(parts) => eval_template(parts, args),
     }
 }
 
-fn eval_op(op: PureOp, operands: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
-    macro_rules! ev {
-        ($idx:expr) => {
-            match eval_expr(&operands[$idx], args) {
-                EvalOutcome::Value(v) => v,
-                deopt => return deopt,
-            }
-        };
+/// Field/property projection. The base must evaluate to a record (`Val::Map`);
+/// anything else (or a missing key) de-opts so the interpreter reproduces exact
+/// access semantics.
+fn eval_field(base: &PureExpr, key: &str, args: &[PureValue]) -> EvalOutcome {
+    let base_val = match eval_expr(base, args) {
+        EvalOutcome::Value(v) => v.into_val(),
+        deopt => return deopt,
+    };
+    match base_val {
+        Val::Map(map) => match map.get(&Val::from(key)) {
+            Some(v) => EvalOutcome::Value(PureValue::from_val(v.clone())),
+            None => EvalOutcome::DeoptToInterpreter,
+        },
+        _ => EvalOutcome::DeoptToInterpreter,
     }
-    macro_rules! int_of {
-        ($v:expr) => {
-            match $v.as_int() {
-                Some(i) => i,
-                None => return EvalOutcome::DeoptToInterpreter,
-            }
+}
+
+/// Template interpolation. Each part is stringified exactly as the interpreter's
+/// non-typed path does (`str_internal`); a record/typed `Map` part de-opts
+/// because it could dispatch to a user-defined `Str` implementation.
+fn eval_template(parts: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
+    let max_bytes = crate::lang::runtime::limits::max_string_bytes();
+    let mut out = String::new();
+    for part in parts {
+        let v = match eval_expr(part, args) {
+            EvalOutcome::Value(v) => v.into_val(),
+            deopt => return deopt,
         };
+        if matches!(v, Val::Map(_)) {
+            return EvalOutcome::DeoptToInterpreter;
+        }
+        let piece = match str_internal(std::slice::from_ref(&v)) {
+            HotResult::Ok(Val::Str(s)) => s.to_string(),
+            HotResult::Ok(other) => other.to_string(),
+            HotResult::Err(_) => return EvalOutcome::DeoptToInterpreter,
+        };
+        match out.len().checked_add(piece.len()) {
+            Some(total) if total <= max_bytes => out.push_str(&piece),
+            _ => return EvalOutcome::DeoptToInterpreter,
+        }
     }
-    macro_rules! bool_of {
-        ($v:expr) => {
-            match $v.as_bool() {
-                Some(b) => b,
-                None => return EvalOutcome::DeoptToInterpreter,
+    EvalOutcome::Value(PureValue::Other(Val::from(out)))
+}
+
+fn eval_op(op: PureOp, full_name: &str, operands: &[PureExpr], args: &[PureValue]) -> EvalOutcome {
+    // Evaluate operands first.
+    let mut vals: Vec<PureValue> = Vec::with_capacity(operands.len());
+    for o in operands {
+        match eval_expr(o, args) {
+            EvalOutcome::Value(v) => vals.push(v),
+            deopt => return deopt,
+        }
+    }
+
+    // Inlined fast path for the common `Int`/`Bool` case. Returns `None` to fall
+    // through to the exact hotlib implementation (mixed/`Dec`/`Str` operands,
+    // integer overflow, divide/modulo by zero, ...), guaranteeing parity.
+    if let Some(out) = fast_op(op, &vals) {
+        return out;
+    }
+
+    // Parity fallback: call the registered pure `LibFn` with the operand values.
+    let arg_vals: Vec<Val> = vals.iter().map(PureValue::to_val).collect();
+    match libmap::call_pure_lib(full_name, &arg_vals) {
+        Some(HotResult::Ok(v)) => {
+            // Error values (divide/modulo by zero, type errors, ...) carry
+            // interpreter-specific propagation semantics; de-opt so they are
+            // reproduced exactly.
+            if v.is_err() {
+                EvalOutcome::DeoptToInterpreter
+            } else {
+                EvalOutcome::Value(PureValue::from_val(v))
             }
-        };
+        }
+        // `HotResult::Err` or a non-pure/unknown function: defer to the
+        // interpreter.
+        _ => EvalOutcome::DeoptToInterpreter,
+    }
+}
+
+/// Inlined evaluation for `Int`/`Bool` operands. Returns `None` when the inline
+/// path cannot guarantee parity (non-`Int` operands, overflow, zero divisor) so
+/// the caller falls back to the exact hotlib implementation.
+fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
+    fn ok(v: PureValue) -> Option<EvalOutcome> {
+        Some(EvalOutcome::Value(v))
     }
 
     match op {
         PureOp::Add => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Int(a.wrapping_add(b)))
+            let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
+            // Overflow falls through to the hotlib for identical wrap/panic
+            // behavior in the current build.
+            a.checked_add(b)
+                .map(|r| EvalOutcome::Value(PureValue::Int(r)))
         }
         PureOp::Sub => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Int(a.wrapping_sub(b)))
+            let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
+            a.checked_sub(b)
+                .map(|r| EvalOutcome::Value(PureValue::Int(r)))
         }
         PureOp::Mul => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Int(a.wrapping_mul(b)))
+            let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
+            a.checked_mul(b)
+                .map(|r| EvalOutcome::Value(PureValue::Int(r)))
         }
         PureOp::Mod => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
+            let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
             if b == 0 {
-                // Interpreter returns a "Modulo by zero" error value; defer.
-                return EvalOutcome::DeoptToInterpreter;
+                // Zero divisor produces an error value; defer to the hotlib.
+                None
+            } else {
+                ok(PureValue::Int(a % b))
             }
-            EvalOutcome::Value(PureValue::Int(a % b))
         }
-        PureOp::IsZero => {
-            let a = int_of!(ev!(0));
-            EvalOutcome::Value(PureValue::Bool(a == 0))
-        }
-        PureOp::Eq => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Bool(a == b))
-        }
-        PureOp::Ne => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Bool(a != b))
-        }
-        PureOp::Lt => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Bool(a < b))
-        }
-        PureOp::Lte => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Bool(a <= b))
-        }
-        PureOp::Gt => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Bool(a > b))
-        }
-        PureOp::Gte => {
-            let a = int_of!(ev!(0));
-            let b = int_of!(ev!(1));
-            EvalOutcome::Value(PureValue::Bool(a >= b))
-        }
-        PureOp::Not => {
-            let a = bool_of!(ev!(0));
-            EvalOutcome::Value(PureValue::Bool(!a))
-        }
-        // Not lowered in Tier 1; lowering rejects these, so this is unreachable
-        // in practice. Defer defensively.
-        PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg => {
-            EvalOutcome::DeoptToInterpreter
+        PureOp::IsZero => ok(PureValue::Bool(vals[0].as_int()? == 0)),
+        PureOp::Eq => ok(PureValue::Bool(vals[0].as_int()? == vals[1].as_int()?)),
+        PureOp::Ne => ok(PureValue::Bool(vals[0].as_int()? != vals[1].as_int()?)),
+        PureOp::Lt => ok(PureValue::Bool(vals[0].as_int()? < vals[1].as_int()?)),
+        PureOp::Lte => ok(PureValue::Bool(vals[0].as_int()? <= vals[1].as_int()?)),
+        PureOp::Gt => ok(PureValue::Bool(vals[0].as_int()? > vals[1].as_int()?)),
+        PureOp::Gte => ok(PureValue::Bool(vals[0].as_int()? >= vals[1].as_int()?)),
+        PureOp::Not => ok(PureValue::Bool(!vals[0].as_bool()?)),
+        // `Div` can yield a `Dec`; `Abs`/`Min`/`Max`/`Neg`/`Concat` are handled
+        // by the hotlib fallback for full parity.
+        PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg | PureOp::Concat => {
+            None
         }
     }
 }
@@ -539,8 +676,8 @@ fn eval_op(op: PureOp, operands: &[PureExpr], args: &[PureValue]) -> EvalOutcome
 pub struct FusedStage {
     pub stage: HofStage,
     pub lambda: LoweredLambda,
-    /// `reduce` initial accumulator value.
-    pub initial: Option<PureValue>,
+    /// `reduce` initial accumulator value (any constant `Val`).
+    pub initial: Option<Val>,
 }
 
 /// A recognized fusible pipeline within a function.
@@ -564,7 +701,7 @@ struct StageCall {
     dest: RegisterId,
     input_reg: RegisterId,
     lambda_id: u32,
-    initial: Option<PureValue>,
+    initial: Option<Val>,
 }
 
 /// Detect fusible pipelines in a function's instruction stream. Returns a
@@ -608,7 +745,7 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
                     continue;
                 };
                 let initial = if role.stage == HofStage::Reduce && *args_count >= 3 {
-                    trace_int_const(instrs, program, ip, args_start + 2).map(PureValue::Int)
+                    trace_const_val(instrs, program, ip, args_start + 2)
                 } else {
                     None
                 };
@@ -674,8 +811,12 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
             }
         }
 
-        // A useful pipeline has at least 2 stages and ends in a terminal stage.
-        if chain.len() < 2 {
+        // A fusible pipeline ends in a terminal stage (`reduce`/`length`). A
+        // single terminal stage is allowed (a lone `reduce`/`length` over a
+        // `Vec`): fusing still removes per-element lambda dispatch. Lone `map`/
+        // `filter` chains are rejected because they produce a collection that
+        // the scalar runner does not build.
+        if chain.is_empty() {
             continue;
         }
         if !stage_calls[*chain.last().unwrap()].stage.is_terminal() {
@@ -710,7 +851,7 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
             stages.push(FusedStage {
                 stage: sc.stage,
                 lambda: lowered,
-                initial: sc.initial,
+                initial: sc.initial.clone(),
             });
         }
         if !ok {
@@ -746,8 +887,9 @@ pub enum FusedRun {
 /// writes nothing. Returns `Deopt` (discarding any partial work) whenever a
 /// runtime guard fails so the interpreter can reproduce exact semantics.
 ///
-/// Tier 1 supports `Int`-valued `Vec` sources, `filter`/`map` transform stages,
-/// and `reduce`/`length` terminal stages.
+/// Supports `Vec` sources of any element type (`Int`/`Bool` on the fast path,
+/// `Dec`/`Str`/records via the hotlib parity fallback), `filter`/`map`
+/// transform stages, and `reduce`/`length` terminal stages.
 pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
     let items = match source {
         Val::Vec(items) => items,
@@ -773,32 +915,31 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
     let mut reduce_acc: Option<PureValue> = None;
     let mut count: i64 = 0;
     if terminal.stage == HofStage::Reduce {
-        match terminal.initial {
-            Some(v) => reduce_acc = Some(v),
+        match &terminal.initial {
+            Some(v) => reduce_acc = Some(PureValue::from_val(v.clone())),
             None => return FusedRun::Deopt,
         }
     }
 
     for item in items {
-        let mut cur = match item {
-            Val::Int(i) => PureValue::Int(*i),
-            _ => return FusedRun::Deopt,
-        };
+        let mut cur = PureValue::from_val(item.clone());
 
         let mut keep = true;
         for t in transforms {
             match t.stage {
-                HofStage::Filter => match eval_expr(&t.lambda.expr, &[cur]) {
+                HofStage::Filter => match eval_expr(&t.lambda.expr, std::slice::from_ref(&cur)) {
                     EvalOutcome::Value(PureValue::Bool(b)) => {
                         if !b {
                             keep = false;
                             break;
                         }
                     }
+                    // A non-`Bool` predicate result or a de-opt means the
+                    // interpreter must decide truthiness/errors.
                     _ => return FusedRun::Deopt,
                 },
-                HofStage::Map => match eval_expr(&t.lambda.expr, &[cur]) {
-                    EvalOutcome::Value(v @ PureValue::Int(_)) => cur = v,
+                HofStage::Map => match eval_expr(&t.lambda.expr, std::slice::from_ref(&cur)) {
+                    EvalOutcome::Value(v) if !value_is_err(&v) => cur = v,
                     _ => return FusedRun::Deopt,
                 },
                 _ => return FusedRun::Deopt,
@@ -811,9 +952,9 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
 
         match terminal.stage {
             HofStage::Reduce => {
-                let acc = reduce_acc.expect("reduce acc initialized");
+                let acc = reduce_acc.take().expect("reduce acc initialized");
                 match eval_expr(&terminal.lambda.expr, &[acc, cur]) {
-                    EvalOutcome::Value(v @ PureValue::Int(_)) => reduce_acc = Some(v),
+                    EvalOutcome::Value(v) if !value_is_err(&v) => reduce_acc = Some(v),
                     _ => return FusedRun::Deopt,
                 }
             }
@@ -825,11 +966,17 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
     }
 
     let result = match terminal.stage {
-        HofStage::Reduce => reduce_acc.expect("reduce acc").to_val(),
+        HofStage::Reduce => reduce_acc.expect("reduce acc").into_val(),
         HofStage::Length => Val::Int(count),
         _ => return FusedRun::Deopt,
     };
     FusedRun::Produced(result)
+}
+
+/// True if a produced value is an `Result.Err` error value, which carries
+/// interpreter-specific propagation semantics and must de-opt.
+fn value_is_err(v: &PureValue) -> bool {
+    matches!(v, PureValue::Other(val) if val.is_err())
 }
 
 /// Resolve the function name a `Call` targets by walking back through `Move` /
@@ -902,13 +1049,14 @@ fn trace_lambda_const(instrs: &[Instruction], call_ip: usize, reg: RegisterId) -
     None
 }
 
-/// Walk back to find an Int constant loaded into `reg`.
-fn trace_int_const(
+/// Walk back to find a constant `Val` loaded into `reg` (used for the `reduce`
+/// initial accumulator, which may be any literal: `0`, `""`, a `Dec`, ...).
+fn trace_const_val(
     instrs: &[Instruction],
     program: &BytecodeProgram,
     call_ip: usize,
     reg: RegisterId,
-) -> Option<i64> {
+) -> Option<Val> {
     let mut cur = reg;
     for i in (0..call_ip).rev() {
         match &instrs[i] {
@@ -917,7 +1065,7 @@ fn trace_int_const(
             }
             Instruction::LoadConst { dest, constant } if *dest == cur => {
                 match program.constants.get(*constant as usize) {
-                    Some(Constant::Val(Val::Int(i))) => return Some(*i),
+                    Some(Constant::Val(v)) => return Some(v.clone()),
                     _ => return None,
                 }
             }
@@ -978,6 +1126,7 @@ fn writes_register(ins: &Instruction, reg: RegisterId) -> bool {
         | Instruction::CallLambda { dest, .. }
         | Instruction::CallLibBuiltin { dest, .. }
         | Instruction::DotAccess { dest, .. }
+        | Instruction::TemplateInterpolate { dest, .. }
         if *dest == reg)
 }
 
@@ -1000,6 +1149,11 @@ fn reads_register(ins: &Instruction, reg: RegisterId) -> bool {
             ..
         } => *function == reg || (reg >= *args_start && reg < *args_start + *args_count as u32),
         Instruction::DotAccess { object, .. } => *object == reg,
+        Instruction::TemplateInterpolate {
+            parts_start,
+            parts_count,
+            ..
+        } => reg >= *parts_start && reg < *parts_start + *parts_count as u32,
         Instruction::JumpIf { condition, .. } | Instruction::JumpIfNot { condition, .. } => {
             *condition == reg
         }
@@ -1037,6 +1191,15 @@ mod tests {
         panic!("lambda with params {:?} not found", params);
     }
 
+    /// Build an `Op` node (full_name resolved from the op) for terse assertions.
+    fn op(op: PureOp, args: Vec<PureExpr>) -> PureExpr {
+        PureExpr::Op {
+            op,
+            full_name: op_full_name(op),
+            args,
+        }
+    }
+
     #[test]
     fn lowers_filter_predicate() {
         let prog = compile(
@@ -1052,9 +1215,9 @@ f fn (n: Int): Int {
         // is-zero(mod(Param0, 2))
         assert_eq!(
             lowered.expr,
-            PureExpr::Op(
+            op(
                 PureOp::IsZero,
-                vec![PureExpr::Op(
+                vec![op(
                     PureOp::Mod,
                     vec![PureExpr::Param(0), PureExpr::ConstInt(2)]
                 )]
@@ -1073,19 +1236,63 @@ f fn (n: Int): Int {
         );
         let lam = find_lambda(&prog, &["x"]);
         let lowered = lower_lambda(&prog, lam).expect("lower");
-        assert_eq!(lowered.result_type, ExprType::Int);
         assert_eq!(
             lowered.expr,
-            PureExpr::Op(PureOp::Mul, vec![PureExpr::Param(0), PureExpr::Param(0)])
+            op(PureOp::Mul, vec![PureExpr::Param(0), PureExpr::Param(0)])
+        );
+    }
+
+    #[test]
+    fn lowers_property_access() {
+        // filter((x) { gt(x.count, 0) }) -> Field projection.
+        let prog = compile(
+            r#"::t ns
+f fn (rows: Vec<Map>): Int {
+    rows |> filter((x) { gt(x.count, 0) }) |> map((x) { x.count }) |> reduce((acc, x) { add(acc, x) }, 0)
+}
+"#,
+        );
+        let lam = find_lambda(&prog, &["x"]);
+        let lowered = lower_lambda(&prog, lam).expect("lower predicate");
+        let field = PureExpr::Field {
+            base: Box::new(PureExpr::Param(0)),
+            key: Arc::from("count"),
+        };
+        assert_eq!(
+            lowered.expr,
+            op(PureOp::Gt, vec![field, PureExpr::ConstInt(0)])
+        );
+    }
+
+    #[test]
+    fn lowers_string_template_concat() {
+        // (acc, i) { concat(acc, `item-${i}-`) }
+        let prog = compile(
+            r#"::t ns
+f fn (n: Int): Str {
+    reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
+}
+"#,
+        );
+        let lam = find_lambda(&prog, &["acc", "i"]);
+        let lowered = lower_lambda(&prog, lam).expect("lower");
+        let template = PureExpr::Template(vec![
+            PureExpr::ConstVal(Val::from("item-")),
+            PureExpr::Param(1),
+            PureExpr::ConstVal(Val::from("-")),
+        ]);
+        assert_eq!(
+            lowered.expr,
+            op(PureOp::Concat, vec![PureExpr::Param(0), template])
         );
     }
 
     #[test]
     fn eval_matches_expected() {
         // is-zero(mod(x,2))
-        let pred = PureExpr::Op(
+        let pred = op(
             PureOp::IsZero,
-            vec![PureExpr::Op(
+            vec![op(
                 PureOp::Mod,
                 vec![PureExpr::Param(0), PureExpr::ConstInt(2)],
             )],
@@ -1102,11 +1309,67 @@ f fn (n: Int): Int {
 
     #[test]
     fn mod_by_zero_deopts() {
-        let e = PureExpr::Op(PureOp::Mod, vec![PureExpr::Param(0), PureExpr::ConstInt(0)]);
+        let e = op(PureOp::Mod, vec![PureExpr::Param(0), PureExpr::ConstInt(0)]);
         assert_eq!(
             eval_expr(&e, &[PureValue::Int(10)]),
             EvalOutcome::DeoptToInterpreter
         );
+    }
+
+    #[test]
+    fn eval_field_projection() {
+        let field = PureExpr::Field {
+            base: Box::new(PureExpr::Param(0)),
+            key: Arc::from("count"),
+        };
+        let mut m = indexmap::IndexMap::new();
+        m.insert(Val::from("count"), Val::Int(7));
+        let record = PureValue::Other(Val::Map(Box::new(m)));
+        assert_eq!(
+            eval_expr(&field, std::slice::from_ref(&record)),
+            EvalOutcome::Value(PureValue::Int(7))
+        );
+        // Missing key de-opts.
+        let missing = PureExpr::Field {
+            base: Box::new(PureExpr::Param(0)),
+            key: Arc::from("nope"),
+        };
+        assert_eq!(
+            eval_expr(&missing, &[record]),
+            EvalOutcome::DeoptToInterpreter
+        );
+    }
+
+    #[test]
+    fn eval_template_stringifies_primitives() {
+        let template = PureExpr::Template(vec![
+            PureExpr::ConstVal(Val::from("item-")),
+            PureExpr::Param(0),
+            PureExpr::ConstVal(Val::from("-")),
+        ]);
+        assert_eq!(
+            eval_expr(&template, &[PureValue::Int(3)]),
+            EvalOutcome::Value(PureValue::Other(Val::from("item-3-")))
+        );
+    }
+
+    #[test]
+    fn eval_div_falls_back_to_dec() {
+        // div(3, 2) -> Dec(1.5) via the hotlib parity fallback.
+        let e = op(
+            PureOp::Div,
+            vec![PureExpr::ConstInt(3), PureExpr::ConstInt(2)],
+        );
+        match eval_expr(&e, &[]) {
+            EvalOutcome::Value(PureValue::Other(Val::Dec(_))) => {}
+            other => panic!("expected Dec, got {:?}", other),
+        }
+        // div by zero -> error value -> de-opt.
+        let z = op(
+            PureOp::Div,
+            vec![PureExpr::ConstInt(3), PureExpr::ConstInt(0)],
+        );
+        assert_eq!(eval_expr(&z, &[]), EvalOutcome::DeoptToInterpreter);
     }
 
     #[test]
@@ -1133,7 +1396,7 @@ f fn (n: Int): Int {
         assert_eq!(p.stages[0].stage, HofStage::Filter);
         assert_eq!(p.stages[1].stage, HofStage::Map);
         assert_eq!(p.stages[2].stage, HofStage::Reduce);
-        assert_eq!(p.stages[2].initial, Some(PureValue::Int(0)));
+        assert_eq!(p.stages[2].initial, Some(Val::Int(0)));
     }
 
     #[test]
@@ -1207,6 +1470,57 @@ f fn (n: Int): Int {
                 .iter()
                 .all(|p| p.stages.iter().all(|s| s.stage != HofStage::Map)),
             "pmap must never be fused"
+        );
+    }
+
+    fn record(count: i64) -> Val {
+        let mut m = indexmap::IndexMap::new();
+        m.insert(Val::from("count"), Val::Int(count));
+        Val::Map(Box::new(m))
+    }
+
+    #[test]
+    fn run_pipeline_property_access() {
+        let prog = compile(
+            r#"::t ns
+f fn (rows: Vec<Map>): Int {
+    rows
+    |> filter((x) { gt(x.count, 0) })
+    |> map((x) { x.count })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        // counts: 3, -1 (dropped), 0 (dropped), 5  -> 3 + 5 = 8
+        let source = Val::Vec(vec![record(3), record(-1), record(0), record(5)]);
+        assert_eq!(run_pipeline(plan, &source), FusedRun::Produced(Val::Int(8)));
+    }
+
+    #[test]
+    fn run_pipeline_string_concat() {
+        let prog = compile(
+            r#"::t ns
+f fn (items: Vec<Str>): Str {
+    items |> map((s) { concat(s, "!") }) |> reduce((acc, s) { concat(acc, s) }, "")
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        let source = Val::Vec(vec![Val::from("a"), Val::from("b"), Val::from("c")]);
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::from("a!b!c!"))
         );
     }
 }

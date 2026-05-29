@@ -109,12 +109,18 @@ pub enum PureOp {
     Gt,
     Gte,
     Not,
+    /// String/collection concatenation (`::hot::coll/concat`).
+    Concat,
 }
 
 /// Declared lowering capability of a pure scalar op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PureOpDescriptor {
     pub op: PureOp,
+    /// Fully-qualified registry key of the backing hotlib `LibFn`, used by the
+    /// fused evaluator to call the exact implementation for non-`Int` operands
+    /// (guaranteeing parity with the interpreter).
+    pub full_name: &'static str,
     /// True if the op traps on a zero divisor and therefore needs a runtime
     /// zero-check (or a proven non-zero divisor) before fusion.
     pub traps_on_zero_divisor: bool,
@@ -169,29 +175,40 @@ pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
     PURE_OP_MAP
         .get_or_init(|| {
             use PureOp::*;
-            let d = |op, traps_on_zero_divisor| PureOpDescriptor {
+            let d = |op, full_name: &'static str, traps_on_zero_divisor| PureOpDescriptor {
                 op,
+                full_name,
                 traps_on_zero_divisor,
             };
             // Fully-qualified registry keys plus bare names (see hof_role for the
-            // bare-name safety rationale).
+            // bare-name safety rationale). Both keys carry the same `full_name`
+            // so the evaluator can fetch the backing `LibFn`.
             let entries: &[(&'static str, &'static str, PureOpDescriptor)] = &[
-                ("::hot::math/add", "add", d(Add, false)),
-                ("::hot::math/sub", "sub", d(Sub, false)),
-                ("::hot::math/mul", "mul", d(Mul, false)),
-                ("::hot::math/div", "div", d(Div, true)),
-                ("::hot::math/mod", "mod", d(Mod, true)),
-                ("::hot::math/abs", "abs", d(Abs, false)),
-                ("::hot::math/min", "min", d(Min, false)),
-                ("::hot::math/max", "max", d(Max, false)),
-                ("::hot::math/is-zero", "is-zero", d(IsZero, false)),
-                ("::hot::cmp/eq", "eq", d(Eq, false)),
-                ("::hot::cmp/ne", "ne", d(Ne, false)),
-                ("::hot::cmp/lt", "lt", d(Lt, false)),
-                ("::hot::cmp/lte", "lte", d(Lte, false)),
-                ("::hot::cmp/gt", "gt", d(Gt, false)),
-                ("::hot::cmp/gte", "gte", d(Gte, false)),
-                ("::hot::bool/not", "not", d(Not, false)),
+                ("::hot::math/add", "add", d(Add, "::hot::math/add", false)),
+                ("::hot::math/sub", "sub", d(Sub, "::hot::math/sub", false)),
+                ("::hot::math/mul", "mul", d(Mul, "::hot::math/mul", false)),
+                ("::hot::math/div", "div", d(Div, "::hot::math/div", true)),
+                ("::hot::math/mod", "mod", d(Mod, "::hot::math/mod", true)),
+                ("::hot::math/abs", "abs", d(Abs, "::hot::math/abs", false)),
+                ("::hot::math/min", "min", d(Min, "::hot::math/min", false)),
+                ("::hot::math/max", "max", d(Max, "::hot::math/max", false)),
+                (
+                    "::hot::math/is-zero",
+                    "is-zero",
+                    d(IsZero, "::hot::math/is-zero", false),
+                ),
+                ("::hot::cmp/eq", "eq", d(Eq, "::hot::cmp/eq", false)),
+                ("::hot::cmp/ne", "ne", d(Ne, "::hot::cmp/ne", false)),
+                ("::hot::cmp/lt", "lt", d(Lt, "::hot::cmp/lt", false)),
+                ("::hot::cmp/lte", "lte", d(Lte, "::hot::cmp/lte", false)),
+                ("::hot::cmp/gt", "gt", d(Gt, "::hot::cmp/gt", false)),
+                ("::hot::cmp/gte", "gte", d(Gte, "::hot::cmp/gte", false)),
+                ("::hot::bool/not", "not", d(Not, "::hot::bool/not", false)),
+                (
+                    "::hot::coll/concat",
+                    "concat",
+                    d(Concat, "::hot::coll/concat", false),
+                ),
             ];
             let mut m: ahash::AHashMap<&'static str, PureOpDescriptor> = ahash::AHashMap::new();
             for (full, bare, desc) in entries {
@@ -199,7 +216,7 @@ pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
                 m.insert(bare, *desc);
             }
             // `modulo` is an alternate registry key for the same op.
-            m.insert("::hot::math/modulo", d(Mod, true));
+            m.insert("::hot::math/modulo", d(Mod, "::hot::math/mod", true));
             m
         })
         .get(name)
@@ -216,6 +233,22 @@ pub fn get_hotlib_functions() -> Vec<String> {
 }
 
 /// Get the hotlib map with functions (cached, built only once)
+/// Call a pure (non-VM) hotlib `LibFn` by its fully-qualified registry name.
+///
+/// Returns `None` when the name is not registered or is VM-aware (the caller
+/// must then fall back to the interpreter). Used by the fused HOF evaluator to
+/// run the exact registered implementation for operands it does not handle on
+/// its inlined fast path, guaranteeing semantic parity.
+pub fn call_pure_lib(
+    full_name: &str,
+    args: &[Val],
+) -> Option<crate::lang::hot::r#type::HotResult<Val>> {
+    match get_hotlib_map().get(full_name)? {
+        HotLibFn::LibFn(f) => Some(f(args)),
+        _ => None,
+    }
+}
+
 pub fn get_hotlib_map() -> &'static HotLibMap {
     HOTLIB_MAP.get_or_init(|| {
         let mut map = ahash::AHashMap::new();
