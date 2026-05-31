@@ -1,3 +1,7 @@
+---
+description: "Declare and resolve Hot package dependencies for reusable packages and projects that depend on shared Hot code."
+---
+
 # Package Dependencies
 
 Declare your package's dependencies on other packages.

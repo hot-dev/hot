@@ -1,3 +1,7 @@
+---
+description: "Run background tasks in Hot for long-running work, async jobs, progress streams, and durable task orchestration."
+---
+
 # Tasks
 
 Tasks are long-running, asynchronous processes on the Hot Platform. Understanding the distinction between **Runs** and **Tasks** helps you choose the right execution model for your workflow.

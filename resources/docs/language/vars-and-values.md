@@ -1,3 +1,7 @@
+---
+description: "Work with Hot variables, immutable values, expressions, scope, inference, and common value patterns."
+---
+
 # Vars and Values
 
 In Hot, everything is either a **Var** (a named binding) or a **Value**. This simple model is the foundation of the language.

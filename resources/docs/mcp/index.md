@@ -1,3 +1,7 @@
+---
+description: "Expose Hot functions as MCP tools and connect AI clients to Hot-hosted MCP services over streamable HTTP or SSE."
+---
+
 # MCP Services
 
 The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) is an open standard that allows AI models and agents to discover and invoke tools. Hot functions can be exposed as MCP tools, making them callable by any MCP-compatible client—such as Claude, Cursor, or custom AI agents.

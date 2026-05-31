@@ -1,3 +1,7 @@
+---
+description: "Handle expected results and hard failures in Hot with Result values, auto-unwrapping, fail boundaries, and recovery patterns."
+---
+
 # Error Handling
 
 Operations that can fail return `Result` values. Hot makes working with Results ergonomic through **automatic wrapping**, **automatic unwrapping**, and **lazy argument evaluation**.

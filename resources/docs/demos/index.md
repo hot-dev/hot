@@ -1,3 +1,7 @@
+---
+description: "Explore runnable Hot Dev demos that show agents, workflows, integrations, cloud features, and real application patterns."
+---
+
 # Demos
 
 Hot demos are complete, runnable projects you can clone, edit, and deploy.

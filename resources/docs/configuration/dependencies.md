@@ -1,3 +1,7 @@
+---
+description: "Configure external dependencies for Hot projects, including package dependencies and runtime requirements."
+---
+
 # Dependencies
 
 Hot uses a flexible dependency system that supports local paths, Git repositories, and the Hot package registry.

@@ -1,3 +1,7 @@
+---
+description: "Configure Hot alerts for failures, run status, events, schedules, webhooks, Slack, email, PagerDuty, and operational monitoring."
+---
+
 # Alerts
 
 The Alerts system helps you monitor your Hot applications by automatically notifying you when important events occur, such as run failures or deployment issues. Alerts use a pub/sub model with three key components: **channels**, **destinations**, and **subscriptions**.

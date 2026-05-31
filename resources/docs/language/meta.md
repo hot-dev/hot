@@ -1,3 +1,7 @@
+---
+description: "Attach metadata to Hot functions and types to define handlers, schedules, webhooks, MCP tools, agents, docs, and deploy behavior."
+---
+
 # Metadata
 
 Metadata in Hot uses the `meta` keyword to attach information to functions, types, and namespaces. This powers documentation, testing, event handling, scheduling, and more.

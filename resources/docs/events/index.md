@@ -1,3 +1,7 @@
+---
+description: "Build event-driven workflows in Hot with typed event handlers, emitted events, async execution, and run tracking."
+---
+
 # Events and Event Handlers
 
 Events are the primary way to trigger asynchronous work in Hot. Event handlers run when specific events occur, enabling decoupled, scalable workflows.

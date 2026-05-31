@@ -1,3 +1,7 @@
+---
+description: "See what Hot intentionally leaves out, including syntax and language features replaced by Hot-specific patterns."
+---
+
 # What Hot Doesn't Have
 
 Hot intentionally omits certain syntax found in other languages. This isn't a limitation—it's a design choice that keeps the language simple and consistent.

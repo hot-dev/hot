@@ -1,3 +1,7 @@
+---
+description: "Set up CI/CD for Hot projects with automated checks, tests, deploys, secrets, environments, and release workflows."
+---
+
 # CI/CD
 
 Automate testing and deployment of your Hot projects in continuous integration pipelines.

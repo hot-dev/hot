@@ -1,3 +1,7 @@
+---
+description: "Expose Hot functions as webhooks with request handling, authentication, deployment, and event-driven follow-up work."
+---
+
 # Webhooks
 
 Webhooks allow external services to send HTTP requests to your Hot functions. When a service like Slack, Stripe, or GitHub needs to notify your application of an event, it sends an HTTP request to a webhook URL. Hot receives the request, runs your function, and returns the response.

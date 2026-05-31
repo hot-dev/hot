@@ -1,3 +1,7 @@
+---
+description: "Upgrade Hot projects across versions with migration notes, compatibility guidance, breaking changes, and recommended steps."
+---
+
 # Migrations and Upgrades
 
 This guide covers upgrading an existing Hot project and database between Hot releases.

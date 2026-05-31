@@ -1,3 +1,7 @@
+---
+description: "Authenticate with Hot Dev Cloud using the CLI, API keys, bearer tokens, project tokens, and scoped access controls."
+---
+
 # Authentication
 
 The [Hot API](/docs/api) supports three credential types for authenticating requests. All are passed in the `Authorization` header as Bearer tokens and scoped to an environment.

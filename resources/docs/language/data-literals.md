@@ -1,3 +1,7 @@
+---
+description: "Write Hot literals for strings, numbers, booleans, arrays, maps, optional values, and structured data."
+---
+
 # Data Literals
 
 Hot uses JavaScript-like syntax for data literals, making it instantly familiar if you've worked with JSON. There are a few important differences to be aware of.

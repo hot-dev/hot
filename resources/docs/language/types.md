@@ -1,3 +1,7 @@
+---
+description: "Define Hot types, structs, enums, optionals, collections, conversions, and type-safe data contracts."
+---
+
 # Types
 
 Hot has an optional type system inspired by TypeScript. Add types where they help catch errors and document intent; skip them where they add noise.

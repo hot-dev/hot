@@ -1,3 +1,7 @@
+---
+description: "Use the Hot CLI to create projects, run checks and tests, deploy apps, manage packages, and inspect cloud resources."
+---
+
 # Hot CLI
 
 The `hot` command-line interface is your primary tool for developing, testing, and deploying Hot applications.

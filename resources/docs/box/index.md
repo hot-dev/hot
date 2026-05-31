@@ -1,3 +1,7 @@
+---
+description: "Use Hot Box containers to run external tools, custom runtimes, binaries, and isolated task workloads from Hot code."
+---
+
 # Containers (Hot Box)
 
 Hot Box lets you run Docker/OCI containers from Hot code. Containers execute asynchronously as tasks, returning immediately with a `TaskInfo` while the container runs in the background.

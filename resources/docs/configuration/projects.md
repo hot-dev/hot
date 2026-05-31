@@ -1,3 +1,7 @@
+---
+description: "Understand Hot project configuration, project IDs, environments, deploy settings, and how local files map to cloud projects."
+---
+
 # Projects
 
 A Hot workspace can contain multiple projects, each with its own source paths and dependencies.

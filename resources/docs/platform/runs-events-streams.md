@@ -1,3 +1,7 @@
+---
+description: "Understand how Hot represents function runs, emitted events, streaming output, logs, traces, and execution history."
+---
+
 # Runs, Events & Streams
 
 Hot Platform uses three core primitives for workflow execution: **Runs**, **Events**, and **Streams**. Understanding these concepts is essential for building effective Hot applications.

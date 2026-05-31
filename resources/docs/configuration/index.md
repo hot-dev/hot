@@ -1,3 +1,7 @@
+---
+description: "Configure Hot projects with environment variables, project settings, dependencies, deploy targets, and local development options."
+---
+
 # Hot Configuration
 
 Configure your Hot project using the `hot.hot` configuration file.

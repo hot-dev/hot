@@ -1,3 +1,7 @@
+---
+description: "Call the Hot Cloud API for projects, events, runs, streams, files, secrets, agents, MCP access, and API keys."
+---
+
 # HOT API
 
 The Hot API provides programmatic access to manage projects, builds, runs, events, and more.

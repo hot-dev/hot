@@ -1,3 +1,7 @@
+---
+description: "Understand Container Usage Seconds billing for Hot Box workloads, including measurement, examples, and cost controls."
+---
+
 # Container Billing (CUS)
 
 Container tasks are billed using **Compute Unit Seconds** (CUS), a metric that combines wall-clock time with container size.

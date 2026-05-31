@@ -525,7 +525,8 @@ fn load_page_from_dir(config: &DocsConfig, docs_dir: &Path, path: &str) -> Resul
         .ok_or_else(|| format!("The documentation page '{path}' was not found."))?;
     let markdown = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read {}: {e}", file_path.display()))?;
-    let markdown = process_snippets(config, &markdown);
+    let markdown = strip_frontmatter(&markdown);
+    let markdown = process_snippets(config, markdown);
     let title = extract_title(&markdown).unwrap_or_else(|| title_from_slug(path));
     let (content_html, toc) = markdown_to_html_with_toc(&markdown);
     let content_text = strip_markdown(&markdown);
@@ -539,6 +540,18 @@ fn load_page_from_dir(config: &DocsConfig, docs_dir: &Path, path: &str) -> Resul
         excerpt,
         toc,
     })
+}
+
+fn strip_frontmatter(markdown: &str) -> &str {
+    if !markdown.starts_with("---\n") {
+        return markdown;
+    }
+
+    let Some(end_idx) = markdown[4..].find("\n---") else {
+        return markdown;
+    };
+
+    markdown.get(end_idx + 8..).unwrap_or("").trim_start()
 }
 
 fn docs_file_path(docs_dir: &Path, path: &str) -> Option<PathBuf> {

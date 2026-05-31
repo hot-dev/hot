@@ -1,3 +1,7 @@
+---
+description: "Define and call Hot functions, including typed parameters, return values, metadata, handlers, and reusable logic."
+---
+
 # Functions
 
 In Hot, everything is a [Var/Value pair](/docs/language/vars-and-values)—function names are Vars, and function definitions are Values.
