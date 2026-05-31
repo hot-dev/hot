@@ -68,9 +68,9 @@ hot_api = { path = "crates/hot_api" }
 rustyline = "18.0"
 serde_json = "1.0.150"
 serde = { version = "1.0", features = ["derive", "rc"] }
-uuid = "1.23.1"
+uuid = "1.23.2"
 async-trait = "0.1.89"
-redis = { version = "1.2.1", features = ["tokio-comp", "cluster-async", "tokio-rustls-comp"] }
+redis = { version = "1.2.2", features = ["tokio-comp", "cluster-async", "tokio-rustls-comp"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 chrono = "0.4.44"
 chrono-tz = "0.10"
@@ -123,7 +123,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 bytes = "1.11"
 aws-config = "1.8"
 aws-runtime = "1.7"
-aws-sdk-s3 = "1.133"
+aws-sdk-s3 = "1.134"
 oauth2 = "5.0"
 md5 = "0.8"
 pulldown-cmark = "0.13"
