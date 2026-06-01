@@ -122,6 +122,11 @@ pub struct Compiler {
     /// share the same `ConstantId`, causing the VM's `skip_until_branch_end`
     /// short-circuit logic to terminate at the wrong `CondBranchEnd`.
     next_cond_id: u64,
+    /// Non-fatal diagnostics (warnings) collected during the last
+    /// `compile_program`, available on both the success and failure paths.
+    /// Errors are returned via `Result`; warnings live here so consumers
+    /// (`hot check`, LSP) can surface them without failing compilation.
+    diagnostics: crate::lang::errors::CompilerErrors,
 }
 
 impl Compiler {
@@ -201,7 +206,21 @@ impl Compiler {
             core_lazy_function_names: IndexMap::new(),
             known_functions: AHashSet::new(),
             next_cond_id: 0,
+            diagnostics: crate::lang::errors::CompilerErrors::new(),
         }
+    }
+
+    /// Non-fatal diagnostics (warnings) collected during the last
+    /// `compile_program` call. Available regardless of whether compilation
+    /// succeeded or failed.
+    pub fn diagnostics(&self) -> &crate::lang::errors::CompilerErrors {
+        &self.diagnostics
+    }
+
+    /// Move out the collected warning diagnostics, leaving the compiler's
+    /// diagnostics empty.
+    pub fn take_diagnostics(&mut self) -> crate::lang::errors::CompilerErrors {
+        std::mem::take(&mut self.diagnostics)
     }
 
     /// Add file content for error reporting
@@ -714,7 +733,15 @@ impl Compiler {
         for (file_path, content) in &self.file_contents {
             type_checker.add_source_file(file_path.clone(), content.clone());
         }
-        type_checker.check_program(program)?;
+        let check_result = type_checker.check_program(program);
+        // Capture non-fatal warnings (e.g. deprecated-API usage) on both the
+        // success and failure paths. Warnings live on the compiler, not in the
+        // returned error, so they never count toward compilation failure.
+        self.diagnostics = type_checker.take_warnings();
+        if let Err(mut errors) = check_result {
+            errors.warnings.clear();
+            return Err(errors);
+        }
 
         // Phase 3: Bytecode compilation
         tracing::debug!("Compiler: Phase 3 - Bytecode compilation");
@@ -6807,6 +6834,37 @@ impl Compiler {
                 if let Some(deep_path) = &var_ref.var.deep_path {
                     // This is a deep path access like colors.red
                     // First load the base variable, then traverse the deep path
+                    let local_type_path = format!("{}/{}", self.current_namespace, var_name);
+                    let local_type_exists = self
+                        .program
+                        .namespaces
+                        .namespaces
+                        .get(&self.current_namespace)
+                        .is_some_and(|ns_info| ns_info.variables.contains_key(&local_type_path));
+
+                    if !self.current_function_params.contains(&var_name.to_string())
+                        && !local_type_exists
+                        && let Some(core_info) = self.core_variables.get(var_name)
+                        && let crate::lang::ast::Value::TypeDef(type_def) = &core_info.value
+                        && let Some(variants) = &type_def.variants
+                    {
+                        let full_type_name = format!("{}/{}", core_info.namespace_path, var_name);
+                        let variant_map: indexmap::IndexMap<String, Option<String>> = variants
+                            .iter()
+                            .map(|v| (v.name.name().to_string(), v.type_ref.clone()))
+                            .collect();
+                        let type_ref = crate::lang::refs::TypeRef::new(full_type_name, variant_map);
+                        let type_ref_constant = self
+                            .program
+                            .add_constant(Constant::VariantTypeRef(type_ref));
+                        let type_ref_reg = self.allocate_register();
+                        self.emit_instruction(Instruction::LoadTypeRef {
+                            dest: type_ref_reg,
+                            type_ref: type_ref_constant,
+                        });
+                        return self.compile_deep_path_access(type_ref_reg, deep_path);
+                    }
+
                     let base_reg = self.allocate_register();
                     let var_name_constant = self
                         .program

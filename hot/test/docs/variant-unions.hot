@@ -307,49 +307,49 @@ meta ["test"] fn () {
   }
 
   // Only one arm should match
-  assert-eq(1, length(result), "match-all|map should have 1 entry")
+  assert-eq(1, length(result), "match-all should have 1 entry")
   assert-eq("matched up", get(result, "Direction.Up"), "match-all should map Direction.Up to 'matched up'")
 }
 
-// match-all|vec returns a vector of results
+// All<Vec> returns a vector of match-all results
 test-match-all-vec
 meta ["test"] fn () {
   up Direction.Up
 
-  result match-all|vec up {
+  result: All<Vec> match-all up {
     Direction.Up => "matched up"
     Direction.Down => "matched down"
   }
 
-  assert-eq(1, length(result), "match-all|vec should have 1 element")
-  assert-eq("matched up", get(result, 0), "match-all|vec should contain 'matched up'")
+  assert-eq(1, length(result), "match-all All<Vec> should have 1 element")
+  assert-eq("matched up", get(result, 0), "match-all All<Vec> should contain 'matched up'")
 }
 
-// match-all|one returns the last matching result
-test-match-all-one
+// Regular match returns the winning result
+test-match-single-default
 meta ["test"] fn () {
   up Direction.Up
 
-  result match-all|one up {
+  result match up {
     Direction.Up => "matched up"
     Direction.Down => "matched down"
   }
 
-  assert-eq("matched up", result, "match-all|one should return 'matched up'")
+  assert-eq("matched up", result, "match should return 'matched up'")
 }
 
-// match|map returns a map (override default |one)
+// All<Map> returns a map for a regular match
 test-match-map
 meta ["test"] fn () {
   up Direction.Up
 
-  result match|map up {
+  result: All<Map> match up {
     Direction.Up => "matched up"
     Direction.Down => "matched down"
   }
 
-  assert-eq(1, length(result), "match|map should have 1 entry")
-  assert-eq("matched up", get(result, "Direction.Up"), "match|map should map Direction.Up")
+  assert-eq(1, length(result), "match All<Map> should have 1 entry")
+  assert-eq("matched up", get(result, "Direction.Up"), "match All<Map> should map Direction.Up")
 }
 
 test-match-all-no-match

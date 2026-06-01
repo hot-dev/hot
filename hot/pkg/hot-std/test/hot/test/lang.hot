@@ -182,6 +182,56 @@ meta ["test"] fn () {
     // Test pipe flow with |map modifier (should return step results as map)
     pipe-map 5 |> add(2) |> mul(3) |map
     assert-eq({"$pipe_0": 5, "$pipe_1": 7, "$pipe_2": 21}, pipe-map, "Pipe |map: should return step map")
+
+    // New All<Vec> annotation is equivalent to |vec, but erases to a plain Vec.
+    pipe-all-vec: All<Vec> 5 |> add(2) |> mul(3)
+    assert-eq([5, 7, 21], pipe-all-vec, "Pipe All<Vec>: should return [5, 7, 21]")
+}
+
+test-all-flow-annotations
+meta ["test"] fn () {
+    parallel-map: All<Map> parallel {
+        a 10
+        b 20
+        c 30
+    }
+
+    assert-eq(parallel-map, {
+        a: 10,
+        b: 20,
+        c: 30,
+    }, "parallel All<Map>")
+
+    serial-vec: All<Vec> serial {
+        a 1
+        b 2
+        c 3
+    }
+
+    assert-eq(serial-vec, [1, 2, 3], "serial All<Vec>")
+
+    condall-default: All cond-all {
+        true => a { 1 }
+        false => b { 2 }
+        true => c { 3 }
+    }
+
+    assert-eq(condall-default, {a: 1, c: 3}, "cond-all All defaults to map")
+
+    tagged All({value: [1, 2, 3]})
+    assert(is-type(tagged, All), "Explicit All constructor remains a tagged value")
+}
+
+all-flow-return fn (): All<Vec> {
+    a 1
+    b 2
+    c 3
+}
+
+test-all-return-annotation
+meta ["test"] fn () {
+    result all-flow-return()
+    assert-eq(result, [1, 2, 3], "function return All<Vec> shapes the body flow")
 }
 
 test-pipe-with-collections

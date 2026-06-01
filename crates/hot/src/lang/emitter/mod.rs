@@ -58,26 +58,50 @@ impl EngineEvent {
         )
     }
 
-    /// Creates a run:fail event with Failure type
+    /// Creates a run:fail event with canonical status fields plus the legacy
+    /// `failure` payload consumed by existing database/UI code.
     pub fn run_fail(execution_context: &ExecutionContext, failure: Val) -> Self {
+        let (kind, explicit) = match typed_payload_name(&failure).as_deref() {
+            Some("::hot::run/Failure" | "::hot::task/Failure") => ("failure", true),
+            _ => ("unhandled-error", false),
+        };
+        let msg = payload_msg(&failure).unwrap_or_else(|| failure.to_string());
+        let err = payload_err(&failure).unwrap_or_else(|| failure.clone());
+        let origin = payload_origin(&failure).unwrap_or(Val::Null);
+
         Self::new(
             execution_context.clone(),
             "run:fail".to_string(),
             val!({
                 "stop_time": Utc::now().to_rfc3339(),
                 "failure": failure,
+                "kind": kind,
+                "msg": msg,
+                "err": err,
+                "origin": origin,
+                "explicit": explicit,
             }),
         )
     }
 
-    /// Creates a run:cancel event with Cancellation type
+    /// Creates a run:cancel event with canonical status fields plus the legacy
+    /// `cancellation` payload consumed by existing database/UI code.
     pub fn run_cancel(execution_context: &ExecutionContext, cancellation: Val) -> Self {
+        let msg = payload_msg(&cancellation).unwrap_or_else(|| cancellation.to_string());
+        let data = payload_data(&cancellation).unwrap_or_else(|| cancellation.clone());
+        let origin = payload_origin(&cancellation).unwrap_or(Val::Null);
+
         Self::new(
             execution_context.clone(),
             "run:cancel".to_string(),
             val!({
                 "stop_time": Utc::now().to_rfc3339(),
                 "cancellation": cancellation,
+                "kind": "cancellation",
+                "msg": msg,
+                "data": data,
+                "origin": origin,
+                "explicit": true,
             }),
         )
     }
@@ -166,6 +190,54 @@ impl EngineEvent {
             }),
         )
     }
+}
+
+fn map_get<'a>(val: &'a Val, key: &str) -> Option<&'a Val> {
+    match val {
+        Val::Map(map) => map.get(&Val::from(key)),
+        _ => None,
+    }
+}
+
+fn typed_payload_name(val: &Val) -> Option<String> {
+    match map_get(val, "$type") {
+        Some(Val::Str(type_name)) => Some((**type_name).to_owned()),
+        _ => None,
+    }
+}
+
+fn payload_body(val: &Val) -> &Val {
+    map_get(val, "$val").unwrap_or(val)
+}
+
+fn payload_string_field(val: &Val, key: &str) -> Option<String> {
+    match map_get(payload_body(val), key).or_else(|| map_get(val, key)) {
+        Some(Val::Str(s)) => Some((**s).to_owned()),
+        Some(other) => Some(other.to_string()),
+        None => None,
+    }
+}
+
+fn payload_msg(val: &Val) -> Option<String> {
+    payload_string_field(val, "$msg").or_else(|| payload_string_field(val, "msg"))
+}
+
+fn payload_err(val: &Val) -> Option<Val> {
+    map_get(payload_body(val), "$err")
+        .or_else(|| map_get(val, "$err"))
+        .cloned()
+}
+
+fn payload_data(val: &Val) -> Option<Val> {
+    map_get(payload_body(val), "$data")
+        .or_else(|| map_get(val, "$data"))
+        .cloned()
+}
+
+fn payload_origin(val: &Val) -> Option<Val> {
+    map_get(val, "$origin")
+        .or_else(|| map_get(payload_body(val), "$origin"))
+        .cloned()
 }
 
 pub trait EngineEventEmitter: Send + Sync {

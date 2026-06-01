@@ -173,7 +173,7 @@
 		},
 		'number': /(?<![a-zA-Z_\d])-?\d+(?:\.\d+)?(?![a-zA-Z_])/,
 		'flow-modifier': /\|(?:all|one|map|vec)\b/,
-		'punctuation': /[{}[\](),.:;]/
+		'punctuation': /[{}[\](),.:;<>]/
 	};
 
 	// Now add interpolation support to string-template (must be done after language is defined)

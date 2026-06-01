@@ -317,7 +317,7 @@ fetch-all fn parallel (ids: Vec<Str>): Str {
 // @end: parallel-error
 
 // =============================================================================
-// @doc: result-modifiers
+// @doc: flow-result-shape
 // =============================================================================
 
 // Stub functions for modifier examples
@@ -325,9 +325,9 @@ fetch-a fn (): Str { "a" }
 fetch-b fn (): Str { "b" }
 fetch-c fn (): Str { "c" }
 
-// @doc: parallel-vec-modifier
+// @doc: parallel-all-vec
 parallel-as-vec fn (): Vec {
-    results parallel|vec {
+    results: All<Vec> parallel {
         fetch-a()
         fetch-b()
         fetch-c()

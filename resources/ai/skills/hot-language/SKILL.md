@@ -240,7 +240,7 @@ This skill includes detailed reference files:
 |------|-------------|
 | [references/syntax.md](references/syntax.md) | Complete syntax reference |
 | [references/hot-std.md](references/hot-std.md) | Full standard library documentation |
-| [references/flows.md](references/flows.md) | Flow patterns, `if()` vs `cond`, result modifiers |
+| [references/flows.md](references/flows.md) | Flow patterns, `if()` vs `cond`, flow result shapes |
 | [references/types.md](references/types.md) | Type system, type coercion |
 | [references/error-handling.md](references/error-handling.md) | Auto-unwrapping, lazy arguments, Result patterns |
 | [references/sequences.md](references/sequences.md) | Eager collections, lazy iterators, the `Next` type |
@@ -251,7 +251,7 @@ This skill includes detailed reference files:
 See the [examples/](examples/) directory for working Hot code:
 - `basic.hot` - Variables, functions, conditionals, pipes
 - `types-and-enums.hot` - Custom types, enums (closed + open), literal unions (closed + open), arrow enrollment, exhaustive match, type coercion
-- `flows.hot` - Parallel, cond-all, match-all, result modifiers
+- `flows.hot` - Parallel, cond-all, match-all, flow result shapes
 - `error-handling.hot` - Auto-unwrapping, lazy arguments, Result patterns
 - `sequences.hot` - Eager collections, lazy iterators, range functions
 - `event-handlers.hot` - Events, schedules, retry patterns

@@ -563,6 +563,68 @@ fn test_flow_definitions() {
 }
 
 #[test]
+fn test_bare_all_only_infers_collect_all_flows() {
+    let source = r#"
+        result: All cond-all {
+            true => a { 1 }
+            false => b { 2 }
+        }
+        "#;
+
+    let program = parse_hot(source).expect("bare All should parse on cond-all");
+    let default_ns_path = NsPath::new();
+    let default_ns = &program.namespaces[&default_ns_path];
+    let (_, value) = default_ns
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == "result")
+        .expect("result should exist");
+
+    match value {
+        Value::Flow(flow) => assert_eq!(flow.result_modifier, Some(ResultModifier::Map)),
+        other => panic!("expected flow, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_bare_all_rejected_on_ambiguous_flows() {
+    let source = r#"
+        result: All cond {
+            true => { 1 }
+            => { 2 }
+        }
+        "#;
+
+    assert!(parse_hot(source).is_err(), "bare All should fail on cond");
+}
+
+#[test]
+fn test_explicit_all_still_allowed_on_ambiguous_flows() {
+    let source = r#"
+        result: All<Vec> cond {
+            true => { 1 }
+            => { 2 }
+        }
+        "#;
+
+    let program = parse_hot(source).expect("explicit All<Vec> should parse on cond");
+    let default_ns_path = NsPath::new();
+    let default_ns = &program.namespaces[&default_ns_path];
+    let (_, value) = default_ns
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == "result")
+        .expect("result should exist");
+
+    match value {
+        Value::Flow(flow) => assert_eq!(flow.result_modifier, Some(ResultModifier::Vec)),
+        other => panic!("expected flow, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_type_definitions_with_constructors() {
     let source = r#"
         // Simple type definitions (like time.hot)

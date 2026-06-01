@@ -1030,6 +1030,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::VmAwareFn(lang::try_call),
         );
         map.insert(
+            "::hot::lang/try".to_string(),
+            HotLibFn::VmAwareFn(lang::r#try),
+        );
+        map.insert(
             "::hot::lang/resolve".to_string(),
             HotLibFn::vm_callback(lang::resolve),
         );

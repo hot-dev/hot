@@ -98,15 +98,15 @@ tg-record-voice ::tg-adapter/record-voice meta { on-event: "telegram:record-voic
 ```
 
 If you need transport-specific behaviour beyond registration (e.g.
-wrapping the call in `try-call` for fault isolation, or doing some
+wrapping the call in `try` for fault isolation, or doing some
 pre/post-processing), upgrade the alias to a full wrapper:
 
 ```hot
 tg-record-voice
 meta { on-event: "telegram:record-voice", retry: 2 }
 fn (event) {
-    result ::hot::lang/try-call(() { ::tg-adapter/record-voice(event) })
-    cond { not(result.ok) => { record-error("voice", result.error) } }
+    result ::hot::lang/try(() { ::tg-adapter/record-voice(event) })
+    cond { is-err(result) => { record-error("voice", result.$val) } }
 }
 ```
 
@@ -480,7 +480,7 @@ All command replies are threaded to the original message
 | `weekly-summary` | every Monday at 9am | Same fan-out, weekly window |
 
 `daily-digest` and `weekly-summary` iterate over
-`list-registered-sessions()` and use `::hot::lang/try-call` so a
+`list-registered-sessions()` and use `::hot::lang/try` so a
 failure on one session (down API, evicted credentials) doesn't kill
 the run for the others.
 

@@ -565,29 +565,32 @@ if(gt(i.run.retry-attempt, 0),
 
 ### ::hot::lang
 
-Language-level helpers. `try-call` is core (auto-imported).
+Language-level helpers. Most code should rely on normal `Result` propagation.
+Use `try` only at explicit fault-isolation boundaries.
 
 ```hot
-try-call fn (f: Fn, args: Vec<Any>): Map                 // Returns {ok: true, value} | {ok: false, error}
-try-call fn (f: Fn): Map                                 // Same as try-call(f, [])
+call fn (f: Fn, args: Vec<Any>): Any                     // Force domain Err by default
+call fn (f: Fn, args: Vec<Any>, on-err: OnErr): Any      // Use OnErr.Preserve to return domain Err as value
+call fn (f: Fn): Any                                     // Same as call(f, [])
+try fn (f: Fn, args: Vec<Any>): Result                   // Returns Result.Ok(value) | Result.Err(payload)
+try fn (f: Fn): Result                                   // Same as try(f, [])
 ```
 
-> Prefer Result propagation. `try-call` is an **escape hatch** for the rare
-> cases where Hot's auto-unwrap behavior gets in the way. In almost all code,
-> let errors propagate (auto-unwrap), inspect with `is-ok`/`is-err` or `match`,
-> or use `try-request` for HTTP. Reach for `try-call` only when (a) you need to
-> catch a runtime panic, or (b) a fan-out loop must continue past a single
-> failure.
+> Prefer Result propagation for normal domain errors. Use `OnErr.Preserve` on
+> eligible APIs (`map`, `pmap`, `map-indexed`, `mapcat`, `call`) when you want
+> to keep a domain `Err` as a value. Use `try` rarely, when an intentional
+> boundary needs to contain `fail()`, `cancel()`, or hard runtime errors as a
+> normal Result so nearby code can record the failure and continue.
 
-When you do use it, it returns a plain Map so the result is **not** auto-unwrapped:
+`try` returns a normal Result:
 
 ```hot
-// Fan-out where one failure must not abort the run.
+// Fan-out where one exceptional failure must not abort the run.
 results map(items, (item) {
-    ::hot::lang/try-call(process-item, [item])
+    ::hot::lang/try(process-item, [item])
 })
 
-failures filter(results, (r) { not(r.ok) })
+failures filter(results, is-err)
 ```
 
 ### ::hot::iter

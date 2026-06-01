@@ -2687,9 +2687,9 @@ async fn process_code_task(
 
     match execution_result {
         Ok(Ok(Ok(result_val))) => {
-            if result_val.is_err() {
-                // The VM returned an error result — normalize to ::hot::task/Failure if not already typed
-                let result_json = normalize_val_to_task_failure(&result_val);
+            if let Some((status, result_json, alert_name)) =
+                classify_task_terminal_result(&result_val)
+            {
                 complete_task_with_event(
                     &db,
                     &stream_publisher,
@@ -2698,14 +2698,19 @@ async fn process_code_task(
                     stream_id,
                     &function_name,
                     &task_type,
-                    TaskStatus::Failed,
+                    status.clone(),
                     Some(&result_json),
                 )
                 .await;
-                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &result_json)
-                    .await;
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
-                tracing::info!(task_id = %task_id, status = "failed", "Task finished with error result");
+                publish_task_alert(&db, org_id, env_id, &task_id, alert_name, &result_json).await;
+                if status == TaskStatus::Failed {
+                    maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                }
+                tracing::info!(
+                    task_id = %task_id,
+                    status = status.as_str(),
+                    "Task finished with terminal result"
+                );
             } else {
                 let result_json = serde_json::to_value(result_val.to_hot_data_repr())
                     .unwrap_or(serde_json::Value::Null);
@@ -2832,6 +2837,43 @@ fn normalize_val_to_task_failure(val: &Val) -> serde_json::Value {
     // Wrap bare error value
     let msg = json.as_str().unwrap_or("Task failed").to_string();
     task_failure_json(&msg, Some(json))
+}
+
+fn typed_val_name(val: &Val) -> Option<&str> {
+    if let Val::Map(map) = val
+        && let Some(Val::Str(type_name)) = map.get(&Val::from("$type"))
+    {
+        return Some(type_name.as_ref());
+    }
+    None
+}
+
+fn is_failure_val(val: &Val) -> bool {
+    typed_val_name(val).is_some_and(|name| {
+        name == "::hot::run/Failure" || name == "::hot::task/Failure" || name.ends_with("/Failure")
+    })
+}
+
+fn classify_task_terminal_result(
+    result_val: &Val,
+) -> Option<(TaskStatus, serde_json::Value, &'static str)> {
+    let payload = result_val.unwrap_err().unwrap_or(result_val);
+
+    if payload.is_cancelled() {
+        let json =
+            serde_json::to_value(payload.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+        return Some((TaskStatus::Cancelled, json, "task:cancelled"));
+    }
+
+    if result_val.is_err() || is_failure_val(payload) {
+        return Some((
+            TaskStatus::Failed,
+            normalize_val_to_task_failure(payload),
+            "task:failed",
+        ));
+    }
+
+    None
 }
 
 /// Emit a `task:started` env event via pub/sub.
@@ -4387,6 +4429,64 @@ mod tests {
         let result = normalize_val_to_task_failure(&null_val);
         assert_eq!(result["$type"], "::hot::task/Failure");
         assert_eq!(result["$val"]["$msg"], "Task failed");
+    }
+
+    #[test]
+    fn test_classify_task_terminal_result_unwraps_result_err_failure() {
+        let failure_val: Val = serde_json::from_value(serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"$msg": "task error", "$err": {"detail": "x"}}
+        }))
+        .unwrap();
+        let result_err = Val::err(failure_val);
+
+        let (status, json, alert) = classify_task_terminal_result(&result_err)
+            .expect("Result.Err(Failure) should be terminal");
+
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(alert, "task:failed");
+        assert_eq!(json["$type"], "::hot::task/Failure");
+        assert_eq!(json["$val"]["$err"]["detail"], "x");
+    }
+
+    #[test]
+    fn test_classify_task_terminal_result_unwraps_result_err_cancellation() {
+        let cancellation_val: Val = serde_json::from_value(serde_json::json!({
+            "$type": "::hot::task/Cancellation",
+            "$val": {"$msg": "stopped", "$data": {"reason": "user"}}
+        }))
+        .unwrap();
+        let result_err = Val::err(cancellation_val);
+
+        let (status, json, alert) = classify_task_terminal_result(&result_err)
+            .expect("Result.Err(Cancellation) should be terminal");
+
+        assert_eq!(status, TaskStatus::Cancelled);
+        assert_eq!(alert, "task:cancelled");
+        assert_eq!(json["$type"], "::hot::task/Cancellation");
+        assert_eq!(json["$val"]["$data"]["reason"], "user");
+    }
+
+    #[test]
+    fn test_classify_task_terminal_result_direct_failure() {
+        let failure_val: Val = serde_json::from_value(serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"$msg": "panic", "$err": {"panic": true}}
+        }))
+        .unwrap();
+
+        let (status, json, alert) =
+            classify_task_terminal_result(&failure_val).expect("typed Failure should be terminal");
+
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(alert, "task:failed");
+        assert_eq!(json["$type"], "::hot::task/Failure");
+        assert_eq!(json["$val"]["$err"]["panic"], true);
+    }
+
+    #[test]
+    fn test_classify_task_terminal_result_success_value() {
+        assert!(classify_task_terminal_result(&Val::from(42)).is_none());
     }
 
     #[test]

@@ -1230,6 +1230,7 @@ async fn async_main(providers: CliProviders) {
             global,
             format,
             raw,
+            deny_warnings,
             path,
             ..
         }) => {
@@ -1242,9 +1243,12 @@ async fn async_main(providers: CliProviders) {
             } else {
                 conf.get_bool("check.raw")
             };
+            let effective_deny_warnings =
+                deny_warnings || conf.get_bool_or_default("check.deny-warnings", false);
             match run_check_with_raw(
                 effective_format.as_deref(),
                 effective_raw,
+                effective_deny_warnings,
                 &conf,
                 &global,
                 context_storage.clone(),
@@ -1263,6 +1267,7 @@ async fn async_main(providers: CliProviders) {
             global,
             format,
             raw,
+            deny_warnings,
             watch_debounce_ms,
             ..
         }) => {
@@ -1275,11 +1280,14 @@ async fn async_main(providers: CliProviders) {
             } else {
                 conf.get_bool("check.raw")
             };
+            let effective_deny_warnings =
+                deny_warnings || conf.get_bool_or_default("check.deny-warnings", false);
             let effective_debounce =
                 watch_debounce_ms.unwrap_or_else(|| conf.get_int("watch.debounce") as u64);
             match run_check_watch(
                 effective_format.as_deref(),
                 effective_raw,
+                effective_deny_warnings,
                 effective_debounce,
                 &conf,
                 &global,

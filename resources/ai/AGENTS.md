@@ -142,13 +142,16 @@ classify fn cond (x: Int): Str {
 }
 ```
 
-**Result modifiers** control what a flow returns. Append with `|`:
-- `|one` — return the winning/last value (default for `serial`, `cond`, `match`)
-- `|vec` — collect all results into a Vec
-- `|map` — collect results into a Map keyed by branch name (default for `parallel`, `cond-all`, `match-all`)
+**Flow result shape** controls what a flow returns. Prefer annotations:
+- plain/no annotation — return the winning/last value (default for `serial`, `cond`, `match`)
+- `All<Vec>` — collect all results into a Vec
+- `All<Map>` — collect results into a Map keyed by branch name (default for `parallel`, `cond-all`, `match-all`)
+
+Bare `All` is only for natural collect-all forms (`parallel`, `cond-all`, and
+`match-all`); use explicit `All<Vec>` or `All<Map>` elsewhere.
 
 ```hot
-// cond-all defaults to |map with named branches
+// cond-all defaults to All<Map> with named branches
 effects cond-all {
     order.is-gift => gift { add-gift-wrap(order) }
     order.notify => notify { send-notification(order) }
@@ -156,14 +159,14 @@ effects cond-all {
 // => {gift: ..., notify: ...}
 
 // Override to collect as Vec
-discounts cond-all|vec {
+discounts: All<Vec> cond-all {
     is-member => { 0.10 }
     gt(total, 100) => { 0.05 }
 }
 // => [0.10, 0.05]
 
-// parallel with |vec instead of default |map
-values parallel|vec {
+// parallel with All<Vec> instead of default All<Map>
+values: All<Vec> parallel {
     a fetch-a()
     b fetch-b()
 }
@@ -757,14 +760,14 @@ For local reference, see the `.skills/hot-language/` directory:
 - `references/syntax.md` - Complete syntax reference
 - `references/hot-std.md` - Full standard library documentation
 - `references/types.md` - Type system and type coercion
-- `references/flows.md` - Flow patterns, `if()` vs `cond`, result modifiers
+- `references/flows.md` - Flow patterns, `if()` vs `cond`, flow result shapes
 - `references/error-handling.md` - Auto-unwrapping, lazy arguments, Result patterns
 - `references/sequences.md` - Eager collections, lazy iterators, range functions
 
 **Examples:**
 - `examples/basic.hot` - Variables, functions, conditionals, pipes
 - `examples/types-and-enums.hot` - Custom types, enums (closed + open), literal unions (closed + open), arrow enrollment, exhaustive match
-- `examples/flows.hot` - Parallel, cond-all, match-all, result modifiers
+- `examples/flows.hot` - Parallel, cond-all, match-all, flow result shapes
 - `examples/error-handling.hot` - Auto-unwrapping, lazy arguments
 - `examples/sequences.hot` - Collections, iterators, range
 - `examples/event-handlers.hot` - Events, schedules, retry patterns

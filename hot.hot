@@ -181,6 +181,10 @@ hot.cache.format "zstdjson"
 hot.check.format "pretty"
 hot.check.raw false
 hot.check.include-tests false
+// Treat deprecation (and future) warnings as errors: when true, `hot check`
+// exits non-zero if any warnings are emitted. Default false (warnings report
+// but never fail the check).
+hot.check.deny-warnings false
 
 hot.emitter.type "db"
 

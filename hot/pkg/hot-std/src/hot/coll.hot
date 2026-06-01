@@ -15,11 +15,18 @@ meta {
 
     map({a: 1, b: 2}, (k, v) { add(v, 10) })
     // [11, 12]
+
+    map(items, risky, OnErr.Preserve)
+    // preserves domain Err values as result slots
     ```
     """
 }
-fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+fn
+(coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
     call-lib(::hot::coll/map, [coll, func])
+},
+(coll: Str | Vec | Map, func: Fn, on-err: OnErr): Str | Vec | Map {
+    call-lib(::hot::coll/map, [coll, func, on-err])
 }
 
 
@@ -38,8 +45,12 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+fn
+(coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
     call-lib(::hot::coll/pmap, [coll, func])
+},
+(coll: Str | Vec | Map, func: Fn, on-err: OnErr): Str | Vec | Map {
+    call-lib(::hot::coll/pmap, [coll, func, on-err])
 }
 
 
@@ -57,8 +68,12 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+fn
+(coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
     call-lib(::hot::coll/map-indexed, [coll, func])
+},
+(coll: Str | Vec | Map, func: Fn, on-err: OnErr): Str | Vec | Map {
+    call-lib(::hot::coll/map-indexed, [coll, func, on-err])
 }
 
 
@@ -1169,10 +1184,14 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
+fn
+(coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
     coll
     |> map(f)
     |> reduce((acc, x) { concat(acc, x) }, [])
+},
+(coll: Str | Vec | Map, f: Fn, on-err: OnErr): Str | Vec | Map {
+    call-lib(::hot::coll/mapcat, [coll, f, on-err])
 }
 
 

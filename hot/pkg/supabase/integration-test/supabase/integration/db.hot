@@ -7,11 +7,11 @@ meta ["test"]
 SUPABASE_TEST_TABLE ::hot::env/get("SUPABASE_TEST_TABLE", "hot-integration-test")
 
 ok-body fn (lazy response: Any, label: Str): Any {
-  attempt ::hot::lang/try-call(() { do response })
+  attempt ::hot::lang/try(() { do response })
   cond {
-    not(attempt.ok) => { fail(`${label} transport failed: ${attempt.error}`) }
+    is-err(attempt) => { fail(`${label} transport failed: ${attempt.$val.$msg}`) }
     => {
-      resolved attempt.value
+      resolved attempt.$val
       cond {
         gte(resolved.status, 400) => {
           fail(`${label} failed with status ${resolved.status}: ${to-json(resolved.body)}`)

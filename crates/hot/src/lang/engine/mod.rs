@@ -279,6 +279,7 @@ impl Engine {
             None,  // No task queue
             None,  // No stream publisher
             false, // No color in server-side execution
+            None,  // No warnings out
         )
     }
 
@@ -326,6 +327,7 @@ impl Engine {
             None,  // No task queue
             None,  // No stream publisher
             false, // No color in server-side test execution
+            None,  // No warnings out
         ) {
             Ok(crate::val::Val::Bool(passed)) => Ok(vec![TestResult {
                 name: pattern.unwrap_or("all tests").to_string(),

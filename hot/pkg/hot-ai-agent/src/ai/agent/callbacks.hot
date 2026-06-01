@@ -199,7 +199,7 @@ fn (payload: Any, opts: CallbackOptions): CallbackResult {
                     CallbackResult({
                         ok: false,
                         status: 0,
-                        error: Str(attempt.$val),
+                        error: attempt.$val.$msg,
                         attempt-ms: elapsed,
                     })
                 }

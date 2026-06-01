@@ -142,7 +142,9 @@ Provide fallbacks for failures:
 
 ### Pattern 4: Fail with Context
 
-Use `fail` to halt execution with a custom error:
+Use `fail` to declare that the current run or task failed. This is different
+from returning a normal domain `err(...)` value: `fail()` and `cancel()` stop
+execution by default and are only caught at an explicit boundary such as `try`.
 
 ```hot
 validate fn (data) {
@@ -152,12 +154,42 @@ validate fn (data) {
 }
 ```
 
+### Pattern 5: Preserve Domain Errors in Map-Shaped Calls
+
+Eligible higher-order functions force a normal `Result.Err` by default. Pass
+`OnErr.Preserve` when you intentionally want to keep per-item domain errors as
+values in the result:
+
+{{snippet:errors#preserve-domain-errors}}
+
+`OnErr` applies only to normal `err(...)` / `Result.Err(...)` values. It does
+not catch `fail()`, `cancel()`, or hard runtime errors.
+
+### Pattern 6: Rare Halt Containment
+
+Most Hot code should not use `try`. Normal error handling uses `Result` values
+and Hot's auto-unwrapping rules, while `fail()` and `cancel()` usually mean the
+current run or task should stop.
+
+Use `::hot::lang/try` only at an intentional boundary where one failure must be
+caught, such as a scheduled fan-out loop where one failed item must be recorded
+without stopping the rest of the batch:
+
+{{snippet:errors#try-contain-halt}}
+
+`try` returns a normal `Result`: `Result.Ok(value)` on success and
+`Result.Err(payload)` on failure. Because it catches halts that would otherwise
+stop the run or task, it should be uncommon in application logic.
+
 ## Summary
 
 - Use `Result.Ok(value)` or `ok(value)` and `Result.Err(message)` or `err(message)` to create Results
 - Results **auto-unwrap** when passed to functions or used in templates
 - Err Results **automatically fail** at point of use—no explicit handling needed
 - Use `is-ok(result)` and `is-err(result)` to check without triggering auto-unwrap
+- Use `OnErr.Preserve` with eligible map-shaped APIs when you intentionally want to keep domain errors as values
+- Use `fail()` / `cancel()` for explicit run/task termination, not ordinary recoverable domain errors
+- Reach for `try` only in rare cases where a `fail()`, `cancel()`, or runtime halt must be caught at a boundary
 - Use `match` for pattern matching on `Result.Ok` and `Result.Err` variants
 - Dot access on Results automatically accesses fields within the payload: `result.name`
 - **Lazy arguments** suppress Result checking, enabling safe inspection and short-circuit evaluation

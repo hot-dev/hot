@@ -209,12 +209,9 @@ meta ["test"] fn () {
     assert(is-null(reg), "resolve-registration should be null for unknown model")
     // `dispatch-chat` halts via `fail(...)` on misconfiguration (correct
     // behavior: an unknown model is a programmer error, not a normal
-    // control-flow path). `try-call` is the right tool for *testing* that
-    // halt — there is no `Result`-shaped equivalent. This is one of the
-    // few legitimate try-call usages; see `::hot::lang/try-call` doc for
-    // the full guidance.
-    attempt ::hot::lang/try-call(::chat/dispatch-chat, [opts, [], null])
-    assert-eq(false, attempt.ok, "dispatch-chat should halt for unknown model")
+    // control-flow path). `try` lets this test inspect that halt.
+    attempt ::hot::lang/try(::chat/dispatch-chat, [opts, [], null])
+    assert(is-err(attempt), "dispatch-chat should halt for unknown model")
 }
 
 test-make-usage-from-anthropic-shape

@@ -140,6 +140,85 @@ enum PreparedFunction<'a> {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OnErrDisposition {
+    Force,
+    Preserve,
+}
+
+pub(crate) fn parse_onerr_disposition(
+    function_name: &str,
+    args: &[Val],
+    base_arity: usize,
+) -> Result<OnErrDisposition, Val> {
+    match args.len() {
+        n if n == base_arity => Ok(OnErrDisposition::Force),
+        n if n == base_arity + 1 => match &args[base_arity] {
+            val if is_onerr_variant(val, "Force") => Ok(OnErrDisposition::Force),
+            val if is_onerr_variant(val, "Preserve") => Ok(OnErrDisposition::Preserve),
+            other => Err(Val::from(format!(
+                "{} optional trailing argument must be OnErr.Force or OnErr.Preserve, got {:?}",
+                function_name, other
+            ))),
+        },
+        n => Err(Val::from(format!(
+            "{} expects {} or {} arguments, got {}",
+            function_name,
+            base_arity,
+            base_arity + 1,
+            n
+        ))),
+    }
+}
+
+fn is_onerr_variant(val: &Val, variant: &str) -> bool {
+    let expected_full = format!("::hot::type/OnErr.{}", variant);
+    let expected_short = format!("OnErr.{}", variant);
+
+    match val {
+        Val::Map(map) => {
+            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
+                **type_str == expected_full || **type_str == expected_short
+            } else {
+                false
+            }
+        }
+        Val::Str(s) => **s == expected_full || **s == expected_short || &**s == variant,
+        _ => false,
+    }
+}
+
+fn onerr_variant_val(variant: &str) -> Val {
+    let mut map = IndexMap::new();
+    map.insert(
+        Val::from("$type"),
+        Val::from(format!("::hot::type/OnErr.{}", variant)),
+    );
+    Val::Map(Box::new(map))
+}
+
+fn unwrap_ok_preserve_err(val: Val) -> Val {
+    if let Val::Map(map) = &val
+        && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+        && &**type_str == "::hot::type/Result.Ok"
+    {
+        return map.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
+    }
+
+    val
+}
+
+pub(crate) fn apply_onerr_disposition(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    val: Val,
+    disposition: OnErrDisposition,
+) -> Result<Val, String> {
+    match disposition {
+        OnErrDisposition::Force => vm.unwrap_result_if_ok(&val).map_err(|err| err.to_string()),
+        OnErrDisposition::Preserve => Ok(unwrap_ok_preserve_err(val)),
+    }
+}
+
 fn prepare_function(function_val: &Val) -> PreparedFunction<'_> {
     let mut cur = function_val;
     loop {
@@ -323,7 +402,10 @@ pub fn nth(args: &[Val]) -> HotResult<Val> {
 
 /// Map a function over a collection and concatenate the results
 pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::coll/mapcat", args, 2);
+    let disposition = match parse_onerr_disposition("::hot::coll/mapcat", args, 2) {
+        Ok(disposition) => disposition,
+        Err(err) => return HotResult::Err(err),
+    };
 
     let collection = &args[0];
     let function_val = &args[1];
@@ -348,7 +430,9 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             // Apply function to each item and concatenate results
             for item in items {
                 // Call the function with the item using VM context
-                let function_result = match call_prepared_with_vm(vm, &function, item) {
+                let function_result = match call_prepared_with_vm(vm, &function, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -380,7 +464,9 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
 
                 // Call the function with the key-value pair using VM context
-                let function_result = match call_prepared_with_vm(vm, &function, &pair) {
+                let function_result = match call_prepared_with_vm(vm, &function, &pair)
+                    .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -612,12 +698,10 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 /// This is a simplified version that works with basic collections
 /// Map function over a collection (VM-aware version)
 pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    if args.len() != 2 {
-        return HotResult::Err(Val::from(format!(
-            "::hot::coll/map expects 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    let disposition = match parse_onerr_disposition("::hot::coll/map", args, 2) {
+        Ok(disposition) => disposition,
+        Err(err) => return HotResult::Err(err),
+    };
 
     // Enforce coll-first ordering: (coll, func)
     let collection = &args[0];
@@ -643,7 +727,9 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
             // Apply function to each item
             for item in items {
                 // Call the function with the item using VM context
-                let function_result = match call_prepared_with_vm(vm, &function, item) {
+                let function_result = match call_prepared_with_vm(vm, &function, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -669,7 +755,9 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                     vm,
                     &function,
                     &[key.clone(), value.clone()],
-                ) {
+                )
+                .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -693,7 +781,9 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 let char_val = Val::from(ch.to_string());
 
                 // Call the function with the character using VM context
-                let function_result = match call_prepared_with_vm(vm, &function, &char_val) {
+                let function_result = match call_prepared_with_vm(vm, &function, &char_val)
+                    .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -745,7 +835,9 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                     }
 
                     // Apply the function to each value
-                    let function_result = match call_prepared_with_vm(vm, &function, &value) {
+                    let function_result = match call_prepared_with_vm(vm, &function, &value)
+                        .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                    {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -1470,7 +1562,10 @@ pub fn find_first(
 
 /// Parallel map function with TRUE parallel execution using tokio
 pub fn pmap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::coll/pmap", args, 2);
+    let disposition = match parse_onerr_disposition("::hot::coll/pmap", args, 2) {
+        Ok(disposition) => disposition,
+        Err(err) => return HotResult::Err(err),
+    };
 
     let collection = &args[0];
     let function_val = &args[1];
@@ -1492,9 +1587,9 @@ pub fn pmap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     if !has_runtime {
         tracing::debug!("pmap: No tokio runtime available, running sequentially");
         return match collection {
-            Val::Vec(items) => map(vm, &[Val::Vec(items.clone()), function_val.clone()]),
-            Val::Map(map_val) => pmap_map(vm, function_val, map_val, thread_count),
-            Val::Str(s) => pmap_str(vm, function_val, s, thread_count),
+            Val::Vec(items) => pmap_vec(vm, function_val, items, thread_count, disposition),
+            Val::Map(map_val) => pmap_map(vm, function_val, map_val, thread_count, disposition),
+            Val::Str(s) => pmap_str(vm, function_val, s, thread_count, disposition),
             _ => HotResult::Err(Val::from(format!(
                 "::hot::coll/pmap expects collection (Vec, Map, or Str), got {:?}",
                 collection
@@ -1503,9 +1598,9 @@ pub fn pmap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     }
 
     match collection {
-        Val::Vec(items) => pmap_vec(vm, function_val, items, thread_count),
-        Val::Map(map_val) => pmap_map(vm, function_val, map_val, thread_count),
-        Val::Str(s) => pmap_str(vm, function_val, s, thread_count),
+        Val::Vec(items) => pmap_vec(vm, function_val, items, thread_count, disposition),
+        Val::Map(map_val) => pmap_map(vm, function_val, map_val, thread_count, disposition),
+        Val::Str(s) => pmap_str(vm, function_val, s, thread_count, disposition),
         _ => HotResult::Err(Val::from(format!(
             "::hot::coll/pmap expects collection (Vec, Map, or Str), got {:?}",
             collection
@@ -1532,6 +1627,7 @@ fn pmap_vec(
     function_val: &Val,
     items: &[Val],
     thread_count: usize,
+    disposition: OnErrDisposition,
 ) -> HotResult<Val> {
     if items.is_empty() {
         return HotResult::Ok(Val::Vec(vec![]));
@@ -1539,7 +1635,11 @@ fn pmap_vec(
 
     // For small collections, just use sequential map (halt-propagating).
     if items.len() < thread_count * 2 {
-        return map(vm, &[Val::Vec(items.to_vec()), function_val.clone()]);
+        let onerr = match disposition {
+            OnErrDisposition::Force => onerr_variant_val("Force"),
+            OnErrDisposition::Preserve => onerr_variant_val("Preserve"),
+        };
+        return map(vm, &[Val::Vec(items.to_vec()), function_val.clone(), onerr]);
     }
 
     // Calculate chunk size
@@ -1635,7 +1735,9 @@ fn pmap_vec(
             let mut chunk_results: Vec<Val> = Vec::with_capacity(chunk_vec.len());
             let mut chunk_halt: Option<PmapHalt> = None;
             for item in chunk_vec.iter() {
-                match call_function_with_vm(&mut task_vm, &function_clone, item) {
+                match call_function_with_vm(&mut task_vm, &function_clone, item)
+                    .and_then(|val| apply_onerr_disposition(&mut task_vm, val, disposition))
+                {
                     Ok(val) => chunk_results.push(val),
                     Err(err) => {
                         if task_vm.has_failed() {
@@ -1725,11 +1827,14 @@ fn pmap_map(
     function_val: &Val,
     map_val: &IndexMap<Val, Val>,
     _thread_count: usize,
+    disposition: OnErrDisposition,
 ) -> HotResult<Val> {
     // Map over maps is more complex, use sequential for now
     let mut results = Vec::new();
     for (key, value) in map_val.iter() {
-        match call_function_with_vm_multi_args(vm, function_val, &[key.clone(), value.clone()]) {
+        match call_function_with_vm_multi_args(vm, function_val, &[key.clone(), value.clone()])
+            .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+        {
             Ok(val) => results.push(val),
             Err(err) => {
                 return HotResult::Err(Val::from(format!("pmap function call failed: {}", err)));
@@ -1745,12 +1850,15 @@ fn pmap_str(
     function_val: &Val,
     s: &str,
     _thread_count: usize,
+    disposition: OnErrDisposition,
 ) -> HotResult<Val> {
     // String mapping is less common, use sequential
     let mut results = Vec::new();
     for ch in s.chars() {
         let ch_val = Val::from(ch.to_string());
-        match call_function_with_vm(vm, function_val, &ch_val) {
+        match call_function_with_vm(vm, function_val, &ch_val)
+            .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+        {
             Ok(val) => results.push(val),
             Err(err) => {
                 return HotResult::Err(Val::from(format!("pmap function call failed: {}", err)));
@@ -1765,12 +1873,10 @@ pub fn map_indexed(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
-    if args.len() != 2 {
-        return HotResult::Err(Val::from(format!(
-            "::hot::coll/map-indexed expects 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    let disposition = match parse_onerr_disposition("::hot::coll/map-indexed", args, 2) {
+        Ok(disposition) => disposition,
+        Err(err) => return HotResult::Err(err),
+    };
 
     // Enforce coll-first ordering: (coll, func)
     let collection = &args[0];
@@ -1788,6 +1894,7 @@ pub fn map_indexed(
             for (index, item) in items.iter().enumerate() {
                 let index_val = Val::Int(index as i64);
                 match call_function_with_vm_multi_args(vm, function_val, &[index_val, item.clone()])
+                    .and_then(|val| apply_onerr_disposition(vm, val, disposition))
                 {
                     Ok(val) => result.push(val),
                     Err(err) => {
@@ -1808,7 +1915,9 @@ pub fn map_indexed(
                     vm,
                     function_val,
                     &[index_val, key.clone(), value.clone()],
-                ) {
+                )
+                .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => {
                         result_vec.push(val);
                     }
@@ -1827,7 +1936,9 @@ pub fn map_indexed(
             for (index, ch) in s.chars().enumerate() {
                 let index_val = Val::Int(index as i64);
                 let char_val = Val::from(ch.to_string());
-                match call_function_with_vm_multi_args(vm, function_val, &[index_val, char_val]) {
+                match call_function_with_vm_multi_args(vm, function_val, &[index_val, char_val])
+                    .and_then(|val| apply_onerr_disposition(vm, val, disposition))
+                {
                     Ok(val) => result.push(val),
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
