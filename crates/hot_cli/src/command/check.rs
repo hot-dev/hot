@@ -8,8 +8,10 @@ use crate::cli::GlobalOptions;
 use crate::command::deploy::setup_live_build_for_dev;
 use crate::conf::{get_merged_src_paths, get_merged_test_paths};
 
-// Helper function to run check compilation using engine
-async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Result<(), String> {
+// Helper function to run check compilation using engine. Prints any
+// project-scoped warnings (e.g. deprecated-API usage) and returns whether any
+// were emitted so callers can apply the `--deny-warnings` exit policy.
+async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Result<bool, String> {
     let src_paths = get_merged_src_paths(
         conf,
         global_options.project.as_deref(),
@@ -37,19 +39,27 @@ async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Re
     // Create or update live build for development (consistent with run/eval/repl/test/check)
     setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
 
-    // Use engine for check compilation
-    hot::lang::engine::Engine::check_sources_pipeline_with_deps(
+    let color = hot::env::is_local_dev();
+    let mut warnings = hot::lang::errors::CompilerErrors::new();
+    hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(
         &src_paths,
         &test_paths,
         Some(conf),
         Some(&project_name),
-        hot::env::is_local_dev(),
-    )
+        None,
+        color,
+        Some(&mut warnings),
+    )?;
+    if warnings.has_warnings() {
+        println!("{}", warnings.format_warnings(color));
+    }
+    Ok(warnings.has_warnings())
 }
 
 pub(crate) async fn run_check_watch(
     format: Option<&str>,
     raw: bool,
+    deny_warnings: bool,
     debounce_ms: u64,
     conf: &Val,
     global_options: &GlobalOptions,
@@ -66,7 +76,13 @@ pub(crate) async fn run_check_watch(
     // Synchronous one-shot check that handles both pretty and json output.
     // Async pretty path uses the existing `run_check_compilation` helper;
     // structured json path goes straight to the diagnostics-only pipeline.
-    fn emit_json(json_min: bool, raw: bool, conf: &Val, global_options: &GlobalOptions) -> i32 {
+    fn emit_json(
+        json_min: bool,
+        raw: bool,
+        deny_warnings: bool,
+        conf: &Val,
+        global_options: &GlobalOptions,
+    ) -> i32 {
         let _ = raw; // raw doesn't apply to json output
         let src_paths = get_merged_src_paths(
             conf,
@@ -103,15 +119,16 @@ pub(crate) async fn run_check_watch(
         }
         .unwrap_or_else(|_| "[]".to_string());
         println!("{}", serialized);
-        if errors.is_empty() { 0 } else { 1 }
+        let fail = !errors.is_empty() || (deny_warnings && errors.has_warnings());
+        if fail { 1 } else { 0 }
     }
 
     if json_mode {
-        emit_json(fmt == "json-min", raw, conf, global_options);
+        emit_json(fmt == "json-min", raw, deny_warnings, conf, global_options);
     } else {
         match run_check_compilation(conf, global_options).await {
-            Ok(_) => {
-                if !raw {
+            Ok(had_warnings) => {
+                if !raw && !had_warnings {
                     println!("No issues found");
                 }
             }
@@ -180,13 +197,13 @@ pub(crate) async fn run_check_watch(
                     pending = false;
                     last_run = Instant::now();
                     if json_mode {
-                        emit_json(fmt == "json-min", raw, conf, global_options);
+                        emit_json(fmt == "json-min", raw, deny_warnings, conf, global_options);
                     } else {
                         // Use tokio runtime to call async function from sync context
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         match rt.block_on(run_check_compilation(conf, global_options)) {
-                            Ok(_) => {
-                                if !raw {
+                            Ok(had_warnings) => {
+                                if !raw && !had_warnings {
                                     println!("No issues found");
                                 }
                             }
@@ -209,6 +226,7 @@ pub(crate) async fn run_check_watch(
 pub(crate) async fn run_check_with_raw(
     format: Option<&str>,
     raw: bool,
+    deny_warnings: bool,
     conf: &Val,
     global_options: &GlobalOptions,
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
@@ -287,24 +305,33 @@ pub(crate) async fn run_check_with_raw(
         }
         .unwrap_or_else(|_| "[]".to_string());
         println!("{}", serialized);
-        return Ok(if errors.is_empty() { 0 } else { 1 });
+        let fail = !errors.is_empty() || (deny_warnings && errors.has_warnings());
+        return Ok(if fail { 1 } else { 0 });
     }
 
     // Pretty/text path: keep using the legacy formatter with ctx-requirements
-    // validation included.
-    match hot::lang::engine::Engine::check_sources_pipeline_with_context(
+    // validation included. Project-scoped warnings (deprecated-API usage) are
+    // collected and rendered on success without failing the check unless
+    // `--deny-warnings` is set.
+    let color = hot::env::is_local_dev();
+    let mut warnings = hot::lang::errors::CompilerErrors::new();
+    match hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(
         &src_paths,
         &test_paths,
         Some(conf),
         Some(&project_name),
         context_storage.as_ref(),
-        hot::env::is_local_dev(),
+        color,
+        Some(&mut warnings),
     ) {
         Ok(()) => {
-            if !raw {
+            let had_warnings = warnings.has_warnings();
+            if had_warnings {
+                println!("{}", warnings.format_warnings(color));
+            } else if !raw {
                 println!("No issues found");
             }
-            Ok(0)
+            Ok(if had_warnings && deny_warnings { 1 } else { 0 })
         }
         Err(e) => {
             println!("{}", e);

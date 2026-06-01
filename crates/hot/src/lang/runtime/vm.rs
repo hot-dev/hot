@@ -40,6 +40,34 @@ fn user_facing_branch_name(internal: &str) -> &str {
     }
 }
 
+fn is_terminal_payload(val: &Val) -> bool {
+    terminal_payload_type(val).is_some()
+}
+
+fn is_cancellation_payload(val: &Val) -> bool {
+    matches!(
+        terminal_payload_type(val).as_deref(),
+        Some("::hot::run/Cancellation" | "::hot::task/Cancellation")
+    )
+}
+
+fn terminal_payload_type(val: &Val) -> Option<String> {
+    if let Val::Map(map) = val
+        && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+        && matches!(
+            &**type_str,
+            "::hot::run/Failure"
+                | "::hot::task/Failure"
+                | "::hot::run/Cancellation"
+                | "::hot::task/Cancellation"
+        )
+    {
+        return Some((**type_str).to_owned());
+    }
+
+    None
+}
+
 /// Resolve the active recursion-depth cap, honoring `HOT_MAX_RECURSION_DEPTH`.
 /// Cached after first read so we don't re-parse the env on every call.
 pub fn max_recursion_depth() -> usize {
@@ -1196,31 +1224,75 @@ impl VirtualMachine {
                 // Check if VM has failed or cancelled (e.g., via fail()/cancel() functions) even though execution returned Ok
                 // This happens because HotResult::Err from hotlib functions gets wrapped in Ok(Result{$err: ...})
                 if self.has_failed() {
-                    // VM failure state is set, don't emit run:stop (run:fail was already emitted)
-                    tracing::trace!(
-                        "VM: Execution returned Ok but VM has failure state - skipping run:stop event"
-                    );
+                    if let (Some(failure_state), Some(emitter), Some(execution_context)) =
+                        (self.get_failure(), &self.emitter, &self.execution_context)
+                    {
+                        let failure = if is_terminal_payload(&failure_state.data) {
+                            failure_state.data
+                        } else {
+                            crate::val!({
+                                "$msg": failure_state.msg,
+                                "$err": failure_state.data
+                            })
+                        };
+                        let event =
+                            crate::lang::emitter::EngineEvent::run_fail(execution_context, failure);
+                        emitter.emit(event);
+                    }
                 } else if self.has_cancelled() {
-                    // VM cancellation state is set, don't emit run:stop (run:cancel was already emitted)
-                    tracing::trace!(
-                        "VM: Execution returned Ok but VM has cancellation state - skipping run:stop event"
-                    );
+                    if let (Some(cancellation_state), Some(emitter), Some(execution_context)) = (
+                        self.get_cancellation(),
+                        &self.emitter,
+                        &self.execution_context,
+                    ) {
+                        let event = crate::lang::emitter::EngineEvent::run_cancel(
+                            execution_context,
+                            cancellation_state.data,
+                        );
+                        emitter.emit(event);
+                    }
                 } else if result_val.is_err() {
-                    // Result is a Result.Err type - emit run:fail event
-                    // This handles cases where a Result.Err was returned without calling fail()
+                    // Result is a Result.Err type. Terminal payloads preserve
+                    // their explicit status; all other Err payloads become
+                    // unhandled domain errors.
                     if let (Some(emitter), Some(execution_context)) =
                         (&self.emitter, &self.execution_context)
                     {
                         // Extract the error value from Result.Err
-                        let failure = if let Some(err_val) = result_val.unwrap_err() {
-                            // Check if err_val already has $msg/$err structure
-                            if let Val::Map(m) = err_val {
-                                if m.contains_key(&Val::from("$msg"))
-                                    || m.contains_key(&Val::from("$err"))
-                                {
+                        let emitted_cancel = if let Some(err_val) = result_val.unwrap_err()
+                            && is_cancellation_payload(err_val)
+                        {
+                            let event = crate::lang::emitter::EngineEvent::run_cancel(
+                                execution_context,
+                                err_val.clone(),
+                            );
+                            emitter.emit(event);
+                            tracing::trace!(
+                                "VM: Execution returned Result.Err(Cancellation) - emitting run:cancel event"
+                            );
+                            true
+                        } else {
+                            false
+                        };
+
+                        if !emitted_cancel {
+                            let failure = if let Some(err_val) = result_val.unwrap_err() {
+                                if is_terminal_payload(err_val) {
                                     err_val.clone()
+                                // Check if err_val already has $msg/$err structure
+                                } else if let Val::Map(m) = err_val {
+                                    if m.contains_key(&Val::from("$msg"))
+                                        || m.contains_key(&Val::from("$err"))
+                                    {
+                                        err_val.clone()
+                                    } else {
+                                        // Wrap in failure format
+                                        crate::val!({
+                                            "$msg": format!("{}", err_val),
+                                            "$err": err_val.clone()
+                                        })
+                                    }
                                 } else {
-                                    // Wrap in failure format
                                     crate::val!({
                                         "$msg": format!("{}", err_val),
                                         "$err": err_val.clone()
@@ -1228,22 +1300,19 @@ impl VirtualMachine {
                                 }
                             } else {
                                 crate::val!({
-                                    "$msg": format!("{}", err_val),
-                                    "$err": err_val.clone()
+                                    "$msg": "Unknown error",
+                                    "$err": result_val.clone()
                                 })
-                            }
-                        } else {
-                            crate::val!({
-                                "$msg": "Unknown error",
-                                "$err": result_val.clone()
-                            })
-                        };
-                        let event =
-                            crate::lang::emitter::EngineEvent::run_fail(execution_context, failure);
-                        emitter.emit(event);
-                        tracing::trace!(
-                            "VM: Execution returned Result.Err - emitting run:fail event"
-                        );
+                            };
+                            let event = crate::lang::emitter::EngineEvent::run_fail(
+                                execution_context,
+                                failure,
+                            );
+                            emitter.emit(event);
+                            tracing::trace!(
+                                "VM: Execution returned Result.Err - emitting run:fail event"
+                            );
+                        }
                     }
                 } else if result_val.is_cancelled() {
                     // Result is a Cancellation type - emit run:cancel event
@@ -1284,10 +1353,36 @@ impl VirtualMachine {
                 }
             }
             Err(e) => {
-                // Failure: emit run:fail event (if not already emitted)
-                if !self.has_failed()
-                    && let (Some(emitter), Some(execution_context)) =
-                        (&self.emitter, &self.execution_context)
+                if self.has_failed() {
+                    if let (Some(failure_state), Some(emitter), Some(execution_context)) =
+                        (self.get_failure(), &self.emitter, &self.execution_context)
+                    {
+                        let failure = if is_terminal_payload(&failure_state.data) {
+                            failure_state.data
+                        } else {
+                            crate::val!({
+                                "$msg": failure_state.msg,
+                                "$err": failure_state.data
+                            })
+                        };
+                        let event =
+                            crate::lang::emitter::EngineEvent::run_fail(execution_context, failure);
+                        emitter.emit(event);
+                    }
+                } else if self.has_cancelled() {
+                    if let (Some(cancellation_state), Some(emitter), Some(execution_context)) = (
+                        self.get_cancellation(),
+                        &self.emitter,
+                        &self.execution_context,
+                    ) {
+                        let event = crate::lang::emitter::EngineEvent::run_cancel(
+                            execution_context,
+                            cancellation_state.data,
+                        );
+                        emitter.emit(event);
+                    }
+                } else if let (Some(emitter), Some(execution_context)) =
+                    (&self.emitter, &self.execution_context)
                 {
                     let failure = crate::val!({
                         "$msg": e.to_string(),
@@ -4782,21 +4877,10 @@ impl VirtualMachine {
                     _ => "Error Result encountered".to_string(),
                 };
 
-                // Set VM failure state and return error
+                // Set VM failure state and return error. The run/task boundary
+                // emits terminal status if this halt is not explicitly
+                // contained by try-call / if-err.
                 self.set_failure(msg.clone(), err_val.clone());
-
-                // Emit run:fail event if emitter is available
-                if let (Some(emitter), Some(execution_context)) =
-                    (self.get_emitter().as_ref(), self.get_execution_context())
-                {
-                    let failure = crate::val!({
-                        "$msg": msg.clone(),
-                        "$err": err_val
-                    });
-                    let event =
-                        crate::lang::emitter::EngineEvent::run_fail(execution_context, failure);
-                    emitter.emit(event);
-                }
 
                 return Err(VmError::runtime(format!("Result error: {}", msg)));
             }
@@ -8605,6 +8689,30 @@ impl VirtualMachine {
         if let Ok(mut failure) = self.failure_state.failure.write() {
             *failure = None;
         }
+    }
+
+    pub fn current_origin(&self) -> Val {
+        let call_ctx = self.call_stack.last();
+        crate::val!({
+            "function": call_ctx
+                .map(|ctx| Val::from(ctx.function_name.clone()))
+                .unwrap_or_else(|| {
+                    self.current_debug_function
+                        .clone()
+                        .map(Val::from)
+                        .unwrap_or(Val::Null)
+                }),
+            "static_scope": call_ctx
+                .map(|ctx| Val::from(ctx.static_scope.clone()))
+                .unwrap_or(Val::Null),
+            "call_id": call_ctx
+                .map(|ctx| Val::from(ctx.call_id.to_string()))
+                .unwrap_or(Val::Null),
+            "call_depth": call_ctx
+                .map(|ctx| Val::from(ctx.call_depth as i64))
+                .unwrap_or(Val::Null),
+            "instruction_pointer": self.instruction_pointer as i64,
+        })
     }
 
     /// Get a clone of the failure state Arc (for parallel execution)

@@ -118,7 +118,9 @@ User -> Str fn (user: User): Str {
 
 ## No Exceptions
 
-Hot has no `throw`, `try`, `catch`, or `finally`.
+Hot has no `throw`, `catch`, `finally`, or `try { ... } catch { ... }` blocks.
+The `try(...)` function is a rare fault-isolation boundary for containing
+exceptional halts; it is not the normal error-handling pattern.
 
 | Instead of | Use |
 |------------|-----|

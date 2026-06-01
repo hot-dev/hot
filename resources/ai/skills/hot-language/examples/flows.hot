@@ -164,7 +164,7 @@ describe-access fn match-all (cap: Capability): Str {
 // describe-access(Capability.Admin) returns {"Capability.Admin": "full access"}
 
 // ============================================
-// RESULT MODIFIERS
+// FLOW RESULT SHAPE
 // ============================================
 
 // Stubs for modifier examples
@@ -172,9 +172,9 @@ task-a fn (): Str { "result-a" }
 task-b fn (): Str { "result-b" }
 task-c fn (): Str { "result-c" }
 
-// parallel|vec - return as vector instead of map
+// All<Vec> - return as vector instead of map
 parallel-as-vec fn (): Vec {
-    results parallel|vec {
+    results: All<Vec> parallel {
         task-a()
         task-b()
         task-c()
@@ -184,9 +184,9 @@ parallel-as-vec fn (): Vec {
 }
 // Returns: ["result-a", "result-b", "result-c"]
 
-// parallel|one - return single (last) value
-parallel-as-one fn (): Str {
-    result parallel|one {
+// All<Map> - explicit map collection shape
+parallel-as-map fn (): Map {
+    result: All<Map> parallel {
         task-a()
         task-b()
         task-c()
@@ -194,7 +194,7 @@ parallel-as-one fn (): Str {
 
     result
 }
-// Returns: "result-c"
+// Returns: {parallel_branch_0: "result-a", parallel_branch_1: "result-b", parallel_branch_2: "result-c"}
 
 // ============================================
 // NESTED FLOWS

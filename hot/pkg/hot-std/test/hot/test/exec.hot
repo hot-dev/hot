@@ -1,7 +1,7 @@
 ::hot::test::exec ns
 meta ["test"]
 
-// fail and cancel halt execution. try-call is the halt boundary used here so
+// fail and cancel halt execution. try is the halt boundary used here so
 // tests can inspect the captured runtime error without aborting the whole suite.
 
 call-fail-1 fn (): Any {
@@ -31,44 +31,44 @@ call-temporary-fail fn (): Any {
 
 test-fail-produces-error
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(call-fail-1, [])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "something went wrong"))
+    attempt ::hot::lang/try(call-fail-1, [])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "something went wrong"))
 }
 
 test-fail-with-data
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(call-fail-with-data, [])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "validation failed"))
+    attempt ::hot::lang/try(call-fail-with-data, [])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "validation failed"))
 }
 
 test-cancel-produces-error
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(call-cancel-1, [])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "user cancelled"))
+    attempt ::hot::lang/try(call-cancel-1, [])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "user cancelled"))
 }
 
 test-cancel-with-data
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(call-cancel-with-data, [])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "timeout exceeded"))
+    attempt ::hot::lang/try(call-cancel-with-data, [])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "timeout exceeded"))
 }
 
 test-fail-does-not-continue
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(call-fail-then-marker, [])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "halt here"))
+    attempt ::hot::lang/try(call-fail-then-marker, [])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "halt here"))
 }
 
 test-fail-state-does-not-leak
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(call-temporary-fail, [])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "temporary failure"))
+    attempt ::hot::lang/try(call-temporary-fail, [])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "temporary failure"))
 
     // This parallel flow must succeed — it should NOT see the failure above.
     data parallel|map {
@@ -91,27 +91,27 @@ meta ["test"] fn () {
     assert(is-err(result), "div(10.0, 0.0) should produce error, not crash")
 }
 
-// try-call accepts inline lambdas, not just named functions.
+// try accepts inline lambdas, not just named functions.
 
-test-try-call-with-inline-lambda-success
+test-try-with-inline-lambda-success
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call((x: Any) { add(x, 1) }, [41])
-    assert-eq(true, attempt.ok)
-    assert-eq(42, attempt.value)
+    attempt ::hot::lang/try((x: Any) { add(x, 1) }, [41])
+    assert(is-ok(attempt))
+    assert-eq(42, attempt.$val)
 }
 
-test-try-call-with-inline-lambda-fail
+test-try-with-inline-lambda-fail
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call((x: Any) { fail("lambda boom") }, [3])
-    assert-eq(false, attempt.ok)
-    assert(contains(attempt.error, "lambda boom"))
+    attempt ::hot::lang/try((x: Any) { fail("lambda boom") }, [3])
+    assert(is-err(attempt))
+    assert(contains(attempt.$val.$msg, "lambda boom"))
 }
 
-test-try-call-with-inline-lambda-no-args
+test-try-with-inline-lambda-no-args
 meta ["test"] fn () {
-    attempt ::hot::lang/try-call(() { 7 }, [])
-    assert-eq(true, attempt.ok)
-    assert-eq(7, attempt.value)
+    attempt ::hot::lang/try(() { 7 }, [])
+    assert(is-ok(attempt))
+    assert-eq(7, attempt.$val)
 }
 
 test-mixed-type-arithmetic

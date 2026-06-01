@@ -373,31 +373,34 @@ fetch-all fn parallel (ids: Vec<Str>): Map {
 }
 ```
 
-## Result Modifiers
+## Flow Result Shape
 
-Append modifiers to change how results are returned:
+Use `All<Vec>` or `All<Map>` annotations to collect all flow results.
+Bare `All` is allowed only on natural collect-all forms (`parallel`,
+`cond-all`, and `match-all`); use explicit `All<Vec>` or `All<Map>` on
+`serial`, `pipe`, `cond`, and `match`.
 
-| Modifier | Behavior |
-|----------|----------|
-| `\|one` | Return single value (default for serial, cond, match) |
-| `\|vec` | Return results as vector |
-| `\|map` | Return results as map (default for parallel, cond-all, match-all) |
+| Shape | Behavior |
+|-------|----------|
+| Plain/no annotation | Return single value (default for serial, cond, match) |
+| `All<Vec>` | Return results as vector |
+| `All<Map>` | Return results as map (default for parallel, cond-all, match-all) |
 
 ```hot
-// Force parallel to return vector instead of map
-results parallel|vec {
+// Return parallel results as a vector instead of a map
+results: All<Vec> parallel {
     fetch-a()
     fetch-b()
     fetch-c()
 }
 // Returns: [result-a, result-b, result-c]
 
-// Force cond-all to return single value
-result cond-all|one {
-    condition-a => { value-a }
-    condition-b => { value-b }
+// Explicit map shape for named parallel work
+result: All<Map> parallel {
+    a fetch-a()
+    b fetch-b()
 }
-// Returns last matched value instead of map
+// Returns: {a: result-a, b: result-b}
 ```
 
 ## Nested Flows

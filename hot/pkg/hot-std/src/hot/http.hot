@@ -118,22 +118,21 @@ meta {
 
     - `Result.Ok(HttpResponse)` on success (including non-2xx status codes —
       use `is-ok-response` to check status separately).
-    - `Result.Err(error-message)` when the transport itself failed.
+    - `Result.Err(payload)` when the transport itself failed.
 
     **Example**
 
     ```hot
     result try-request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
     cond {
-      is-err(result) => { println(`Network error: ${result.$val}`) }
+      is-err(result) => { println(`Network error: ${result.$val.$msg}`) }
       => { handle-response(result.$val) }
     }
     ```
     """
 }
 fn (request: HttpRequest): Result {
-    attempt ::hot::lang/try-call(::hot::http/request, [request])
-    if(attempt.ok, ::hot::type/ok(attempt.value), ::hot::type/err(attempt.error))
+    ::hot::lang/try(::hot::http/request, [request])
 },
 (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result {
     try-request(HttpRequest({method, url, headers, body}))

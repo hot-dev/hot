@@ -828,28 +828,41 @@ impl Backend {
         if let Ok(path) = uri.to_file_path() {
             compiler.add_source_file(path, text.clone());
         }
-        match compiler.compile_program(&mut comprehensive_program) {
-            Ok(_) => Vec::new(), // No errors
-            Err(compiler_errors) => {
-                // Lazy-load source for any cross-file location referenced
-                // by the errors so ariadne can render snippets even when
-                // the location isn't in the open buffer.
-                let mut lsp_sources = lsp_sources;
-                Self::ensure_error_sources(&mut lsp_sources, &compiler_errors.errors);
+        let compile_result = compiler.compile_program(&mut comprehensive_program);
 
-                compiler_errors
-                    .errors
-                    .iter()
-                    .filter_map(|error| {
-                        if self.error_is_from_current_file(error, &uri) {
-                            self.compiler_error_to_diagnostic(error, &uri, &lsp_sources)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+        // Lazy-load source for any cross-file location referenced by errors or
+        // warnings so ariadne can render snippets even when the location isn't
+        // in the open buffer.
+        let mut lsp_sources = lsp_sources;
+        let mut diagnostics = Vec::new();
+
+        if let Err(compiler_errors) = &compile_result {
+            Self::ensure_error_sources(&mut lsp_sources, &compiler_errors.errors);
+            for error in &compiler_errors.errors {
+                if self.error_is_from_current_file(error, &uri)
+                    && let Some(d) = self.compiler_error_to_diagnostic(error, &uri, &lsp_sources)
+                {
+                    diagnostics.push(d);
+                }
             }
         }
+
+        // Non-fatal warnings (e.g. deprecated-API usage) live on the compiler
+        // regardless of whether compilation succeeded. Surface them for the
+        // current file with WARNING severity.
+        let warnings = compiler.diagnostics().warnings.clone();
+        if !warnings.is_empty() {
+            Self::ensure_error_sources(&mut lsp_sources, &warnings);
+            for warning in &warnings {
+                if self.error_is_from_current_file(warning, &uri)
+                    && let Some(d) = self.compiler_error_to_diagnostic(warning, &uri, &lsp_sources)
+                {
+                    diagnostics.push(d);
+                }
+            }
+        }
+
+        diagnostics
     }
 
     /// Build a comprehensive program that includes hot-std, project dependencies, and the current file
@@ -977,15 +990,31 @@ impl Backend {
         };
 
         let mut batch = CompilerErrors::new();
-        batch.add(error.clone());
         for (path, content) in lsp_sources {
             batch.add_source(path.clone(), content.clone());
         }
-        let message = batch.format_error(false);
+        // Warnings (e.g. deprecated-usage) render through the warning channel
+        // so the ariadne report shows "warning"; everything else is an error.
+        let severity = match error.severity() {
+            hot::lang::errors::DiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+            hot::lang::errors::DiagnosticSeverity::Information => DiagnosticSeverity::INFORMATION,
+            hot::lang::errors::DiagnosticSeverity::Hint => DiagnosticSeverity::HINT,
+            hot::lang::errors::DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+        };
+        let message = if matches!(
+            error.severity(),
+            hot::lang::errors::DiagnosticSeverity::Warning
+        ) {
+            batch.add_warning(error.clone());
+            batch.format_warnings(false)
+        } else {
+            batch.add(error.clone());
+            batch.format_error(false)
+        };
 
         Some(Diagnostic {
             range,
-            severity: Some(DiagnosticSeverity::ERROR),
+            severity: Some(severity),
             code: Some(NumberOrString::String(error.code().to_string())),
             code_description: None,
             source: Some("hot".to_string()),

@@ -35,6 +35,41 @@ config-result safe-divide(10, 0)
 config if(is-ok(config-result), config-result, 99)  // Fallback to 99
 // @end: default-value
 
+// Stub for the OnErr.Preserve example (not shown in docs)
+load-score fn (n: Int): Int {
+  cond {
+    eq(n, 0) => { err("missing score") }
+    => { mul(n, 10) }
+  }
+}
+
+// @doc: preserve-domain-errors
+scores map([1, 0, 3], load-score, OnErr.Preserve)  // keep Err slots as values
+failed filter(scores, is-err)                       // [Err("missing score")]
+// @end: preserve-domain-errors
+
+// Stubs for the try containment example (not shown in docs)
+session "bad"
+
+run-one-session fn (s: Str): Str {
+  cond {
+    eq(s, "bad") => { fail(`session ${s} crashed`) }
+    => { `ok: ${s}` }
+  }
+}
+
+record-error fn (label: Str, detail: Any): Str {
+  `${label} recorded`
+}
+
+// @doc: try-contain-halt
+attempt ::hot::lang/try(() { run-one-session(session) })
+outcome cond {
+  is-err(attempt) => { record-error("session", attempt.$val) }
+  => { attempt.$val }
+}
+// @end: try-contain-halt
+
 
 // =============================================================================
 // Tests
@@ -102,4 +137,17 @@ meta ["test"] fn () {
 test-default-value
 meta ["test"] fn () {
   assert-eq(99, config, "fallback to default on error")
+}
+
+test-preserve-domain-errors
+meta ["test"] fn () {
+  assert-eq(3, length(scores), "preserve keeps every slot")
+  assert(is-err(scores[1]), "the failing slot stays an Err value")
+  assert-eq(1, length(failed), "one domain error collected")
+}
+
+test-try-contain-halt
+meta ["test"] fn () {
+  assert(is-err(attempt), "try contains the fail() as an Err Result")
+  assert-eq("session recorded", outcome, "the halt is handled at the boundary")
 }

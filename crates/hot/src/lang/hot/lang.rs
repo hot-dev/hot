@@ -2,6 +2,8 @@ use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
 use crate::{validate_args, validate_no_args};
 
+use super::coll::{OnErrDisposition, apply_onerr_disposition, parse_onerr_disposition};
+
 // Function invocation utilities (moved from function.rs)
 
 /// Extract arguments from a Vec value
@@ -23,6 +25,119 @@ fn resolve_function_with_scoping(
     // Use the VM's built-in resolution logic - this ensures we use the same
     // resolution order as the VM itself and don't duplicate hard-coded logic
     vm.resolve_function_name(function_name).map(Val::from)
+}
+
+fn parse_call_onerr_disposition(args: &[Val]) -> Result<OnErrDisposition, Val> {
+    match args.len() {
+        1 => Ok(OnErrDisposition::Force),
+        2 => match parse_onerr_disposition("::hot::lang/call", args, 1) {
+            Ok(disposition) => Ok(disposition),
+            Err(_) => Ok(OnErrDisposition::Force),
+        },
+        3 => match parse_onerr_disposition("::hot::lang/call", args, 2) {
+            Ok(disposition) => Ok(disposition),
+            Err(err) => {
+                if matches!(&args[2], Val::Vec(v) if v.is_empty()) {
+                    Ok(OnErrDisposition::Force)
+                } else {
+                    Err(err)
+                }
+            }
+        },
+        _ => Err(Val::from(format!(
+            "::hot::lang/call expects 1, 2, or 3 arguments, got {}",
+            args.len()
+        ))),
+    }
+}
+
+fn call_args_value(args: &[Val]) -> Option<&Val> {
+    match args.len() {
+        1 => None,
+        2 => match parse_onerr_disposition("::hot::lang/call", args, 1) {
+            Ok(_) => None,
+            Err(_) => Some(&args[1]),
+        },
+        3 => Some(&args[1]),
+        _ => None,
+    }
+}
+
+fn execute_lambda_for_call(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    function_val: &Val,
+    args: &[Val],
+    disposition: OnErrDisposition,
+) -> Result<Val, String> {
+    let saved_suppress = if matches!(disposition, OnErrDisposition::Preserve) {
+        let current = vm.get_suppress_result_checking();
+        vm.set_suppress_result_checking(true);
+        Some(current)
+    } else {
+        None
+    };
+
+    let exec = vm.execute_lambda(function_val, args);
+
+    if let Some(saved) = saved_suppress {
+        vm.set_suppress_result_checking(saved);
+    }
+
+    match exec {
+        Ok(value) => apply_onerr_disposition(vm, value, disposition)
+            .map(|value| wrap_preserved_call_result(value, disposition)),
+        Err(err) => handle_call_execution_error(vm, err.to_string(), disposition),
+    }
+}
+
+fn execute_user_function_for_call(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    function_id: crate::lang::bytecode::FunctionId,
+    args: &[Val],
+    disposition: OnErrDisposition,
+) -> Result<Val, String> {
+    let saved_suppress = if matches!(disposition, OnErrDisposition::Preserve) {
+        let current = vm.get_suppress_result_checking();
+        vm.set_suppress_result_checking(true);
+        Some(current)
+    } else {
+        None
+    };
+
+    let exec = vm.execute_compiled_user_function(function_id, args);
+
+    if let Some(saved) = saved_suppress {
+        vm.set_suppress_result_checking(saved);
+    }
+
+    match exec {
+        Ok(value) => apply_onerr_disposition(vm, value, disposition)
+            .map(|value| wrap_preserved_call_result(value, disposition)),
+        Err(err) => handle_call_execution_error(vm, err.to_string(), disposition),
+    }
+}
+
+fn handle_call_execution_error(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    msg: String,
+    disposition: OnErrDisposition,
+) -> Result<Val, String> {
+    if matches!(disposition, OnErrDisposition::Force) && !vm.has_failed() && !vm.has_cancelled() {
+        vm.set_failure(msg.clone(), Val::from(msg.clone()));
+    }
+
+    Err(msg)
+}
+
+fn wrap_preserved_call_result(val: Val, disposition: OnErrDisposition) -> Val {
+    if matches!(disposition, OnErrDisposition::Preserve) && val.is_err() {
+        let mut raw = indexmap::IndexMap::new();
+        raw.insert(Val::from("$type"), Val::from("Raw"));
+        raw.insert(Val::from("$val"), val);
+        Val::Map(Box::new(raw))
+    } else {
+        val
+    }
 }
 
 /// List all namespaces known to the program
@@ -175,13 +290,19 @@ pub fn call_lib(args: &[Val]) -> HotResult<Val> {
 /// VM-aware universal function dispatcher - the core function calling mechanism
 /// Takes a function reference and arguments, dispatches to hotlib OR user-defined functions
 pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    // Support 1-arg (function only) and 2-arg (function, args) forms
-    if args.len() != 1 && args.len() != 2 {
+    // Support 1-arg (function only), 2-arg (function, args or OnErr), and
+    // 3-arg (function, args, OnErr) forms.
+    if args.is_empty() || args.len() > 3 {
         return HotResult::Err(Val::from(format!(
-            "::hot::lang/call expects 1 or 2 arguments, got {}",
+            "::hot::lang/call expects 1, 2, or 3 arguments, got {}",
             args.len()
         )));
     }
+
+    let disposition = match parse_call_onerr_disposition(args) {
+        Ok(disposition) => disposition,
+        Err(err) => return HotResult::Err(err),
+    };
 
     // Check for call function recursion to prevent infinite loops
     if let Err(err) = vm.increment_call_depth() {
@@ -190,16 +311,15 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
 
     let function_val = &args[0];
     // Prepare arguments vector
-    let arg_vals: Vec<Val> = if args.len() == 1 {
-        Vec::new()
-    } else {
-        match extract_args_vec(&args[1]) {
+    let arg_vals: Vec<Val> = match call_args_value(args) {
+        None => Vec::new(),
+        Some(args_val) => match extract_args_vec(args_val) {
             Ok(av) => av,
             Err(err) => {
                 vm.decrement_call_depth();
                 return HotResult::Err(err);
             }
-        }
+        },
     };
 
     // Debug: Check what type of value is being passed as the function
@@ -221,7 +341,7 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
             {
-                let exec = vm.execute_lambda(inner, &arg_vals);
+                let exec = execute_lambda_for_call(vm, inner, &arg_vals, disposition);
                 vm.decrement_call_depth();
                 return match exec {
                     Ok(v) => HotResult::Ok(v),
@@ -293,7 +413,12 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
             {
-                let exec = vm.execute_lambda(&Val::Box(boxed_val.clone_box()), &arg_vals);
+                let exec = execute_lambda_for_call(
+                    vm,
+                    &Val::Box(boxed_val.clone_box()),
+                    &arg_vals,
+                    disposition,
+                );
                 vm.decrement_call_depth();
                 return match exec {
                     Ok(v) => HotResult::Ok(v),
@@ -362,18 +487,31 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     if let Some(function_id) =
         vm.find_best_user_function_overload(&resolved_function_name, &arg_vals)
     {
-        let exec = vm.execute_compiled_user_function(function_id, &arg_vals);
+        let exec = execute_user_function_for_call(vm, function_id, &arg_vals, disposition);
         vm.decrement_call_depth();
         return match exec {
             Ok(result) => HotResult::Ok(result),
-            Err(err) => {
-                vm.reset_failure_state();
-                vm.reset_cancellation_state();
-                HotResult::Err(Val::from(format!(
-                    "Error executing function '{}': {}",
-                    resolved_function_name, err
-                )))
-            }
+            Err(err) => HotResult::Err(Val::from(format!(
+                "Error executing function '{}': {}",
+                resolved_function_name, err
+            ))),
+        };
+    }
+
+    let hotlib_map = super::get_hotlib_map();
+    if hotlib_map.contains_key(&resolved_function_name) {
+        let exec = vm
+            .execute_call_lib(&resolved_function_name, &arg_vals)
+            .map_err(|err| err.to_string())
+            .and_then(|value| apply_onerr_disposition(vm, value, disposition))
+            .map(|value| wrap_preserved_call_result(value, disposition));
+        vm.decrement_call_depth();
+        return match exec {
+            Ok(result) => HotResult::Ok(result),
+            Err(err) => HotResult::Err(Val::from(format!(
+                "Error executing function '{}': {}",
+                resolved_function_name, err
+            ))),
         };
     }
 
@@ -385,24 +523,81 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     )))
 }
 
-/// VM-aware try-call function - calls a function and catches ALL errors as a plain Map
-/// Returns {ok: true, value: <result>} on success, {ok: false, error: "message"} on failure
-/// The return value is a plain Map (NOT a Result type) so it won't be auto-unwrapped
-pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+enum TryShape {
+    Result,
+    LegacyMap,
+}
+
+fn try_success(value: Val, shape: TryShape) -> HotResult<Val> {
+    match shape {
+        TryShape::Result => HotResult::Ok(Val::ok(value)),
+        TryShape::LegacyMap => {
+            let mut result = indexmap::IndexMap::new();
+            result.insert(Val::from("ok"), Val::Bool(true));
+            result.insert(Val::from("value"), value);
+            HotResult::Ok(Val::Map(Box::new(result)))
+        }
+    }
+}
+
+fn contained_error_payload(
+    vm: &crate::lang::runtime::vm::VirtualMachine,
+    err: impl ToString,
+) -> Val {
+    if let Some(failure) = vm.get_failure() {
+        return failure.data;
+    }
+    if let Some(cancellation) = vm.get_cancellation() {
+        return cancellation.data;
+    }
+
+    let msg = err.to_string();
+    crate::val!({
+        "$msg": msg.clone(),
+        "$err": {"error": msg},
+    })
+}
+
+fn try_error(
+    vm: &crate::lang::runtime::vm::VirtualMachine,
+    err: impl ToString,
+    shape: TryShape,
+) -> HotResult<Val> {
+    let payload = contained_error_payload(vm, err);
+    match shape {
+        TryShape::Result => HotResult::Ok(Val::err(payload)),
+        TryShape::LegacyMap => {
+            let mut result = indexmap::IndexMap::new();
+            result.insert(Val::from("ok"), Val::Bool(false));
+            result.insert(Val::from("error"), Val::from(payload.to_string()));
+            HotResult::Ok(Val::Map(Box::new(result)))
+        }
+    }
+}
+
+fn reset_contained_state(vm: &crate::lang::runtime::vm::VirtualMachine) {
+    vm.reset_failure_state();
+    vm.reset_cancellation_state();
+}
+
+fn execute_try_boundary(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+    shape: TryShape,
+    name: &str,
+) -> HotResult<Val> {
     // Support 1-arg (function only) and 2-arg (function, args) forms
     if args.len() != 1 && args.len() != 2 {
         return HotResult::Err(Val::from(format!(
-            "::hot::lang/try-call expects 1 or 2 arguments, got {}",
-            args.len()
+            "{} expects 1 or 2 arguments, got {}",
+            name,
+            args.len(),
         )));
     }
 
     // Check for call function recursion to prevent infinite loops
     if let Err(err) = vm.increment_call_depth() {
-        let mut result = indexmap::IndexMap::new();
-        result.insert(Val::from("ok"), Val::Bool(false));
-        result.insert(Val::from("error"), Val::from(err.to_string()));
-        return HotResult::Ok(Val::Map(Box::new(result)));
+        return try_error(vm, err, shape);
     }
 
     let function_val = &args[0];
@@ -413,10 +608,7 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
             Ok(av) => av,
             Err(err) => {
                 vm.decrement_call_depth();
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(false));
-                result.insert(Val::from("error"), Val::from(err.to_string()));
-                return HotResult::Ok(Val::Map(Box::new(result)));
+                return try_error(vm, err, shape);
             }
         }
     };
@@ -438,19 +630,11 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         let exec = vm.execute_lambda(inner, &arg_vals);
         vm.decrement_call_depth();
         return match exec {
-            Ok(value) => {
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(true));
-                result.insert(Val::from("value"), value);
-                HotResult::Ok(Val::Map(Box::new(result)))
-            }
+            Ok(value) => try_success(value, shape),
             Err(err) => {
-                vm.reset_failure_state();
-                vm.reset_cancellation_state();
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(false));
-                result.insert(Val::from("error"), Val::from(err.to_string()));
-                HotResult::Ok(Val::Map(Box::new(result)))
+                let result = try_error(vm, err, shape);
+                reset_contained_state(vm);
+                result
             }
         };
     }
@@ -465,19 +649,11 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         let exec = vm.execute_lambda(&Val::Box(boxed_val.clone_box()), &arg_vals);
         vm.decrement_call_depth();
         return match exec {
-            Ok(value) => {
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(true));
-                result.insert(Val::from("value"), value);
-                HotResult::Ok(Val::Map(Box::new(result)))
-            }
+            Ok(value) => try_success(value, shape),
             Err(err) => {
-                vm.reset_failure_state();
-                vm.reset_cancellation_state();
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(false));
-                result.insert(Val::from("error"), Val::from(err.to_string()));
-                HotResult::Ok(Val::Map(Box::new(result)))
+                let result = try_error(vm, err, shape);
+                reset_contained_state(vm);
+                result
             }
         };
     }
@@ -493,23 +669,11 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
                     (**qualified_name).to_owned()
                 } else {
                     vm.decrement_call_depth();
-                    let mut result = indexmap::IndexMap::new();
-                    result.insert(Val::from("ok"), Val::Bool(false));
-                    result.insert(
-                        Val::from("error"),
-                        Val::from("Fn value missing string $val".to_string()),
-                    );
-                    return HotResult::Ok(Val::Map(Box::new(result)));
+                    return try_error(vm, "Fn value missing string $val", shape);
                 }
             } else {
                 vm.decrement_call_depth();
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(false));
-                result.insert(
-                    Val::from("error"),
-                    Val::from("Expected function reference (Fn)".to_string()),
-                );
-                return HotResult::Ok(Val::Map(Box::new(result)));
+                return try_error(vm, "Expected function reference (Fn)", shape);
             }
         }
         Val::Box(boxed_val) => {
@@ -520,27 +684,16 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
                 fr.name().to_string()
             } else {
                 vm.decrement_call_depth();
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(false));
-                result.insert(
-                    Val::from("error"),
-                    Val::from("Invalid function reference".to_string()),
-                );
-                return HotResult::Ok(Val::Map(Box::new(result)));
+                return try_error(vm, "Invalid function reference", shape);
             }
         }
         _ => {
             vm.decrement_call_depth();
-            let mut result = indexmap::IndexMap::new();
-            result.insert(Val::from("ok"), Val::Bool(false));
-            result.insert(
-                Val::from("error"),
-                Val::from(format!(
-                    "Invalid function reference type: {:?}",
-                    function_val
-                )),
+            return try_error(
+                vm,
+                format!("Invalid function reference type: {:?}", function_val),
+                shape,
             );
-            return HotResult::Ok(Val::Map(Box::new(result)));
         }
     };
 
@@ -561,37 +714,38 @@ pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         let exec = vm.execute_compiled_user_function(function_id, &arg_vals);
         vm.decrement_call_depth();
         return match exec {
-            Ok(value) => {
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(true));
-                result.insert(Val::from("value"), value);
-                HotResult::Ok(Val::Map(Box::new(result)))
-            }
+            Ok(value) => try_success(value, shape),
             Err(err) => {
-                // try-call is a halt boundary: if the inner call halted via
+                // try / try-call are halt boundaries: if the inner call halted via
                 // fail() or cancel(), reset that state so subsequent code
                 // outside the boundary can run normally.
-                vm.reset_failure_state();
-                vm.reset_cancellation_state();
-                let mut result = indexmap::IndexMap::new();
-                result.insert(Val::from("ok"), Val::Bool(false));
-                result.insert(Val::from("error"), Val::from(err.to_string()));
-                HotResult::Ok(Val::Map(Box::new(result)))
+                let result = try_error(vm, err, shape);
+                reset_contained_state(vm);
+                result
             }
         };
     }
 
     vm.decrement_call_depth();
-    let mut result = indexmap::IndexMap::new();
-    result.insert(Val::from("ok"), Val::Bool(false));
-    result.insert(
-        Val::from("error"),
-        Val::from(format!(
+    try_error(
+        vm,
+        format!(
             "Function '{}' not found in compiled Hot functions",
             resolved_function_name
-        )),
-    );
-    HotResult::Ok(Val::Map(Box::new(result)))
+        ),
+        shape,
+    )
+}
+
+/// VM-aware try function - calls a function and catches halts/runtime errors as Result.Err.
+pub fn r#try(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    execute_try_boundary(vm, args, TryShape::Result, "::hot::lang/try")
+}
+
+/// VM-aware try-call function - legacy map-shaped halt boundary.
+/// Returns {ok: true, value: <result>} on success, {ok: false, error: "message"} on failure.
+pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    execute_try_boundary(vm, args, TryShape::LegacyMap, "::hot::lang/try-call")
 }
 
 /// VM-aware resolve function with proper namespace scoping (implements ::hot::lang/resolve)

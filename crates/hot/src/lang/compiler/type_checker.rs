@@ -5,7 +5,7 @@
 // when present and infers types where possible.
 
 use crate::lang::ast::{
-    Flow, FlowType, FnCall, FnDef, MatchArm, Namespace, Program, Ref, Source, Value,
+    Flow, FlowType, FnCall, FnDef, MatchArm, Namespace, Program, Ref, Source, Value, Var,
 };
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::errors::{CompilerError, CompilerErrors, CompilerResult, ErrorLocation};
@@ -569,6 +569,12 @@ pub struct TypeChecker {
     /// untyped REPL expression, etc.) — exhaustiveness is then skipped
     /// rather than raising spurious errors.
     match_subject_stack: Vec<Option<TypeExpr>>,
+    /// Fully-qualified name (`::ns/name`) → optional custom note for every
+    /// definition declared with `meta { deprecated: true }` or
+    /// `meta { deprecated: "note" }`. Populated during the qualified-variable
+    /// pre-pass and consulted at call sites to emit `deprecated-usage`
+    /// warnings.
+    deprecated_defs: AHashMap<String, Option<String>>,
 }
 
 impl Default for TypeChecker {
@@ -593,7 +599,63 @@ impl TypeChecker {
             core_variables: AHashMap::new(),
             in_fn_body: 0,
             match_subject_stack: Vec::new(),
+            deprecated_defs: AHashMap::new(),
         }
+    }
+
+    /// Inspect a definition's `meta` for a `deprecated` flag.
+    ///
+    /// Returns `None` when not deprecated, `Some(None)` for a bare
+    /// `deprecated: true`, and `Some(Some(note))` for `deprecated: "note"`
+    /// (a custom migration message surfaced in the diagnostic).
+    fn deprecated_meta_note(var: &Var) -> Option<Option<String>> {
+        let meta = var.meta.as_ref()?;
+        if let Val::Map(map) = &meta.val {
+            for (key, value) in map.iter() {
+                if let Val::Str(key_str) = key
+                    && &**key_str == "deprecated"
+                {
+                    return match value {
+                        Val::Bool(true) => Some(None),
+                        Val::Str(s) => Some(Some((**s).to_string())),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a call's `lookup_name` to a deprecation note if the callee was
+    /// declared deprecated. Checks the already-qualified form, the
+    /// current-namespace-local form, and core auto-imported exports (which is
+    /// how a bare `try-call(...)` resolves to `::hot::lang/try-call`).
+    fn lookup_deprecated_note(&self, lookup_name: &str) -> Option<Option<String>> {
+        if let Some(note) = self.deprecated_defs.get(lookup_name) {
+            return Some(note.clone());
+        }
+        let qualified = format!("{}/{}", self.context.current_namespace, lookup_name);
+        if let Some(note) = self.deprecated_defs.get(&qualified) {
+            return Some(note.clone());
+        }
+        if let Some(qualifieds) = self.core_variables.get(lookup_name) {
+            for q in qualifieds {
+                if let Some(note) = self.deprecated_defs.get(q) {
+                    return Some(note.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Drain non-fatal warnings collected during `check_program` into a
+    /// self-contained `CompilerErrors` (warnings + the source cache needed to
+    /// render them). Errors are left untouched.
+    pub fn take_warnings(&mut self) -> CompilerErrors {
+        let mut out = CompilerErrors::new();
+        out.warnings = std::mem::take(&mut self.errors.warnings);
+        out.source_cache = self.errors.source_cache.clone();
+        out
     }
 
     /// Convert AST Source to ErrorLocation for error reporting
@@ -825,6 +887,10 @@ impl TypeChecker {
             for (var, value) in &namespace.scope.vars {
                 let var_name = var.sym.name().to_string();
                 let qualified = format!("{}/{}", ns_str, var_name);
+
+                if let Some(note) = Self::deprecated_meta_note(var) {
+                    self.deprecated_defs.insert(qualified.clone(), note);
+                }
 
                 let inferred = self.shallow_infer_top_level_type(value, &alias_map, &ns_str);
                 if !matches!(inferred, TypeExpr::Any)
@@ -2536,6 +2602,21 @@ impl TypeChecker {
             let resolved_name = self.resolve_aliased_function_name(&func_name);
             let lookup_name = resolved_name.as_deref().unwrap_or(&func_name);
 
+            // Deprecation: if the callee was declared `meta { deprecated: ... }`,
+            // emit a non-fatal warning at the call site. Surfaced by both
+            // `hot check` and the LSP; never fails compilation.
+            if let Some(note) = self.lookup_deprecated_note(lookup_name) {
+                let location = fn_call
+                    .src
+                    .as_ref()
+                    .map(|s| self.source_to_error_location(s));
+                self.errors.add_warning(CompilerError::DeprecatedUsage {
+                    name: lookup_name.to_string(),
+                    note,
+                    location,
+                });
+            }
+
             // Constructor calls: `TypeName({...})` returns a value of the
             // declared type. The TypeDef registry is keyed by qualified name,
             // so try both the unqualified `lookup_name` (matched by short
@@ -3846,6 +3927,85 @@ mod tests {
             has_ambiguous,
             "expected AmbiguousTypeImplementation for Triangle -> Shape.Tri, got: {:?}",
             errors.errors
+        );
+    }
+
+    #[test]
+    fn test_deprecated_call_emits_warning_not_error() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // A `core: true` deprecated function is auto-imported, mirroring how
+        // `::hot::lang/try-call` resolves from a bare `try-call(...)` call.
+        let source = r#"
+        old-fn meta { core: true, deprecated: true } fn (): Int { 1 }
+        caller fn (): Int { old-fn() }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+
+        // Deprecation is a warning: it must never fail the check.
+        assert!(
+            result.is_ok(),
+            "deprecated usage must not fail compilation: {:?}",
+            result
+        );
+        let has_warning = checker.errors.warnings.iter().any(|w| {
+            matches!(
+                w,
+                CompilerError::DeprecatedUsage { name, note, .. }
+                    if name.contains("old-fn") && note.is_none()
+            )
+        });
+        assert!(
+            has_warning,
+            "expected DeprecatedUsage warning, got: {:?}",
+            checker.errors.warnings
+        );
+    }
+
+    #[test]
+    fn test_deprecated_call_carries_custom_note() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        let source = r#"
+        old-fn meta { core: true, deprecated: "use new-fn instead" } fn (): Int { 1 }
+        caller fn (): Int { old-fn() }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        let note = checker.errors.warnings.iter().find_map(|w| match w {
+            CompilerError::DeprecatedUsage { name, note, .. } if name.contains("old-fn") => {
+                Some(note.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            note,
+            Some(Some("use new-fn instead".to_string())),
+            "expected custom deprecation note, got: {:?}",
+            checker.errors.warnings
+        );
+    }
+
+    #[test]
+    fn test_non_deprecated_call_emits_no_warning() {
+        use crate::lang::parser::parse_hot;
+
+        let source = r#"
+        ok-fn meta { core: true } fn (): Int { 1 }
+        caller fn (): Int { ok-fn() }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        assert!(
+            checker.errors.warnings.is_empty(),
+            "non-deprecated call must not warn, got: {:?}",
+            checker.errors.warnings
         );
     }
 

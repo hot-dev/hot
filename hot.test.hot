@@ -76,6 +76,7 @@ hot.cache.format "zstdjson"
 hot.check.format "pretty"
 hot.check.raw false
 hot.check.include-tests false
+hot.check.deny-warnings false
 
 hot.emitter.type "none"
 

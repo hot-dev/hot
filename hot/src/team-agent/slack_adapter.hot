@@ -115,12 +115,12 @@ fn (user-id: Str): Str {
     cond {
         is-some(cached) => { cached }
         => {
-            result ::hot::lang/try-call(() {
+            result ::hot::lang/try(() {
                 resp ::slack-users/users-info(::slack-users/UsersInfoRequest({user: user-id}))
                 user or(resp.user, {})
                 or(get(user, "real_name"), get(user, "name"), user-id)
             })
-            name if(result.ok, result.value, user-id)
+            name if(is-ok(result), result.$val, user-id)
             ::store/put(user-name-cache, user-id, name)
             name
         }

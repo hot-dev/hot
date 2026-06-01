@@ -16,7 +16,9 @@
 //!   * `call_test_runner[_with_pattern]` — invokes the in-language
 //!     `::hot::test::run-tests` entry point.
 
-use super::discover::{discover_compilation_units, parse_files_parallel, parse_units_with_cache};
+use super::discover::{
+    DiscoveredUnit, discover_compilation_units, parse_files_parallel, parse_units_with_cache,
+};
 use super::{
     CompilationArtifacts, Engine, ExecutionWithArtifacts, ExtractedHandlers, PipelineMode,
 };
@@ -257,6 +259,7 @@ impl Engine {
             None, // No task queue
             None, // No stream publisher
             color,
+            None, // No warnings out
         )
     }
 
@@ -288,6 +291,7 @@ impl Engine {
             None, // No task queue
             None, // No stream publisher
             false,
+            None, // No warnings out
         )
     }
 
@@ -323,6 +327,7 @@ impl Engine {
             None, // No task queue
             None, // No stream publisher
             false,
+            None, // No warnings out
         )
     }
 
@@ -359,6 +364,7 @@ impl Engine {
             None, // No task queue
             None, // No stream publisher
             false,
+            None, // No warnings out
         )
     }
 
@@ -375,6 +381,71 @@ impl Engine {
     /// don't have any source location (e.g. dependency discovery failures)
     /// are surfaced as a single `InvalidFunctionCall` with `func_name =
     /// "<pipeline>"` and `location: None`.
+    /// Collect the set of project-owned source file paths (i.e. files from
+    /// `SourcePath` units, not dependency `Package` units). Used to scope
+    /// deprecation warnings to first-party code so a deprecated call buried in
+    /// a dependency or in `hot-std` never produces noise the user can't fix.
+    fn project_source_files(units: &[DiscoveredUnit]) -> AHashSet<String> {
+        use crate::lang::cache::unit_cache::CompilationUnit;
+        let mut set = AHashSet::new();
+        for u in units {
+            if matches!(u.unit, CompilationUnit::SourcePath { .. }) {
+                for f in &u.files {
+                    // Store both the raw and canonicalized path. The discovered
+                    // path (often relative, e.g. `./hot/src/app.hot`) may differ
+                    // from the path stored in the cached AST (absolute /
+                    // canonicalized), so we match against either form.
+                    set.insert(f.clone());
+                    if let Ok(canon) = std::fs::canonicalize(f) {
+                        set.insert(canon.display().to_string());
+                    }
+                }
+            }
+        }
+        set
+    }
+
+    /// Keep only warnings whose call site lives in a project-owned file.
+    /// Preserves the source cache so the retained warnings can still render
+    /// rich ariadne snippets.
+    fn scope_warnings_to_project(
+        diagnostics: crate::lang::errors::CompilerErrors,
+        project_files: &AHashSet<String>,
+    ) -> crate::lang::errors::CompilerErrors {
+        let mut out = crate::lang::errors::CompilerErrors::new();
+        out.source_cache = diagnostics.source_cache;
+        for w in diagnostics.warnings {
+            let file = w.location().and_then(|l| l.file.as_ref()).cloned();
+            let keep = file
+                .as_ref()
+                .map(|f| {
+                    let raw = f.display().to_string();
+                    if project_files.contains(&raw) {
+                        return true;
+                    }
+                    match std::fs::canonicalize(f) {
+                        Ok(canon) => project_files.contains(&canon.display().to_string()),
+                        Err(_) => false,
+                    }
+                })
+                .unwrap_or(false);
+            if keep {
+                // Ensure the warning's source is cached so it renders with a
+                // rich ariadne snippet rather than the plain Display fallback.
+                if let Some(f) = &file {
+                    let key = f.display().to_string();
+                    if !out.source_cache.contains_key(&key)
+                        && let Ok(content) = std::fs::read_to_string(f)
+                    {
+                        out.add_source(key, content);
+                    }
+                }
+                out.warnings.push(w);
+            }
+        }
+        out
+    }
+
     pub fn check_sources_pipeline_diagnostics(
         src_paths: &[String],
         test_paths: &[String],
@@ -488,7 +559,14 @@ impl Engine {
             );
         }
 
-        let mut errors = match compiler.compile_program(&mut combined_program) {
+        let compile_result = compiler.compile_program(&mut combined_program);
+        // Capture non-fatal warnings (deprecated-API usage), scoped to
+        // project-owned files so dependency/stdlib code never adds noise.
+        let scoped_warnings = {
+            let project_files = Self::project_source_files(&units);
+            Self::scope_warnings_to_project(compiler.take_diagnostics(), &project_files)
+        };
+        let mut errors = match compile_result {
             Ok(()) => CompilerErrors::new(),
             Err(mut errors) => {
                 // Make sure source content is attached so diagnostics can
@@ -556,6 +634,14 @@ impl Engine {
             }
         }
 
+        // Merge in the deprecation warnings. They ride alongside errors so
+        // `to_diagnostics()` emits them (severity 2), but never affect
+        // `is_empty()` / the success exit code.
+        errors.warnings.extend(scoped_warnings.warnings);
+        for (path, content) in scoped_warnings.source_cache {
+            errors.add_source(path, content);
+        }
+
         errors
     }
 
@@ -588,6 +674,30 @@ impl Engine {
         context_storage: Option<&AHashMap<String, crate::val::Val>>,
         color: bool,
     ) -> Result<(), String> {
+        Self::check_sources_pipeline_with_context_warnings(
+            src_paths,
+            test_paths,
+            conf,
+            project_name,
+            context_storage,
+            color,
+            None,
+        )
+    }
+
+    /// Like `check_sources_pipeline_with_context`, but additionally fills
+    /// `warnings_out` with project-scoped, non-fatal warnings (e.g. deprecated
+    /// API usage) collected during a successful check. Errors are still
+    /// returned via `Err(String)`; warnings never affect the result.
+    pub fn check_sources_pipeline_with_context_warnings(
+        src_paths: &[String],
+        test_paths: &[String],
+        conf: Option<&crate::val::Val>,
+        project_name: Option<&str>,
+        context_storage: Option<&AHashMap<String, crate::val::Val>>,
+        color: bool,
+        warnings_out: Option<&mut crate::lang::errors::CompilerErrors>,
+    ) -> Result<(), String> {
         // Delegate to unified pipeline with Check mode
         Self::run_unified_pipeline(
             src_paths,
@@ -608,6 +718,7 @@ impl Engine {
             None, // task_queue
             None, // stream_publisher
             color,
+            warnings_out,
         )
         .map(|_| ())
     }
@@ -633,6 +744,7 @@ impl Engine {
         task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
         stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
         color: bool,
+        warnings_out: Option<&mut crate::lang::errors::CompilerErrors>,
     ) -> Result<crate::val::Val, String> {
         tracing::debug!(" Unified Pipeline: Loading Hot dependencies...");
         tracing::debug!(" Source paths: {:?}", src_paths);
@@ -807,7 +919,16 @@ impl Engine {
         // Try comprehensive compilation with validation first
         match compiler.compile_program(&mut combined_program) {
             Ok(()) => {
-                // Compilation with validation succeeded
+                // Compilation with validation succeeded. Capture non-fatal
+                // deprecation warnings for the caller (scoped to project files)
+                // without failing the check.
+                if let Some(out) = warnings_out {
+                    let project_files = Self::project_source_files(&units);
+                    *out = Self::scope_warnings_to_project(
+                        compiler.take_diagnostics(),
+                        &project_files,
+                    );
+                }
             }
             Err(errors) => {
                 let formatted = errors.format_error(color);

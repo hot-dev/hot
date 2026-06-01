@@ -134,6 +134,7 @@ cond-skip-expensive fn (n: Int): Int {
             lt(i, 0) => { fib-recursive(20) }
             => { 1 }
         }
+
         add(acc, selected)
     }, 0)
 }

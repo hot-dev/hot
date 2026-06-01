@@ -303,6 +303,7 @@ pub(crate) async fn run_run(
                 None, // No task queue
                 None, // No stream publisher
                 hot::env::is_local_dev(),
+                None, // No warnings out
             );
             let _ = result_tx.send(r);
         })

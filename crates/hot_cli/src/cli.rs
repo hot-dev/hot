@@ -484,6 +484,11 @@ pub(crate) enum Command {
         /// Raw output (pretty/simple): suppresses success banners and headers
         #[arg(long = "check.raw", action = clap::ArgAction::SetTrue)]
         raw: bool,
+        /// Treat warnings (e.g. deprecated-API usage) as errors: exit non-zero
+        /// if any warnings are emitted. Defaults to the `check.deny-warnings`
+        /// config value (false).
+        #[arg(long = "check.deny-warnings", action = clap::ArgAction::SetTrue)]
+        deny_warnings: bool,
         /// Optional path to a specific .hot file or directory to check (if not provided, checks all project sources)
         #[arg(value_hint = ValueHint::AnyPath)]
         path: Option<String>,
@@ -504,6 +509,11 @@ pub(crate) enum Command {
         /// Raw output (pretty/simple): suppresses success banners and headers
         #[arg(long = "check.raw", action = clap::ArgAction::SetTrue)]
         raw: bool,
+        /// Treat warnings (e.g. deprecated-API usage) as errors: exit non-zero
+        /// if any warnings are emitted. Defaults to the `check.deny-warnings`
+        /// config value (false).
+        #[arg(long = "check.deny-warnings", action = clap::ArgAction::SetTrue)]
+        deny_warnings: bool,
         /// Debounce in milliseconds for watch mode
         #[arg(long = "watch.debounce", value_name = "MILLISECONDS")]
         watch_debounce_ms: Option<u64>,

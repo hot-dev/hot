@@ -190,6 +190,83 @@ mod tests {
     }
 
     #[test]
+    fn test_run_fail_event_classifies_explicit_failure() {
+        let execution_context = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            crate::db::run::RunType::Run.as_id(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let fail_event = EngineEvent::run_fail(
+            &execution_context,
+            crate::val!({
+                "$type": "::hot::run/Failure",
+                "$origin": {
+                    "function": "test-fn",
+                    "instruction_pointer": 42,
+                },
+                "$val": {
+                    "$msg": "boom",
+                    "$err": {"reason": "test"},
+                },
+            }),
+        );
+
+        assert_eq!(
+            map_get(&fail_event.event_data, "kind"),
+            Some(&Val::from("failure"))
+        );
+        assert_eq!(
+            map_get(&fail_event.event_data, "explicit"),
+            Some(&Val::Bool(true))
+        );
+        assert_eq!(
+            map_get(&fail_event.event_data, "msg"),
+            Some(&Val::from("boom"))
+        );
+        assert!(matches!(
+            map_get(&fail_event.event_data, "origin"),
+            Some(Val::Map(_))
+        ));
+    }
+
+    #[test]
+    fn test_run_fail_event_classifies_unhandled_domain_error() {
+        let execution_context = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            crate::db::run::RunType::Run.as_id(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let fail_event = EngineEvent::run_fail(
+            &execution_context,
+            crate::val!({
+                "$msg": "domain",
+                "$err": "domain",
+            }),
+        );
+
+        assert_eq!(
+            map_get(&fail_event.event_data, "kind"),
+            Some(&Val::from("unhandled-error"))
+        );
+        assert_eq!(
+            map_get(&fail_event.event_data, "explicit"),
+            Some(&Val::Bool(false))
+        );
+        assert_eq!(
+            map_get(&fail_event.event_data, "msg"),
+            Some(&Val::from("domain"))
+        );
+    }
+
+    #[test]
     fn test_compiled_lazy_args_emit_hot_data_repr_without_vm_instructions() {
         let test_emitter = Arc::new(TestEmitter::new());
         let execution_context = ExecutionContext::new(

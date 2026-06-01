@@ -243,6 +243,7 @@ impl Engine {
                 task_queue,
                 stream_publisher,
                 color,
+                None, // No warnings out
             )
         })
         .await
@@ -654,16 +655,30 @@ impl Engine {
         // Emit run:stop, run:fail, or run:cancel manually based on result and VM state
         match &result {
             Ok(result_val) => {
-                // Check if VM has failed or cancelled (e.g., via fail()/cancel() functions)
-                // If so, the event was already emitted by those functions - don't emit run:stop
                 if vm.has_failed() {
-                    tracing::debug!(
-                        "Engine: VM has failure state - skipping run:stop (run:fail already emitted)"
-                    );
+                    if let (Some(failure_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_failure(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let event = crate::lang::emitter::EngineEvent::run_fail(
+                            execution_context,
+                            failure_state.data,
+                        );
+                        emitter.emit(event);
+                    }
                 } else if vm.has_cancelled() {
-                    tracing::debug!(
-                        "Engine: VM has cancellation state - skipping run:stop (run:cancel already emitted)"
-                    );
+                    if let (Some(cancellation_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_cancellation(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let event = crate::lang::emitter::EngineEvent::run_cancel(
+                            execution_context,
+                            cancellation_state.data,
+                        );
+                        emitter.emit(event);
+                    }
                 } else if result_val.is_err() {
                     // Result is a Result.Err type - emit run:fail event
                     if let (Some(emitter), Some(execution_context)) =
@@ -745,10 +760,32 @@ impl Engine {
                 }
             }
             Err(e) => {
-                // Only emit run:fail if not already emitted by fail()
-                if !vm.has_failed()
-                    && let (Some(emitter), Some(execution_context)) =
-                        (&emitter_for_run, &execution_context_for_run)
+                if vm.has_failed() {
+                    if let (Some(failure_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_failure(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let fail_event = crate::lang::emitter::EngineEvent::run_fail(
+                            execution_context,
+                            failure_state.data,
+                        );
+                        emitter.emit(fail_event);
+                    }
+                } else if vm.has_cancelled() {
+                    if let (Some(cancellation_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_cancellation(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let cancel_event = crate::lang::emitter::EngineEvent::run_cancel(
+                            execution_context,
+                            cancellation_state.data,
+                        );
+                        emitter.emit(cancel_event);
+                    }
+                } else if let (Some(emitter), Some(execution_context)) =
+                    (&emitter_for_run, &execution_context_for_run)
                 {
                     let fail_event = crate::lang::emitter::EngineEvent::run_fail(
                         execution_context,
@@ -902,8 +939,30 @@ impl Engine {
         // Emit run:stop/fail/cancel
         match &result {
             Ok(result_val) => {
-                if vm.has_failed() || vm.has_cancelled() {
-                    // Already emitted by fail()/cancel()
+                if vm.has_failed() {
+                    if let (Some(failure_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_failure(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let fail_event = crate::lang::emitter::EngineEvent::run_fail(
+                            execution_context,
+                            failure_state.data,
+                        );
+                        emitter.emit(fail_event);
+                    }
+                } else if vm.has_cancelled() {
+                    if let (Some(cancellation_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_cancellation(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let cancel_event = crate::lang::emitter::EngineEvent::run_cancel(
+                            execution_context,
+                            cancellation_state.data,
+                        );
+                        emitter.emit(cancel_event);
+                    }
                 } else if result_val.is_err() {
                     if let (Some(emitter), Some(execution_context)) =
                         (&emitter_for_run, &execution_context_for_run)
@@ -939,9 +998,32 @@ impl Engine {
                 }
             }
             Err(e) => {
-                if !vm.has_failed()
-                    && let (Some(emitter), Some(execution_context)) =
-                        (&emitter_for_run, &execution_context_for_run)
+                if vm.has_failed() {
+                    if let (Some(failure_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_failure(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let fail_event = crate::lang::emitter::EngineEvent::run_fail(
+                            execution_context,
+                            failure_state.data,
+                        );
+                        emitter.emit(fail_event);
+                    }
+                } else if vm.has_cancelled() {
+                    if let (Some(cancellation_state), Some(emitter), Some(execution_context)) = (
+                        vm.get_cancellation(),
+                        &emitter_for_run,
+                        &execution_context_for_run,
+                    ) {
+                        let cancel_event = crate::lang::emitter::EngineEvent::run_cancel(
+                            execution_context,
+                            cancellation_state.data,
+                        );
+                        emitter.emit(cancel_event);
+                    }
+                } else if let (Some(emitter), Some(execution_context)) =
+                    (&emitter_for_run, &execution_context_for_run)
                 {
                     let fail_event = crate::lang::emitter::EngineEvent::run_fail(
                         execution_context,

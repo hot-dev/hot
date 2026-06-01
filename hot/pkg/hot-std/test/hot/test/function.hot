@@ -18,3 +18,23 @@ meta ["test"] fn () {
         "call(::hot::str/split, [\"hello,world\", \",\"]) returns [\"hello\", \"world\"]"
     )
 }
+
+maybe-domain-err-for-call fn (x: Int) {
+    cond {
+        eq(x, 2) => { err("call domain err") }
+        => { ok(mul(x, 10)) }
+    }
+}
+
+test-call-forces-domain-err-by-default
+meta ["test"] fn () {
+    attempt ::hot::lang/try(() { call(maybe-domain-err-for-call, [2]) })
+    assert(is-err(attempt))
+    assert(contains(Str(attempt.$val), "call domain err"))
+}
+
+test-call-preserves-domain-err-with-onerr-preserve
+meta ["test"] fn () {
+    result call(maybe-domain-err-for-call, [2], OnErr.Preserve)
+    assert(is-err(result))
+}

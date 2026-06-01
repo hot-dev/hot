@@ -161,24 +161,17 @@ pub fn fail(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     tracing::debug!("VM: fail called with msg: '{}', err: {:?}", msg, err);
 
     let type_name = failure_type(vm);
+    let origin = vm.current_origin();
     let failure = crate::val!({
         "$type": type_name,
+        "$origin": origin,
         "$val": {
             "$msg": msg.clone(),
             "$err": err.clone()
         }
     });
 
-    let is_first_failure = vm.set_failure(msg.clone(), failure.clone());
-
-    if is_first_failure
-        && let (Some(emitter), Some(execution_context)) =
-            (vm.get_emitter().as_ref(), vm.get_execution_context())
-    {
-        let event = crate::lang::emitter::EngineEvent::run_fail(execution_context, failure.clone());
-        emitter.emit(event);
-        tracing::debug!("VM: Emitted run:fail event with {} type", type_name);
-    }
+    vm.set_failure(msg.clone(), failure.clone());
 
     HotResult::Err(failure)
 }
@@ -222,25 +215,17 @@ pub fn cancel(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     tracing::debug!("VM: cancel called with msg: '{}', data: {:?}", msg, data);
 
     let type_name = cancellation_type(vm);
+    let origin = vm.current_origin();
     let cancellation = crate::val!({
         "$type": type_name,
+        "$origin": origin,
         "$val": {
             "$msg": msg.clone(),
             "$data": data.clone()
         }
     });
 
-    let is_first_cancellation = vm.set_cancellation(msg.clone(), cancellation.clone());
-
-    if is_first_cancellation
-        && let (Some(emitter), Some(execution_context)) =
-            (vm.get_emitter().as_ref(), vm.get_execution_context())
-    {
-        let event =
-            crate::lang::emitter::EngineEvent::run_cancel(execution_context, cancellation.clone());
-        emitter.emit(event);
-        tracing::debug!("VM: Emitted run:cancel event with {} type", type_name);
-    }
+    vm.set_cancellation(msg.clone(), cancellation.clone());
 
     HotResult::Err(cancellation)
 }

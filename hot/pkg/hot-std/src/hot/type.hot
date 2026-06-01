@@ -750,6 +750,86 @@ meta {
 fn (value: Any): Bool { is-type(value, Result) }
 
 
+// OnErr controls whether eligible higher-order functions force or preserve
+// normal domain Result.Err values. It does not govern fail(), cancel(), or
+// hard runtime halts.
+
+OnErr
+meta {
+    core: true,
+    doc: """
+    Disposition for how eligible higher-order functions (`map`, `pmap`,
+    `map-indexed`, `mapcat`, `call`) handle a normal domain `Result.Err`.
+
+    - `OnErr.Force` (default) — force the `Err`, stopping the operation and
+      propagating the error to the caller (fail-fast).
+    - `OnErr.Preserve` — keep the `Err` as a value according to the
+      function's return shape. For map-shaped functions, the `Err` is retained
+      as an output element. For `call`, the callee's `Err` is returned as the
+      call result.
+
+    `OnErr` only applies to normal `err(...)` / `Result.Err` values.
+    `fail()`, `cancel()`, and hard runtime errors remain exceptional and halt
+    unless they are wrapped in an explicit containment boundary.
+
+    Passed as an optional trailing argument:
+
+    ```hot
+    map(items, risky)                    // Force (default): fail-fast on Err
+    map(items, risky, OnErr.Preserve)    // preserve Err slots in the result
+    call(risky, [arg], OnErr.Preserve)   // return a callee Err as a value
+    ```
+    """
+}
+enum {
+    Force,
+    Preserve
+}
+
+
+All
+meta {
+    core: true,
+    doc: """
+    Marker type for values that intentionally represent "all" produced
+    results from a flow.
+
+    In normal Hot code you should usually not need to construct `All`
+    directly. Flow result annotations such as `: All<Vec>` and `: All<Map>`
+    are compile-time result-shape directives: they tell the compiler to
+    collect all produced results, then erase to the underlying `Vec` or `Map`
+    value at runtime.
+
+    Bare `All` is only accepted on natural collect-all flows (`parallel`,
+    `cond-all`, and `match-all`). Use explicit `All<Vec>` or `All<Map>` on
+    `serial`, `pipe`, `cond`, and `match`.
+
+    Use the `All` constructor only when you explicitly want to tag a
+    collection value as "all results" for metadata, debugging, or API
+    boundaries:
+
+    ```hot
+    tagged All({value: [1, 2, 3]})
+    tagged.value  // [1, 2, 3]
+    ```
+
+    For ordinary flow results, prefer annotation syntax instead:
+
+    ```hot
+    results: All<Map> parallel {
+        a fetch-a()
+        b fetch-b()
+    }
+
+    // `results` behaves as the collected Map in normal use.
+    ```
+    """
+}
+type {
+    value: Vec | Map
+}
+
+
 // ============================================================================
 // Type Conversion Implementations
 // ============================================================================

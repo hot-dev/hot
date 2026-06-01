@@ -277,31 +277,47 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
             is-error: true
         }),
         {
-            // try-call catches halts from `fail()` so a misbehaving tool
+            // try catches halts from `fail()` so a misbehaving tool
             // is reported back to the model as `is-error: true` instead
             // of bringing down the whole run-loop.
             attempt if(
                 or(get(tool, "pass-input"), false),
-                ::hot::lang/try-call(tool.fn, [call.input]),
-                ::hot::lang/try-call(::hot::internal::mcp/invoke-with-input, [tool.fn, call.input])
+                ::hot::lang/try(tool.fn, [call.input]),
+                ::hot::lang/try(::hot::internal::mcp/invoke-with-input, [tool.fn, call.input])
             )
             cond {
-                not(attempt.ok) => {
-                    ToolResult({id: call.id, output: attempt.error, is-error: true})
+                is-err(attempt) => {
+                    ToolResult({
+                        id: call.id,
+                        output: attempt.$val.$msg,
+                        is-error: true,
+                    })
                 }
                 => {
-                    result attempt.value
+                    result attempt.$val
                     match result {
                         Result.Err => {
-                            ToolResult({id: call.id, output: result, is-error: true})
+                            ToolResult({
+                                id: call.id,
+                                output: result,
+                                is-error: true,
+                            })
                         }
 
                         Result.Ok => {
-                            ToolResult({id: call.id, output: result, is-error: false})
+                            ToolResult({
+                                id: call.id,
+                                output: result,
+                                is-error: false,
+                            })
                         }
 
                         _ => {
-                            ToolResult({id: call.id, output: result, is-error: false})
+                            ToolResult({
+                                id: call.id,
+                                output: result,
+                                is-error: false,
+                            })
                         }
                     }
                 }

@@ -244,11 +244,11 @@ fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
                             cond {
                                 is-null(ts-str) => { fail-result("timestamp-missing") }
                                 => {
-                                    ts-attempt ::hot::lang/try-call(Int, [ts-str])
+                                    ts-attempt ::hot::lang/try(Int, [ts-str])
                                     cond {
-                                        not(ts-attempt.ok) => { fail-result("timestamp-invalid") }
+                                        is-err(ts-attempt) => { fail-result("timestamp-invalid") }
                                         => {
-                                            ts ts-attempt.value
+                                            ts ts-attempt.$val
                                             now div(::time/epoch-millis(::time/now()), 1000)
                                             delta ::math/abs(sub(now, ts))
                                             if(gt(delta, skew),

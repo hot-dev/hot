@@ -41,7 +41,7 @@ meta {
     `run-session-job` uses `map`'s built-in per-item halt boundary, so a
     handler that halts has its slot recovered to a `LifecycleJob.ok =
     false` record (with the failure data preserved) and the loop
-    continues with the next session. No callsite-level `try-call` is
+    continues with the next session. No callsite-level `try` is
     required.
 
     Follow-up: a future iteration of `::ai::chat/run-loop` should return

@@ -263,6 +263,16 @@ pub enum CompilerError {
         target_type: String,
         location: Option<ErrorLocation>,
     },
+    /// A referenced definition is marked `meta { deprecated: true }` (or
+    /// `meta { deprecated: "use X instead" }`). This is a *warning*, not an
+    /// error: it never fails compilation, but `hot check` and the LSP surface
+    /// it so callers migrate off the deprecated API. `note`, when present,
+    /// carries the custom migration message from the definition's metadata.
+    DeprecatedUsage {
+        name: String,
+        note: Option<String>,
+        location: Option<ErrorLocation>,
+    },
 }
 
 impl fmt::Display for CompilerError {
@@ -900,6 +910,31 @@ impl fmt::Display for CompilerError {
                     )
                 }
             }
+            CompilerError::DeprecatedUsage {
+                name,
+                note,
+                location,
+            } => {
+                let body = match note {
+                    Some(n) => format!("`{}` is deprecated: {}", name, n),
+                    None => format!("`{}` is deprecated", name),
+                };
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
         }
     }
 }
@@ -908,6 +943,10 @@ impl fmt::Display for CompilerError {
 #[derive(Debug, Clone, Default)]
 pub struct CompilerErrors {
     pub errors: Vec<CompilerError>,
+    /// Non-fatal warnings (e.g. deprecated-API usage). Warnings never cause
+    /// `is_empty()` to report failure, so they do not fail compilation, but
+    /// they are surfaced by `hot check` and the LSP.
+    pub warnings: Vec<CompilerError>,
     pub source_cache: AHashMap<String, String>,
 }
 
@@ -915,6 +954,7 @@ impl CompilerErrors {
     pub fn new() -> Self {
         Self {
             errors: Vec::new(),
+            warnings: Vec::new(),
             source_cache: AHashMap::new(),
         }
     }
@@ -929,16 +969,51 @@ impl CompilerErrors {
         self.errors.push(error);
     }
 
+    /// Record a non-fatal warning. Warnings are reported but never fail
+    /// compilation (`is_empty()` ignores them).
+    pub fn add_warning(&mut self, warning: CompilerError) {
+        self.warnings.push(warning);
+    }
+
     pub fn add_source(&mut self, name: String, content: String) {
         self.source_cache.insert(name, content);
     }
 
+    /// True when there are no hard errors. Warnings do not count, so a
+    /// warnings-only result is still considered a successful compile.
     pub fn is_empty(&self) -> bool {
         self.errors.is_empty()
     }
 
+    /// True when at least one non-fatal warning was collected.
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    pub fn warnings_len(&self) -> usize {
+        self.warnings.len()
+    }
+
     pub fn len(&self) -> usize {
         self.errors.len()
+    }
+
+    /// Render only the collected warnings (ariadne when source is available).
+    /// Returns an empty string when there are no warnings so callers can
+    /// unconditionally print the result.
+    pub fn format_warnings(&self, color: bool) -> String {
+        if self.warnings.is_empty() {
+            return String::new();
+        }
+        let mut output = Vec::new();
+        for warning in &self.warnings {
+            if let Some(formatted) = self.create_ariadne_report(warning, color) {
+                output.push(formatted);
+            } else {
+                output.push(warning.to_string());
+            }
+        }
+        output.join("\n\n")
     }
 
     /// Format errors using ariadne reports when source is available, plain text otherwise.
@@ -988,6 +1063,7 @@ impl CompilerErrors {
             CompilerError::NonExhaustiveMatch { location, .. } => location.as_ref(),
             CompilerError::OpenLiteralUnionMismatch { location, .. } => location.as_ref(),
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
+            CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
         }?;
 
         let source_name = if let Some(file) = &location.file {
@@ -1009,11 +1085,12 @@ impl CompilerErrors {
         let span_start = location.position;
         let span_end = location.position + location.length.max(1);
 
-        let mut report = Report::build(
-            ReportKind::Error,
-            (source_name.as_str(), span_start..span_end),
-        )
-        .with_config(Config::default().with_color(color));
+        let report_kind = match error.severity() {
+            DiagnosticSeverity::Warning => ReportKind::Warning,
+            _ => ReportKind::Error,
+        };
+        let mut report = Report::build(report_kind, (source_name.as_str(), span_start..span_end))
+            .with_config(Config::default().with_color(color));
 
         match error {
             CompilerError::UnresolvedVariable {
@@ -1413,6 +1490,20 @@ impl CompilerErrors {
                          (and any types it depends on) to the top level of a namespace.",
                     );
             }
+            CompilerError::DeprecatedUsage { name, note, .. } => {
+                let label_msg = match note {
+                    Some(n) => format!("deprecated: {}", n),
+                    None => "this is deprecated".to_string(),
+                };
+                report = report
+                    .with_code("deprecated-usage")
+                    .with_message(format!("`{}` is deprecated", name))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(label_msg)
+                            .with_color(label_color),
+                    );
+            }
         }
 
         let mut buffer = Vec::new();
@@ -1475,6 +1566,16 @@ impl CompilerError {
             CompilerError::NonExhaustiveMatch { location, .. } => location.as_ref(),
             CompilerError::OpenLiteralUnionMismatch { location, .. } => location.as_ref(),
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
+            CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
+        }
+    }
+
+    /// Diagnostic severity for this variant. Today only `DeprecatedUsage` is a
+    /// warning; everything else is a hard error that fails compilation.
+    pub fn severity(&self) -> DiagnosticSeverity {
+        match self {
+            CompilerError::DeprecatedUsage { .. } => DiagnosticSeverity::Warning,
+            _ => DiagnosticSeverity::Error,
         }
     }
 
@@ -1515,6 +1616,7 @@ impl CompilerError {
             CompilerError::NonExhaustiveMatch { .. } => "non-exhaustive-match",
             CompilerError::OpenLiteralUnionMismatch { .. } => "open-literal-union-mismatch",
             CompilerError::NestedTypeImplementation { .. } => "nested-type-implementation",
+            CompilerError::DeprecatedUsage { .. } => "deprecated-usage",
         }
     }
 }
@@ -1529,6 +1631,7 @@ impl CompilerErrors {
     pub fn to_diagnostics(&self) -> Vec<Diagnostic> {
         self.errors
             .iter()
+            .chain(self.warnings.iter())
             .map(|e| self.error_to_diagnostic(e))
             .collect()
     }
@@ -1580,7 +1683,7 @@ impl CompilerErrors {
         Diagnostic {
             file,
             range,
-            severity: DiagnosticSeverity::Error.as_lsp_number(),
+            severity: error.severity().as_lsp_number(),
             code: error.code().to_string(),
             source: "hot".to_string(),
             message,
@@ -1607,6 +1710,51 @@ mod diagnostic_tests {
     fn empty_collection_yields_no_diagnostics() {
         let errors = CompilerErrors::new();
         assert!(errors.to_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn warnings_render_with_warning_severity_and_do_not_fail() {
+        let mut errors = CompilerErrors::new();
+        errors.add_warning(CompilerError::DeprecatedUsage {
+            name: "try-call".to_string(),
+            note: Some("use `try` instead".to_string()),
+            location: Some(loc(2, 1, 8, "/tmp/x.hot")),
+        });
+
+        // Warnings never count as compilation failure.
+        assert!(errors.is_empty(), "warnings must not make is_empty() false");
+        assert!(errors.has_warnings());
+
+        // to_diagnostics surfaces the warning with severity 2 (Warning).
+        let diags = errors.to_diagnostics();
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d.code, "deprecated-usage");
+        assert_eq!(d.severity, DiagnosticSeverity::Warning.as_lsp_number());
+        assert_eq!(d.severity, 2);
+    }
+
+    #[test]
+    fn errors_and_warnings_both_appear_in_diagnostics() {
+        let mut errors = CompilerErrors::new();
+        errors.add(CompilerError::UnresolvedVariable {
+            var_name: "foo".to_string(),
+            namespace: "test".to_string(),
+            message: "unresolved foo".to_string(),
+            location: Some(loc(3, 5, 3, "/tmp/x.hot")),
+        });
+        errors.add_warning(CompilerError::DeprecatedUsage {
+            name: "old".to_string(),
+            note: None,
+            location: Some(loc(9, 1, 3, "/tmp/x.hot")),
+        });
+
+        let diags = errors.to_diagnostics();
+        assert_eq!(diags.len(), 2);
+        // Errors come first (severity 1), then warnings (severity 2).
+        assert_eq!(diags[0].severity, 1);
+        assert_eq!(diags[1].severity, 2);
+        assert!(!errors.is_empty(), "an error must make is_empty() false");
     }
 
     #[test]

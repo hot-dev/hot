@@ -36,6 +36,19 @@ $env:HOT_VERSION = "1.4.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading to Hot 2.2
+
+No code changes are required. Hot 2.2 is backward compatible — existing flow
+modifiers, `try-call`, and default error behavior keep working. The version bump
+does invalidate bytecode and AST cache entries from older versions; they rebuild
+automatically on first run.
+
+2.2 also adds newer, opt-in idioms you can adopt over time:
+
+- `All<Vec>` / `All<Map>` annotations for flow result shape — see [Flows](/docs/language/flows).
+- `OnErr.Force` / `OnErr.Preserve` disposition for map-shaped higher-order functions, defaulting to today's fail-fast behavior — see [Error Handling](/docs/language/errors).
+- `::hot::lang/try` for the rare case of containing a `fail()` / `cancel()` / runtime halt as a `Result`.
+
 ## Upgrading from Hot 1.x to Hot 2
 
 Hot 2 ships a clean baseline schema and does not migrate a Hot 1.x database in place. The public upgrade path covers local SQLite projects; Hot Cloud's v1→v2 data backfill lives in the private cloud repository.

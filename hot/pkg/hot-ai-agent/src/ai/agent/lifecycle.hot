@@ -73,18 +73,18 @@ meta {
 fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
     sessions ::runtime/list-registered-sessions(rt)
     map(sessions, (session) {
-        attempt ::hot::lang/try-call(handler, [session])
+        attempt ::hot::lang/try(handler, [session])
         cond {
-            attempt.ok => {
+            is-ok(attempt) => {
                 LifecycleJob({
                     session-id: session.id,
                     action: action,
                     ok: true,
-                    result: attempt.value,
+                    result: attempt.$val,
                     error: null,
                 })
             }
-            => { job-error(rt, session, action, attempt.error) }
+            => { job-error(rt, session, action, attempt.$val) }
         }
     })
 }

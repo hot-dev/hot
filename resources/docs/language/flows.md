@@ -271,16 +271,23 @@ Use `match-all` when you want **all** matching patterns to execute:
 
 {{result:flows#match-all-describe-traits}}
 
-### Result Modifiers for Match
+### Match Result Shape
 
-Like other flows, match supports result modifiers:
+Like other flows, match supports `All` annotations to collect branch results.
+Use plain return types for single values and `All<Vec>` / `All<Map>` for
+collected results.
+
+Bare `All` is allowed only where the language already has a natural collect-all
+default: `parallel`, `cond-all`, and `match-all`. On `serial`, `pipe`, `cond`,
+and `match`, use explicit `All<Vec>` or `All<Map>` to make the collection shape
+clear.
 
 ```hot
-// match defaults to |one (first match)
-// match-all defaults to |map (keyed by branch)
+// match defaults to one winning result
+// match-all defaults to All<Map> (keyed by branch)
 
 // Get results as vector
-traits match-all|vec creature {
+traits: All<Vec> match-all creature {
   Trait.Flying => "flies"
   Trait.Swimming => "swims"
 }
@@ -357,36 +364,55 @@ process fn (data: Map): Result {
 }
 ```
 
-## Result Modifiers
+## Flow Result Shape
 
-Result modifiers control how a flow collects its results. Append them to any flow with `|`:
+Flow result shape controls whether a flow returns its single produced value or
+all produced values. Use a plain type annotation for the single value case and
+`All<Vec>` / `All<Map>` when you want a collected result:
 
-| Modifier | Description |
-|----------|-------------|
-| `\|one` | Return the last/winning value |
-| `\|vec` | Return all results as a vector |
-| `\|map` | Return all results as a map (keyed by variable/branch name) |
+```hot
+// Single value (the default for serial, cond, match, and pipe)
+result: Int serial {
+  a 1
+  b 2
+}
 
-### Default Result Modifiers
+// All values as a vector
+values: All<Vec> serial {
+  a 1
+  b 2
+}
+
+// All values as a map keyed by branch or variable name
+data: All<Map> parallel {
+  user ::api/get-user(id)
+  orders ::api/get-orders(id)
+}
+```
+
+Bare `All` is accepted only on natural collect-all flows (`parallel`,
+`cond-all`, and `match-all`). Use `All<Vec>` or `All<Map>` on other flows.
+
+### Default Flow Shapes
 
 Each flow type has a sensible default:
 
 | Flow | Default | Behavior |
 |------|---------|----------|
-| `serial` | `\|one` | Returns the last expression's value |
-| `parallel` | `\|map` | Returns all results as a map keyed by variable name |
-| `cond` | `\|one` | Returns the matching branch's value |
-| `cond-all` | `\|map` | Returns all matching results as a map keyed by branch name |
-| `match` | `\|one` | Returns the matching arm's value |
-| `match-all` | `\|map` | Returns all matching results as a map keyed by pattern |
-| `\|>` (pipe) | `\|one` | Returns the final piped value |
+| `serial` | Single value | Returns the last expression's value |
+| `parallel` | `All<Map>` | Returns all results as a map keyed by variable name |
+| `cond` | Single value | Returns the matching branch's value |
+| `cond-all` | `All<Map>` | Returns all matching results as a map keyed by branch name |
+| `match` | Single value | Returns the matching arm's value |
+| `match-all` | `All<Map>` | Returns all matching results as a map keyed by pattern |
+| `\|>` (pipe) | Single value | Returns the final piped value |
 
-### Explicit Result Modifiers
+### Explicit Result Shapes
 
 Override the default when you need different results:
 
 ```hot
-// Parallel defaults to |map
+// Parallel defaults to All<Map>
 data parallel {
   user ::api/get-user(id)
   orders ::api/get-orders(id)
@@ -394,23 +420,22 @@ data parallel {
 }
 // => {user: ..., orders: ..., prefs: ...}
 
-// Parallel with |one - get only the last result
-last-value parallel|one {
-  a fetch-a()
-  b fetch-b()
-  c fetch-c()
+// Bare All is accepted on collect-all flows and keeps the natural map shape
+data: All parallel {
+  user ::api/get-user(id)
+  orders ::api/get-orders(id)
 }
-// => <c-result>
+// => {user: ..., orders: ...}
 
-// Parallel with |vec - get results as a vector
-values parallel|vec {
+// Parallel with All<Vec> - get results as a vector
+values: All<Vec> parallel {
   a fetch-a()
   b fetch-b()
   c fetch-c()
 }
 // => [<a-result>, <b-result>, <c-result>]
 
-// cond-all defaults to |map
+// cond-all defaults to All<Map>
 results cond-all {
   check-a() => a { "A passed" }
   check-b() => b { "B passed" }
@@ -418,16 +443,16 @@ results cond-all {
 }
 // => {a: "A passed", c: "C passed"} (if A and C pass)
 
-// cond-all with |vec - collect as vector (no branch names)
-discounts cond-all|vec {
+// cond-all with All<Vec> - collect as vector (no branch names)
+discounts: All<Vec> cond-all {
   is-member => { "10% off" }
   gt(total, 100) => { "Free shipping" }
   has-coupon => { "Coupon applied" }
 }
 // => ["10% off", "Free shipping"] (if member with $150 order, no coupon)
 
-// Pipe with |vec - collect all intermediate values
-steps 5 |> add(2) |> mul(3) |vec
+// Pipe with All<Vec> - collect all intermediate values
+steps: All<Vec> 5 |> add(2) |> mul(3)
 // => [5, 7, 21]
 ```
 

@@ -959,6 +959,9 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
             if role.execution != HofExecution::Sequential {
                 continue; // never fuse pmap / parallel
             }
+            if !hof_arity_is_fusible(role.stage, *args_count) {
+                continue;
+            }
             // input collection comes from args_start; lambda from args_start+1;
             // reduce initial from args_start+2.
             let input_reg = match trace_move_src(instrs, ip, *args_start) {
@@ -1105,6 +1108,19 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
     }
 
     plans
+}
+
+fn hof_arity_is_fusible(stage: HofStage, args_count: u8) -> bool {
+    match stage {
+        // Do not fuse the new 3-arg `map(..., OnErr.*)` form yet. The fused
+        // scalar runner is pure and safely de-opts on produced Result.Err, but
+        // it does not preserve the user's explicit disposition as part of the
+        // plan. Keeping those calls on the interpreter path avoids silently
+        // ignoring the third argument.
+        HofStage::Map | HofStage::Filter | HofStage::Some | HofStage::All => args_count == 2,
+        HofStage::Reduce => args_count == 3,
+        HofStage::Length => args_count == 1,
+    }
 }
 
 fn trace_range_source(
@@ -2114,6 +2130,30 @@ f fn (n: Int): Int {
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Int(220))
+        );
+    }
+
+    #[test]
+    fn does_not_detect_map_with_onerr_disposition() {
+        let prog = compile(
+            r#"::t ns
+f fn (): Int {
+    map([1, 2, 3], (x) { mul(x, 2) }, OnErr.Preserve)
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plans = detect_pipelines(&func.instructions, &prog);
+        assert!(
+            plans
+                .iter()
+                .all(|plan| plan.stages.iter().all(|stage| stage.stage != HofStage::Map)),
+            "map with explicit OnErr disposition must stay on interpreter path; plans={plans:#?}"
         );
     }
 

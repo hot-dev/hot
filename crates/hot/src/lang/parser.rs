@@ -1177,12 +1177,14 @@ impl Parser {
         }
 
         // Check for type annotation: var : Type
-        if let Some(token) = self.peek()
+        let type_annotation = if let Some(token) = self.peek()
             && matches!(token.token_type, TokenType::Colon)
         {
             self.next(); // consume colon
-            let _type_expr = self.parse_type_ref()?; // Parse complex type annotations
-        }
+            Some(self.parse_type_ref()?) // Parse complex type annotations
+        } else {
+            None
+        };
 
         // Check for type definition: var type ...
         if let Some(token) = self.peek()
@@ -1435,6 +1437,7 @@ impl Parser {
         if self.peek().is_some() {
             tracing::trace!("Parsing value for variable '{}'", var.sym.name());
             let value = self.parse_value()?;
+            let value = self.apply_all_annotation_to_value(value, type_annotation.as_ref())?;
             tracing::trace!("Parsed value for '{}': {:?}", var.sym.name(), value);
 
             // Trailing meta: `name value meta {...}`. Mirrors the
@@ -1569,6 +1572,143 @@ impl Parser {
         }
 
         Ok(Value::Fn(definitions))
+    }
+
+    fn apply_all_annotation_to_value(
+        &mut self,
+        mut value: Value,
+        type_annotation: Option<&TypeExpr>,
+    ) -> ParseResult<Value> {
+        let Some(type_annotation) = type_annotation else {
+            return Ok(value);
+        };
+        if !Self::is_all_annotation(type_annotation) {
+            return Ok(value);
+        }
+
+        if !matches!(value, Value::Flow(_) | Value::Match(_)) {
+            return Ok(value);
+        }
+
+        let modifier = self.all_annotation_modifier(type_annotation, &value)?;
+        match &mut value {
+            Value::Flow(flow) => {
+                Self::set_all_result_modifier(&mut flow.result_modifier, modifier)?;
+            }
+            Value::Match(match_expr) => {
+                Self::set_all_result_modifier(&mut match_expr.result_modifier, modifier)?;
+            }
+            // Non-flow uses of `All` are ordinary type annotations. For example,
+            // `tagged: All All({value: [1]})` constructs the real marker value.
+            _ => {}
+        }
+
+        Ok(value)
+    }
+
+    fn all_annotation_modifier(
+        &mut self,
+        type_annotation: &TypeExpr,
+        value: &Value,
+    ) -> ParseResult<ResultModifier> {
+        match type_annotation {
+            TypeExpr::Named(name) if Self::is_all_type_name(name) => {
+                self.bare_all_modifier_for_value(value)
+            }
+            TypeExpr::Generic(name, params) if Self::is_all_type_name(name) => {
+                if params.len() != 1 {
+                    return Err(self.error("All flow annotations expect exactly one type argument"));
+                }
+                match &params[0] {
+                    TypeExpr::Builtin(BuiltinType::Map) => Ok(ResultModifier::Map),
+                    TypeExpr::Builtin(BuiltinType::Vec) => Ok(ResultModifier::Vec),
+                    TypeExpr::Named(name) if name == "Map" || name.ends_with("/Map") => {
+                        Ok(ResultModifier::Map)
+                    }
+                    TypeExpr::Named(name) if name == "Vec" || name.ends_with("/Vec") => {
+                        Ok(ResultModifier::Vec)
+                    }
+                    other => Err(self.error(&format!(
+                        "All flow annotations support Map or Vec containers, got All<{}>",
+                        other
+                    ))),
+                }
+            }
+            _ => self.bare_all_modifier_for_value(value),
+        }
+    }
+
+    fn is_all_annotation(type_annotation: &TypeExpr) -> bool {
+        match type_annotation {
+            TypeExpr::Named(name) => Self::is_all_type_name(name),
+            TypeExpr::Generic(name, _) => Self::is_all_type_name(name),
+            _ => false,
+        }
+    }
+
+    fn is_all_type_name(name: &str) -> bool {
+        name == "All" || name.ends_with("/All")
+    }
+
+    fn bare_all_modifier_for_value(&mut self, value: &Value) -> ParseResult<ResultModifier> {
+        match value {
+            Value::Flow(flow) => match flow.flow_type {
+                FlowType::Parallel
+                | FlowType::ParallelShort
+                | FlowType::CondAll
+                | FlowType::CondAllShort
+                | FlowType::MatchAll
+                | FlowType::MatchAllShort => Ok(ResultModifier::Map),
+                FlowType::Serial
+                | FlowType::SerialShort
+                | FlowType::Pipe
+                | FlowType::Cond
+                | FlowType::CondShort
+                | FlowType::Match
+                | FlowType::MatchShort => Err(self.error(
+                    "Bare All annotations are only allowed on collect-all flows (parallel, cond-all, match-all); use All<Vec> or All<Map> here",
+                )),
+            },
+            Value::Match(match_expr) if match_expr.match_all => Ok(ResultModifier::Map),
+            Value::Match(_) => Err(self.error(
+                "Bare All annotations are only allowed on collect-all flows (parallel, cond-all, match-all); use All<Vec> or All<Map> here",
+            )),
+            _ => Ok(ResultModifier::Vec),
+        }
+    }
+
+    fn set_all_result_modifier(
+        current: &mut Option<ResultModifier>,
+        next: ResultModifier,
+    ) -> ParseResult<()> {
+        if let Some(existing) = current
+            && existing != &next
+        {
+            return Err(ParseError {
+                message: format!(
+                    "All annotation conflicts with existing deprecated |{} result modifier; remove the modifier or change the All<...> container",
+                    Self::result_modifier_name(existing)
+                ),
+                location: ErrorLocation {
+                    line: 1,
+                    column: 1,
+                    position: 0,
+                    length: 1,
+                    file: None,
+                },
+                source_context: None,
+            });
+        }
+        *current = Some(next);
+        Ok(())
+    }
+
+    fn result_modifier_name(modifier: &ResultModifier) -> &'static str {
+        match modifier {
+            ResultModifier::Map => "map",
+            ResultModifier::Vec => "vec",
+            ResultModifier::One => "one",
+        }
     }
 
     /// Parse single function definition with specific flow type
@@ -1709,10 +1849,10 @@ impl Parser {
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType
-        let return_type = if self.check(&TokenType::Colon) {
+        let return_type_expr = if self.check(&TokenType::Colon) {
             self.next(); // consume colon
             let type_expr = self.parse_type_ref()?;
-            Some(type_expr.to_string())
+            Some(type_expr)
         } else {
             None
         };
@@ -1732,6 +1872,8 @@ impl Parser {
                 aliases: vec![],
             })
         };
+        let body = self.apply_all_annotation_to_value(body, return_type_expr.as_ref())?;
+        let return_type = return_type_expr.map(|type_expr| type_expr.to_string());
 
         Ok(FnDef {
             args: FnArgs { args, variadic },
@@ -2464,10 +2606,10 @@ impl Parser {
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType
-        let return_type = if self.check(&TokenType::Colon) {
+        let return_type_expr = if self.check(&TokenType::Colon) {
             self.next(); // consume colon
             let type_expr = self.parse_type_ref()?;
-            Some(type_expr.to_string())
+            Some(type_expr)
         } else {
             None
         };
@@ -2480,6 +2622,8 @@ impl Parser {
             // Simple expression as function body
             self.parse_value()?
         };
+        let body = self.apply_all_annotation_to_value(body, return_type_expr.as_ref())?;
+        let return_type = return_type_expr.map(|type_expr| type_expr.to_string());
 
         Ok(FnDef {
             args: FnArgs { args, variadic },
