@@ -20,8 +20,8 @@ meta {
     """
 }
 type {
-    $msg: Str,
-    $err: Any
+    msg: Str,
+    err: Any
 }
 
 Cancellation
@@ -37,8 +37,8 @@ meta {
     """
 }
 type {
-    $msg: Str,
-    $data: Any
+    msg: Str,
+    data: Any
 }
 
 TaskInfo

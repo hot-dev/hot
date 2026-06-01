@@ -297,8 +297,8 @@ impl TaskShutdownCoordinator {
         let error = serde_json::json!({
             "$type": "::hot::task/Failure",
             "$val": {
-                "$msg": SHUTDOWN_REASON,
-                "$err": null,
+                "msg": SHUTDOWN_REASON,
+                "err": null,
                 "infra_interrupted": true,
             }
         });

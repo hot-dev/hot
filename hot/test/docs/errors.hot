@@ -64,10 +64,7 @@ record-error fn (label: Str, detail: Any): Str {
 
 // @doc: try-contain-halt
 attempt ::hot::lang/try(() { run-one-session(session) })
-outcome cond {
-  is-err(attempt) => { record-error("session", attempt.$val) }
-  => { attempt.$val }
-}
+outcome if-err(attempt, (failure) { record-error("session", failure) })
 // @end: try-contain-halt
 
 
@@ -82,8 +79,10 @@ meta ["test"] fn () {
   failure err("Not found")
   assert(is-ok(success), "success is ok")
   assert(is-err(failure), "failure is err")
-  assert-eq(42, success.$val, "success value is 42")
-  assert-eq("Not found", failure.$val, "failure message")
+  success-value success
+  failure-value if-err(failure, (error) { error })
+  assert-eq(42, success-value, "success value is 42")
+  assert-eq("Not found", failure-value, "failure message")
 }
 
 test-safe-divide
@@ -99,9 +98,8 @@ test-safe-divide-usage
 meta ["test"] fn () {
   // Test the safe-divide with is-ok check
   result safe-divide(10, 0)
-  check-result if(is-ok(result),
-    `Result: ${result.$val}`,
-    "Cannot divide by zero")
+  check-result if-ok(result, (value) { `Result: ${value}` })
+  check-result if-err(check-result, "Cannot divide by zero")
   assert-eq("Cannot divide by zero", check-result, "check handles error case")
 }
 

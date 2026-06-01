@@ -228,11 +228,24 @@ fn () {
         tools: [::tool/from-fn(add-fn)],
         max-iterations: 3
     })
-    // `run-loop` halts via `fail(...)` when max-iterations is exceeded;
-    // try captures that halt so the test can inspect it.
+    // `try` keeps this test from aborting if the loop halts, while the
+    // nested match also handles a domain Err returned by the run loop.
     attempt ::hot::lang/try(::chat/run-loop, [opts, "loop forever"])
-    assert(is-err(attempt), `expected halt, got ${Str(attempt)}`)
-    assert(contains(attempt.$val.$msg, "max-iterations"), "error mentions max-iterations")
+    match attempt {
+        Result.Err => {
+            assert(contains(attempt.msg, "max-iterations"), "error mentions max-iterations")
+        }
+
+        Result.Ok => {
+            match attempt {
+                Result.Err => {
+                    assert(contains(attempt.msg, "max-iterations"), "error mentions max-iterations")
+                }
+
+                _ => { assert(false, "expected max-iterations failure") }
+            }
+        }
+    }
 }
 
 test-run-loop-tool-error-recovery
@@ -606,7 +619,21 @@ fn () {
     })
     // Budget overflow halts via `fail(...)`; try captures the halt.
     attempt ::hot::lang/try(::chat/run-loop, [opts, "anything"])
-    assert(is-err(attempt), `expected halt, got ${Str(attempt)}`)
+    match attempt {
+        Result.Err => {
+            assert(contains(attempt.msg, "context limit"), "error mentions context limit")
+        }
+
+        Result.Ok => {
+            match attempt {
+                Result.Err => {
+                    assert(contains(attempt.msg, "context limit"), "error mentions context limit")
+                }
+
+                _ => { assert(false, "expected budget failure") }
+            }
+        }
+    }
 }
 
 test-budget-passes-when-under-limit
@@ -644,7 +671,21 @@ fn () {
         count-tokens-fn: mock-counter-large
     })
     attempt ::hot::lang/try(::chat/run-loop-stream, [opts, "anything"])
-    assert(is-err(attempt), `expected halt, got ${Str(attempt)}`)
+    match attempt {
+        Result.Err => {
+            assert(contains(attempt.msg, "context limit"), "error mentions context limit")
+        }
+
+        Result.Ok => {
+            match attempt {
+                Result.Err => {
+                    assert(contains(attempt.msg, "context limit"), "error mentions context limit")
+                }
+
+                _ => { assert(false, "expected stream budget failure") }
+            }
+        }
+    }
 }
 
 test-message-helpers

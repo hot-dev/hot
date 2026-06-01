@@ -30,7 +30,8 @@ test-call-forces-domain-err-by-default
 meta ["test"] fn () {
     attempt ::hot::lang/try(() { call(maybe-domain-err-for-call, [2]) })
     assert(is-err(attempt))
-    assert(contains(Str(attempt.$val), "call domain err"))
+    failure if-err(attempt, (failure) { failure })
+    assert(contains(Str(failure), "call domain err"))
 }
 
 test-call-preserves-domain-err-with-onerr-preserve

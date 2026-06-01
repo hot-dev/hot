@@ -1222,7 +1222,7 @@ impl VirtualMachine {
         match &execution_result {
             Ok(result_val) => {
                 // Check if VM has failed or cancelled (e.g., via fail()/cancel() functions) even though execution returned Ok
-                // This happens because HotResult::Err from hotlib functions gets wrapped in Ok(Result{$err: ...})
+                // This happens because HotResult::Err from hotlib functions gets wrapped in Ok(Result{err: ...})
                 if self.has_failed() {
                     if let (Some(failure_state), Some(emitter), Some(execution_context)) =
                         (self.get_failure(), &self.emitter, &self.execution_context)
@@ -1231,8 +1231,8 @@ impl VirtualMachine {
                             failure_state.data
                         } else {
                             crate::val!({
-                                "$msg": failure_state.msg,
-                                "$err": failure_state.data
+                                "msg": failure_state.msg,
+                                "err": failure_state.data
                             })
                         };
                         let event =
@@ -1279,29 +1279,29 @@ impl VirtualMachine {
                             let failure = if let Some(err_val) = result_val.unwrap_err() {
                                 if is_terminal_payload(err_val) {
                                     err_val.clone()
-                                // Check if err_val already has $msg/$err structure
+                                // Check if err_val already has terminal Failure structure
                                 } else if let Val::Map(m) = err_val {
-                                    if m.contains_key(&Val::from("$msg"))
-                                        || m.contains_key(&Val::from("$err"))
+                                    if m.contains_key(&Val::from("msg"))
+                                        || m.contains_key(&Val::from("err"))
                                     {
                                         err_val.clone()
                                     } else {
                                         // Wrap in failure format
                                         crate::val!({
-                                            "$msg": format!("{}", err_val),
-                                            "$err": err_val.clone()
+                                            "msg": format!("{}", err_val),
+                                            "err": err_val.clone()
                                         })
                                     }
                                 } else {
                                     crate::val!({
-                                        "$msg": format!("{}", err_val),
-                                        "$err": err_val.clone()
+                                        "msg": format!("{}", err_val),
+                                        "err": err_val.clone()
                                     })
                                 }
                             } else {
                                 crate::val!({
-                                    "$msg": "Unknown error",
-                                    "$err": result_val.clone()
+                                    "msg": "Unknown error",
+                                    "err": result_val.clone()
                                 })
                             };
                             let event = crate::lang::emitter::EngineEvent::run_fail(
@@ -1361,8 +1361,8 @@ impl VirtualMachine {
                             failure_state.data
                         } else {
                             crate::val!({
-                                "$msg": failure_state.msg,
-                                "$err": failure_state.data
+                                "msg": failure_state.msg,
+                                "err": failure_state.data
                             })
                         };
                         let event =
@@ -1385,8 +1385,8 @@ impl VirtualMachine {
                     (&self.emitter, &self.execution_context)
                 {
                     let failure = crate::val!({
-                        "$msg": e.to_string(),
-                        "$err": crate::val!({"error": e.to_string()})
+                        "msg": e.to_string(),
+                        "err": crate::val!({"error": e.to_string()})
                     });
                     let event =
                         crate::lang::emitter::EngineEvent::run_fail(execution_context, failure);
@@ -4868,7 +4868,7 @@ impl VirtualMachine {
                 let msg = match &err_val {
                     Val::Str(s) => (**s).to_owned(),
                     Val::Map(err_map) => err_map
-                        .get(&Val::from("$msg"))
+                        .get(&Val::from("msg"))
                         .and_then(|v| match v {
                             Val::Str(s) => Some((**s).to_owned()),
                             _ => None,

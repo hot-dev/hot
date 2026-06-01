@@ -9,9 +9,12 @@ SUPABASE_TEST_TABLE ::hot::env/get("SUPABASE_TEST_TABLE", "hot-integration-test"
 ok-body fn (lazy response: Any, label: Str): Any {
   attempt ::hot::lang/try(() { do response })
   cond {
-    is-err(attempt) => { fail(`${label} transport failed: ${attempt.$val.$msg}`) }
+    is-err(attempt) => {
+      failure if-err(attempt, (failure) { failure })
+      fail(`${label} transport failed: ${failure.msg}`)
+    }
     => {
-      resolved attempt.$val
+      resolved attempt
       cond {
         gte(resolved.status, 400) => {
           fail(`${label} failed with status ${resolved.status}: ${to-json(resolved.body)}`)

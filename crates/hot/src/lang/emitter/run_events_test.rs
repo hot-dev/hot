@@ -209,8 +209,8 @@ mod tests {
                     "instruction_pointer": 42,
                 },
                 "$val": {
-                    "$msg": "boom",
-                    "$err": {"reason": "test"},
+                    "msg": "boom",
+                    "err": {"reason": "test"},
                 },
             }),
         );
@@ -247,8 +247,8 @@ mod tests {
         let fail_event = EngineEvent::run_fail(
             &execution_context,
             crate::val!({
-                "$msg": "domain",
-                "$err": "domain",
+                "msg": "domain",
+                "err": "domain",
             }),
         );
 

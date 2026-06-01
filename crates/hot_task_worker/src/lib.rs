@@ -906,8 +906,8 @@ async fn reap_zombie_tasks(
         let error = serde_json::json!({
             "$type": "::hot::task/Failure",
             "$val": {
-                "$msg": "Task interrupted by worker crash (zombie reaper)",
-                "$err": null
+                "msg": "Task interrupted by worker crash (zombie reaper)",
+                "err": null
             }
         });
 
@@ -2807,8 +2807,8 @@ fn task_failure_json(msg: &str, err: Option<serde_json::Value>) -> serde_json::V
     serde_json::json!({
         "$type": "::hot::task/Failure",
         "$val": {
-            "$msg": msg,
-            "$err": err.unwrap_or(serde_json::Value::Null)
+            "msg": msg,
+            "err": err.unwrap_or(serde_json::Value::Null)
         }
     })
 }
@@ -2818,8 +2818,8 @@ fn task_cancellation_json(msg: &str, data: Option<serde_json::Value>) -> serde_j
     serde_json::json!({
         "$type": "::hot::task/Cancellation",
         "$val": {
-            "$msg": msg,
-            "$data": data.unwrap_or(serde_json::Value::Null)
+            "msg": msg,
+            "data": data.unwrap_or(serde_json::Value::Null)
         }
     })
 }
@@ -2975,7 +2975,7 @@ async fn complete_task_with_event(
                 event_id: None,
                 error: result
                     .and_then(|v| v.get("$val"))
-                    .and_then(|v| v.get("$msg"))
+                    .and_then(|v| v.get("msg"))
                     .and_then(|v| v.as_str())
                     .map(String::from),
             }
@@ -4349,8 +4349,8 @@ mod tests {
     fn test_task_failure_json_simple() {
         let result = task_failure_json("something broke", None);
         assert_eq!(result["$type"], "::hot::task/Failure");
-        assert_eq!(result["$val"]["$msg"], "something broke");
-        assert!(result["$val"]["$err"].is_null());
+        assert_eq!(result["$val"]["msg"], "something broke");
+        assert!(result["$val"]["err"].is_null());
     }
 
     #[test]
@@ -4358,17 +4358,17 @@ mod tests {
         let details = serde_json::json!({"exit-code": 1, "stderr": "segfault"});
         let result = task_failure_json("container crashed", Some(details.clone()));
         assert_eq!(result["$type"], "::hot::task/Failure");
-        assert_eq!(result["$val"]["$msg"], "container crashed");
-        assert_eq!(result["$val"]["$err"]["exit-code"], 1);
-        assert_eq!(result["$val"]["$err"]["stderr"], "segfault");
+        assert_eq!(result["$val"]["msg"], "container crashed");
+        assert_eq!(result["$val"]["err"]["exit-code"], 1);
+        assert_eq!(result["$val"]["err"]["stderr"], "segfault");
     }
 
     #[test]
     fn test_task_cancellation_json_simple() {
         let result = task_cancellation_json("user cancelled", None);
         assert_eq!(result["$type"], "::hot::task/Cancellation");
-        assert_eq!(result["$val"]["$msg"], "user cancelled");
-        assert!(result["$val"]["$data"].is_null());
+        assert_eq!(result["$val"]["msg"], "user cancelled");
+        assert!(result["$val"]["data"].is_null());
     }
 
     #[test]
@@ -4376,32 +4376,32 @@ mod tests {
         let data = serde_json::json!({"reason": "timeout", "elapsed_ms": 30000});
         let result = task_cancellation_json("task timed out", Some(data));
         assert_eq!(result["$type"], "::hot::task/Cancellation");
-        assert_eq!(result["$val"]["$msg"], "task timed out");
-        assert_eq!(result["$val"]["$data"]["reason"], "timeout");
+        assert_eq!(result["$val"]["msg"], "task timed out");
+        assert_eq!(result["$val"]["data"]["reason"], "timeout");
     }
 
     #[test]
     fn test_normalize_val_to_task_failure_already_typed() {
         let typed_val: Val = serde_json::from_value(serde_json::json!({
             "$type": "::hot::run/Failure",
-            "$val": {"$msg": "run error", "$err": null}
+            "$val": {"msg": "run error", "err": null}
         }))
         .unwrap();
         let result = normalize_val_to_task_failure(&typed_val);
         assert_eq!(result["$type"], "::hot::run/Failure");
-        assert_eq!(result["$val"]["$msg"], "run error");
+        assert_eq!(result["$val"]["msg"], "run error");
     }
 
     #[test]
     fn test_normalize_val_to_task_failure_task_typed() {
         let typed_val: Val = serde_json::from_value(serde_json::json!({
             "$type": "::hot::task/Failure",
-            "$val": {"$msg": "task error", "$err": {"detail": "x"}}
+            "$val": {"msg": "task error", "err": {"detail": "x"}}
         }))
         .unwrap();
         let result = normalize_val_to_task_failure(&typed_val);
         assert_eq!(result["$type"], "::hot::task/Failure");
-        assert_eq!(result["$val"]["$err"]["detail"], "x");
+        assert_eq!(result["$val"]["err"]["detail"], "x");
     }
 
     #[test]
@@ -4409,7 +4409,7 @@ mod tests {
         let bare_val = Val::from("connection refused");
         let result = normalize_val_to_task_failure(&bare_val);
         assert_eq!(result["$type"], "::hot::task/Failure");
-        assert_eq!(result["$val"]["$msg"], "connection refused");
+        assert_eq!(result["$val"]["msg"], "connection refused");
     }
 
     #[test]
@@ -4419,8 +4419,8 @@ mod tests {
                 .unwrap();
         let result = normalize_val_to_task_failure(&bare_val);
         assert_eq!(result["$type"], "::hot::task/Failure");
-        assert_eq!(result["$val"]["$msg"], "Task failed");
-        assert_eq!(result["$val"]["$err"]["code"], 500);
+        assert_eq!(result["$val"]["msg"], "Task failed");
+        assert_eq!(result["$val"]["err"]["code"], 500);
     }
 
     #[test]
@@ -4428,14 +4428,14 @@ mod tests {
         let null_val = Val::Null;
         let result = normalize_val_to_task_failure(&null_val);
         assert_eq!(result["$type"], "::hot::task/Failure");
-        assert_eq!(result["$val"]["$msg"], "Task failed");
+        assert_eq!(result["$val"]["msg"], "Task failed");
     }
 
     #[test]
     fn test_classify_task_terminal_result_unwraps_result_err_failure() {
         let failure_val: Val = serde_json::from_value(serde_json::json!({
             "$type": "::hot::task/Failure",
-            "$val": {"$msg": "task error", "$err": {"detail": "x"}}
+            "$val": {"msg": "task error", "err": {"detail": "x"}}
         }))
         .unwrap();
         let result_err = Val::err(failure_val);
@@ -4446,14 +4446,14 @@ mod tests {
         assert_eq!(status, TaskStatus::Failed);
         assert_eq!(alert, "task:failed");
         assert_eq!(json["$type"], "::hot::task/Failure");
-        assert_eq!(json["$val"]["$err"]["detail"], "x");
+        assert_eq!(json["$val"]["err"]["detail"], "x");
     }
 
     #[test]
     fn test_classify_task_terminal_result_unwraps_result_err_cancellation() {
         let cancellation_val: Val = serde_json::from_value(serde_json::json!({
             "$type": "::hot::task/Cancellation",
-            "$val": {"$msg": "stopped", "$data": {"reason": "user"}}
+            "$val": {"msg": "stopped", "data": {"reason": "user"}}
         }))
         .unwrap();
         let result_err = Val::err(cancellation_val);
@@ -4464,14 +4464,14 @@ mod tests {
         assert_eq!(status, TaskStatus::Cancelled);
         assert_eq!(alert, "task:cancelled");
         assert_eq!(json["$type"], "::hot::task/Cancellation");
-        assert_eq!(json["$val"]["$data"]["reason"], "user");
+        assert_eq!(json["$val"]["data"]["reason"], "user");
     }
 
     #[test]
     fn test_classify_task_terminal_result_direct_failure() {
         let failure_val: Val = serde_json::from_value(serde_json::json!({
             "$type": "::hot::task/Failure",
-            "$val": {"$msg": "panic", "$err": {"panic": true}}
+            "$val": {"msg": "panic", "err": {"panic": true}}
         }))
         .unwrap();
 
@@ -4481,7 +4481,7 @@ mod tests {
         assert_eq!(status, TaskStatus::Failed);
         assert_eq!(alert, "task:failed");
         assert_eq!(json["$type"], "::hot::task/Failure");
-        assert_eq!(json["$val"]["$err"]["panic"], true);
+        assert_eq!(json["$val"]["err"]["panic"], true);
     }
 
     #[test]

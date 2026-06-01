@@ -686,28 +686,28 @@ impl Engine {
                     {
                         // Extract the error value from Result.Err
                         let failure = if let Some(err_val) = result_val.unwrap_err() {
-                            // Check if err_val already has $msg/$err structure
+                            // Check if err_val already has terminal Failure structure
                             if let crate::val::Val::Map(m) = err_val {
-                                if m.contains_key(&crate::val::Val::from("$msg"))
-                                    || m.contains_key(&crate::val::Val::from("$err"))
+                                if m.contains_key(&crate::val::Val::from("msg"))
+                                    || m.contains_key(&crate::val::Val::from("err"))
                                 {
                                     err_val.clone()
                                 } else {
                                     crate::val!({
-                                        "$msg": format!("{}", err_val),
-                                        "$err": err_val.clone()
+                                        "msg": format!("{}", err_val),
+                                        "err": err_val.clone()
                                     })
                                 }
                             } else {
                                 crate::val!({
-                                    "$msg": format!("{}", err_val),
-                                    "$err": err_val.clone()
+                                    "msg": format!("{}", err_val),
+                                    "err": err_val.clone()
                                 })
                             }
                         } else {
                             crate::val!({
-                                "$msg": "Unknown error",
-                                "$err": result_val.clone()
+                                "msg": "Unknown error",
+                                "err": result_val.clone()
                             })
                         };
                         let event =
@@ -969,11 +969,11 @@ impl Engine {
                     {
                         let failure = if let Some(err_val) = result_val.unwrap_err() {
                             crate::val!({
-                                "$msg": format!("{}", err_val),
-                                "$err": err_val.clone()
+                                "msg": format!("{}", err_val),
+                                "err": err_val.clone()
                             })
                         } else {
-                            crate::val!({"$msg": "Unknown error"})
+                            crate::val!({"msg": "Unknown error"})
                         };
                         let fail_event =
                             crate::lang::emitter::EngineEvent::run_fail(execution_context, failure);

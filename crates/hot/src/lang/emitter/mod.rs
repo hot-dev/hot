@@ -219,18 +219,18 @@ fn payload_string_field(val: &Val, key: &str) -> Option<String> {
 }
 
 fn payload_msg(val: &Val) -> Option<String> {
-    payload_string_field(val, "$msg").or_else(|| payload_string_field(val, "msg"))
+    payload_string_field(val, "msg")
 }
 
 fn payload_err(val: &Val) -> Option<Val> {
-    map_get(payload_body(val), "$err")
-        .or_else(|| map_get(val, "$err"))
+    map_get(payload_body(val), "err")
+        .or_else(|| map_get(val, "err"))
         .cloned()
 }
 
 fn payload_data(val: &Val) -> Option<Val> {
-    map_get(payload_body(val), "$data")
-        .or_else(|| map_get(val, "$data"))
+    map_get(payload_body(val), "data")
+        .or_else(|| map_get(val, "data"))
         .cloned()
 }
 

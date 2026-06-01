@@ -127,7 +127,6 @@ pub fn fail(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 Val::Map(m) => m
                     .get(&Val::from("message"))
                     .or_else(|| m.get(&Val::from("msg")))
-                    .or_else(|| m.get(&Val::from("$msg")))
                     .and_then(|v| match v {
                         Val::Str(s) => Some((**s).to_owned()),
                         _ => None,
@@ -166,8 +165,8 @@ pub fn fail(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         "$type": type_name,
         "$origin": origin,
         "$val": {
-            "$msg": msg.clone(),
-            "$err": err.clone()
+            "msg": msg.clone(),
+            "err": err.clone()
         }
     });
 
@@ -220,8 +219,8 @@ pub fn cancel(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
         "$type": type_name,
         "$origin": origin,
         "$val": {
-            "$msg": msg.clone(),
-            "$data": data.clone()
+            "msg": msg.clone(),
+            "data": data.clone()
         }
     });
 

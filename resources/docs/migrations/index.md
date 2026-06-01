@@ -17,7 +17,7 @@ hot update
 If your installed `hot` supports pinned updates, install a specific Hot version:
 
 ```bash
-hot update --version 1.4.0
+hot update --version 2.3.0
 ```
 
 For older `hot` binaries that do not support `hot update --version`, use the hosted installer script instead.
@@ -25,16 +25,26 @@ For older `hot` binaries that do not support `hot update --version`, use the hos
 macOS / Linux:
 
 ```bash
-curl -fsSL https://get.hot.dev/install.sh | sh -s -- --version 1.4.0
+curl -fsSL https://get.hot.dev/install.sh | sh -s -- --version 2.3.0
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:HOT_VERSION = "1.4.0"; irm https://get.hot.dev/install.ps1 | iex
+$env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 ```
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
+
+## Upgrading to Hot 2.3
+
+Hot 2.3 includes a breaking cleanup to the public `Failure` and `Cancellation`
+payload fields. Replace direct field access as follows:
+
+- `failure.$msg` → `failure.msg`
+- `failure.$err` → `failure.err`
+- `cancellation.$msg` → `cancellation.msg`
+- `cancellation.$data` → `cancellation.data`
 
 ## Upgrading to Hot 2.2
 

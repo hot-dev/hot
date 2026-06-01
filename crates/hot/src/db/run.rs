@@ -1839,12 +1839,12 @@ impl Run {
         error_message: &str,
     ) -> Result<(), RunError> {
         let stop_time = Utc::now();
-        // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {$msg: ..., $err: ...}}
+        // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {msg: ..., err: ...}}
         let result_val = serde_json::json!({
             "$type": "::hot::run/Failure",
             "$val": {
-                "$msg": error_message,
-                "$err": serde_json::Value::Null
+                "msg": error_message,
+                "err": serde_json::Value::Null
             }
         });
 
@@ -1918,12 +1918,12 @@ impl Run {
         error_message: &str,
     ) -> Result<u64, RunError> {
         let stop_time = Utc::now();
-        // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {$msg: ..., $err: ...}}
+        // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {msg: ..., err: ...}}
         let result_val = serde_json::json!({
             "$type": "::hot::run/Failure",
             "$val": {
-                "$msg": error_message,
-                "$err": serde_json::Value::Null
+                "msg": error_message,
+                "err": serde_json::Value::Null
             }
         });
 
@@ -1979,12 +1979,12 @@ impl Run {
         error_message: &str,
     ) -> Result<u64, RunError> {
         let stop_time = Utc::now();
-        // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {$msg: ..., $err: ...}}
+        // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {msg: ..., err: ...}}
         let result_val = serde_json::json!({
             "$type": "::hot::run/Failure",
             "$val": {
-                "$msg": error_message,
-                "$err": serde_json::Value::Null
+                "msg": error_message,
+                "err": serde_json::Value::Null
             }
         });
 
@@ -2049,8 +2049,8 @@ impl Run {
         let result_val = serde_json::json!({
             "$type": "::hot::run/Failure",
             "$val": {
-                "$msg": error_message,
-                "$err": serde_json::Value::Null,
+                "msg": error_message,
+                "err": serde_json::Value::Null,
             }
         });
 

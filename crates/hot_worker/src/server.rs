@@ -2850,7 +2850,7 @@ async fn execute_single_event_handler(
             // Extract cancellation reason from the Cancellation type if available
             let reason = result.unwrap_cancelled().and_then(|v| {
                 if let Val::Map(m) = v {
-                    m.get(&Val::from("$msg")).and_then(|msg| match msg {
+                    m.get(&Val::from("msg")).and_then(|msg| match msg {
                         Val::Str(s) => Some((**s).to_owned()),
                         _ => None,
                     })
@@ -2889,7 +2889,7 @@ async fn execute_single_event_handler(
         } else if is_cancelled_result {
             let reason = result.unwrap_cancelled().and_then(|v| {
                 if let Val::Map(m) = v {
-                    m.get(&Val::from("$msg")).and_then(|msg| match msg {
+                    m.get(&Val::from("msg")).and_then(|msg| match msg {
                         Val::Str(s) => Some((**s).to_owned()),
                         _ => None,
                     })

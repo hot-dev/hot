@@ -248,7 +248,7 @@ fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
                                     cond {
                                         is-err(ts-attempt) => { fail-result("timestamp-invalid") }
                                         => {
-                                            ts ts-attempt.$val
+                                            ts ts-attempt
                                             now div(::time/epoch-millis(::time/now()), 1000)
                                             delta ::math/abs(sub(now, ts))
                                             if(gt(delta, skew),
@@ -468,9 +468,9 @@ meta { doc: "Internal: dispatch a single `Verifier` against a request." }
 fn (request: Any, body: Str, verifier: Verifier): AuthResult {
     headers or(get(or(request, {}), "headers"), {})
     match verifier {
-        Verifier.Platform => { verify-platform(request, verifier.$val) }
-        Verifier.Hmac => { verify-hmac(headers, body, verifier.$val) }
-        Verifier.SharedSecret => { verify-shared-secret(headers, verifier.$val) }
+        Verifier.Platform => { verify-platform(request, verifier) }
+        Verifier.Hmac => { verify-hmac(headers, body, verifier) }
+        Verifier.SharedSecret => { verify-shared-secret(headers, verifier) }
         Verifier.Anonymous => { ok-result() }
     }
 }

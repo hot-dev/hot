@@ -814,8 +814,8 @@ impl Task {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let row: (Option<i64>, Option<i64>) = sqlx::query_as(
                     "SELECT COALESCE(SUM(CASE
-                        WHEN result->'$val'->'$err'->>'compute-units' IS NOT NULL
-                            THEN (result->'$val'->'$err'->>'compute-units')::bigint
+                        WHEN result->'$val'->'err'->>'compute-units' IS NOT NULL
+                            THEN (result->'$val'->'err'->>'compute-units')::bigint
                         WHEN result->>'compute-units' IS NOT NULL
                             THEN (result->>'compute-units')::bigint
                         ELSE 0
@@ -831,8 +831,8 @@ impl Task {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let row: (Option<i64>, Option<i64>) = sqlx::query_as(
                     "SELECT COALESCE(SUM(CASE
-                        WHEN json_extract(result, '$.\"$val\".\"$err\".\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"$val\".\"$err\".\"compute-units\"') AS INTEGER)
+                        WHEN json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') IS NOT NULL
+                            THEN CAST(json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') AS INTEGER)
                         WHEN json_extract(result, '$.\"compute-units\"') IS NOT NULL
                             THEN CAST(json_extract(result, '$.\"compute-units\"') AS INTEGER)
                         ELSE 0

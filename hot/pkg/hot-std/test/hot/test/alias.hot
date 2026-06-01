@@ -75,8 +75,10 @@ fn () {
     assert-eq("::hot::type/Result.Err", failure.$type, "Result.Err should create correct type")
 
     // Verify the values
-    assert-eq(42, success.$val, "Ok value should be accessible")
-    assert-eq("error message", failure.$val, "Err value should be accessible")
+    success-value success
+    failure-value if-err(failure, (error) { error })
+    assert-eq(42, success-value, "Ok value should be accessible")
+    assert-eq("error message", failure-value, "Err value should be accessible")
 }
 
 test-type-alias-in-match-namespace-level
@@ -194,7 +196,8 @@ fn () {
     final-result Result.Ok(upper-str)
 
     assert-eq("::hot::type/Result.Ok", final-result.$type, "Complex mixed aliases should work")
-    assert-eq("17", final-result.$val, "Complex calculation with aliases should be correct")
+    actual if-ok(final-result, (ok-value) { ok-value })
+    assert-eq("17", actual, "Complex calculation with aliases should be correct")
 }
 
 test-alias-chaining

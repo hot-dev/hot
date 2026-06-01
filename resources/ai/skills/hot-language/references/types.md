@@ -241,7 +241,7 @@ circle Shape.Circle({radius: 5.0})
 rect Shape.Rectangle({width: 10.0, height: 20.0})
 point Shape.Point
 
-// Access inner data (dot notation skips $val automatically)
+// Access fields on variant values
 circle.radius  // 5.0
 rect.width     // 10.0
 ```

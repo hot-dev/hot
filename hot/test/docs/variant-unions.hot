@@ -103,7 +103,7 @@ meta ["test"] fn () {
   result Result.OkVal({value: 42})
 
   check-variant(result, ".OkVal", "OkVal result should have $type ending with .OkVal")
-  assert-eq(42, result.$val.value, "OkVal result should have $val.value field")
+  assert-eq(42, result.value, "OkVal result should expose value field")
 }
 
 test-result-err
@@ -111,8 +111,8 @@ meta ["test"] fn () {
   result Result.ErrVal({message: "Something went wrong", code: 500})
 
   check-variant(result, ".ErrVal", "ErrVal result should have $type ending with .ErrVal")
-  assert-eq("Something went wrong", result.$val.message, "ErrVal result should have $val.message field")
-  assert-eq(500, result.$val.code, "ErrVal result should have $val.code field")
+  assert-eq("Something went wrong", result.message, "ErrVal result should expose message field")
+  assert-eq(500, result.code, "ErrVal result should expose code field")
 }
 
 
@@ -224,7 +224,7 @@ meta ["test"] fn () {
   // Test type-reference variant
   success LocalResult.Success({value: 42})
   check-variant(success, ".Success", "Local success should have $type ending with .Success")
-  assert-eq(42, success.$val.value, "Local success should have $val.value: 42")
+  assert-eq(42, success.value, "Local success should expose value: 42")
 }
 
 

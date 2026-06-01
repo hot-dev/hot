@@ -124,10 +124,8 @@ meta {
 
     ```hot
     result try-request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
-    cond {
-      is-err(result) => { println(`Network error: ${result.$val.$msg}`) }
-      => { handle-response(result.$val) }
-    }
+    if-err(result, (failure) { println(`Network error: ${failure.msg}`) })
+    if-ok(result, (response) { handle-response(response) })
     ```
     """
 }
