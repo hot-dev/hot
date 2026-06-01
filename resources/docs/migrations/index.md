@@ -1,3 +1,7 @@
+---
+description: "Upgrade Hot and move local SQLite databases from 1.x to 2 with hot update and hot db port-v1-to-v2."
+---
+
 # Migrations and Upgrades
 
 This guide covers upgrading an existing Hot project and database between Hot releases.

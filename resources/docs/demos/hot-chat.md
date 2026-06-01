@@ -1,3 +1,7 @@
+---
+description: "Run Hot Chat to explore personal and team AI agents, slash commands, memory, file attachments, and streaming replies."
+---
+
 # Hot Chat Demo
 
 Hot Chat is a complete, runnable demo of two AI agents and a polished web UI

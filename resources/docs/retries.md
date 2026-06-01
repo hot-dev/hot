@@ -1,3 +1,7 @@
+---
+description: "Configure retries for Hot handlers, schedules, webhooks, and workflows with attempts, delays, and failure behavior."
+---
+
 # Retries
 
 Hot supports automatic retries for:

@@ -1,3 +1,7 @@
+---
+description: "Use the Hot App dashboard to inspect projects, runs, events, traces, streams, logs, agents, and deployment state."
+---
+
 # Hot App
 
 The Hot App is a web-based management and observability platform for your Hot projects. It provides visibility into executions, events, and streams, along with project configuration and team management.

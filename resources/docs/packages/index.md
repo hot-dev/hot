@@ -1,3 +1,7 @@
+---
+description: "Create reusable Hot packages with namespaces, functions, types, metadata, documentation, and versioned distribution."
+---
+
 # Hot Package Creation
 
 Create reusable Hot packages to share code across projects and with the community.

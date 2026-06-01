@@ -1,3 +1,7 @@
+---
+description: "Automate hot check, hot test, and hot deploy in GitHub Actions and other CI with setup-hot."
+---
+
 # CI/CD
 
 Automate testing and deployment of your Hot projects in continuous integration pipelines.

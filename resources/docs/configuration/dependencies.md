@@ -1,3 +1,7 @@
+---
+description: "Declare project package dependencies in hot.hot using registry versions, Git repositories, and local paths."
+---
+
 # Dependencies
 
 Hot uses a flexible dependency system that supports local paths, Git repositories, and the Hot package registry.

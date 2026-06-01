@@ -1,3 +1,7 @@
+---
+description: "Set up alert channels, destinations, and subscriptions for run failures, deploy events, and custom Hot alert calls."
+---
+
 # Alerts
 
 The Alerts system helps you monitor your Hot applications by automatically notifying you when important events occur, such as run failures or deployment issues. Alerts use a pub/sub model with three key components: **channels**, **destinations**, and **subscriptions**.

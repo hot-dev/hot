@@ -1,3 +1,7 @@
+---
+description: "Use Hot flows for sequential logic, conditionals, matches, parallel work, and branch-based execution."
+---
+
 # Flows
 
 Flows control how expressions execute. They're one of Hot's most powerful features, enabling parallel execution, conditional branching, and data pipelines.

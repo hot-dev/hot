@@ -1,3 +1,7 @@
+---
+description: "REST API reference for Hot projects, builds, runs, events, streams, files, secrets, agents, MCP services, and API keys."
+---
+
 # HOT API
 
 The Hot API provides programmatic access to manage projects, builds, runs, events, and more.

@@ -1,3 +1,7 @@
+---
+description: "See how Hot persists runs and event chains, retries failed steps with the same input, and records execution history."
+---
+
 # Durable Execution
 
 Hot provides durable execution out of the box. Every function call is a persisted **run** with recorded inputs, outputs, and a full execution trace. Multi-step workflows are chains of **events** and runs — each step is independently tracked, retryable, and recoverable.

@@ -1,3 +1,7 @@
+---
+description: "Configure a Hot workspace with hot.hot projects, dependencies, profiles, services, and environment-backed settings."
+---
+
 # Hot Configuration
 
 Configure your Hot project using the `hot.hot` configuration file.

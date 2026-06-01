@@ -1,3 +1,7 @@
+---
+description: "Publish Hot packages with versioning, naming rules, package docs, metadata, and registry-ready structure."
+---
+
 # Publishing Packages
 
 Share your Hot packages with others.

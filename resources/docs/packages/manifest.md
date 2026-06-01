@@ -1,3 +1,7 @@
+---
+description: "Write pkg.hot manifests with package metadata, descriptions, tags, versions, dependencies, and publishing configuration."
+---
+
 # Package Manifest
 
 The `pkg.hot` file defines your package's metadata and dependencies.

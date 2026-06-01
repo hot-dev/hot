@@ -1,3 +1,7 @@
+---
+description: "Configure multiple Hot projects in one workspace with source paths, tests, dependencies, defaults, and store settings."
+---
+
 # Projects
 
 A Hot workspace can contain multiple projects, each with its own source paths and dependencies.

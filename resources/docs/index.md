@@ -1,3 +1,7 @@
+---
+description: "Start with the Hot Dev docs for language basics, platform concepts, packages, and deployment workflows."
+---
+
 # Hot Docs
 
 Welcome to the Hot documentation. Hot is a backend workflow automation platform for the AI age.

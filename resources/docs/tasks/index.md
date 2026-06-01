@@ -1,3 +1,7 @@
+---
+description: "Choose between short-lived Hot runs and long-running tasks, including TaskInfo, code tasks, container tasks, and messaging."
+---
+
 # Tasks
 
 Tasks are long-running, asynchronous processes on the Hot Platform. Understanding the distinction between **Runs** and **Tasks** helps you choose the right execution model for your workflow.

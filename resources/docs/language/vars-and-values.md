@@ -1,3 +1,7 @@
+---
+description: "Understand Hot's Var and Value model, including literals, definitions, references, bindings, namespaces, and immutability."
+---
+
 # Vars and Values
 
 In Hot, everything is either a **Var** (a named binding) or a **Value**. This simple model is the foundation of the language.

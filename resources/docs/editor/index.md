@@ -1,3 +1,7 @@
+---
+description: "Use the Hot VS Code extension and language server for syntax highlighting, diagnostics, navigation, and editor feedback."
+---
+
 # VS Code & LSP
 
 Hot provides first-class editor support through a Language Server Protocol (LSP) implementation and VS Code extension.

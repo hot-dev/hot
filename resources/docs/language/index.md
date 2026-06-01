@@ -1,3 +1,7 @@
+---
+description: "Learn how Hot programs are organized: functions, values, types, metadata, flows, errors, and core syntax."
+---
+
 # Hot Language
 
 Hot is a functional, expression-based language designed for backend workflows. It combines familiar JavaScript-like syntax with powerful features for concurrent execution and data transformation.

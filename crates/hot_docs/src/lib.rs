@@ -6,8 +6,10 @@ use axum::Router;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{Html, Json};
 use axum::routing::get;
+use hot::lang::hot::md::parse_frontmatter_str;
 use hot::pkg::docs::{self, PkgDocs, PkgSummary, PkgVersionsIndex};
 use hot::pkg::docs_html::{NavItem, TocItem, TocSection};
+use hot::val::Val;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, html};
 use regex::Regex;
 use serde::Deserialize;
@@ -103,6 +105,7 @@ fn landing_html(config: &DocsConfig) -> Html<String> {
     Html(layout(
         config,
         "Hot Documentation",
+        None,
         "docs-home",
         r#"
         <section class="hero">
@@ -172,7 +175,13 @@ async fn render_docs_page(state: Arc<DocsState>, path: &str) -> Html<String> {
         render_toc(&page.toc),
     );
 
-    Html(layout(&state.config, &page.title, "docs", &body))
+    Html(layout(
+        &state.config,
+        &page.title,
+        Some(&page.description),
+        "docs",
+        &body,
+    ))
 }
 
 async fn pkg_index_handler(State(state): State<Arc<DocsState>>) -> Html<String> {
@@ -216,7 +225,7 @@ async fn pkg_index_handler(State(state): State<Arc<DocsState>>) -> Html<String> 
         <section class="package-grid">{packages_html}</section>
         "#
     );
-    Html(layout(&state.config, "Hot Packages", "pkg", &body))
+    Html(layout(&state.config, "Hot Packages", None, "pkg", &body))
 }
 
 async fn pkg_docs_route_handler(
@@ -272,7 +281,7 @@ async fn pkg_docs_route_handler(
         render_toc(&page.toc),
     );
 
-    Html(layout(&state.config, &page.title, "pkg", &body))
+    Html(layout(&state.config, &page.title, None, "pkg", &body))
 }
 
 async fn list_packages_handler(State(state): State<Arc<DocsState>>) -> Json<Value> {
@@ -362,6 +371,7 @@ async fn search_all_packages_handler(
 #[derive(Debug, Clone)]
 struct DocPage {
     title: String,
+    description: String,
     content_html: String,
     content_text: String,
     path: String,
@@ -525,20 +535,45 @@ fn load_page_from_dir(config: &DocsConfig, docs_dir: &Path, path: &str) -> Resul
         .ok_or_else(|| format!("The documentation page '{path}' was not found."))?;
     let markdown = fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read {}: {e}", file_path.display()))?;
+    let (frontmatter, markdown) = parse_frontmatter_str(&markdown).map_err(|e| {
+        format!(
+            "Failed to parse frontmatter in {}: {e}",
+            file_path.display()
+        )
+    })?;
+    let frontmatter_description = frontmatter_description(&frontmatter);
     let markdown = process_snippets(config, &markdown);
     let title = extract_title(&markdown).unwrap_or_else(|| title_from_slug(path));
     let (content_html, toc) = markdown_to_html_with_toc(&markdown);
     let content_text = strip_markdown(&markdown);
-    let excerpt = excerpt(&content_text);
+    let body_excerpt = excerpt(&content_text);
+    let description = frontmatter_description.unwrap_or_else(|| body_excerpt.clone());
+    let excerpt = description.clone();
 
     Ok(DocPage {
         title,
+        description,
         content_html,
         content_text,
         path: path.to_string(),
         excerpt,
         toc,
     })
+}
+
+fn frontmatter_description(frontmatter: &Val) -> Option<String> {
+    let Val::Map(map) = frontmatter else {
+        return None;
+    };
+    let Some(Val::Str(description)) = map.get(&Val::from("description")) else {
+        return None;
+    };
+    let description = description.trim();
+    if description.is_empty() {
+        None
+    } else {
+        Some(description.to_string())
+    }
 }
 
 fn docs_file_path(docs_dir: &Path, path: &str) -> Option<PathBuf> {
@@ -1262,9 +1297,26 @@ fn render_breadcrumb(items: &[String]) -> String {
     )
 }
 
-fn layout(config: &DocsConfig, title: &str, current_page: &str, body: &str) -> String {
+fn layout(
+    config: &DocsConfig,
+    title: &str,
+    description: Option<&str>,
+    current_page: &str,
+    body: &str,
+) -> String {
     let docs_active = if current_page == "docs" { "active" } else { "" };
     let pkg_active = if current_page == "pkg" { "active" } else { "" };
+    let description_meta = description
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .map(|description| {
+            format!(
+                r#"  <meta name="description" content="{}">
+"#,
+                escape_attr(description)
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"<!doctype html>
 <html lang="en" class="dark">
@@ -1272,6 +1324,7 @@ fn layout(config: &DocsConfig, title: &str, current_page: &str, body: &str) -> S
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{}</title>
+{}
   <link rel="stylesheet" href="/assets/css/prism-hot-theme.css">
   <link rel="stylesheet" href="/assets/css/hot-docs.css">
 </head>
@@ -1297,6 +1350,7 @@ fn layout(config: &DocsConfig, title: &str, current_page: &str, body: &str) -> S
 </body>
 </html>"#,
         escape_html(title),
+        description_meta,
         escape_attr(&config.hot_dev_url),
         escape_attr(&config.github_url),
         2026,
@@ -1309,6 +1363,7 @@ fn error_page(config: &DocsConfig, title: &str, message: &str) -> String {
     layout(
         config,
         title,
+        None,
         "error",
         &format!(
             r#"<section class="hero compact"><h1>{}</h1><p>{}</p><p><a href="/docs">Back to docs</a></p></section>"#,
@@ -1405,5 +1460,30 @@ mod tests {
         let (html, _) = markdown_to_html_with_toc("```result\nok\n```");
         assert!(html.contains(r#"class="result-block""#));
         assert!(html.contains(r#"class="language-plaintext""#));
+    }
+
+    #[test]
+    fn reads_frontmatter_description() {
+        let (frontmatter, body) =
+            parse_frontmatter_str("---\ndescription: \"Useful docs\"\n---\n# Title\n").unwrap();
+        assert_eq!(
+            frontmatter_description(&frontmatter).as_deref(),
+            Some("Useful docs")
+        );
+        assert_eq!(body, "# Title\n");
+    }
+
+    #[test]
+    fn renders_description_meta_tag() {
+        let html = layout(
+            &DocsConfig::from_resources(),
+            "Title",
+            Some("A \"quoted\" & useful page."),
+            "docs",
+            "<p>Body</p>",
+        );
+        assert!(html.contains(
+            r#"<meta name="description" content="A &quot;quoted&quot; &amp; useful page.">"#
+        ));
     }
 }

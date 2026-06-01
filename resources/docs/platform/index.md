@@ -1,3 +1,7 @@
+---
+description: "Understand Hot's platform model for projects, functions, runs, events, streams, tasks, durability, and observability."
+---
+
 # Hot Platform
 
 The Hot Platform is a complete backend workflow automation system. It combines a purpose-built programming language with managed infrastructure for running, monitoring, and scaling your workflows.

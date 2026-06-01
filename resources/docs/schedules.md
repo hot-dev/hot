@@ -1,3 +1,7 @@
+---
+description: "Run Hot functions on a schedule with cron expressions, natural-language schedules, retries, and dynamic schedules."
+---
+
 # Schedules
 
 The Hot Scheduler runs functions on a schedule using cron expressions or natural language.

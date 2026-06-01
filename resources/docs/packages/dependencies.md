@@ -1,3 +1,7 @@
+---
+description: "Declare package dependencies in pkg.hot and understand version, Git, local, transitive, and circular dependency behavior."
+---
+
 # Package Dependencies
 
 Declare your package's dependencies on other packages.

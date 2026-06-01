@@ -1,3 +1,7 @@
+---
+description: "Configure custom domains for Hot Cloud apps, including DNS, certificates, verification, and production routing."
+---
+
 # Custom Domains
 
 **Custom Domains** let you map your own domain names (e.g., `mcp.example.com`, `webhook.example.com`) to your Hot Dev environment. Instead of your customers connecting to `api.hot.dev`, they connect to your branded domain.

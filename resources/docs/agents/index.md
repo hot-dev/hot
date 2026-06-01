@@ -1,3 +1,7 @@
+---
+description: "Build AI agents with Hot metadata, handlers, tools, memory patterns, commands, graph inspection, and deployment."
+---
+
 # Agents
 
 Agents are typed groups of event handlers, schedules, and webhooks that share identity. An agent is defined as a Hot type with `agent` metadata, and functions declare membership via `meta {agent: TypeName}`. When deployed, Hot tracks agent runs, surfaces health metrics, and groups observability data by agent.

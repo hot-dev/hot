@@ -1,3 +1,7 @@
+---
+description: "Install Hot Dev, create your first project, run functions locally, and trigger your first event handler."
+---
+
 # Getting Started
 
 Get up and running with Hot in minutes.

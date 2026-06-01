@@ -1,3 +1,7 @@
+---
+description: "Understand Hot Result values, automatic wrapping and unwrapping, lazy result checks, short-circuiting, and fail handling."
+---
+
 # Error Handling
 
 Operations that can fail return `Result` values. Hot makes working with Results ergonomic through **automatic wrapping**, **automatic unwrapping**, and **lazy argument evaluation**.
