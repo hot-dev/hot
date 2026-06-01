@@ -847,15 +847,17 @@ handle-compact-command fn (session: Session, arg: Str, reply-to: Str?) {
   result ::hot::lang/try(() { compact-team-agent-session(session, hours) })
   cond {
     is-ok(result) => {
-      ::agent-stream/emit-memory-end(AGENT_NAME, "compact", {session-id: session.id, result: result.$val})
-      capsule-id get(result.$val, "capsule-id")
-      source-count get(result.$val, "source-count")
+      compact-result result
+      ::agent-stream/emit-memory-end(AGENT_NAME, "compact", {session-id: session.id, result: compact-result})
+      capsule-id get(compact-result, "capsule-id")
+      source-count get(compact-result, "source-count")
       ::transport/reply(session, `<b>Compaction complete</b>\nCapsule <code>${capsule-id}</code> captured ${source-count} source record(s).`, reply-to)
     }
     => {
-      record-error("compact", `${session.id}: ${result.$val.$msg}`)
-      ::agent-stream/emit-memory-error(AGENT_NAME, "compact", {session-id: session.id, error: result.$val})
-      ::transport/reply(session, `<b>Compaction failed</b>\n<code>${result.$val.$msg}</code>`, reply-to)
+      failure if-err(result, (failure) { failure })
+      record-error("compact", `${session.id}: ${failure.msg}`)
+      ::agent-stream/emit-memory-error(AGENT_NAME, "compact", {session-id: session.id, error: failure})
+      ::transport/reply(session, `<b>Compaction failed</b>\n<code>${failure.msg}</code>`, reply-to)
     }
   }
 }
@@ -1269,9 +1271,7 @@ fn (event) {
     // Don't let one session's failure (e.g. revoked token) take out the
     // whole loop; `::hot::lang/try` lets us fan-out without aborting.
     result ::hot::lang/try(() { run-digest-for-session(s) })
-    cond {
-      is-err(result) => { record-error("daily-digest", `${s.id}: ${result.$val.$msg}`) }
-    }
+    if-err(result, (failure) { record-error("daily-digest", `${s.id}: ${failure.msg}`) })
   })
 }
 
@@ -1325,9 +1325,7 @@ fn (event) {
   sessions list-registered-sessions()
   for-each(sessions, (s) {
     result ::hot::lang/try(() { run-weekly-for-session(s) })
-    cond {
-      is-err(result) => { record-error("weekly-summary", `${s.id}: ${result.$val.$msg}`) }
-    }
+    if-err(result, (failure) { record-error("weekly-summary", `${s.id}: ${failure.msg}`) })
   })
 }
 

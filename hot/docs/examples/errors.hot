@@ -9,6 +9,8 @@ ok ::hot::type/ok
 err ::hot::type/err
 is-ok ::hot::type/is-ok
 is-err ::hot::type/is-err
+if-ok ::hot::type/if-ok
+if-err ::hot::type/if-err
 eq ::hot::cmp/eq
 div ::hot::math/div
 if ::hot::bool/if
@@ -36,9 +38,8 @@ safe-divide fn (a: Int, b: Int): Result {
 
 // @doc: check-result
 check-result fn (result: Result): Str {
-  if(is-ok(result),
-    `Success: ${result.$val}`,
-    `Error: ${result.$val}`)
+  message if-ok(result, (value) { `Success: ${value}` })
+  if-err(message, (error) { `Error: ${error}` })
 }
 // @end: check-result
 
@@ -63,8 +64,10 @@ meta ["test"] fn () {
   results create-results()
   assert(is-ok(results.success), "success is ok")
   assert(is-err(results.failure), "failure is err")
-  assert-eq(results.success.$val, 42, "success value is 42")
-  assert-eq(results.failure.$val, "Not found", "failure message")
+  success-value results.success
+  failure-value if-err(results.failure, (error) { error })
+  assert-eq(success-value, 42, "success value is 42")
+  assert-eq(failure-value, "Not found", "failure message")
 }
 
 test-safe-divide
@@ -72,9 +75,10 @@ meta ["test"] fn () {
   ok-result safe-divide(10, 2)
   err-result safe-divide(10, 0)
   assert(is-ok(ok-result), "10/2 is ok")
-  assert-eq(ok-result.$val, 5, "10/2 = 5")
+  assert-eq(ok-result, 5, "10/2 = 5")
   assert(is-err(err-result), "10/0 is err")
-  assert-eq(err-result.$val, "Division by zero", "division by zero message")
+  error-message if-err(err-result, (error) { error })
+  assert-eq(error-message, "Division by zero", "division by zero message")
 }
 
 test-check-result

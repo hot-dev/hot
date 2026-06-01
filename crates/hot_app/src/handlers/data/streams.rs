@@ -404,8 +404,8 @@ pub async fn stream_metrics_handler(
                     COUNT(*) FILTER (WHERE t.task_status_id = 3) as completed,
                     COUNT(*) FILTER (WHERE t.task_status_id = 4) as failed,
                     COALESCE(SUM(CASE
-                        WHEN t.result->'$val'->'$err'->>'compute-units' IS NOT NULL
-                            THEN (t.result->'$val'->'$err'->>'compute-units')::bigint
+                        WHEN t.result->'$val'->'err'->>'compute-units' IS NOT NULL
+                            THEN (t.result->'$val'->'err'->>'compute-units')::bigint
                         WHEN t.result->>'compute-units' IS NOT NULL
                             THEN (t.result->>'compute-units')::bigint
                         ELSE 0
@@ -552,8 +552,8 @@ pub async fn stream_metrics_handler(
                     SUM(CASE WHEN t.task_status_id = 3 THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN t.task_status_id = 4 THEN 1 ELSE 0 END) as failed,
                     COALESCE(SUM(CASE
-                        WHEN json_extract(t.result, '$."$val"."$err"."compute-units"') IS NOT NULL
-                            THEN CAST(json_extract(t.result, '$."$val"."$err"."compute-units"') AS INTEGER)
+                        WHEN json_extract(t.result, '$."$val"."err"."compute-units"') IS NOT NULL
+                            THEN CAST(json_extract(t.result, '$."$val"."err"."compute-units"') AS INTEGER)
                         WHEN json_extract(t.result, '$."compute-units"') IS NOT NULL
                             THEN CAST(json_extract(t.result, '$."compute-units"') AS INTEGER)
                         ELSE 0

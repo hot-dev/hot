@@ -106,7 +106,7 @@ tg-record-voice
 meta { on-event: "telegram:record-voice", retry: 2 }
 fn (event) {
     result ::hot::lang/try(() { ::tg-adapter/record-voice(event) })
-    cond { is-err(result) => { record-error("voice", result.$val) } }
+    if-err(result, (failure) { record-error("voice", failure) })
 }
 ```
 

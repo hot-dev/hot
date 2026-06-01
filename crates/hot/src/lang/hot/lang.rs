@@ -553,8 +553,8 @@ fn contained_error_payload(
 
     let msg = err.to_string();
     crate::val!({
-        "$msg": msg.clone(),
-        "$err": {"error": msg},
+        "msg": msg.clone(),
+        "err": {"error": msg},
     })
 }
 

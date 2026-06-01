@@ -285,21 +285,21 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
                 ::hot::lang/try(tool.fn, [call.input]),
                 ::hot::lang/try(::hot::internal::mcp/invoke-with-input, [tool.fn, call.input])
             )
-            cond {
-                is-err(attempt) => {
+            match attempt {
+                Result.Err => {
                     ToolResult({
                         id: call.id,
-                        output: attempt.$val.$msg,
+                        output: attempt.msg,
                         is-error: true,
                     })
                 }
-                => {
-                    result attempt.$val
-                    match result {
+
+                Result.Ok => {
+                    match attempt {
                         Result.Err => {
                             ToolResult({
                                 id: call.id,
-                                output: result,
+                                output: attempt,
                                 is-error: true,
                             })
                         }
@@ -307,7 +307,7 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
                         Result.Ok => {
                             ToolResult({
                                 id: call.id,
-                                output: result,
+                                output: attempt,
                                 is-error: false,
                             })
                         }
@@ -315,7 +315,7 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
                         _ => {
                             ToolResult({
                                 id: call.id,
-                                output: result,
+                                output: attempt,
                                 is-error: false,
                             })
                         }

@@ -595,11 +595,11 @@ meta {
     **Example**
 
     ```hot
-    ok(42)           // {$type: "::hot::type/Result.Ok", $val: 42}
-    ok("success")    // {$type: "::hot::type/Result.Ok", $val: "success"}
+    ok(42)           // Result.Ok(42)
+    ok("success")    // Result.Ok("success")
 
     result ok(get-user(id))
-    if(is-ok(result), result.$val, "not found")
+    if-ok(result, (user) { user })
     ```
     """
 }
@@ -617,8 +617,8 @@ meta {
     **Example**
 
     ```hot
-    err("Not found")           // {$type: "::hot::type/Result.Err", $val: "Not found"}
-    err({"code": 404})         // {$type: "::hot::type/Result.Err", $val: {"code": 404}}
+    err("Not found")           // Result.Err("Not found")
+    err({code: 404})            // Result.Err({code: 404})
 
     if(eq(user, null), err("User not found"), ok(user))
     ```
@@ -642,7 +642,7 @@ meta {
     is-ok(Result.Err("failed"))     // false
 
     result safe-divide(10, 2)
-    if(is-ok(result), result.$val, 0)
+    if-ok(result, (value) { value })
     ```
     """
 }
@@ -664,7 +664,7 @@ meta {
     is-err(Result.Ok(42))           // false
 
     result fetch-data()
-    if(is-err(result), println(result.$val), process(result.$val))
+    if-err(result, (error) { println(error) })
     ```
     """
 }

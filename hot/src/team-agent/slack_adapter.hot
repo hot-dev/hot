@@ -120,7 +120,7 @@ fn (user-id: Str): Str {
                 user or(resp.user, {})
                 or(get(user, "real_name"), get(user, "name"), user-id)
             })
-            name if(is-ok(result), result.$val, user-id)
+            name if-err(result, user-id)
             ::store/put(user-name-cache, user-id, name)
             name
         }

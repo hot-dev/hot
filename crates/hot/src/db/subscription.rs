@@ -929,8 +929,8 @@ impl OrgUsageStats {
         let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(
             "SELECT COUNT(*)::bigint, COALESCE(SUM(duration_ms), 0)::bigint,
                     COALESCE(SUM(CASE
-                        WHEN result->'$val'->'$err'->>'compute-units' IS NOT NULL
-                            THEN (result->'$val'->'$err'->>'compute-units')::bigint
+                        WHEN result->'$val'->'err'->>'compute-units' IS NOT NULL
+                            THEN (result->'$val'->'err'->>'compute-units')::bigint
                         WHEN result->>'compute-units' IS NOT NULL
                             THEN (result->>'compute-units')::bigint
                         ELSE 0
@@ -1050,8 +1050,8 @@ impl OrgUsageStats {
         let task_q = format!(
             "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0),
                     COALESCE(SUM(CASE
-                        WHEN json_extract(result, '$.\"$val\".\"$err\".\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"$val\".\"$err\".\"compute-units\"') AS INTEGER)
+                        WHEN json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') IS NOT NULL
+                            THEN CAST(json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') AS INTEGER)
                         WHEN json_extract(result, '$.\"compute-units\"') IS NOT NULL
                             THEN CAST(json_extract(result, '$.\"compute-units\"') AS INTEGER)
                         ELSE 0

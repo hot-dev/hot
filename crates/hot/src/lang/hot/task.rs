@@ -536,7 +536,7 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     // Build TaskResult from task + parsed result JSON.
-    // For container tasks: result has exit-code, stdout, etc. directly, or in $val.$err for Failure.
+    // For container tasks: result has exit-code, stdout, etc. directly, or in $val.err for Failure.
     // For code tasks: result is the return value.
     let result_json: Option<&serde_json::Value> = task.result.as_ref();
     let container_payload: Option<serde_json::Value> =
@@ -546,7 +546,7 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 .is_some()
             {
                 r.get("$val")
-                    .and_then(|v: &serde_json::Value| v.get("$err"))
+                    .and_then(|v: &serde_json::Value| v.get("err"))
                     .cloned()
             } else {
                 Some(r.clone())

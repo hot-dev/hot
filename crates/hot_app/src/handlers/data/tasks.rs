@@ -364,8 +364,8 @@ pub async fn task_cus_timeline_handler(
             };
 
             let cus_expr = r#"COALESCE(SUM(CASE
-                WHEN t.result->'$val'->'$err'->>'compute-units' IS NOT NULL
-                    THEN (t.result->'$val'->'$err'->>'compute-units')::bigint
+                WHEN t.result->'$val'->'err'->>'compute-units' IS NOT NULL
+                    THEN (t.result->'$val'->'err'->>'compute-units')::bigint
                 WHEN t.result->>'compute-units' IS NOT NULL
                     THEN (t.result->>'compute-units')::bigint
                 ELSE 0
@@ -464,8 +464,8 @@ pub async fn task_cus_timeline_handler(
             };
 
             let cus_expr = r#"COALESCE(SUM(CASE
-                WHEN json_extract(t.result, '$."$val"."$err"."compute-units"') IS NOT NULL
-                    THEN CAST(json_extract(t.result, '$."$val"."$err"."compute-units"') AS INTEGER)
+                WHEN json_extract(t.result, '$."$val"."err"."compute-units"') IS NOT NULL
+                    THEN CAST(json_extract(t.result, '$."$val"."err"."compute-units"') AS INTEGER)
                 WHEN json_extract(t.result, '$."compute-units"') IS NOT NULL
                     THEN CAST(json_extract(t.result, '$."compute-units"') AS INTEGER)
                 ELSE 0

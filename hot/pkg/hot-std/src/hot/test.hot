@@ -249,7 +249,8 @@ fn
     cond {
         is-err(expected-val) => {
             current-test-name ::hot::ctx/get("current-test-name")
-            error-msg `${description}: expected argument returned error: ${expected-val.$val}`
+            expected-error if-err(expected-val, (error) { error })
+            error-msg `${description}: expected argument returned error: ${expected-error}`
 
             if(current-test-name,
                 assertion-failed-with-details(current-test-name, error-msg),
@@ -261,7 +262,8 @@ fn
 
         is-err(actual-val) => {
             current-test-name ::hot::ctx/get("current-test-name")
-            error-msg `${description}: actual argument returned error: ${actual-val.$val}`
+            actual-error if-err(actual-val, (error) { error })
+            error-msg `${description}: actual argument returned error: ${actual-error}`
 
             if(current-test-name,
                 assertion-failed-with-details(current-test-name, error-msg),
@@ -403,8 +405,7 @@ fn (f, capture-output) {
     test-had-execution-error is-err(result)
     did-pass if(test-had-execution-error, {
         // For actual execution errors, print the error details
-        // Access result.$val directly to avoid auto-unwrapping the Result.Err in template string
-        error-detail result.$val
+        error-detail if-err(result, (error) { error })
         println(`    ${::hot::term/bright-red("✗")} Test execution error: ${error-detail}`)
         false
     }, {

@@ -76,15 +76,19 @@ fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
         attempt ::hot::lang/try(handler, [session])
         cond {
             is-ok(attempt) => {
+                result attempt
                 LifecycleJob({
                     session-id: session.id,
                     action: action,
                     ok: true,
-                    result: attempt.$val,
+                    result: result,
                     error: null,
                 })
             }
-            => { job-error(rt, session, action, attempt.$val) }
+            => {
+                failure if-err(attempt, (failure) { failure })
+                job-error(rt, session, action, failure)
+            }
         }
     })
 }

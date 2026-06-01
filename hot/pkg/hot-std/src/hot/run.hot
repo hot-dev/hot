@@ -10,8 +10,8 @@ meta {
 
     **Fields**
 
-    - `$msg` — Human-readable error message
-    - `$err` — Structured error data (any type)
+    - `msg` — Human-readable error message
+    - `err` — Structured error data (any type)
 
     `fail()` halts execution; user code does not bind a `Failure`
     directly. Inspect it from a halt boundary like `::hot::lang/try`
@@ -19,8 +19,8 @@ meta {
     """
 }
 type {
-    $msg: Str,
-    $err: Any
+    msg: Str,
+    err: Any
 }
 
 Cancellation
@@ -32,8 +32,8 @@ meta {
 
     **Fields**
 
-    - `$msg` — Human-readable cancellation message
-    - `$data` — Optional structured data
+    - `msg` — Human-readable cancellation message
+    - `data` — Optional structured data
 
     `cancel()` halts execution; user code does not bind a `Cancellation`
     directly. Inspect it from a halt boundary like `::hot::lang/try`
@@ -41,8 +41,8 @@ meta {
     """
 }
 type {
-    $msg: Str,
-    $data: Any
+    msg: Str,
+    data: Any
 }
 
 Run type {

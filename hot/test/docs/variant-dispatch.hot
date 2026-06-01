@@ -72,8 +72,8 @@ meta ["test"] fn () {
 
   // Field access on a tagged variant reaches into $val transparently —
   // the user does not write `b.$val.species`.
-  assert-eq("Eagle", b.species, "Dot access on variant skips $val")
-  assert-eq(2.1, b.wingspan, "Numeric field also reaches into $val")
+  assert-eq("Eagle", b.species, "Dot access reaches the variant payload")
+  assert-eq(2.1, b.wingspan, "Numeric field also reaches the variant payload")
 }
 
 // -- Tagged serialization round-trip --

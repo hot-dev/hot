@@ -383,7 +383,7 @@ length(f(200))"#;
             result test_fail()
         "#;
 
-        // This test verifies that fail constructs a Failure type {$msg, $err}
+        // This test verifies that fail constructs a Failure type {msg, err}
         // The actual execution will fail, but we're testing the structure
         let result = compile_and_run(source);
         assert!(result.is_err());

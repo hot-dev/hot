@@ -251,7 +251,7 @@ async fn drain_timeout_signals_cancel_then_finalizes() {
     assert_eq!(
         val.get("infra_interrupted").and_then(|v| v.as_bool()),
         Some(true),
-        "result.$val.infra_interrupted should be true",
+        "failure payload should carry infra_interrupted",
     );
 
     // A retry copy should have been enqueued.

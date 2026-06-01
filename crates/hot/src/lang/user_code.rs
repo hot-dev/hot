@@ -284,8 +284,8 @@ impl UserCodePanic {
     ///   $val: {
     ///     $type: "::hot::task/Failure",
     ///     $val: {
-    ///       $msg: "panicked: ...",
-    ///       $err: { panic: true, location, thread, backtrace? }
+    ///       msg: "panicked: ...",
+    ///       err: { panic: true, location, thread, backtrace? }
     ///     }
     ///   }
     /// }
@@ -294,7 +294,7 @@ impl UserCodePanic {
         use crate::val::Val;
         use indexmap::IndexMap;
 
-        // Inner $err map carrying structured panic info.
+        // Inner err map carrying structured panic info.
         let mut err: IndexMap<Val, Val> = IndexMap::new();
         err.insert(Val::from("panic"), Val::from(true));
         if let Some(loc) = &self.location {
@@ -310,10 +310,10 @@ impl UserCodePanic {
         // ::hot::task/Failure payload.
         let mut failure_val: IndexMap<Val, Val> = IndexMap::new();
         failure_val.insert(
-            Val::from("$msg"),
+            Val::from("msg"),
             Val::from(format!("panicked: {}", self.message)),
         );
-        failure_val.insert(Val::from("$err"), Val::from(err));
+        failure_val.insert(Val::from("err"), Val::from(err));
 
         let mut failure: IndexMap<Val, Val> = IndexMap::new();
         failure.insert(Val::from("$type"), Val::from("::hot::task/Failure"));

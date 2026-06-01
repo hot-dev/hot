@@ -12,8 +12,8 @@ meta {
     `::hot::task/Failure` when called in a task.
 
     Fields:
-    - `$msg` — short human-readable message.
-    - `$err` — structured details (whatever was passed as the second
+    - `msg` — short human-readable message.
+    - `err` — structured details (whatever was passed as the second
       `fail()` argument).
 
     `fail()` halts execution; user code does not bind a `Failure`
@@ -22,8 +22,8 @@ meta {
     """
 }
 type {
-    $msg: Str,
-    $err: Any
+    msg: Str,
+    err: Any
 }
 
 Cancellation
@@ -37,8 +37,8 @@ meta {
     `::hot::task/Cancellation` when called in a task.
 
     Fields:
-    - `$msg` — short human-readable message.
-    - `$data` — structured details (whatever was passed as the second
+    - `msg` — short human-readable message.
+    - `data` — structured details (whatever was passed as the second
       `cancel()` argument).
 
     `cancel()` halts execution; user code does not bind a `Cancellation`
@@ -47,8 +47,8 @@ meta {
     """
 }
 type {
-    $msg: Str,
-    $data: Any
+    msg: Str,
+    data: Any
 }
 
 fail

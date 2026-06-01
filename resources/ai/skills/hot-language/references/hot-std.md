@@ -659,8 +659,8 @@ Long-running task execution. Start tasks from runs, send/receive messages, check
 ::task ::hot::task
 
 // Types
-Failure type { $msg: Str, $err: Any }                    // Failed task execution
-Cancellation type { $msg: Str, $data: Any }              // Cancelled task execution
+Failure type { msg: Str, err: Any }                      // Failed task execution
+Cancellation type { msg: Str, data: Any }                // Cancelled task execution
 TaskInfo type { id: Str, stream: Stream, origin-run: Run } // Returned by start
 TaskOptions type { timeout: Int?, type: Str?, retry: Int | Map? }
 TaskResult type { id: Str, status: Str, exit-code: Int?, ... } // Returned by await

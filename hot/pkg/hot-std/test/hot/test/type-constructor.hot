@@ -6,7 +6,7 @@ meta ["test"]
 // Supports:
 // - Required field validation (including nested types)
 // - Optional fields (T?) are not required
-// - Type wrapping with $type/$val structure
+// - Type wrapping with transparent field access
 // - Nested type construction with validation
 // - Vec<CustomType> item validation
 
@@ -30,9 +30,9 @@ meta ["test"] fn () {
     // Verify it's not an error
     assert(not(is-err(p)), "Point construction should succeed")
 
-    // Access fields through $val
-    assert-eq(10, p.$val.x, "Point x should be 10")
-    assert-eq(20, p.$val.y, "Point y should be 20")
+    // Access fields through transparent typed field access
+    assert-eq(10, p.x, "Point x should be 10")
+    assert-eq(20, p.y, "Point y should be 20")
     assert-eq("::hot::test::type-constructor/Point", p.$type, "Type should be set correctly")
 }
 
@@ -53,7 +53,7 @@ meta ["test"] fn () {
 
     assert(is-err(result), "Missing required field should return Result.Err")
 
-    error_msg result.$val
+    error_msg if-err(result, (error) { error })
     assert(::hot::str/contains(Str(error_msg), "age"), "Error should mention missing field 'age'")
 }
 
@@ -75,7 +75,7 @@ meta ["test"] fn () {
 
     assert(is-err(result), "Missing multiple fields should return Result.Err")
 
-    error_msg Str(result.$val)
+    error_msg Str(if-err(result, (error) { error }))
     assert(::hot::str/contains(error_msg, "city"), "Error should mention 'city'")
     assert(::hot::str/contains(error_msg, "zip"), "Error should mention 'zip'")
 }
@@ -95,12 +95,12 @@ meta ["test"] fn () {
     // Without optional field - should succeed
     user1 User({name: "Alice"})
     assert(not(is-err(user1)), "Optional field can be omitted")
-    assert-eq("Alice", user1.$val.name, "Name should be set")
+    assert-eq("Alice", user1.name, "Name should be set")
 
     // With optional field - should also succeed
     user2 User({name: "Bob", email: "bob@example.com"})
     assert(not(is-err(user2)), "Optional field can be provided")
-    assert-eq("bob@example.com", user2.$val.email, "Email should be set")
+    assert-eq("bob@example.com", user2.email, "Email should be set")
 }
 
 // ============================================================================
@@ -126,12 +126,12 @@ meta ["test"] fn () {
     })
 
     assert(not(is-err(result)), "Nested construction should succeed")
-    assert-eq("Test", result.$val.name, "Outer name should be set")
+    assert-eq("Test", result.name, "Outer name should be set")
 
     // The inner field should be a typed Inner object
-    inner_obj result.$val.inner
+    inner_obj result.inner
     assert-eq("::hot::test::type-constructor/Inner", inner_obj.$type, "Inner should be typed")
-    assert-eq(42, inner_obj.$val.value, "Inner value should be 42")
+    assert-eq(42, inner_obj.value, "Inner value should be 42")
 }
 
 // ============================================================================
@@ -159,7 +159,7 @@ meta ["test"] fn () {
 
     assert(is-err(result), "Nested type missing field should return error")
 
-    error_msg Str(result.$val)
+    error_msg Str(if-err(result, (error) { error }))
     assert(::hot::str/contains(error_msg, "port"), "Error should mention missing nested field 'port'")
 }
 
@@ -190,9 +190,9 @@ meta ["test"] fn () {
 
     assert(not(is-err(result)), "Vec of custom type should construct")
 
-    first_tag result.$val.tags[0]
+    first_tag result.tags[0]
     assert-eq("::hot::test::type-constructor/Tag", first_tag.$type, "First tag should be typed")
-    assert-eq("color", first_tag.$val.key, "First tag key should be 'color'")
+    assert-eq("color", first_tag.key, "First tag key should be 'color'")
 }
 
 // ============================================================================
@@ -221,7 +221,7 @@ meta ["test"] fn () {
 
     assert(is-err(result), "Vec item missing field should return error")
 
-    error_msg Str(result.$val)
+    error_msg Str(if-err(result, (error) { error }))
     assert(::hot::str/contains(error_msg, "item"), "Error should mention item index")
 }
 
@@ -257,12 +257,12 @@ meta ["test"] fn () {
 
     assert(not(is-err(result)), "Deeply nested construction should succeed")
 
-    location result.$val.location
+    location result.location
     assert-eq("::hot::test::type-constructor/Location", location.$type, "Location should be typed")
 
-    coords location.$val.coords
+    coords location.coords
     assert-eq("::hot::test::type-constructor/Coordinates", coords.$type, "Coordinates should be typed")
-    assert-eq(40.7128, coords.$val.lat, "Latitude should be correct")
+    assert-eq(40.7128, coords.lat, "Latitude should be correct")
 }
 
 // ============================================================================
@@ -287,7 +287,7 @@ meta ["test"] fn () {
     result Outer({inner: inner_typed})
 
     assert(not(is-err(result)), "Already typed input should work")
-    assert-eq(100, result.$val.inner.$val.value, "Value should be preserved")
+    assert-eq(100, result.inner.value, "Value should be preserved")
 }
 
 // ============================================================================
@@ -306,7 +306,7 @@ meta ["test"] fn () {
 
     assert(is-err(result), "Wrong type should return error")
 
-    error_msg Str(result.$val)
+    error_msg Str(if-err(result, (error) { error }))
     assert(::hot::str/contains(error_msg, "expected"), "Error should mention expected type")
 }
 
@@ -330,7 +330,7 @@ meta ["test"] fn () {
     // Partial construction should work
     partial_opts Options({debug: true})
     assert(not(is-err(partial_opts)), "Partial optional type should work")
-    assert-eq(true, partial_opts.$val.debug, "Debug should be true")
+    assert-eq(true, partial_opts.debug, "Debug should be true")
 }
 
 // ============================================================================
@@ -377,9 +377,9 @@ meta ["test"] fn () {
 
     assert(not(is-err(result)), "Construction should succeed")
     assert-eq("::hot::test::type-constructor/Simple", result.$type, "Should have $type")
-    assert-eq(1, result.$val.a, "Field a should be accessible")
-    assert-eq("hello", result.$val.b, "Field b should be accessible")
-    assert-eq(true, result.$val.c, "Field c should be accessible")
+    assert-eq(1, result.a, "Field a should be accessible")
+    assert-eq("hello", result.b, "Field b should be accessible")
+    assert-eq(true, result.c, "Field c should be accessible")
 }
 
 // ============================================================================
@@ -414,7 +414,7 @@ meta ["test"] fn () {
     // null for optional field is OK
     result Record({id: 1, notes: null})
     assert(not(is-err(result)), "Null for optional field should work")
-    assert-eq(null, result.$val.notes, "Notes should be null")
+    assert-eq(null, result.notes, "Notes should be null")
 }
 
 // ============================================================================
@@ -432,9 +432,9 @@ meta ["test"] fn () {
     result Basic({name: "test", extra: "data", count: 42})
 
     assert(not(is-err(result)), "Extra fields should be allowed")
-    assert-eq("test", result.$val.name, "Defined field should be set")
-    assert-eq("data", result.$val.extra, "Extra field should be preserved")
-    assert-eq(42, result.$val.count, "Extra field should be preserved")
+    assert-eq("test", result.name, "Defined field should be set")
+    assert-eq("data", result.extra, "Extra field should be preserved")
+    assert-eq(42, result.count, "Extra field should be preserved")
 }
 
 // ============================================================================

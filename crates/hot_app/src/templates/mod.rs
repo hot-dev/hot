@@ -545,14 +545,14 @@ impl TaskDisplay {
             .map(|r| serde_json::to_string_pretty(r).unwrap_or_else(|_| r.to_string()));
 
         // Parse container-specific fields from result JSON
-        // Success: result is direct object. Failure: result is { $type, $val: { $msg, $err } }
+        // Success: result is direct object. Failure: result is { $type, $val: { msg, err } }
         let result_obj = task.result.as_ref().and_then(|v| {
             if let Some(obj) = v.as_object() {
                 if obj.contains_key("exit-code") || obj.contains_key("compute-units") {
                     return Some(obj);
                 }
                 if let Some(val) = obj.get("$val").and_then(|v| v.as_object())
-                    && let Some(err) = val.get("$err").and_then(|e| e.as_object())
+                    && let Some(err) = val.get("err").and_then(|e| e.as_object())
                 {
                     return Some(err);
                 }

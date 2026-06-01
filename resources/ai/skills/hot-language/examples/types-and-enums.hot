@@ -140,7 +140,7 @@ rect Shape.Rectangle({width: 10.0, height: 20.0})
 tri Shape.Triangle({base: 6.0, height: 8.0})
 point Shape.Point
 
-// Access inner data (dot notation skips $val)
+// Access fields on variant values
 circle-radius circle.radius  // 5.0
 rect-width rect.width        // 10.0
 
@@ -216,7 +216,7 @@ eagle Critter.Falcon({species: "Eagle", wingspan: 2.1})
 gecko Critter.Scaly({length-cm: 12.0})
 hound Critter.Hound                    // bare variant, no payload
 
-// Dot access transparently skips the variant `$val` wrapper.
+// Access fields on variant values.
 eagle-species eagle.species            // "Eagle"
 
 // `match` on an open enum REQUIRES a `_` default arm — the variant set

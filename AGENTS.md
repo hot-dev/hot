@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:42a38913a96a
+<!-- HOT_LANGUAGE_SECTION_START --> hash:fb55d94e852d
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -190,7 +190,7 @@ dir Direction.Up
 Circle type { radius: Dec }
 Shape enum { Circle(Circle), Point }
 shape Shape.Circle({radius: 5.0})
-shape.radius  // 5.0 (dot access skips $val)
+shape.radius  // 5.0
 
 // Match flow for enums (access matched value through original variable).
 // Match on a closed enum must be exhaustive — every variant covered or
@@ -521,11 +521,11 @@ message match result {
 
 ### Dot Access on Results
 
-Dot access on a Result reaches into the payload, skipping `$val`:
+Result-returning calls can be used directly when you expect success:
 
 ```hot
 response ::http/get("https://api.example.com/user/1")
-name response.body.name  // accesses .body.name within the Ok payload
+name response.body.name
 ```
 
 ### Common Error Patterns

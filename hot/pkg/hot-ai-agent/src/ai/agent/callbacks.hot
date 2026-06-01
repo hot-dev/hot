@@ -196,15 +196,16 @@ fn (payload: Any, opts: CallbackOptions): CallbackResult {
             elapsed sub(::time/epoch-millis(::time/now()), started)
             cond {
                 is-err(attempt) => {
+                    failure if-err(attempt, (failure) { failure })
                     CallbackResult({
                         ok: false,
                         status: 0,
-                        error: attempt.$val.$msg,
+                        error: failure.msg,
                         attempt-ms: elapsed,
                     })
                 }
                 => {
-                    response attempt.$val
+                    response attempt
                     status response.status
                     success and(gte(status, 200), lt(status, 300))
                     CallbackResult({
