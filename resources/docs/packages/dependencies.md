@@ -1,5 +1,5 @@
 ---
-description: "Declare and resolve Hot package dependencies for reusable packages and projects that depend on shared Hot code."
+description: "Declare package dependencies in pkg.hot and understand version, Git, local, transitive, and circular dependency behavior."
 ---
 
 # Package Dependencies

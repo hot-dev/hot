@@ -1,5 +1,5 @@
 ---
-description: "Set up CI/CD for Hot projects with automated checks, tests, deploys, secrets, environments, and release workflows."
+description: "Automate hot check, hot test, and hot deploy in GitHub Actions and other CI with setup-hot."
 ---
 
 # CI/CD

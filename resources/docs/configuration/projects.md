@@ -1,5 +1,5 @@
 ---
-description: "Understand Hot project configuration, project IDs, environments, deploy settings, and how local files map to cloud projects."
+description: "Configure multiple Hot projects in one workspace with source paths, tests, dependencies, defaults, and store settings."
 ---
 
 # Projects

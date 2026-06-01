@@ -1,5 +1,5 @@
 ---
-description: "Configure Hot alerts for failures, run status, events, schedules, webhooks, Slack, email, PagerDuty, and operational monitoring."
+description: "Set up alert channels, destinations, and subscriptions for run failures, deploy events, and custom Hot alert calls."
 ---
 
 # Alerts

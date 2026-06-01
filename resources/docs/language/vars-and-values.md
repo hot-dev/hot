@@ -1,5 +1,5 @@
 ---
-description: "Work with Hot variables, immutable values, expressions, scope, inference, and common value patterns."
+description: "Understand Hot's Var and Value model, including literals, definitions, references, bindings, namespaces, and immutability."
 ---
 
 # Vars and Values

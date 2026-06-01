@@ -1,5 +1,5 @@
 ---
-description: "Configure external dependencies for Hot projects, including package dependencies and runtime requirements."
+description: "Declare project package dependencies in hot.hot using registry versions, Git repositories, and local paths."
 ---
 
 # Dependencies

@@ -1,5 +1,5 @@
 ---
-description: "Handle expected results and hard failures in Hot with Result values, auto-unwrapping, fail boundaries, and recovery patterns."
+description: "Understand Hot Result values, automatic wrapping and unwrapping, lazy result checks, short-circuiting, and fail handling."
 ---
 
 # Error Handling

@@ -1,5 +1,5 @@
 ---
-description: "Schedule Hot functions with cron expressions, retries, metadata, and production-ready recurring workflows."
+description: "Run Hot functions on a schedule with cron expressions, natural-language schedules, retries, and dynamic schedules."
 ---
 
 # Schedules

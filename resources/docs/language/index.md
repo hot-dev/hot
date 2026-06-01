@@ -1,5 +1,5 @@
 ---
-description: "Learn the Hot language model: functions, values, types, metadata, flows, errors, and the syntax used across Hot projects."
+description: "Learn how Hot programs are organized: functions, values, types, metadata, flows, errors, and core syntax."
 ---
 
 # Hot Language

@@ -1,5 +1,5 @@
 ---
-description: "Understand the Hot platform model for projects, functions, runs, events, streams, tasks, durability, and observability."
+description: "Understand Hot's platform model for projects, functions, runs, events, streams, tasks, durability, and observability."
 ---
 
 # Hot Platform

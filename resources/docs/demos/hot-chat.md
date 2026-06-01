@@ -1,5 +1,5 @@
 ---
-description: "Run the Hot Chat demo with personal and team AI agents, slash commands, memory, streaming replies, and the Hot SDK."
+description: "Run Hot Chat to explore personal and team AI agents, slash commands, memory, file attachments, and streaming replies."
 ---
 
 # Hot Chat Demo

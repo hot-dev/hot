@@ -1,5 +1,5 @@
 ---
-description: "Learn how Hot provides durable execution for workflows, retries, resumability, idempotency, and production reliability."
+description: "See how Hot persists runs and event chains, retries failed steps with the same input, and records execution history."
 ---
 
 # Durable Execution

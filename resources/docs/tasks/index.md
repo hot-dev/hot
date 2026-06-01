@@ -1,5 +1,5 @@
 ---
-description: "Run background tasks in Hot for long-running work, async jobs, progress streams, and durable task orchestration."
+description: "Choose between short-lived Hot runs and long-running tasks, including TaskInfo, code tasks, container tasks, and messaging."
 ---
 
 # Tasks

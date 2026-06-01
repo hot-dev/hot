@@ -1,5 +1,5 @@
 ---
-description: "Build AI agents with Hot metadata, handlers, tools, memory patterns, commands, graph inspection, and cloud deployment."
+description: "Build AI agents with Hot metadata, handlers, tools, memory patterns, commands, graph inspection, and deployment."
 ---
 
 # Agents

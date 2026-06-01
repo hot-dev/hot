@@ -1,5 +1,5 @@
 ---
-description: "Start here for Hot Dev docs: language basics, platform guides, cloud features, packages, and deployment workflows."
+description: "Start with the Hot Dev docs for language basics, platform concepts, packages, and deployment workflows."
 ---
 
 # Hot Docs

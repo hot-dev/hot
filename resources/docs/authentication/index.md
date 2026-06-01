@@ -1,5 +1,5 @@
 ---
-description: "Authenticate with Hot Dev Cloud using the CLI, API keys, bearer tokens, project tokens, and scoped access controls."
+description: "Use API keys, service keys, and sessions with the Hot API, including bearer auth, access levels, and permissions."
 ---
 
 # Authentication

@@ -1,5 +1,5 @@
 ---
-description: "Define Hot types, structs, enums, optionals, collections, conversions, and type-safe data contracts."
+description: "Define Hot types with structs, enums, nullable values, collections, coercions, Result types, and type-safe contracts."
 ---
 
 # Types

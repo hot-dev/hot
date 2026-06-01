@@ -1,5 +1,5 @@
 ---
-description: "Call the Hot Cloud API for projects, events, runs, streams, files, secrets, agents, MCP access, and API keys."
+description: "REST API reference for Hot projects, builds, runs, events, streams, files, secrets, agents, MCP services, and API keys."
 ---
 
 # HOT API

@@ -1,5 +1,5 @@
 ---
-description: "Understand Container Usage Seconds billing for Hot Box workloads, including measurement, examples, and cost controls."
+description: "Understand Hot Box billing with Compute Unit Seconds (CUS), plan quotas, overages, and organization budgets."
 ---
 
 # Container Billing (CUS)

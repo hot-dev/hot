@@ -1,5 +1,5 @@
 ---
-description: "Upgrade Hot projects across versions with migration notes, compatibility guidance, breaking changes, and recommended steps."
+description: "Upgrade Hot and move local SQLite databases from 1.x to 2 with hot update and hot db port-v1-to-v2."
 ---
 
 # Migrations and Upgrades

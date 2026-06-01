@@ -1,5 +1,5 @@
 ---
-description: "Use the Hot CLI to create projects, run checks and tests, deploy apps, manage packages, and inspect cloud resources."
+description: "Use the Hot CLI to create projects, run checks and tests, deploy apps, manage packages, and inspect resources."
 ---
 
 # Hot CLI

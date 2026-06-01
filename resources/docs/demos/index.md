@@ -1,5 +1,5 @@
 ---
-description: "Explore runnable Hot Dev demos that show agents, workflows, integrations, cloud features, and real application patterns."
+description: "Try runnable Hot Dev demos for agents, workflows, integrations, platform features, and application patterns."
 ---
 
 # Demos

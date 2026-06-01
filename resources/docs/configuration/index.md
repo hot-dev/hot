@@ -1,5 +1,5 @@
 ---
-description: "Configure Hot projects with environment variables, project settings, dependencies, deploy targets, and local development options."
+description: "Configure a Hot workspace with hot.hot projects, dependencies, profiles, services, and environment-backed settings."
 ---
 
 # Hot Configuration
