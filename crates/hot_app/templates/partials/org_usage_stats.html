@@ -142,10 +142,10 @@
         {% endif %}
     </div>
 
-    <!-- Call Data Storage -->
+    <!-- Execution Trace Data Storage -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
         <div class="flex items-center justify-between mb-4">
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Call Data</h3>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Execution Trace Data</h3>
             {% if usage.call_storage_pct(&features) > 90.0 %}
             <span class="text-yellow-500">⚠️</span>
             {% endif %}
@@ -156,7 +156,7 @@
         <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">Unlimited storage</p>
         {% else if features.call_retention_days() == 0 %}
         <p class="text-3xl font-bold text-gray-500 dark:text-gray-400 mb-2">Not Available</p>
-        <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">Call data not included in this plan</p>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">Execution trace data not included in this plan</p>
         {% else %}
         <p class="text-3xl font-bold text-gray-900 dark:text-white mb-2">
             {{ hot::db::Features::format_bytes(usage.call_storage_bytes) }} <span class="text-lg font-normal text-gray-500">/ {{ hot::db::Features::format_bytes(features.call_storage_bytes()) }}</span>
@@ -268,7 +268,7 @@
                 <li><strong>Runs</strong> are counted per billing period and reset at the start of each cycle.</li>
                 <li><strong>File Storage</strong> includes all files uploaded through your Hot applications.</li>
                 <li><strong>Team Members</strong> limit is enforced - you cannot add members beyond your plan limit.</li>
-                <li><strong>Call Data</strong> is automatically archived after the retention period expires.</li>
+                <li><strong>Execution Trace Data</strong> is automatically archived after the retention period expires.</li>
                 <li><strong>Store Data</strong> includes all data in <code>::hot::store</code> maps, including embeddings.</li>
                 <li><strong>Compute Unit Seconds (CUS)</strong> measure container resource usage. Each box size has a multiplier applied to wall-clock seconds. Usage over the included amount is billed as overage.</li>
             </ul>
