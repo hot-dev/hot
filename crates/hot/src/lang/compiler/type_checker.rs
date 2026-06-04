@@ -575,6 +575,12 @@ pub struct TypeChecker {
     /// pre-pass and consulted at call sites to emit `deprecated-usage`
     /// warnings.
     deprecated_defs: AHashMap<String, Option<String>>,
+    /// Fully-qualified name (`::ns/name`) of the top-level definition whose
+    /// body is currently being checked, if any. Used to suppress
+    /// `deprecated-usage` warnings for a deprecated function's references to
+    /// itself (e.g. one arity delegating to another), which would otherwise
+    /// flag the stdlib definition site and surface on every downstream user.
+    current_def: Option<String>,
 }
 
 impl Default for TypeChecker {
@@ -600,6 +606,7 @@ impl TypeChecker {
             in_fn_body: 0,
             match_subject_stack: Vec::new(),
             deprecated_defs: AHashMap::new(),
+            current_def: None,
         }
     }
 
@@ -626,22 +633,28 @@ impl TypeChecker {
         None
     }
 
-    /// Resolve a call's `lookup_name` to a deprecation note if the callee was
-    /// declared deprecated. Checks the already-qualified form, the
+    /// Resolve a call's `lookup_name` to the matched deprecated definition if
+    /// the callee was declared deprecated. Returns the resolved definition key
+    /// (the `::ns/name` form stored in `deprecated_defs`) alongside its
+    /// optional custom note. Checks the already-qualified form, the
     /// current-namespace-local form, and core auto-imported exports (which is
     /// how a bare `try-call(...)` resolves to `::hot::lang/try-call`).
-    fn lookup_deprecated_note(&self, lookup_name: &str) -> Option<Option<String>> {
+    ///
+    /// Returning the matched key lets callers suppress self-references: a
+    /// deprecated function's own body may call itself (e.g. one arity
+    /// delegating to another), and we don't want to warn on the definition.
+    fn lookup_deprecated_note(&self, lookup_name: &str) -> Option<(String, Option<String>)> {
         if let Some(note) = self.deprecated_defs.get(lookup_name) {
-            return Some(note.clone());
+            return Some((lookup_name.to_string(), note.clone()));
         }
         let qualified = format!("{}/{}", self.context.current_namespace, lookup_name);
         if let Some(note) = self.deprecated_defs.get(&qualified) {
-            return Some(note.clone());
+            return Some((qualified, note.clone()));
         }
         if let Some(qualifieds) = self.core_variables.get(lookup_name) {
             for q in qualifieds {
                 if let Some(note) = self.deprecated_defs.get(q) {
-                    return Some(note.clone());
+                    return Some((q.clone(), note.clone()));
                 }
             }
         }
@@ -2014,7 +2027,11 @@ impl TypeChecker {
         for (var, value) in &namespace.scope.vars {
             let var_name = var.sym.name().to_string();
 
+            // Track the qualified name of the definition whose body we're about
+            // to walk so the deprecation check can suppress self-references.
+            self.current_def = Some(format!("{}/{}", ns_path, var_name));
             let inferred_type = self.infer_value_type(value);
+            self.current_def = None;
             self.context.add_variable(var_name, inferred_type);
         }
 
@@ -2605,16 +2622,25 @@ impl TypeChecker {
             // Deprecation: if the callee was declared `meta { deprecated: ... }`,
             // emit a non-fatal warning at the call site. Surfaced by both
             // `hot check` and the LSP; never fails compilation.
-            if let Some(note) = self.lookup_deprecated_note(lookup_name) {
-                let location = fn_call
-                    .src
-                    .as_ref()
-                    .map(|s| self.source_to_error_location(s));
-                self.errors.add_warning(CompilerError::DeprecatedUsage {
-                    name: lookup_name.to_string(),
-                    note,
-                    location,
-                });
+            if let Some((def_name, note)) = self.lookup_deprecated_note(lookup_name) {
+                // Skip the deprecated definition's own body referencing
+                // itself (e.g. one arity delegating to another). Without this
+                // guard the stdlib definition of a deprecated helper like
+                // `try-call` flags its own self-call, surfacing a warning that
+                // every downstream user would see even though they never wrote
+                // the deprecated call.
+                let is_self_reference = self.current_def.as_deref() == Some(def_name.as_str());
+                if !is_self_reference {
+                    let location = fn_call
+                        .src
+                        .as_ref()
+                        .map(|s| self.source_to_error_location(s));
+                    self.errors.add_warning(CompilerError::DeprecatedUsage {
+                        name: lookup_name.to_string(),
+                        note,
+                        location,
+                    });
+                }
             }
 
             // Constructor calls: `TypeName({...})` returns a value of the
@@ -4005,6 +4031,63 @@ mod tests {
         assert!(
             checker.errors.warnings.is_empty(),
             "non-deprecated call must not warn, got: {:?}",
+            checker.errors.warnings
+        );
+    }
+
+    #[test]
+    fn test_deprecated_self_reference_emits_no_warning() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // A deprecated function whose own body references itself (here one
+        // arity delegating to another) must not flag its own definition. This
+        // mirrors the stdlib `try-call` whose 1-arg arity calls the 2-arg one;
+        // otherwise the warning would surface on every project loading stdlib.
+        let source = r#"
+        old-fn
+        meta { core: true, deprecated: true }
+        fn
+        (a: Int, b: Int): Int { a },
+        (a: Int): Int { old-fn(a, 0) }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        let has_warning = checker.errors.warnings.iter().any(
+            |w| matches!(w, CompilerError::DeprecatedUsage { name, .. } if name.contains("old-fn")),
+        );
+        assert!(
+            !has_warning,
+            "deprecated definition's self-reference must not warn, got: {:?}",
+            checker.errors.warnings
+        );
+    }
+
+    #[test]
+    fn test_deprecated_external_call_still_warns_after_self_guard() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // The self-reference guard must not suppress warnings from a *different*
+        // definition calling the deprecated function.
+        let source = r#"
+        old-fn
+        meta { core: true, deprecated: true }
+        fn
+        (a: Int, b: Int): Int { a },
+        (a: Int): Int { old-fn(a, 0) }
+        caller fn (): Int { old-fn(1) }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        let has_warning = checker.errors.warnings.iter().any(
+            |w| matches!(w, CompilerError::DeprecatedUsage { name, .. } if name.contains("old-fn")),
+        );
+        assert!(
+            has_warning,
+            "external deprecated call must still warn, got: {:?}",
             checker.errors.warnings
         );
     }
