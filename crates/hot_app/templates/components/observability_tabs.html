@@ -967,18 +967,18 @@ window.ObservabilityTabs = class ObservabilityTabs {
         switch (status) {
             case 'expired':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
-                    <p>Call data is no longer available</p>
-                    <p class="text-xs mt-2">Your plan retains call data for ${retentionDays} day${retentionDays !== 1 ? 's' : ''}</p>
+                    <p>Execution trace data is no longer available</p>
+                    <p class="text-xs mt-2">Your plan retains execution trace data for ${retentionDays} day${retentionDays !== 1 ? 's' : ''}</p>
                 </div>`;
             case 'not_included':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
-                    <p>Call data is not included in your current plan</p>
-                    <p class="text-xs mt-2">Upgrade your plan to access call-level execution data</p>
+                    <p>Execution trace data is not included in your current plan</p>
+                    <p class="text-xs mt-2">Upgrade your plan to access execution trace data</p>
                 </div>`;
             case 'collecting':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
-                    <p>Collecting call data&hellip;</p>
-                    <p class="text-xs mt-2">Call data will appear as the run executes</p>
+                    <p>Collecting execution trace data&hellip;</p>
+                    <p class="text-xs mt-2">Execution trace data will appear as the run executes</p>
                 </div>`;
             case 'empty':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
