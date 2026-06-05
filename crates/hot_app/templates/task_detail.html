@@ -1,7 +1,18 @@
 {% extends "private_layout.html" %}
 
+{% block sse_data_attrs %}data-sse-mode="auto" data-sse-filter-task="{{ task.task_id }}"{% endblock %}
+
+{% block sse_status %}
+{% include "components/sse_status_indicator.html" %}
+{% endblock %}
+
 {% block content %}
-<div class="rounded-lg p-4 sm:p-6 backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+<div id="task-detail-header"
+     hx-get="/tasks/{{ task.task_id }}"
+     hx-trigger="refresh"
+     hx-select="#task-detail-header"
+     hx-swap="outerHTML"
+     class="rounded-lg p-4 sm:p-6 backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
     <!-- Header: Task ID, Function, Status, Size, Backend -->
     <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
         <div>
@@ -334,6 +345,19 @@ function openPlainTextModal(title, content) {
     })(content);
     openContentModal(title, decoded);
 }
+
+// SSE refresh callback - used by the SSE status indicator component.
+// Targeted refresh of the task header (status/result) on task lifecycle events
+// instead of a full page reload, preserving scroll position.
+window.sseRefreshCallback = function() {
+    const target = document.getElementById('task-detail-header');
+    if (target && typeof htmx !== 'undefined') {
+        // Uses the element's hx-get/hx-select to swap only the header fragment.
+        htmx.trigger(target, 'refresh');
+    } else {
+        window.location.reload();
+    }
+};
 
 document.addEventListener('DOMContentLoaded', function() {
     if (typeof initializeUuidDisplays === 'function') initializeUuidDisplays();

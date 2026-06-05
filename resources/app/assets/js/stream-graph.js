@@ -156,7 +156,7 @@ function renderSimpleStreamGraph(container, graphData, inspectorCallbackName, se
                 <thead>
                     <tr class="text-left text-gray-500 dark:text-gray-400 uppercase text-[10px] tracking-wider" style="height: 32px;">
                         <th class="pl-2 pr-0 font-medium" style="width: 50px;"></th>
-                        <th class="px-2 font-medium" style="width: 70px;">Type</th>
+                        <th class="pl-2 pr-0 font-medium" colspan="2" style="width: 94px;">Type</th>
                         <th class="px-2 font-medium" style="width: 90px;">ID</th>
                         <th class="px-2 font-medium" style="width: 90px;">Kind</th>
                         <th class="px-2 font-medium">Function</th>
@@ -178,7 +178,7 @@ function renderSimpleStreamGraph(container, graphData, inspectorCallbackName, se
     if (visibleCount === 0 && nodes.length > 0) {
         html += `
             <tr>
-                <td colspan="6" class="text-center text-gray-500 dark:text-gray-400 py-8">
+                <td colspan="7" class="text-center text-gray-500 dark:text-gray-400 py-8">
                     No matches found. ${nodes.length} items hidden by search.
                 </td>
             </tr>
@@ -477,6 +477,7 @@ function renderNodeRow(node, lineInfo, inspectorCallbackName) {
             style="height: 40px;"
             onclick="${navNodeType === 'task' ? `window.location.href='${detailUrl}'` : `window.${inspectorCallbackName}('${node.id}', '${navNodeType}', ${JSON.stringify(details).replace(/"/g, '&quot;')})`}">
             <td class="p-0 pl-2 align-middle" style="line-height: 0;">${graphCell}</td>
+            <td class="pl-2 pr-0 align-middle" style="width: 24px;">${nodeTypeIcon(navNodeType, typeColor)}</td>
             <td class="px-2 align-middle">
                 <div class="flex flex-col leading-tight">
                     <div><span class="font-semibold ${typeColor}">${escapeHtml(nodeTypeLabel)}</span>${currentBadge}</div>${queueWaitLine}
@@ -497,6 +498,16 @@ function renderNodeRow(node, lineInfo, inspectorCallbackName) {
             <td class="px-2 align-middle text-right">${statusHtml}</td>
         </tr>
     `;
+}
+
+// Entity icon matching the main nav / detail-page tabs (run = play, event = sparkles, task = play-in-square)
+function nodeTypeIcon(navNodeType, colorClass) {
+    const inner = navNodeType === 'event'
+        ? '<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"/>'
+        : navNodeType === 'task'
+            ? '<rect x="3" y="3" width="18" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round"/><path stroke-linecap="round" stroke-linejoin="round" d="M9.5 7.5v9l7.5-4.5-7.5-4.5z"/>'
+            : '<path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/>';
+    return `<svg class="w-3.5 h-3.5 flex-shrink-0 ${colorClass}" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
 }
 
 function escapeHtml(text) {

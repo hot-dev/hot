@@ -31,7 +31,7 @@
     </defs>
 </svg>
 
-<div id="sse-status-indicator" class="flex items-center h-6" x-data="sseStatus()" x-init="init()">
+<div id="sse-status-indicator" class="flex items-center h-6" x-data="sseStatus()" x-init="init()" role="status" aria-live="polite">
     <!-- Updating indicator - pill with text left, icon right -->
     <div x-show="isUpdating" x-cloak
          x-transition:enter="transition ease-out duration-150"
@@ -157,6 +157,15 @@
         0%, 100% { opacity: 0.4; }
         50% { opacity: 0.6; }
     }
+
+    /* Respect reduced-motion preferences: keep the icons static. */
+    @media (prefers-reduced-motion: reduce) {
+        .hot-flame-active,
+        .hot-flame-idle,
+        .hot-flame-dim {
+            animation: none;
+        }
+    }
 </style>
 
 <script>
@@ -171,6 +180,7 @@ function sseStatus() {
         filterStream: null,
         filterRun: null,
         filterEvent: null,
+        filterTask: null,
 
         init() {
             // Read configuration from page
@@ -182,6 +192,7 @@ function sseStatus() {
                 this.filterStream = container.dataset.sseFilterStream || null;
                 this.filterRun = container.dataset.sseFilterRun || null;
                 this.filterEvent = container.dataset.sseFilterEvent || null;
+                this.filterTask = container.dataset.sseFilterTask || null;
             }
 
             this.connect();
@@ -197,10 +208,13 @@ function sseStatus() {
 
             this.sseConnection.onopen = () => {
                 this.isConnected = true;
+                // Shared flag so pages can decide whether to run fallback polling.
+                window.__sseConnected = true;
             };
 
             this.sseConnection.onerror = () => {
                 this.isConnected = false;
+                window.__sseConnected = false;
                 this.sseConnection.close();
                 this.sseConnection = null;
                 // Reconnect after delay
@@ -221,6 +235,7 @@ function sseStatus() {
         },
 
         disconnect() {
+            window.__sseConnected = false;
             if (this.sseConnection) {
                 this.sseConnection.close();
                 this.sseConnection = null;
@@ -235,6 +250,7 @@ function sseStatus() {
                 if (this.filterStream && data.stream_id !== this.filterStream) return;
                 if (this.filterRun && data.run_id !== this.filterRun) return;
                 if (this.filterEvent && data.event_id !== this.filterEvent) return;
+                if (this.filterTask && data.task_id !== this.filterTask) return;
 
                 if (this.mode === 'auto') {
                     this.triggerAutoRefresh();
@@ -246,6 +262,22 @@ function sseStatus() {
             }
         },
 
+        // Delegate to the shared refresh scheduler when available, falling back
+        // to the legacy per-page global for any not-yet-migrated page.
+        runRefresh(immediate) {
+            if (window.HotRefresh) {
+                if (immediate && typeof window.HotRefresh.refreshNow === 'function') {
+                    window.HotRefresh.refreshNow('sse');
+                } else if (typeof window.HotRefresh.trigger === 'function') {
+                    window.HotRefresh.trigger('sse');
+                }
+                return;
+            }
+            if (typeof window.sseRefreshCallback === 'function') {
+                window.sseRefreshCallback();
+            }
+        },
+
         triggerAutoRefresh() {
             // Show updating indicator
             this.isUpdating = true;
@@ -253,12 +285,9 @@ function sseStatus() {
             // Clear any pending timeout
             if (this.updateTimeout) clearTimeout(this.updateTimeout);
 
-            // Debounce the actual refresh
+            // Debounce the visual state; the scheduler coalesces the real work.
             this.updateTimeout = setTimeout(() => {
-                // Call the page's refresh function if defined
-                if (typeof window.sseRefreshCallback === 'function') {
-                    window.sseRefreshCallback();
-                }
+                this.runRefresh(false);
 
                 // Hide updating indicator after a moment
                 setTimeout(() => {
@@ -271,10 +300,8 @@ function sseStatus() {
             this.hasNewData = false;
             this.isUpdating = true;
 
-            // Call the page's refresh function
-            if (typeof window.sseRefreshCallback === 'function') {
-                window.sseRefreshCallback();
-            }
+            // User explicitly asked for fresh data: refresh immediately.
+            this.runRefresh(true);
 
             // Hide updating indicator after a moment
             setTimeout(() => {

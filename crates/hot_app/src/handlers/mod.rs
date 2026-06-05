@@ -32,6 +32,18 @@ pub mod tasks;
 pub mod teams;
 pub mod webhooks;
 
+/// Returns true when the request came from HTMX (header `HX-Request: true`).
+///
+/// Shared so all handlers detect HTMX consistently instead of ad-hoc
+/// `headers.get("HX-Request").is_some()` checks that differ in semantics.
+pub fn is_htmx_request(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("HX-Request")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 // Re-export handlers from modules for backward compatibility
 pub use account::{
     account_handler, account_update_handler, notifications_handler, notifications_update_handler,
@@ -113,7 +125,7 @@ pub use orgs::{
 };
 pub use runs::{
     run_detail_handler, run_json_handler, run_rerun_handler, run_retry_handler,
-    run_tasks_tab_handler, runs_list_handler,
+    run_stream_graph_handler, run_tasks_tab_handler, runs_list_handler,
 };
 pub use schedules::{event_handlers_list_handler, schedule_detail_handler, schedules_list_handler};
 pub use source_browser::{source_file_handler, source_search_handler, source_tree_handler};

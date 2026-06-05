@@ -22,7 +22,7 @@ pub async fn runs_list_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Check if this is an HTMX request (partial update)
-    let is_htmx_request = headers.get("HX-Request").is_some();
+    let is_htmx_request = crate::handlers::is_htmx_request(&headers);
     // Build breadcrumbs: <org> (<env>) / Runs
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Runs".to_string()));
@@ -405,6 +405,7 @@ pub async fn run_detail_handler(
                 ),
                 run: run_display,
                 run_id,
+                stream_id: run.stream_id,
                 raw_mode,
                 inspect_mode,
                 graph_data_json,
@@ -453,6 +454,43 @@ pub async fn run_tasks_tab_handler(
 
     let template = templates::RunDetailTasksTab { tasks };
     Html(template.render().unwrap()).into_response()
+}
+
+/// JSON endpoint returning the stream graph for a run.
+///
+/// Used for live refresh of the Stream Graph tab so it reflects current run/task
+/// status instead of reusing the page-embedded graph data captured at load time.
+pub async fn run_stream_graph_handler(
+    Path(run_id): Path<Uuid>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::extract::Extension(session): axum::extract::Extension<Session>,
+) -> impl IntoResponse {
+    let env_id = match session.current_env_id() {
+        Some(id) => id,
+        None => {
+            return Json(json!({ "error": "No environment selected" }));
+        }
+    };
+
+    match Run::get_run(&db, &run_id).await {
+        Ok(run) => {
+            // SECURITY: Verify the run belongs to the current environment.
+            if run.env_id != env_id {
+                return Json(json!({ "error": "Run not found" }));
+            }
+
+            let graph_data = stream_graph::build_stream_graph(
+                &db,
+                &run.stream_id,
+                &run.env_id,
+                stream_graph::FocusElement::Run(run.run_id),
+            )
+            .await;
+
+            Json(serde_json::to_value(&graph_data).unwrap_or_else(|_| json!({})))
+        }
+        Err(_) => Json(json!({ "error": "Run not found" })),
+    }
 }
 
 // JSON API endpoint for getting run details

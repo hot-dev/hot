@@ -246,6 +246,10 @@ pub fn routes(
         .route("/data/runs/{run_id}/hierarchy", get(get_hierarchy_handler))
         .route("/data/runs/{run_id}/files", get(run_files_handler))
         .route(
+            "/data/runs/{run_id}/stream-graph",
+            get(run_stream_graph_handler),
+        )
+        .route(
             "/claim-handle",
             get(claim_handle_handler).post(claim_handle_post_handler),
         )

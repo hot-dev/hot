@@ -1853,6 +1853,7 @@ pub struct RunDetail<'a> {
     pub page_context: PrivatePageContext,
     pub run: Option<RunDisplay>,
     pub run_id: Uuid,
+    pub stream_id: Uuid,
     pub raw_mode: bool,
     pub inspect_mode: bool,
     pub graph_data_json: String,

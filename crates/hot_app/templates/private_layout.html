@@ -797,6 +797,8 @@
 
     <!-- Core App Utilities -->
     <script src="{{ page_context.asset("js/app.js") }}" defer></script>
+    <!-- Auto-Refresh Foundation (registry + scheduler + request lifecycle) -->
+    <script src="{{ page_context.asset("js/app-refresh.js") }}" defer></script>
     <script>
         // Initialize modal format from page context
         if (typeof initModalFormat === 'function') {

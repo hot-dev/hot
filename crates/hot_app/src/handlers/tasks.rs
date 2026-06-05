@@ -17,7 +17,7 @@ pub async fn tasks_list_handler(
     headers: HeaderMap,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    let is_htmx_request = headers.get("HX-Request").is_some();
+    let is_htmx_request = crate::handlers::is_htmx_request(&headers);
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Tasks".to_string()));

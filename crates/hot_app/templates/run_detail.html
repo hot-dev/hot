@@ -1,6 +1,10 @@
 {% extends "private_layout.html" %}
 
-{% block sse_data_attrs %}data-sse-mode="auto" data-sse-filter-run="{{ run_id }}"{% endblock %}
+{# Stream-scoped: the Stream Graph tab shows the whole stream (child runs/tasks),
+   and task events carry only stream_id (no run_id). Scoping to the stream keeps
+   nested rows live; refreshes are coalesced by the scheduler and self-terminate
+   when this run completes. #}
+{% block sse_data_attrs %}data-sse-mode="auto" data-sse-filter-stream="{{ stream_id }}"{% endblock %}
 
 {% block sse_status %}
 {% include "components/sse_status_indicator.html" %}
@@ -16,9 +20,10 @@
          class="rounded-t-lg p-4 sm:p-6 backdrop-blur-sm border border-b-0 border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white"
          {% if !r.is_completed %}
          hx-get="/runs/{{ r.run_id }}"
-         hx-trigger="every 5s"
+         hx-trigger="refresh"
          hx-select="#run-detail-header"
          hx-swap="outerHTML"
+         data-run-incomplete="true"
          {% endif %}>
         <!-- Row 1: Identity & Status -->
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -1298,27 +1303,39 @@ function initializeRunDetailHeaderAfterSwap() {
         window.observabilityTabs.timelineData = null;
         window.observabilityTabs.filesData = null;
 
+        // Refetch the Stream Graph JSON first so loadAllData() renders current
+        // run/task status instead of the stale page-embedded snapshot.
+        const fetchGraph = typeof window.observabilityTabs.fetchFlowGraphData === 'function'
+            ? window.observabilityTabs.fetchFlowGraphData()
+            : Promise.resolve();
+
         // Reload all data and re-render current tab
         if (typeof window.observabilityTabs.loadAllData === 'function') {
-            window.observabilityTabs.loadAllData().then(() => {
-                // Force re-render of current tab after data loads
-                if (currentTab === 'timeline' && window.observabilityTabs.renderTimeline) {
-                    window.observabilityTabs.renderTimeline();
-                } else if (currentTab === 'hierarchy' && window.observabilityTabs.renderHierarchy) {
-                    window.observabilityTabs.renderHierarchy();
-                }
-
-                // Restore inspector state if an item was selected
-                if (selectedNode && inspectorOpen) {
-                    // Find and refresh the inspector with the selected node's updated data
-                    const node = window.observabilityTabs.findNodeInHierarchy
-                        ? window.observabilityTabs.findNodeInHierarchy(selectedNode)
-                        : null;
-                    if (node && window.observabilityTabs.showNodeInInspector) {
-                        window.observabilityTabs.showNodeInInspector(node);
+            Promise.resolve(fetchGraph)
+                .then(() => window.observabilityTabs.loadAllData())
+                .then(() => {
+                    // Force re-render of current tab after data loads
+                    if (currentTab === 'timeline' && window.observabilityTabs.renderTimeline) {
+                        window.observabilityTabs.renderTimeline();
+                    } else if (currentTab === 'hierarchy' && window.observabilityTabs.renderHierarchy) {
+                        window.observabilityTabs.renderHierarchy();
+                    } else if (currentTab === 'stream-graph' && window.observabilityTabs.loadFlowGraphData) {
+                        // loadAllData already repainted from fresh #graph-data, but
+                        // re-render explicitly to be safe when it is the active tab.
+                        window.observabilityTabs.loadFlowGraphData();
                     }
-                }
-            });
+
+                    // Restore inspector state if an item was selected
+                    if (selectedNode && inspectorOpen) {
+                        // Find and refresh the inspector with the selected node's updated data
+                        const node = window.observabilityTabs.findNodeInHierarchy
+                            ? window.observabilityTabs.findNodeInHierarchy(selectedNode)
+                            : null;
+                        if (node && window.observabilityTabs.showNodeInInspector) {
+                            window.observabilityTabs.showNodeInInspector(node);
+                        }
+                    }
+                });
         }
     }
 }
@@ -1332,11 +1349,73 @@ function initializeRunDetailHeaderAfterSwap() {
 </style>
 
 <script>
-// SSE refresh callback - used by the SSE status indicator component
-window.sseRefreshCallback = function() {
-    // Trigger HTMX refresh of the run header
-    htmx.trigger('#run-detail-header', 'htmx:load');
-};
+// Run detail live refresh.
+//
+// Strategy: SSE-first via the shared HotRefresh registry. The single refresh
+// action reloads the run header fragment; htmx's afterSettle handler then
+// refreshes every observability tab and the Stream Graph, keeping all derived
+// views in sync. A bounded 5s poll runs only as a fallback when SSE is not
+// connected, and everything self-terminates once the run reaches a terminal
+// state (the re-rendered header drops its data-run-incomplete marker).
+(function () {
+    function runIsIncomplete() {
+        const h = document.getElementById('run-detail-header');
+        return !!(h && h.getAttribute('data-run-incomplete') === 'true');
+    }
+
+    let pollTimer = null;
+
+    function teardown() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+        if (window.HotRefresh && typeof window.HotRefresh.unregisterRegion === 'function') {
+            window.HotRefresh.unregisterRegion('run-detail');
+        }
+    }
+
+    function refreshRunDetail() {
+        const h = document.getElementById('run-detail-header');
+        if (h && typeof htmx !== 'undefined') {
+            htmx.trigger(h, 'refresh');
+        }
+        if (!runIsIncomplete()) {
+            teardown();
+        }
+    }
+
+    function startFallbackPoll() {
+        if (pollTimer) return;
+        pollTimer = setInterval(() => {
+            if (!runIsIncomplete()) {
+                teardown();
+                return;
+            }
+            // Only poll when SSE isn't delivering live updates.
+            if (!window.__sseConnected) {
+                refreshRunDetail();
+            }
+        }, 5000);
+    }
+
+    function setup() {
+        if (!runIsIncomplete()) return;
+        if (window.HotRefresh && typeof window.HotRefresh.registerRegion === 'function') {
+            window.HotRefresh.registerRegion('run-detail', refreshRunDetail);
+        } else {
+            // No shared scheduler available: fall back to the legacy global.
+            window.sseRefreshCallback = refreshRunDetail;
+        }
+        startFallbackPoll();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', setup);
+    } else {
+        setup();
+    }
+})();
 </script>
 
 {% endblock %}
