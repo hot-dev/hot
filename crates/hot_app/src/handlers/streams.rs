@@ -20,7 +20,7 @@ pub async fn streams_list_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Check if this is an HTMX request (partial update)
-    let is_htmx_request = headers.get("HX-Request").is_some();
+    let is_htmx_request = crate::handlers::is_htmx_request(&headers);
     // Get the current environment ID
     let env_id = match session.current_env_id() {
         Some(id) => id,

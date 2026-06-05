@@ -9,7 +9,12 @@
 {% block content %}
 <div class="space-y-6">
     <!-- Stream Summary -->
-    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-6">
+    <div id="stream-detail-header"
+         hx-get="/streams/{{ stream.stream_id }}"
+         hx-trigger="refresh"
+         hx-select="#stream-detail-header"
+         hx-swap="outerHTML"
+         class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-6">
         <h2 class="text-xl font-semibold mb-4">Stream Details</h2>
         <dl class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -60,10 +65,19 @@
 </div>
 
 <script>
-// SSE refresh callback - used by the SSE status indicator component
+// SSE refresh callback - used by the SSE status indicator component.
+//
+// Targeted refresh of the stream summary header (stats) instead of a full page
+// reload, preserving scroll and the active tab. Tab content binds listeners at
+// load time, so only the display-only summary is refreshed; reload is fallback.
 window.sseRefreshCallback = function() {
-    // Reload the page to get updated stream stats
-    window.location.reload();
+    const target = document.getElementById('stream-detail-header');
+    if (target && typeof htmx !== 'undefined') {
+        // Uses the element's hx-get/hx-select to swap only the summary fragment.
+        htmx.trigger(target, 'refresh');
+    } else {
+        window.location.reload();
+    }
 };
 </script>
 {% endblock %}

@@ -115,7 +115,7 @@ pub async fn store_detail_handler(
     headers: HeaderMap,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Response {
-    let is_htmx_request = headers.get("HX-Request").is_some();
+    let is_htmx_request = crate::handlers::is_htmx_request(&headers);
     let store_name = match urlencoding::decode(&store_name_url) {
         Ok(s) => s.into_owned(),
         Err(_) => return Redirect::to("/stores").into_response(),

@@ -2,6 +2,10 @@
 
 {% block title %}{{ title }}{% endblock %}
 
+{% block sse_data_attrs %}{% if active_tab == "graph" %}data-sse-mode="auto"{% endif %}{% endblock %}
+
+{% block sse_status %}{% if active_tab == "graph" %}{% include "components/sse_status_indicator.html" %}{% endif %}{% endblock %}
+
 {% block content %}
 <div>
     <!-- Tabs -->

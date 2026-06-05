@@ -22,7 +22,7 @@ pub async fn events_list_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Check if this is an HTMX request (partial update)
-    let is_htmx_request = headers.get("HX-Request").is_some();
+    let is_htmx_request = crate::handlers::is_htmx_request(&headers);
     // Build breadcrumbs: <org> (<env>) / Events
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Events".to_string()));

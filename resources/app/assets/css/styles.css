@@ -413,6 +413,9 @@
   .-right-0 {
     right: calc(var(--spacing) * -0);
   }
+  .-right-0\.5 {
+    right: calc(var(--spacing) * -0.5);
+  }
   .right-0 {
     right: calc(var(--spacing) * 0);
   }
@@ -427,6 +430,9 @@
   }
   .-bottom-0 {
     bottom: calc(var(--spacing) * -0);
+  }
+  .-bottom-0\.5 {
+    bottom: calc(var(--spacing) * -0.5);
   }
   .bottom-0 {
     bottom: calc(var(--spacing) * 0);

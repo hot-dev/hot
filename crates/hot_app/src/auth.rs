@@ -453,12 +453,7 @@ pub fn get_session_from_request(request: &Request) -> Option<&Session> {
 
 /// Check if request is from HTMX by looking for HX-Request header
 fn is_htmx_request(request: &Request) -> bool {
-    request
-        .headers()
-        .get("HX-Request")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "true")
-        .unwrap_or(false)
+    crate::handlers::is_htmx_request(request.headers())
 }
 
 /// Create a redirect response that works with both normal and HTMX requests
