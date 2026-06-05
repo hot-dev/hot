@@ -6,18 +6,19 @@
   </picture>
 </p>
 
-<p align="left"><strong>Backend Workflows for the AI Age</strong></p>
+<p align="left"><strong>Open source platform for backend workflows and AI agents</strong></p>
 
 # Hot Dev
 
-Hot Dev is an open source platform for backend workflows — events, schedules,
-AI agents, MCP tools, long-running tasks, and service orchestration — with
-built-in execution tracing, a local dev runtime, and one-command deploys.
+Hot Dev is an open source platform for backend workflows: events, schedules,
+AI agents, MCP tools, long-running tasks, and service orchestration. It includes
+execution tracing, a local dev runtime, and single-command deploys.
 
 Hot is the language and runtime at its core. This repo contains the Hot
-compiler, VM, and standard library, plus the platform components built on top:
-the `hot` CLI, API, web app, scheduler, event worker, task worker, and LSP
-server.
+compiler, VM, and standard library, plus the platform built on top: the `hot`
+CLI, API, web app, scheduler, event worker, task worker, and LSP server. Public
+Hot packages live under `hot/pkg`, including `hot-std` and provider/tool
+integrations.
 
 Hot Dev Cloud is the hosted offering; its deployment infrastructure and private
 operational tooling live outside this repository.
@@ -27,15 +28,58 @@ operational tooling live outside this repository.
 - Documentation: [hot.dev/docs](https://hot.dev/docs)
 - License: [Apache-2.0](LICENSE)
 
-## What Is Included
+## Example
 
-- Hot compiler, runtime, and standard library.
-- Platform services and developer tools: the `hot` CLI, API, web app/dashboard,
-  event worker, scheduler, task worker, `hotbox`, and LSP server.
-- Public Hot packages under `hot/pkg`, including `hot-std` and provider/tool
-  integrations.
-- Public documentation, package documentation generation, installer resources,
-  and release packaging scripts.
+This example shows how Hot wires webhooks, events, schedules, and MCP tools with
+the same `meta` mechanism:
+
+```hot
+::myapp ns
+::http ::hot::http
+::uri ::hot::uri
+
+// Receive a webhook, then fan out through an event.
+on-signup
+meta {
+    webhook: {service: "leads", path: "/signup"},
+    on-event: "lead:new",
+}
+fn (request) {
+    send("lead:new", request.body)
+    {ok: true}
+}
+
+// React to the event: score the lead and route it.
+qualify-lead
+meta {on-event: "lead:new"}
+fn (event) {
+    score score-lead(event.data)
+    if(gte(score, 0.7),
+        send("lead:qualified", event.data),
+        send("lead:nurture", event.data))
+}
+
+// Run on a schedule.
+weekly-summary
+meta {schedule: "every monday at 9am"}
+fn (event) {
+    post-pipeline-summary()
+}
+
+// Expose a function as an MCP tool.
+get-forecast
+meta {
+    mcp: {
+        service: "weather",
+        description: "Get the weather forecast for a location",
+    },
+}
+fn (location: Str): Vec {
+    loc ::uri/encode(location)
+    response ::http/get(`https://wttr.in/${loc}?format=j1`)
+    response.body.weather
+}
+```
 
 ## Install
 
@@ -64,18 +108,31 @@ Common commands:
 hot run file.hot          # Run one Hot file
 hot check                 # Type/check project source
 hot test                  # Run Hot tests
+hot deploy                # Build and deploy to Hot Dev Cloud
 hot ai add                # Add AGENTS.md + Hot language skill for AI tools
 ```
 
-`hot ai add` installs the Hot language skill snapshot bundled with the CLI. The
-same skill is also published for the broader skills.sh ecosystem from
-`hot-dev/hot-skills`.
+`hot ai add` installs the Hot language skill snapshot bundled with the CLI.
+
+## Related Repositories
+
+- [`hot-demos`](https://github.com/hot-dev/hot-demos): runnable Hot projects,
+  including AI agent examples.
+- [`hot-skills`](https://github.com/hot-dev/hot-skills): Hot language skills for
+  AI coding tools.
+- [`setup-hot`](https://github.com/hot-dev/setup-hot): GitHub Action for
+  installing Hot in CI.
+- [`hot-js`](https://github.com/hot-dev/hot-js): JavaScript/TypeScript SDK for
+  Hot.
+- [`hot-python`](https://github.com/hot-dev/hot-python): Python SDK for Hot.
+- [`hot-vsx`](https://github.com/hot-dev/hot-vsx): VS Code and Cursor extension
+  for Hot.
 
 ## Repository Layout
 
 ```text
 crates/
-  hot/                    # Core language, runtime, storage, packages, docs
+  hot/                    # Core language, runtime, storage, and internals
   hot_cli/                # CLI binary
   hot_api/                # API service
   hot_app/                # App/Dashboard
@@ -93,13 +150,17 @@ scripts/                  # Build, package, docs, and integration helpers
 docker/                   # Public release build/package Dockerfiles
 ```
 
+`crates/` is the Rust workspace (compiler, runtime, and services). The top-level
+`hot/` tree holds Hot source: the publishable packages in `hot/pkg` and the Hot
+language and package tests.
+
 ## Development
 
 Prerequisites:
 
 - Rust (version pinned in `rust-toolchain.toml`)
-- Docker, optional for most development but required for `::hot::box` container
-  tasks and release packaging.
+- Docker (optional for most development; required for `::hot::box` container
+  tasks and release packaging)
 
 Common checks:
 
@@ -123,36 +184,21 @@ Install optional git hooks:
 ./scripts/setup-git-hooks.sh
 ```
 
-## Packages
-
-Public packages live under `hot/pkg`. The publish allowlist is
-`hot/pkg/pkg-publish.txt`; only listed packages are included in public package
-publishing flows.
-
-Package documentation JSON can be regenerated from checked-in packages with:
-
-```bash
-./scripts/pkg-docs.sh
-```
-
-Official package releases use the same release workflow as Hot runtime releases.
-Push or tag through the normal release path for a full Hot release, which also
-publishes packages. To publish only updated packages to `pkg.hot.dev`, update
-the package versions/docs allowlist and push the package changes to the
-`pkg-release` branch; that branch runs only the package CDN publishing path.
-
 ## Releases
 
-Public release automation lives in `.github/workflows/release.yml`. Releases are
-versioned from `resources/version.txt`; tagged releases should use immutable
-`vX.Y.Z` tags that match that file.
+Releases are tagged from `resources/version.txt`; automation lives in
+`.github/workflows/release.yml`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and submit
+changes. To report a security issue, follow the process in
+[SECURITY.md](SECURITY.md) rather than opening a public issue.
 
 ## License
 
 Copyright 2025-2026 Hot Dev, LLC.
 
 Hot is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE)
-and [NOTICE](NOTICE).
-
-Brand usage for the Hot Dev name and artwork is covered separately in
-[BRAND.md](BRAND.md).
+and [NOTICE](NOTICE). Brand usage for the Hot Dev name and artwork is covered
+separately in [BRAND.md](BRAND.md).
