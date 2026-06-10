@@ -15,12 +15,16 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 pub async fn get_env_info(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<Json<ApiResponse<EnvironmentResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read environment info.")?;
+
     let env = Env::get_env(&db, &api_key.env_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -150,11 +154,14 @@ pub enum EnvSseEvent {
 /// - `task:complete` - Emitted when a task completes
 pub async fn subscribe_to_env(
     State((_db, _storage, _conf, stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<
     Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    super::require_api_key(&auth, "Only API keys can subscribe to environment events.")?;
+
     let env_id = api_key.env_id;
 
     // Try to subscribe to pub/sub for real-time updates

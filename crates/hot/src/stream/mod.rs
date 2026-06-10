@@ -16,11 +16,13 @@
 use crate::val;
 use crate::val::Val;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub mod mem;
@@ -34,6 +36,7 @@ pub enum StreamEvent {
     #[serde(rename = "run:start")]
     RunStart {
         run_id: Uuid,
+        env_id: Uuid,
         stream_id: Uuid,
         event_id: Option<Uuid>,
     },
@@ -41,6 +44,7 @@ pub enum StreamEvent {
     #[serde(rename = "run:stop")]
     RunStop {
         run_id: Uuid,
+        env_id: Uuid,
         stream_id: Uuid,
         event_id: Option<Uuid>,
         result: Option<serde_json::Value>,
@@ -49,6 +53,7 @@ pub enum StreamEvent {
     #[serde(rename = "run:fail")]
     RunFail {
         run_id: Uuid,
+        env_id: Uuid,
         stream_id: Uuid,
         event_id: Option<Uuid>,
         error: Option<String>,
@@ -57,6 +62,7 @@ pub enum StreamEvent {
     #[serde(rename = "run:cancel")]
     RunCancel {
         run_id: Uuid,
+        env_id: Uuid,
         stream_id: Uuid,
         event_id: Option<Uuid>,
         reason: Option<String>,
@@ -68,6 +74,10 @@ pub enum StreamEvent {
         /// Unique ID for this data emission (UUIDv7 for ordering)
         stream_data_id: Uuid,
         run_id: Uuid,
+        /// Environment that owns this stream. `None` is reserved for internal
+        /// non-tenant compatibility channels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_id: Option<Uuid>,
         stream_id: Uuid,
         /// User-defined data type (e.g., "http:sse:event", "progress", "llm:token")
         data_type: String,
@@ -217,6 +227,41 @@ impl EnvEvent {
 }
 
 impl StreamEvent {
+    pub fn channel_name(&self) -> String {
+        match self {
+            StreamEvent::RunStart {
+                env_id, stream_id, ..
+            }
+            | StreamEvent::RunStop {
+                env_id, stream_id, ..
+            }
+            | StreamEvent::RunFail {
+                env_id, stream_id, ..
+            }
+            | StreamEvent::RunCancel {
+                env_id, stream_id, ..
+            } => channel_name(env_id, stream_id),
+            StreamEvent::StreamData {
+                env_id: Some(env_id),
+                stream_id,
+                ..
+            } => channel_name(env_id, stream_id),
+            StreamEvent::StreamData { stream_id, .. } => legacy_channel_name(stream_id),
+            StreamEvent::TaskMessage { .. } => legacy_channel_name(&self.stream_id()),
+        }
+    }
+
+    pub fn env_id(&self) -> Option<Uuid> {
+        match self {
+            StreamEvent::RunStart { env_id, .. }
+            | StreamEvent::RunStop { env_id, .. }
+            | StreamEvent::RunFail { env_id, .. }
+            | StreamEvent::RunCancel { env_id, .. } => Some(*env_id),
+            StreamEvent::StreamData { env_id, .. } => *env_id,
+            StreamEvent::TaskMessage { .. } => None,
+        }
+    }
+
     /// Get the stream_id from any event variant.
     /// For TaskMessage, the task_id (parsed as UUID) is used as the routing key.
     pub fn stream_id(&self) -> Uuid {
@@ -318,12 +363,20 @@ pub trait StreamPublisher: Send + Sync {
 }
 
 /// Trait for subscribing to stream events
+#[derive(Debug, Clone)]
+pub enum StreamNext {
+    Event(StreamEvent),
+    Idle,
+    Closed,
+}
+
 #[async_trait]
 pub trait StreamSubscriber: Send {
     /// Receive the next event from the subscription
     ///
-    /// Returns `None` if the subscription is closed or an error occurred.
-    async fn next(&mut self) -> Option<StreamEvent>;
+    /// Returns `Idle` when no event is currently available but the subscription
+    /// is still healthy, and `Closed` when the subscription cannot continue.
+    async fn next(&mut self) -> StreamNext;
 }
 
 /// Factory for creating stream subscribers
@@ -332,6 +385,13 @@ pub trait StreamSubscriberFactory: Send + Sync {
     /// Subscribe to events for a specific stream
     async fn subscribe(
         &self,
+        stream_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError>;
+
+    /// Subscribe to tenant-owned events for a specific stream.
+    async fn subscribe_in_env(
+        &self,
+        env_id: Uuid,
         stream_id: Uuid,
     ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError>;
 }
@@ -362,6 +422,47 @@ pub trait EnvSubscriberFactory: Send + Sync {
         &self,
         env_id: Uuid,
     ) -> Result<Box<dyn EnvSubscriber>, StreamPubSubError>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum McpSseTransportPrincipal {
+    ApiKey(Uuid),
+    Session(Uuid),
+    ServiceKey(Uuid),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpSseTransportSessionBinding {
+    pub transport_session_id: Uuid,
+    pub env_id: Uuid,
+    pub route_key: String,
+    pub principal: McpSseTransportPrincipal,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl McpSseTransportSessionBinding {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at <= Utc::now()
+    }
+}
+
+#[async_trait]
+pub trait McpSseTransportSessionStore: Send + Sync {
+    async fn put_mcp_sse_transport_session(
+        &self,
+        binding: McpSseTransportSessionBinding,
+        ttl: Duration,
+    ) -> Result<(), StreamPubSubError>;
+
+    async fn get_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<Option<McpSseTransportSessionBinding>, StreamPubSubError>;
+
+    async fn delete_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<(), StreamPubSubError>;
 }
 
 /// Unified stream pub/sub implementation that can use either Memory or Redis Streams backend
@@ -441,6 +542,57 @@ impl StreamSubscriberFactory for StreamPubSub {
             StreamPubSub::Redis(r) => r.subscribe(stream_id).await,
         }
     }
+
+    async fn subscribe_in_env(
+        &self,
+        env_id: Uuid,
+        stream_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(m) => m.subscribe_in_env(env_id, stream_id).await,
+            StreamPubSub::Redis(r) => r.subscribe_in_env(env_id, stream_id).await,
+        }
+    }
+}
+
+#[async_trait]
+impl McpSseTransportSessionStore for StreamPubSub {
+    async fn put_mcp_sse_transport_session(
+        &self,
+        binding: McpSseTransportSessionBinding,
+        ttl: Duration,
+    ) -> Result<(), StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(m) => m.put_mcp_sse_transport_session(binding, ttl).await,
+            StreamPubSub::Redis(r) => r.put_mcp_sse_transport_session(binding, ttl).await,
+        }
+    }
+
+    async fn get_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<Option<McpSseTransportSessionBinding>, StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(m) => m.get_mcp_sse_transport_session(transport_session_id).await,
+            StreamPubSub::Redis(r) => r.get_mcp_sse_transport_session(transport_session_id).await,
+        }
+    }
+
+    async fn delete_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<(), StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(m) => {
+                m.delete_mcp_sse_transport_session(transport_session_id)
+                    .await
+            }
+            StreamPubSub::Redis(r) => {
+                r.delete_mcp_sse_transport_session(transport_session_id)
+                    .await
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -498,9 +650,13 @@ pub const ENV_CHANNEL_PREFIX: &str = "hot:env";
 
 /// Generate a Redis channel name for a stream
 /// Uses hash tags for Redis cluster compatibility
-pub fn channel_name(stream_id: &Uuid) -> String {
-    // Hash tag around stream_id ensures streams distribute across cluster nodes
-    // while related operations (pub/sub) for the same stream hit the same node
+pub fn channel_name(env_id: &Uuid, stream_id: &Uuid) -> String {
+    // Hash tag around env+stream keeps tenant-owned stream traffic isolated.
+    format!("{}:{{{}:{}}}", STREAM_CHANNEL_PREFIX, env_id, stream_id)
+}
+
+pub fn legacy_channel_name(stream_id: &Uuid) -> String {
+    // Internal non-tenant channels, such as task message inboxes.
     format!("{}:{{{}}}", STREAM_CHANNEL_PREFIX, stream_id)
 }
 
@@ -577,28 +733,52 @@ mod tests {
 
     #[test]
     fn test_run_start_stream_id() {
+        let env_id = Uuid::now_v7();
         let sid = Uuid::now_v7();
         let event = StreamEvent::RunStart {
             run_id: Uuid::now_v7(),
+            env_id,
             stream_id: sid,
             event_id: None,
         };
         assert_eq!(event.stream_id(), sid);
+        assert_eq!(event.env_id(), Some(env_id));
+        assert_eq!(event.channel_name(), channel_name(&env_id, &sid));
     }
 
     #[test]
     fn test_stream_data_accessors() {
+        let env_id = Uuid::now_v7();
         let rid = Uuid::now_v7();
         let sid = Uuid::now_v7();
         let event = StreamEvent::StreamData {
             stream_data_id: Uuid::now_v7(),
             run_id: rid,
+            env_id: Some(env_id),
             stream_id: sid,
             data_type: "progress".to_string(),
             payload: serde_json::json!(50),
         };
         assert_eq!(event.stream_id(), sid);
         assert_eq!(event.run_id(), rid);
+        assert_eq!(event.env_id(), Some(env_id));
         assert_eq!(event.event_id(), None);
+        assert_eq!(event.channel_name(), channel_name(&env_id, &sid));
+    }
+
+    #[test]
+    fn test_internal_stream_data_uses_legacy_channel() {
+        let rid = Uuid::now_v7();
+        let sid = Uuid::now_v7();
+        let event = StreamEvent::StreamData {
+            stream_data_id: Uuid::now_v7(),
+            run_id: rid,
+            env_id: None,
+            stream_id: sid,
+            data_type: "internal:test".to_string(),
+            payload: serde_json::json!("{}"),
+        };
+        assert_eq!(event.env_id(), None);
+        assert_eq!(event.channel_name(), legacy_channel_name(&sid));
     }
 }

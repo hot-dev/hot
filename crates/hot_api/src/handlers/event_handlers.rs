@@ -9,14 +9,18 @@ use hot::db::{api_key::ApiKey, build::Build, event_handler::EventHandler};
 
 use super::{ListQueryParams, get_and_verify_project};
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 pub async fn list_project_event_handlers(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<EventHandlerResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list event handlers.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get the deployed build

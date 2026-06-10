@@ -36,7 +36,8 @@ use hot::lang::event::{EventPublisher, ExecutionContext};
 use hot::lang::hot::task::TaskRequest;
 use hot::queue::{ProcessingQueue, Queue, QueueType};
 use hot::stream::{
-    EnvEvent, EnvPublisher, StreamEvent, StreamPubSub, StreamPublisher, StreamSubscriberFactory,
+    EnvEvent, EnvPublisher, StreamEvent, StreamNext, StreamPubSub, StreamPublisher,
+    StreamSubscriberFactory,
 };
 use hot::val::Val;
 use std::collections::HashMap;
@@ -2474,9 +2475,9 @@ async fn process_code_task(
     let cancel_notify_fwd = Arc::clone(&cancel_notify);
     let inbox_forwarder = tokio::spawn(async move {
         match stream_pub_clone.subscribe(task_id_for_sub).await {
-            Ok(mut sub) => {
-                while let Some(event) = sub.next().await {
-                    if let StreamEvent::TaskMessage { payload, .. } = event {
+            Ok(mut sub) => loop {
+                match sub.next().await {
+                    StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) => {
                         let is_cancel = payload
                             .as_object()
                             .and_then(|m| m.get("$cancel"))
@@ -2493,8 +2494,10 @@ async fn process_code_task(
                             break;
                         }
                     }
+                    StreamNext::Event(_) | StreamNext::Idle => {}
+                    StreamNext::Closed => break,
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!(task_id = %task_id_for_sub, "Failed to subscribe for task messages: {}", e);
             }
@@ -2971,6 +2974,7 @@ async fn complete_task_with_event(
         let stream_event = if matches!(status, TaskStatus::Failed | TaskStatus::TimedOut) {
             StreamEvent::RunFail {
                 run_id: *task_id,
+                env_id,
                 stream_id,
                 event_id: None,
                 error: result
@@ -2982,6 +2986,7 @@ async fn complete_task_with_event(
         } else {
             StreamEvent::RunStop {
                 run_id: *task_id,
+                env_id,
                 stream_id,
                 event_id: None,
                 result: result.cloned(),

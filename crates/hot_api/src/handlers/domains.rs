@@ -11,7 +11,7 @@
 
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use hot::db::Features;
@@ -23,7 +23,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::ApiStateData;
-use crate::handlers::get_org_id_for_env;
+use crate::auth::AuthContext;
+use crate::handlers::{ListQueryParams, get_org_id_for_env};
 use crate::models::*;
 
 // ============================================================================
@@ -229,9 +230,12 @@ async fn check_domain_limit(
 /// 3. Returns the validation CNAME record for the customer to add.
 pub async fn create_domain(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Json(body): Json<CreateDomainRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<DomainResponse>>), (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can create custom domains.")?;
+
     if !hot::domain::custom_domains_enabled(&conf) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -318,8 +322,12 @@ pub async fn create_domain(
 /// GET /v1/domains — List domains for this environment
 pub async fn list_domains(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
-) -> Result<Json<ApiResponse<Vec<DomainResponse>>>, (StatusCode, Json<ApiErrorResponse>)> {
+    Query(params): Query<ListQueryParams>,
+) -> Result<Json<ApiListResponse<DomainResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list custom domains.")?;
+
     let domains = Domain::list_by_env(&db, &api_key.env_id)
         .await
         .map_err(|e| {
@@ -330,22 +338,30 @@ pub async fn list_domains(
         })?;
 
     let data: Vec<DomainResponse> = domains.iter().map(domain_to_response).collect();
+    let total = data.len() as i64;
+    let paged = data
+        .into_iter()
+        .skip(params.offset as usize)
+        .take(params.limit as usize)
+        .collect();
 
-    Ok(Json(ApiResponse {
-        data,
-        meta: ResponseMeta {
-            request_id: Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
-        },
-    }))
+    Ok(Json(ApiListResponse::new(
+        paged,
+        total,
+        params.limit,
+        params.offset,
+    )))
 }
 
 /// GET /v1/domains/{domain_id} — Get a specific domain
 pub async fn get_domain(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(domain_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<DomainResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read custom domains.")?;
+
     let domain = Domain::get_domain(&db, &domain_id)
         .await
         .map_err(|e| match e {
@@ -380,10 +396,13 @@ pub async fn get_domain(
 /// Polls provider certificate status and returns current domain state.
 pub async fn verify_domain(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     domain_cache: Option<Extension<crate::domain_resolver::DomainCache>>,
     Path(domain_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<DomainVerifyResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can verify custom domains.")?;
+
     let domain = Domain::get_domain(&db, &domain_id)
         .await
         .map_err(|e| match e {
@@ -553,10 +572,13 @@ async fn check_certificate_and_update(
 /// and then performs the final hard delete.
 pub async fn delete_domain(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     domain_cache: Option<Extension<crate::domain_resolver::DomainCache>>,
     Path(domain_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can delete custom domains.")?;
+
     let domain = Domain::get_domain(&db, &domain_id)
         .await
         .map_err(|e| match e {

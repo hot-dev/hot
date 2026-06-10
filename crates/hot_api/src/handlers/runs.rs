@@ -14,6 +14,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::deserialize_clamped_limit;
+use crate::auth::AuthContext;
 
 fn default_limit() -> i64 {
     20
@@ -36,9 +37,12 @@ pub struct RunFilters {
 
 pub async fn list_runs(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Query(filters): Query<RunFilters>,
 ) -> Result<Json<ApiListResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list runs.")?;
+
     // Parse filters into arrays
     let statuses: Option<Vec<&str>> = filters.status.as_ref().map(|s| vec![s.as_str()]);
     let run_types: Option<Vec<&str>> = filters.run_type.as_ref().map(|t| vec![t.as_str()]);
@@ -112,9 +116,12 @@ pub async fn list_runs(
 
 pub async fn get_run(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read runs.")?;
+
     let run = Run::get_run(&db, &run_id).await.map_err(|e| match e {
         hot::db::run::RunError::NotFound => (
             StatusCode::NOT_FOUND,
@@ -155,8 +162,11 @@ pub async fn get_run(
 
 pub async fn get_run_stats(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<Json<ApiResponse<RunStatsResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read run stats.")?;
+
     use hot::db::run::RunStatus;
 
     let total = Run::get_count_by_env(&db, &api_key.env_id)

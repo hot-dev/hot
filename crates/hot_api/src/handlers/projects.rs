@@ -10,13 +10,17 @@ use uuid::Uuid;
 
 use super::{ListQueryParams, get_and_verify_project};
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 pub async fn list_projects(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list projects.")?;
+
     let projects = Project::get_projects_by_env(
         &db,
         &api_key.env_id,
@@ -62,9 +66,12 @@ pub async fn list_projects(
 
 pub async fn get_project(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
 ) -> Result<Json<ApiResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read projects.")?;
+
     // Try to parse as UUID first, otherwise treat as slug (project name)
     let project = if let Ok(project_id) = Uuid::parse_str(&project_id_or_slug) {
         Project::get_project(&db, &project_id).await
@@ -105,10 +112,13 @@ pub async fn get_project(
 
 pub async fn create_project(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<ProjectResponse>>), (StatusCode, Json<ApiErrorResponse>)>
 {
+    super::require_api_key(&auth, "Only API keys can create projects.")?;
+
     let project_id = Uuid::now_v7();
 
     Project::insert_project(
@@ -148,10 +158,13 @@ pub async fn create_project(
 
 pub async fn update_project(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
     Json(req): Json<UpdateProjectRequest>,
 ) -> Result<Json<ApiResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can update projects.")?;
+
     // Get the project first to verify ownership
     let project = if let Ok(project_id) = Uuid::parse_str(&project_id_or_slug) {
         Project::get_project(&db, &project_id).await
@@ -216,9 +229,12 @@ pub async fn update_project(
 
 pub async fn delete_project(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can delete projects.")?;
+
     // Get the project first to verify ownership
     let project = if let Ok(project_id) = Uuid::parse_str(&project_id_or_slug) {
         Project::get_project(&db, &project_id).await
@@ -260,17 +276,23 @@ pub async fn delete_project(
 
 pub async fn activate_project(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
 ) -> Result<Json<ApiResponse<ProjectActivateResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can activate projects.")?;
+
     toggle_project_active(db, conf, api_key, project_id_or_slug, true).await
 }
 
 pub async fn deactivate_project(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
 ) -> Result<Json<ApiResponse<ProjectActivateResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can deactivate projects.")?;
+
     toggle_project_active(db, conf, api_key, project_id_or_slug, false).await
 }
 

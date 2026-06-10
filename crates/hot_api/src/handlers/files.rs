@@ -20,6 +20,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 type SharedFileStorage = Arc<Box<dyn FileStorage>>;
@@ -48,9 +49,12 @@ fn file_response_from_record(record: &FileRecord) -> FileResponse {
 
 pub async fn list_files(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Query(params): Query<FileListQueryParams>,
 ) -> Result<Json<ApiListResponse<FileResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list files.")?;
+
     let files = file::list_files_by_env(
         &db,
         api_key.env_id,
@@ -88,9 +92,12 @@ pub async fn list_files(
 
 pub async fn get_file(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(file_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<FileResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read files.")?;
+
     let record = file::get_file_by_id_with_env_check(&db, file_id, api_key.env_id)
         .await
         .map_err(|e| {
@@ -105,10 +112,13 @@ pub async fn get_file(
 
 pub async fn download_file(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Path(file_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can download files.")?;
+
     let record = file::get_file_by_id_with_env_check(&db, file_id, api_key.env_id)
         .await
         .map_err(|e| {
@@ -174,11 +184,14 @@ pub async fn download_file(
 
 pub async fn upload_file(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<ApiResponse<FileResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can upload files.")?;
+
     let org_id = Env::get_env(&db, &api_key.env_id)
         .await
         .map(|env| env.org_id)
@@ -270,9 +283,12 @@ pub async fn upload_file(
 
 pub async fn delete_file(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(file_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can delete files.")?;
+
     let record = file::get_file_by_id_with_env_check(&db, file_id, api_key.env_id)
         .await
         .map_err(|e| {
@@ -316,6 +332,7 @@ pub async fn delete_file(
 
 pub async fn initiate_upload(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Json(req): Json<InitiateUploadRequest>,
@@ -323,6 +340,8 @@ pub async fn initiate_upload(
     (StatusCode, Json<ApiResponse<InitiateUploadResponse>>),
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    super::require_api_key(&auth, "Only API keys can initiate file uploads.")?;
+
     let org_id = Env::get_env(&db, &api_key.env_id)
         .await
         .map(|env| env.org_id)
@@ -460,11 +479,14 @@ pub async fn initiate_upload(
 
 pub async fn upload_part_handler(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Path((upload_id, part_number)): Path<(Uuid, i32)>,
     body: Bytes,
 ) -> Result<Json<ApiResponse<UploadPartResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can upload file parts.")?;
+
     validate_part_number(part_number).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -599,10 +621,13 @@ pub async fn upload_part_handler(
 
 pub async fn complete_upload(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Path(upload_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<FileResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can complete file uploads.")?;
+
     let org_id = Env::get_env(&db, &api_key.env_id)
         .await
         .map(|env| env.org_id)
@@ -737,10 +762,13 @@ pub async fn complete_upload(
 
 pub async fn abort_upload(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Path(upload_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can abort file uploads.")?;
+
     let org_id = Env::get_env(&db, &api_key.env_id)
         .await
         .map(|env| env.org_id)

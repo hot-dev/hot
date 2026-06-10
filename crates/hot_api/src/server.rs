@@ -60,8 +60,8 @@ use crate::handlers::{
     list_sessions,
     mcp_handler,
     mcp_handler_domain,
-    mcp_legacy_messages_handler,
-    mcp_legacy_messages_handler_domain,
+    mcp_http_sse_messages_handler,
+    mcp_http_sse_messages_handler_domain,
     mcp_sse_handler,
     mcp_sse_handler_domain,
     publish_event,
@@ -247,15 +247,15 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         )
         // MCP (Model Context Protocol) — public route with per-tool auth
         // URL includes env_name for explicit environment targeting (like webhooks)
-        // Streamable HTTP (POST) + legacy SSE (GET)
+        // Streamable HTTP (POST) + deprecated HTTP+SSE compatibility (GET)
         .route(
             "/mcp/{org_slug}/{env_name}/{service}",
             axum::routing::post(mcp_handler).get(mcp_sse_handler),
         )
-        // MCP legacy HTTP+SSE transport — message POST endpoint
+        // MCP HTTP+SSE transport — message POST endpoint
         .route(
             "/mcp/{org_slug}/{env_name}/{service}/messages",
-            axum::routing::post(mcp_legacy_messages_handler),
+            axum::routing::post(mcp_http_sse_messages_handler),
         )
         // Custom domain routes (org/env resolved from domain)
         .route(
@@ -264,7 +264,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         )
         .route(
             "/mcp/{service}/messages",
-            axum::routing::post(mcp_legacy_messages_handler_domain),
+            axum::routing::post(mcp_http_sse_messages_handler_domain),
         )
         .merge(SwaggerUi::new("/docs/api").url("/openapi.json", ApiDoc::openapi()))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for webhooks/MCP

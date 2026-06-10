@@ -591,15 +591,18 @@ async fn webhook_handler_inner(
 
     // Subscribe to pub/sub BEFORE enqueueing (prevents race condition)
     use hot::stream::StreamSubscriberFactory;
-    let subscriber = pubsub.subscribe(stream_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to subscribe to stream: {}",
-                e
-            ))),
-        )
-    })?;
+    let subscriber = pubsub
+        .subscribe_in_env(ctx.env.env_id, stream_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&format!(
+                    "Failed to subscribe to stream: {}",
+                    e
+                ))),
+            )
+        })?;
 
     // Enqueue the message
     use hot::queue::Queue;
@@ -634,7 +637,7 @@ async fn webhook_handler_inner(
     // Webhook timeout: 30 seconds (configurable, but Slack requires < 3s)
     let timeout_seconds = conf.get_int_or_default("webhook.timeout", 30) as u64;
 
-    use hot::stream::StreamEvent;
+    use hot::stream::{StreamEvent, StreamNext};
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_seconds);
     let mut subscriber = subscriber;
 
@@ -650,23 +653,24 @@ async fn webhook_handler_inner(
         tokio::select! {
             event = async { subscriber.next().await } => {
                 match event {
-                    Some(StreamEvent::RunStop { result, .. }) => {
+                    StreamNext::Event(StreamEvent::RunStop { result, .. }) => {
                         outcome = Some(Outcome::Stopped { result });
                         break;
                     }
-                    Some(StreamEvent::RunFail { error, .. }) => {
+                    StreamNext::Event(StreamEvent::RunFail { error, .. }) => {
                         outcome = Some(Outcome::Failed { error });
                         break;
                     }
-                    Some(StreamEvent::RunCancel { reason, .. }) => {
+                    StreamNext::Event(StreamEvent::RunCancel { reason, .. }) => {
                         outcome = Some(Outcome::Cancelled { reason });
                         break;
                     }
-                    Some(_) => {
+                    StreamNext::Event(_) => {
                         // Ignore other events (RunStart, StreamData, etc.)
                         continue;
                     }
-                    None => {
+                    StreamNext::Idle => {}
+                    StreamNext::Closed => {
                         break;
                     }
                 }

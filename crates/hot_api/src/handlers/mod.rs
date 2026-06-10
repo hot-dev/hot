@@ -78,7 +78,23 @@ use axum::{Json, http::StatusCode};
 use hot::db::{DatabasePool, api_key::ApiKey, project::Project};
 use uuid::Uuid;
 
+use crate::auth::AuthContext;
 use crate::models::ApiErrorResponse;
+
+/// Require a first-party API key principal for administrative endpoints.
+pub fn require_api_key(
+    auth: &AuthContext,
+    message: &'static str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if auth.is_api_key() {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ApiErrorResponse::new("forbidden", message)),
+    ))
+}
 
 /// Helper to get project and verify ownership
 pub async fn get_and_verify_project(

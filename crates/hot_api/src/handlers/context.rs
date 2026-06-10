@@ -11,14 +11,18 @@ use uuid::Uuid;
 
 use super::{ListQueryParams, get_and_verify_project, get_org_id_for_env};
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 pub async fn list_context_variables(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<ContextVariableResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list context variables.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     let (context_vars, total) = Context::get_by_project_paginated(
@@ -56,6 +60,7 @@ pub async fn list_context_variables(
 
 pub async fn create_context_variable(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
     Json(req): Json<CreateContextVariableRequest>,
@@ -63,6 +68,8 @@ pub async fn create_context_variable(
     (StatusCode, Json<ApiResponse<ContextVariableResponse>>),
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    super::require_api_key(&auth, "Only API keys can create context variables.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get org_id for encryption
@@ -131,10 +138,13 @@ pub async fn create_context_variable(
 
 pub async fn update_context_variable(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path((project_id_or_slug, key)): Path<(String, String)>,
     Json(req): Json<UpdateContextVariableRequest>,
 ) -> Result<Json<ApiResponse<ContextVariableResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can update context variables.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get org_id for encryption
@@ -202,9 +212,12 @@ pub async fn update_context_variable(
 
 pub async fn delete_context_variable(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path((project_id_or_slug, key)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can delete context variables.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get existing context variable

@@ -3,6 +3,49 @@ use sqlx::{FromRow, Pool, Postgres, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
+fn normalize_auth_mode(auth_mode: Option<&str>) -> &'static str {
+    match auth_mode {
+        Some("none") => "none",
+        _ => "required",
+    }
+}
+
+fn auth_mode_from_meta(meta: Option<&JsonValue>) -> &'static str {
+    normalize_auth_mode(
+        meta.and_then(|m| m.get("mcp"))
+            .and_then(|mcp| mcp.get("auth"))
+            .and_then(|a| a.as_str()),
+    )
+}
+
+fn with_normalized_auth_mode(
+    meta: Option<JsonValue>,
+    auth_mode: &'static str,
+) -> Option<JsonValue> {
+    if meta.is_none() && auth_mode == "required" {
+        return None;
+    }
+
+    let mut meta_obj = match meta {
+        Some(JsonValue::Object(obj)) => obj,
+        Some(other) => return Some(other),
+        None => serde_json::Map::new(),
+    };
+
+    let mut mcp_obj = meta_obj
+        .remove("mcp")
+        .and_then(|mcp| match mcp {
+            JsonValue::Object(obj) => Some(obj),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    mcp_obj.insert("auth".to_string(), JsonValue::String(auth_mode.to_string()));
+    meta_obj.insert("mcp".to_string(), JsonValue::Object(mcp_obj));
+
+    Some(JsonValue::Object(meta_obj))
+}
+
 #[derive(Error, Debug)]
 pub enum McpToolError {
     #[error("Database error: {0}")]
@@ -36,13 +79,11 @@ pub struct McpTool {
 
 impl McpTool {
     /// Extract auth_mode from the meta JSON. Defaults to "required".
-    pub fn auth_mode(&self) -> &str {
-        self.meta
-            .as_ref()
-            .and_then(|m| m.get("mcp"))
-            .and_then(|mcp| mcp.get("auth"))
-            .and_then(|a| a.as_str())
-            .unwrap_or("required")
+    ///
+    /// Only exact `none` is public. Missing, malformed, or unknown values fail
+    /// closed as `required`.
+    pub fn auth_mode(&self) -> &'static str {
+        auth_mode_from_meta(self.meta.as_ref())
     }
 
     /// Returns true if this tool allows unauthenticated access.
@@ -91,13 +132,11 @@ pub struct McpToolWithProject {
 
 impl McpToolWithProject {
     /// Extract auth_mode from the meta JSON. Defaults to "required".
-    pub fn auth_mode(&self) -> &str {
-        self.meta
-            .as_ref()
-            .and_then(|m| m.get("mcp"))
-            .and_then(|mcp| mcp.get("auth"))
-            .and_then(|a| a.as_str())
-            .unwrap_or("required")
+    ///
+    /// Only exact `none` is public. Missing, malformed, or unknown values fail
+    /// closed as `required`.
+    pub fn auth_mode(&self) -> &'static str {
+        auth_mode_from_meta(self.meta.as_ref())
     }
 }
 
@@ -943,10 +982,23 @@ impl McpTool {
             .get(&Val::from("annotations"))
             .and_then(|v| serde_json::to_value(v).ok());
 
-        let meta = tool_map
+        let raw_meta = tool_map
             .get(&Val::from("meta"))
             .map(crate::db::resolve_meta_val)
             .and_then(|v| serde_json::to_value(&v).ok());
+
+        let top_level_auth_mode = tool_map.get(&Val::from("auth_mode")).and_then(|v| match v {
+            Val::Str(s) => Some(s.as_ref()),
+            _ => None,
+        });
+        let normalized_auth_mode = normalize_auth_mode(top_level_auth_mode.or_else(|| {
+            raw_meta
+                .as_ref()
+                .and_then(|m| m.get("mcp"))
+                .and_then(|mcp| mcp.get("auth"))
+                .and_then(|a| a.as_str())
+        }));
+        let meta = with_normalized_auth_mode(raw_meta, normalized_auth_mode);
 
         let file = tool_map.get(&Val::from("file")).and_then(|v| match v {
             Val::Str(s) => Some((**s).to_owned()),
@@ -1008,5 +1060,65 @@ impl McpTool {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_with_meta(meta: Option<JsonValue>) -> McpTool {
+        McpTool {
+            mcp_tool_id: Uuid::now_v7(),
+            build_id: Uuid::now_v7(),
+            service: "svc".to_string(),
+            ns: "::test".to_string(),
+            var: "tool".to_string(),
+            name: "tool".to_string(),
+            description: None,
+            input_schema: None,
+            output_schema: None,
+            title: None,
+            icons: None,
+            annotations: None,
+            meta,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        }
+    }
+
+    #[test]
+    fn auth_mode_allows_only_exact_none_to_be_public() {
+        let public = tool_with_meta(Some(serde_json::json!({
+            "mcp": {"auth": "none"}
+        })));
+        assert_eq!(public.auth_mode(), "none");
+        assert!(public.is_public());
+
+        for value in ["required", "optional", "Required", ""] {
+            let tool = tool_with_meta(Some(serde_json::json!({
+                "mcp": {"auth": value}
+            })));
+            assert_eq!(tool.auth_mode(), "required");
+            assert!(!tool.is_public());
+        }
+
+        let missing = tool_with_meta(None);
+        assert_eq!(missing.auth_mode(), "required");
+        assert!(!missing.is_public());
+    }
+
+    #[test]
+    fn normalized_auth_mode_overrides_raw_meta_on_insert_path() {
+        let meta = Some(serde_json::json!({
+            "mcp": {"auth": "optional"},
+            "other": true
+        }));
+        let normalized = with_normalized_auth_mode(meta, "required").unwrap();
+
+        assert_eq!(normalized["mcp"]["auth"], "required");
+        assert_eq!(normalized["other"], true);
     }
 }

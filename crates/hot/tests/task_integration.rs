@@ -8,7 +8,8 @@ use hot::db::{self, DatabasePool, Task, TaskStatus};
 use hot::lang::hot::task::TaskRequest;
 use hot::queue::{ProcessingQueue, Queue, QueueProcessor, QueueType};
 use hot::stream::{
-    StreamEvent, StreamPubSub, StreamPubSubType, StreamPublisher, StreamSubscriberFactory,
+    StreamEvent, StreamNext, StreamPubSub, StreamPubSubType, StreamPublisher,
+    StreamSubscriberFactory,
 };
 use hot::val;
 use std::sync::Arc;
@@ -290,7 +291,7 @@ async fn test_task_message_pubsub_round_trip() {
         .expect("Timed out waiting for message");
 
     match received {
-        Some(StreamEvent::TaskMessage {
+        StreamNext::Event(StreamEvent::TaskMessage {
             task_id: tid,
             payload,
         }) => {
@@ -323,7 +324,7 @@ async fn test_task_message_multiple_messages() {
             .expect("Timed out");
 
         match msg {
-            Some(StreamEvent::TaskMessage { payload, .. }) => {
+            StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) => {
                 assert_eq!(payload["seq"], i);
             }
             other => panic!("Expected TaskMessage seq={}, got: {:?}", i, other),
