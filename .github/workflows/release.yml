@@ -802,6 +802,7 @@ jobs:
         $version = "${{ steps.version.outputs.version }}"
         $nsiScript = @"
         !include "MUI2.nsh"
+        !include "WinMessages.nsh"
         !include "LogicLib.nsh"
 
         Name "Hot Dev"
@@ -934,6 +935,89 @@ jobs:
             Pop `$1
         FunctionEnd
 
+        ; Add install directory to the system PATH without external plugins.
+        Function AddToPath
+            ReadRegStr `$0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
+
+            Push `$0
+            Push "`$INSTDIR"
+            Call StrContains
+            Pop `$1
+            StrCmp `$1 "" 0 PathExists
+
+            StrCpy `$1 "`$0;`$INSTDIR"
+            WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "`$1"
+            SendMessage `${HWND_BROADCAST} `${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+
+            DetailPrint "Added `$INSTDIR to system PATH"
+            Goto PathDone
+
+        PathExists:
+            DetailPrint "`$INSTDIR is already in PATH"
+
+        PathDone:
+        FunctionEnd
+
+        ; Remove install directory from the system PATH without external plugins.
+        Function un.RemoveFromPath
+            ReadRegStr `$0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
+
+            Push `$0
+            Push ";`$INSTDIR"
+            Call un.StrReplace
+            Pop `$1
+
+            Push `$1
+            Push "`$INSTDIR;"
+            Call un.StrReplace
+            Pop `$2
+
+            Push `$2
+            Push "`$INSTDIR"
+            Call un.StrReplace
+            Pop `$3
+
+            WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "`$3"
+            SendMessage `${HWND_BROADCAST} `${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+        FunctionEnd
+
+        ; Helper function for uninstaller: Simple string replace.
+        Function un.StrReplace
+            Exch `$1 ; find
+            Exch
+            Exch `$0 ; string
+            Push `$2
+            Push `$3
+            Push `$4
+            Push `$5
+
+            StrLen `$2 `$1
+            StrCpy `$3 0
+
+        StrReplaceLoop:
+            StrCpy `$4 `$0 `$2 `$3
+            StrCmp `$4 `$1 StrReplaceFound
+            IntOp `$3 `$3 + 1
+            StrLen `$5 `$0
+            IntCmp `$3 `$5 0 0 StrReplaceDone
+            Goto StrReplaceLoop
+
+        StrReplaceFound:
+            StrCpy `$4 `$0 `$3
+            IntOp `$5 `$3 + `$2
+            StrCpy `$5 `$0 "" `$5
+            StrCpy `$0 "`$4`$5"
+
+        StrReplaceDone:
+            Pop `$5
+            Pop `$4
+            Pop `$3
+            Pop `$2
+            Exch `$0
+            Exch
+            Pop `$1
+        FunctionEnd
+
         Section "Install"
             ; Clean up old installation files to prevent stale files from being found
             ; Remove old resources directory (will be recreated with fresh files)
@@ -957,8 +1041,7 @@ jobs:
             WriteUninstaller "`$INSTDIR\uninstall.exe"
 
             ; Add to PATH
-            EnVar::SetHKLM
-            EnVar::AddValue "Path" "`$INSTDIR"
+            Call AddToPath
 
             ; Start menu shortcuts
             CreateDirectory "`$SMPROGRAMS\Hot Dev"
@@ -987,8 +1070,7 @@ jobs:
             RMDir "`$INSTDIR"
 
             ; Remove from PATH
-            EnVar::SetHKLM
-            EnVar::DeleteValue "Path" "`$INSTDIR"
+            Call un.RemoveFromPath
 
             ; Remove shortcuts
             Delete "`$SMPROGRAMS\Hot Dev\Hot Dev.lnk"
@@ -1001,16 +1083,6 @@ jobs:
         "@
 
         $nsiScript | Out-File -Encoding UTF8 staging/x86_64/installer.nsi
-
-    - name: Install NSIS EnVar plugin
-      shell: pwsh
-      run: |
-        # Download EnVar plugin for PATH manipulation
-        Invoke-WebRequest -Uri "https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip" -OutFile envar.zip
-        Expand-Archive envar.zip -DestinationPath envar
-        $nsisPath = "C:\Program Files (x86)\NSIS"
-        Copy-Item envar/Plugins/x86-ansi/* "$nsisPath/Plugins/x86-ansi/" -Force
-        Copy-Item envar/Plugins/x86-unicode/* "$nsisPath/Plugins/x86-unicode/" -Force
 
     - name: Build installer with NSIS
       shell: pwsh
