@@ -56,6 +56,7 @@ pub fn data(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let run_id = execution_context.run_id;
     let stream_id = execution_context.stream_id;
+    let env_id = execution_context.env_id;
 
     // Validate we have the required IDs
     if stream_id == Uuid::nil() {
@@ -74,6 +75,7 @@ pub fn data(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let stream_event = crate::stream::StreamEvent::StreamData {
         stream_data_id,
         run_id,
+        env_id,
         stream_id,
         data_type: data_type.clone(),
         payload: payload_json.clone(),

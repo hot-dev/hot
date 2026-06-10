@@ -2842,6 +2842,7 @@ async fn execute_single_event_handler(
         let stream_event = if is_error_result {
             StreamEvent::RunFail {
                 run_id,
+                env_id,
                 stream_id,
                 event_id,
                 error: result_json.map(|v| v.to_string()),
@@ -2860,6 +2861,7 @@ async fn execute_single_event_handler(
             });
             StreamEvent::RunCancel {
                 run_id,
+                env_id,
                 stream_id,
                 event_id,
                 reason,
@@ -2867,6 +2869,7 @@ async fn execute_single_event_handler(
         } else {
             StreamEvent::RunStop {
                 run_id,
+                env_id,
                 stream_id,
                 event_id,
                 result: result_json,

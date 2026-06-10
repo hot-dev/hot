@@ -11,8 +11,9 @@
 //! - Connection caching to minimize Redis connection overhead
 
 use super::{
-    EnvEvent, EnvPublisher, EnvSubscriber, EnvSubscriberFactory, StreamEvent, StreamPubSubError,
-    StreamPublisher, StreamSubscriber, StreamSubscriberFactory, channel_name, env_channel_name,
+    EnvEvent, EnvPublisher, EnvSubscriber, EnvSubscriberFactory, McpSseTransportSessionBinding,
+    McpSseTransportSessionStore, StreamEvent, StreamNext, StreamPubSubError, StreamPublisher,
+    StreamSubscriber, StreamSubscriberFactory, channel_name, env_channel_name, legacy_channel_name,
 };
 use async_trait::async_trait;
 use redis::Client;
@@ -20,12 +21,21 @@ use redis::aio::MultiplexedConnection;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 /// Maximum number of entries to keep per stream (approximate)
 /// This prevents unbounded memory growth for streams
 const STREAM_MAXLEN: usize = 1000;
+const MCP_SSE_TRANSPORT_SESSION_PREFIX: &str = "hot:mcp:http-sse-session";
+
+fn mcp_sse_transport_session_key(transport_session_id: &Uuid) -> String {
+    format!(
+        "{}:{{{}}}",
+        MCP_SSE_TRANSPORT_SESSION_PREFIX, transport_session_id
+    )
+}
 
 /// Connection pool that caches Redis connections to avoid expensive reconnections
 enum RedisConnectionPool {
@@ -195,10 +205,73 @@ impl RedisStreamsPubSub {
 }
 
 #[async_trait]
+impl McpSseTransportSessionStore for RedisStreamsPubSub {
+    async fn put_mcp_sse_transport_session(
+        &self,
+        binding: McpSseTransportSessionBinding,
+        ttl: Duration,
+    ) -> Result<(), StreamPubSubError> {
+        let key = mcp_sse_transport_session_key(&binding.transport_session_id);
+        let payload = serde_json::to_string(&binding)
+            .map_err(|e| StreamPubSubError::SerializationError(e.to_string()))?;
+        let ttl_secs = ttl.as_secs().max(1);
+
+        let mut conn = self.connection_pool.get_connection().await?;
+        let _: redis::Value = conn
+            .cmd(
+                &redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&payload)
+                    .arg("EX")
+                    .arg(ttl_secs)
+                    .clone(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<Option<McpSseTransportSessionBinding>, StreamPubSubError> {
+        let key = mcp_sse_transport_session_key(&transport_session_id);
+        let mut conn = self.connection_pool.get_connection().await?;
+        let value = conn.cmd(&redis::cmd("GET").arg(&key).clone()).await?;
+
+        if matches!(value, redis::Value::Nil) {
+            return Ok(None);
+        }
+
+        let payload: String = redis::from_redis_value_ref(&value)
+            .map_err(|e| StreamPubSubError::SerializationError(e.to_string()))?;
+        let binding: McpSseTransportSessionBinding = serde_json::from_str(&payload)
+            .map_err(|e| StreamPubSubError::SerializationError(e.to_string()))?;
+
+        if binding.is_expired() {
+            self.delete_mcp_sse_transport_session(transport_session_id)
+                .await?;
+            return Ok(None);
+        }
+
+        Ok(Some(binding))
+    }
+
+    async fn delete_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<(), StreamPubSubError> {
+        let key = mcp_sse_transport_session_key(&transport_session_id);
+        let mut conn = self.connection_pool.get_connection().await?;
+        let _: redis::Value = conn.cmd(&redis::cmd("DEL").arg(&key).clone()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl StreamPublisher for RedisStreamsPubSub {
     async fn publish(&self, event: StreamEvent) -> Result<(), StreamPubSubError> {
-        let stream_id = event.stream_id();
-        let stream_key = channel_name(&stream_id);
+        let stream_key = event.channel_name();
 
         // Serialize the event to JSON
         let payload = serde_json::to_string(&event)
@@ -237,7 +310,27 @@ impl StreamSubscriberFactory for RedisStreamsPubSub {
         &self,
         stream_id: Uuid,
     ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
-        let stream_key = channel_name(&stream_id);
+        let stream_key = legacy_channel_name(&stream_id);
+
+        // Subscribers need their own dedicated connection since XREAD BLOCK holds it
+        let conn = self.connection_pool.create_subscriber_connection().await?;
+
+        tracing::debug!("Subscribed to Redis Streams channel: {}", stream_key);
+
+        Ok(Box::new(RedisStreamsSubscriber {
+            conn,
+            stream_key,
+            // Start from latest - "$" means "only new messages"
+            last_id: "$".to_string(),
+        }))
+    }
+
+    async fn subscribe_in_env(
+        &self,
+        env_id: Uuid,
+        stream_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
+        let stream_key = channel_name(&env_id, &stream_id);
 
         // Subscribers need their own dedicated connection since XREAD BLOCK holds it
         let conn = self.connection_pool.create_subscriber_connection().await?;
@@ -262,9 +355,9 @@ pub struct RedisStreamsSubscriber {
 
 #[async_trait]
 impl StreamSubscriber for RedisStreamsSubscriber {
-    async fn next(&mut self) -> Option<StreamEvent> {
+    async fn next(&mut self) -> StreamNext {
         // XREAD BLOCK 30000 STREAMS stream last_id
-        // 30 second block timeout - after which we return None and the caller can retry
+        // 30 second block timeout - after which we return Idle and the caller can retry
         let result = self
             .conn
             .cmd(
@@ -284,7 +377,7 @@ impl StreamSubscriber for RedisStreamsSubscriber {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Redis Streams XREAD error on {}: {}", self.stream_key, e);
-                return None;
+                return StreamNext::Closed;
             }
         };
 
@@ -292,57 +385,59 @@ impl StreamSubscriber for RedisStreamsSubscriber {
         // Format: [[stream-name, [[id, [field, value, ...]], ...]]]
         // or nil on timeout
         if matches!(value, redis::Value::Nil) {
-            // Timeout - return None to allow the caller to retry or check other conditions
-            return None;
+            return StreamNext::Idle;
         }
 
         let streams: Vec<redis::Value> = match redis::from_redis_value_ref(&value) {
             Ok(s) => s,
-            Err(_) => return None,
+            Err(_) => return StreamNext::Closed,
         };
 
         let stream_data: Vec<redis::Value> = match streams.first() {
             Some(s) => match redis::from_redis_value_ref(s) {
                 Ok(d) => d,
-                Err(_) => return None,
+                Err(_) => return StreamNext::Closed,
             },
-            None => return None,
+            None => return StreamNext::Closed,
         };
 
         if stream_data.len() < 2 {
-            return None;
+            return StreamNext::Closed;
         }
 
         let messages: Vec<redis::Value> = match redis::from_redis_value_ref(&stream_data[1]) {
             Ok(m) => m,
-            Err(_) => return None,
+            Err(_) => return StreamNext::Closed,
         };
 
         if messages.is_empty() {
-            return None;
+            return StreamNext::Idle;
         }
 
         // Get first message: [id, [field, value, ...]]
-        let msg: Vec<redis::Value> = match redis::from_redis_value_ref(messages.first()?) {
+        let Some(first_message) = messages.first() else {
+            return StreamNext::Idle;
+        };
+        let msg: Vec<redis::Value> = match redis::from_redis_value_ref(first_message) {
             Ok(m) => m,
-            Err(_) => return None,
+            Err(_) => return StreamNext::Closed,
         };
 
         if msg.len() < 2 {
-            return None;
+            return StreamNext::Closed;
         }
 
         // Extract message ID and update last_id for next read
         let msg_id: String = match redis::from_redis_value_ref(&msg[0]) {
             Ok(id) => id,
-            Err(_) => return None,
+            Err(_) => return StreamNext::Closed,
         };
         self.last_id = msg_id;
 
         // Extract fields
         let fields: Vec<redis::Value> = match redis::from_redis_value_ref(&msg[1]) {
             Ok(f) => f,
-            Err(_) => return None,
+            Err(_) => return StreamNext::Closed,
         };
 
         // Find the "event" field
@@ -359,26 +454,26 @@ impl StreamSubscriber for RedisStreamsSubscriber {
             if field_name == "event" {
                 let payload: String = match redis::from_redis_value_ref(&fields[i + 1]) {
                     Ok(p) => p,
-                    Err(_) => return None,
+                    Err(_) => return StreamNext::Closed,
                 };
 
                 // Deserialize the event
                 match serde_json::from_str::<StreamEvent>(&payload) {
-                    Ok(event) => return Some(event),
+                    Ok(event) => return StreamNext::Event(event),
                     Err(e) => {
                         tracing::warn!(
                             "Failed to deserialize stream event from Redis Streams on {}: {}",
                             self.stream_key,
                             e
                         );
-                        return None;
+                        return StreamNext::Closed;
                     }
                 }
             }
             i += 2;
         }
 
-        None
+        StreamNext::Idle
     }
 }
 

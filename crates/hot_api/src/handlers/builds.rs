@@ -14,14 +14,18 @@ use uuid::Uuid;
 
 use super::{ListQueryParams, get_and_verify_project};
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 pub async fn list_builds(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     let builds = Build::get_builds_by_project(
@@ -74,9 +78,12 @@ pub async fn list_builds(
 
 pub async fn list_builds_by_env(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<BuildWithProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can list builds.")?;
+
     let builds = Build::get_builds_by_env(
         &db,
         &api_key.env_id,
@@ -139,9 +146,12 @@ pub async fn list_builds_by_env(
 
 pub async fn get_build(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path((project_id_or_slug, build_id)): Path<(String, Uuid)>,
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     let build = Build::get_build(&db, &build_id)
@@ -182,9 +192,12 @@ pub async fn get_build(
 
 pub async fn get_deployed_build(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     let build = Build::get_deployed_build_by_project(&db, &project.project_id)
@@ -218,9 +231,12 @@ pub async fn get_deployed_build(
 
 pub async fn get_live_build(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     let build = Build::get_live_build_by_project(&db, &project.project_id)
@@ -254,9 +270,12 @@ pub async fn get_live_build(
 
 pub async fn deploy_build(
     State((db, storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path((project_id_or_slug, build_id)): Path<(String, Uuid)>,
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can deploy builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get the build and verify it belongs to this project
@@ -405,6 +424,7 @@ pub async fn deploy_build(
 
 pub async fn upload_build(
     State((db, storage, conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(project_id_or_slug): Path<String>,
     mut multipart: Multipart,
@@ -416,6 +436,8 @@ pub async fn upload_build(
     ),
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    super::require_api_key(&auth, "Only API keys can upload builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     let mut build_file_data: Option<Vec<u8>> = None;
@@ -817,9 +839,12 @@ pub async fn upload_build(
 
 pub async fn download_build(
     State((db, storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path((project_id_or_slug, build_id)): Path<(String, Uuid)>,
 ) -> Result<Response, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can download builds.")?;
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get the build and verify it belongs to this project

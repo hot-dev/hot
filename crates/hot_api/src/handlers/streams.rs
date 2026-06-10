@@ -19,7 +19,9 @@ use hot::db::{
     stream::{Stream as DbStream, StreamError, StreamSummary},
 };
 use hot::permission::actions;
-use hot::stream::{StreamEvent as PubSubEvent, StreamSubscriber, StreamSubscriberFactory};
+use hot::stream::{
+    StreamEvent as PubSubEvent, StreamNext, StreamSubscriber, StreamSubscriberFactory,
+};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use utoipa::ToSchema;
@@ -170,7 +172,7 @@ pub async fn subscribe_to_stream(
 
     // Try to subscribe to pub/sub for real-time updates
     let subscriber: Option<Box<dyn StreamSubscriber>> = if let Some(ref pubsub) = stream_pubsub {
-        match pubsub.subscribe(stream_id).await {
+        match pubsub.subscribe_in_env(env_id, stream_id).await {
             Ok(sub) => {
                 tracing::debug!("SSE handler subscribed to stream pub/sub for {}", stream_id);
                 Some(sub)
@@ -228,13 +230,14 @@ pub async fn subscribe_to_stream(
                         sub.next().await
                     } else {
                         // No subscriber - this branch never completes
-                        std::future::pending::<Option<PubSubEvent>>().await
+                        std::future::pending::<StreamNext>().await
                     }
                 } => {
-                    if let Some(event) = pubsub_event {
+                    match pubsub_event {
+                        StreamNext::Event(event) => {
                         // Convert pub/sub event to SSE event
                         match event {
-                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _ } => {
+                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -262,7 +265,7 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _ } => {
+                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -289,7 +292,7 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _ } => {
+                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -316,7 +319,7 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _ } => {
+                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -344,8 +347,8 @@ pub async fn subscribe_to_stream(
                                     }
                             }
                             // Handle stream:data events - these come with full payload, no DB lookup needed
-                            PubSubEvent::StreamData { stream_data_id, run_id, stream_id: event_stream_id, data_type, payload } => {
-                                if event_stream_id != stream_id {
+                            PubSubEvent::StreamData { stream_data_id, run_id, env_id: event_env_id, stream_id: event_stream_id, data_type, payload } => {
+                                if event_stream_id != stream_id || event_env_id != Some(env_id) {
                                     continue;
                                 }
 
@@ -364,10 +367,13 @@ pub async fn subscribe_to_stream(
                             }
                             PubSubEvent::TaskMessage { .. } => {}
                         }
-                    } else {
-                        // Subscriber closed - disable pub/sub and continue with polling
-                        tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
-                        subscriber = None;
+                        }
+                        StreamNext::Idle => {}
+                        StreamNext::Closed => {
+                            // Subscriber closed - disable pub/sub and continue with polling
+                            tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
+                            subscriber = None;
+                        }
                     }
                 }
 
@@ -605,7 +611,7 @@ pub async fn subscribe_with_event(
     // Step 4: Subscribe to pub/sub BEFORE publishing the event
     // This is the key to eliminating race conditions
     let subscriber: Option<Box<dyn StreamSubscriber>> = if let Some(ref pubsub) = stream_pubsub {
-        match pubsub.subscribe(stream_id).await {
+        match pubsub.subscribe_in_env(env_id, stream_id).await {
             Ok(sub) => {
                 tracing::debug!(
                     "subscribe_with_event: subscribed to stream {} before publishing",
@@ -712,13 +718,14 @@ pub async fn subscribe_with_event(
                         sub.next().await
                     } else {
                         // No subscriber - this branch never completes
-                        std::future::pending::<Option<PubSubEvent>>().await
+                        std::future::pending::<StreamNext>().await
                     }
                 } => {
-                    if let Some(event) = pubsub_event {
+                    match pubsub_event {
+                        StreamNext::Event(event) => {
                         // Convert pub/sub event to SSE event
                         match event {
-                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _ } => {
+                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -746,7 +753,7 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _ } => {
+                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -773,7 +780,7 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _ } => {
+                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -800,7 +807,7 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _ } => {
+                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -828,8 +835,8 @@ pub async fn subscribe_with_event(
                                     }
                             }
                             // Handle stream:data events - these come with full payload, no DB lookup needed
-                            PubSubEvent::StreamData { stream_data_id, run_id, stream_id: event_stream_id, data_type, payload } => {
-                                if event_stream_id != stream_id {
+                            PubSubEvent::StreamData { stream_data_id, run_id, env_id: event_env_id, stream_id: event_stream_id, data_type, payload } => {
+                                if event_stream_id != stream_id || event_env_id != Some(env_id) {
                                     continue;
                                 }
 
@@ -848,10 +855,13 @@ pub async fn subscribe_with_event(
                             }
                             PubSubEvent::TaskMessage { .. } => {}
                         }
-                    } else {
-                        // Subscriber closed - disable pub/sub and continue with polling
-                        tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
-                        subscriber = None;
+                        }
+                        StreamNext::Idle => {}
+                        StreamNext::Closed => {
+                            // Subscriber closed - disable pub/sub and continue with polling
+                            tracing::debug!("SSE pub/sub subscription closed, falling back to polling");
+                            subscriber = None;
+                        }
                     }
                 }
 

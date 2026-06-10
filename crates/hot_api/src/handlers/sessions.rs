@@ -199,9 +199,15 @@ pub async fn create_session(
 /// GET /v1/sessions — List active sessions for the authenticated API key
 pub async fn list_sessions(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<SessionResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can list sessions. Sessions and service keys cannot list sessions.",
+    )?;
+
     let sessions = Session::list_by_api_key(
         &db,
         &api_key.api_key_id,
@@ -251,9 +257,15 @@ pub async fn list_sessions(
 /// DELETE /v1/sessions/{session_id} — Revoke a specific session
 pub async fn revoke_session(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(session_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can revoke sessions. Sessions and service keys cannot revoke sessions.",
+    )?;
+
     // Verify the session belongs to this API key
     let session = Session::get_session(&db, &session_id)
         .await
@@ -288,8 +300,14 @@ pub async fn revoke_session(
 /// DELETE /v1/sessions — Revoke all active sessions for the authenticated API key
 pub async fn revoke_all_sessions(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<Json<ApiResponse<RevokeAllResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can revoke sessions. Sessions and service keys cannot revoke sessions.",
+    )?;
+
     let revoked_count = Session::revoke_all_by_api_key(&db, &api_key.api_key_id)
         .await
         .map_err(|e| {

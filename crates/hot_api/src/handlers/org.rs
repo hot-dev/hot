@@ -10,6 +10,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::ApiStateData;
+use crate::auth::AuthContext;
 use crate::models::*;
 
 /// Response for organization usage and limits
@@ -105,8 +106,11 @@ pub struct PlanInfo {
 /// for the organization associated with this API key.
 pub async fn get_org_usage(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<Json<ApiResponse<OrgUsageResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(&auth, "Only API keys can read organization usage.")?;
+
     // Get the environment to find org_id
     let env = Env::get_env(&db, &api_key.env_id).await.map_err(|e| {
         (

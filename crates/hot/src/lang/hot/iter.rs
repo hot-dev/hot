@@ -183,6 +183,7 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         let stream_event = crate::stream::StreamEvent::StreamData {
             stream_data_id,
             run_id: ctx.run_id,
+            env_id: ctx.env_id,
             stream_id: ctx.stream_id,
             data_type: iter_box.stream_data_type.clone(),
             payload: payload_json.clone(),

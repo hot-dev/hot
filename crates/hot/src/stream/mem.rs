@@ -4,12 +4,14 @@
 //! and API run in the same process.
 
 use super::{
-    EnvEvent, EnvPublisher, EnvSubscriber, EnvSubscriberFactory, StreamEvent, StreamPubSubError,
-    StreamPublisher, StreamSubscriber, StreamSubscriberFactory,
+    EnvEvent, EnvPublisher, EnvSubscriber, EnvSubscriberFactory, McpSseTransportSessionBinding,
+    McpSseTransportSessionStore, StreamEvent, StreamNext, StreamPubSubError, StreamPublisher,
+    StreamSubscriber, StreamSubscriberFactory, channel_name, legacy_channel_name,
 };
 use ahash::AHashMap;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
@@ -24,11 +26,13 @@ const CHANNEL_CAPACITY: usize = 256;
 /// When a publisher publishes, they send to the corresponding sender.
 #[derive(Clone)]
 pub struct MemStreamPubSub {
-    /// Map of stream_id -> broadcast sender
+    /// Map of channel key -> broadcast sender
     /// The sender is created lazily when first needed
-    channels: Arc<RwLock<AHashMap<Uuid, broadcast::Sender<StreamEvent>>>>,
+    channels: Arc<RwLock<AHashMap<String, broadcast::Sender<StreamEvent>>>>,
     /// Map of env_id -> broadcast sender for environment-level events
     env_channels: Arc<RwLock<AHashMap<Uuid, broadcast::Sender<EnvEvent>>>>,
+    /// Ephemeral MCP HTTP+SSE transport session bindings.
+    mcp_sse_transport_sessions: Arc<RwLock<AHashMap<Uuid, McpSseTransportSessionBinding>>>,
 }
 
 impl MemStreamPubSub {
@@ -37,15 +41,16 @@ impl MemStreamPubSub {
         Self {
             channels: Arc::new(RwLock::new(AHashMap::new())),
             env_channels: Arc::new(RwLock::new(AHashMap::new())),
+            mcp_sse_transport_sessions: Arc::new(RwLock::new(AHashMap::new())),
         }
     }
 
     /// Get or create a broadcast sender for a stream
-    async fn get_or_create_sender(&self, stream_id: Uuid) -> broadcast::Sender<StreamEvent> {
+    async fn get_or_create_sender(&self, channel_key: String) -> broadcast::Sender<StreamEvent> {
         // Try read lock first for the common case where channel exists
         {
             let channels = self.channels.read().await;
-            if let Some(sender) = channels.get(&stream_id) {
+            if let Some(sender) = channels.get(&channel_key) {
                 return sender.clone();
             }
         }
@@ -53,13 +58,13 @@ impl MemStreamPubSub {
         // Need to create - acquire write lock
         let mut channels = self.channels.write().await;
         // Double-check in case another task created it while we were waiting
-        if let Some(sender) = channels.get(&stream_id) {
+        if let Some(sender) = channels.get(&channel_key) {
             return sender.clone();
         }
 
         // Create new channel
         let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-        channels.insert(stream_id, tx.clone());
+        channels.insert(channel_key, tx.clone());
         tx
     }
 
@@ -97,6 +102,9 @@ impl MemStreamPubSub {
 
         let mut env_channels = self.env_channels.write().await;
         env_channels.retain(|_, sender| sender.receiver_count() > 0);
+
+        let mut transport_sessions = self.mcp_sse_transport_sessions.write().await;
+        transport_sessions.retain(|_, binding| !binding.is_expired());
     }
 }
 
@@ -109,8 +117,8 @@ impl Default for MemStreamPubSub {
 #[async_trait]
 impl StreamPublisher for MemStreamPubSub {
     async fn publish(&self, event: StreamEvent) -> Result<(), StreamPubSubError> {
-        let stream_id = event.stream_id();
-        let sender = self.get_or_create_sender(stream_id).await;
+        let channel_key = event.channel_name();
+        let sender = self.get_or_create_sender(channel_key.clone()).await;
 
         // Send to all subscribers - ignore if no receivers (fire-and-forget)
         match sender.send(event) {
@@ -118,7 +126,7 @@ impl StreamPublisher for MemStreamPubSub {
                 tracing::debug!(
                     "Published stream event to {} receivers for stream {}",
                     receiver_count,
-                    stream_id
+                    channel_key
                 );
                 Ok(())
             }
@@ -126,7 +134,7 @@ impl StreamPublisher for MemStreamPubSub {
                 // No receivers - this is fine for fire-and-forget
                 tracing::trace!(
                     "No receivers for stream event on stream {} (event dropped)",
-                    stream_id
+                    channel_key
                 );
                 Ok(())
             }
@@ -140,7 +148,8 @@ impl StreamSubscriberFactory for MemStreamPubSub {
         &self,
         stream_id: Uuid,
     ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
-        let sender = self.get_or_create_sender(stream_id).await;
+        let channel_key = legacy_channel_name(&stream_id);
+        let sender = self.get_or_create_sender(channel_key.clone()).await;
         let receiver = sender.subscribe();
 
         tracing::debug!(
@@ -151,7 +160,29 @@ impl StreamSubscriberFactory for MemStreamPubSub {
 
         Ok(Box::new(MemStreamSubscriber {
             receiver,
+            channel_key,
+        }))
+    }
+
+    async fn subscribe_in_env(
+        &self,
+        env_id: Uuid,
+        stream_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
+        let channel_key = channel_name(&env_id, &stream_id);
+        let sender = self.get_or_create_sender(channel_key.clone()).await;
+        let receiver = sender.subscribe();
+
+        tracing::debug!(
+            "Created new subscriber for env {} stream {} (total receivers: {})",
+            env_id,
             stream_id,
+            sender.receiver_count()
+        );
+
+        Ok(Box::new(MemStreamSubscriber {
+            receiver,
+            channel_key,
         }))
     }
 }
@@ -159,33 +190,80 @@ impl StreamSubscriberFactory for MemStreamPubSub {
 /// In-memory stream subscriber
 pub struct MemStreamSubscriber {
     receiver: broadcast::Receiver<StreamEvent>,
-    stream_id: Uuid,
+    channel_key: String,
 }
 
 #[async_trait]
 impl StreamSubscriber for MemStreamSubscriber {
-    async fn next(&mut self) -> Option<StreamEvent> {
+    async fn next(&mut self) -> StreamNext {
         loop {
             match self.receiver.recv().await {
                 Ok(event) => {
-                    return Some(event);
+                    return StreamNext::Event(event);
                 }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     // We missed some messages due to slow consumption
                     tracing::warn!(
                         "Stream subscriber for {} lagged, missed {} events",
-                        self.stream_id,
+                        self.channel_key,
                         count
                     );
                     // Continue to receive the next available event
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    tracing::debug!("Stream subscription closed for stream {}", self.stream_id);
-                    return None;
+                    tracing::debug!("Stream subscription closed for {}", self.channel_key);
+                    return StreamNext::Closed;
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl McpSseTransportSessionStore for MemStreamPubSub {
+    async fn put_mcp_sse_transport_session(
+        &self,
+        binding: McpSseTransportSessionBinding,
+        _ttl: Duration,
+    ) -> Result<(), StreamPubSubError> {
+        self.cleanup_empty_channels().await;
+        self.mcp_sse_transport_sessions
+            .write()
+            .await
+            .insert(binding.transport_session_id, binding);
+        Ok(())
+    }
+
+    async fn get_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<Option<McpSseTransportSessionBinding>, StreamPubSubError> {
+        let binding = self
+            .mcp_sse_transport_sessions
+            .read()
+            .await
+            .get(&transport_session_id)
+            .cloned();
+
+        if matches!(binding, Some(ref b) if b.is_expired()) {
+            self.delete_mcp_sse_transport_session(transport_session_id)
+                .await?;
+            return Ok(None);
+        }
+
+        Ok(binding)
+    }
+
+    async fn delete_mcp_sse_transport_session(
+        &self,
+        transport_session_id: Uuid,
+    ) -> Result<(), StreamPubSubError> {
+        self.mcp_sse_transport_sessions
+            .write()
+            .await
+            .remove(&transport_session_id);
+        Ok(())
     }
 }
 
@@ -277,18 +355,27 @@ impl EnvSubscriber for MemEnvSubscriber {
 mod tests {
     use super::*;
 
+    fn expect_event(next: StreamNext) -> StreamEvent {
+        match next {
+            StreamNext::Event(event) => event,
+            other => panic!("expected stream event, got {:?}", other),
+        }
+    }
+
     #[tokio::test]
     async fn test_publish_subscribe() {
         let pubsub = MemStreamPubSub::new();
+        let env_id = Uuid::new_v4();
         let stream_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
 
         // Create subscriber first
-        let mut subscriber = pubsub.subscribe(stream_id).await.unwrap();
+        let mut subscriber = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
 
         // Publish an event
         let event = StreamEvent::RunStop {
             run_id,
+            env_id,
             stream_id,
             event_id: None,
             result: Some(serde_json::json!({"test": "value"})),
@@ -299,8 +386,8 @@ mod tests {
         let received =
             tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.next())
                 .await
-                .expect("timeout")
-                .expect("should receive event");
+                .expect("timeout");
+        let received = expect_event(received);
 
         assert_eq!(received.run_id(), run_id);
         assert_eq!(received.stream_id(), stream_id);
@@ -309,16 +396,18 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_subscribers() {
         let pubsub = MemStreamPubSub::new();
+        let env_id = Uuid::new_v4();
         let stream_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
 
         // Create multiple subscribers
-        let mut sub1 = pubsub.subscribe(stream_id).await.unwrap();
-        let mut sub2 = pubsub.subscribe(stream_id).await.unwrap();
+        let mut sub1 = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
+        let mut sub2 = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
 
         // Publish an event
         let event = StreamEvent::RunStart {
             run_id,
+            env_id,
             stream_id,
             event_id: None,
         };
@@ -327,27 +416,52 @@ mod tests {
         // Both should receive the event
         let received1 = tokio::time::timeout(std::time::Duration::from_millis(100), sub1.next())
             .await
-            .expect("timeout")
-            .expect("should receive event");
+            .expect("timeout");
+        let received1 = expect_event(received1);
 
         let received2 = tokio::time::timeout(std::time::Duration::from_millis(100), sub2.next())
             .await
-            .expect("timeout")
-            .expect("should receive event");
+            .expect("timeout");
+        let received2 = expect_event(received2);
 
         assert_eq!(received1.run_id(), run_id);
         assert_eq!(received2.run_id(), run_id);
     }
 
     #[tokio::test]
+    async fn test_env_scoped_stream_subscriber_does_not_receive_other_env_event() {
+        let pubsub = MemStreamPubSub::new();
+        let env_a = Uuid::new_v4();
+        let env_b = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
+
+        let mut sub_a = pubsub.subscribe_in_env(env_a, stream_id).await.unwrap();
+
+        let event = StreamEvent::RunStop {
+            run_id: Uuid::new_v4(),
+            env_id: env_b,
+            stream_id,
+            event_id: None,
+            result: None,
+        };
+        pubsub.publish(event).await.unwrap();
+
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(50), sub_a.next()).await;
+        assert!(received.is_err());
+    }
+
+    #[tokio::test]
     async fn test_no_subscribers_ok() {
         let pubsub = MemStreamPubSub::new();
+        let env_id = Uuid::new_v4();
         let stream_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
 
         // Publish without subscribers - should not error
         let event = StreamEvent::RunStop {
             run_id,
+            env_id,
             stream_id,
             event_id: None,
             result: None,

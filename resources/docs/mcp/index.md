@@ -357,7 +357,7 @@ The endpoint implements MCP over JSON-RPC 2.0 and supports both MCP transport st
 | Transport | Endpoint(s) | Notes |
 |-----------|-------------|-------|
 | Streamable HTTP (2025-03-26) | `POST /mcp/{org}/{env}/{service}` | Modern MCP transport. Requests and responses use one HTTP endpoint. `tools/call` may return `text/event-stream`. |
-| HTTP+SSE (2024-11-05, legacy) | `GET /mcp/{org}/{env}/{service}` + `POST /mcp/{org}/{env}/{service}/messages?sessionId=...` | Legacy transport for older clients. `GET` opens SSE and returns an `endpoint` event; `POST` sends JSON-RPC messages; responses arrive on the SSE stream. |
+| HTTP+SSE (2024-11-05, deprecated) | `GET /mcp/{org}/{env}/{service}` + `POST /mcp/{org}/{env}/{service}/messages?sessionId=...` | Deprecated transport for older clients. `GET` opens SSE and returns an `endpoint` event; `POST` sends JSON-RPC messages; responses arrive on the SSE stream. |
 
 Supported methods:
 
@@ -372,7 +372,7 @@ Supported methods:
 ### Timeouts
 
 - `mcp.timeout` controls Streamable HTTP `tools/call` execution timeout (default: `60` seconds).
-- `mcp.legacy.session-timeout` controls legacy HTTP+SSE session lifetime for `GET /mcp/{org}/{env}/{service}` (default: `300` seconds).
+- `mcp.http-sse.session-timeout` controls HTTP+SSE transport session lifetime for `GET /mcp/{org}/{env}/{service}` (default: `300` seconds).
 
 ### Example: Connecting with curl
 
@@ -441,7 +441,7 @@ curl -N -X POST https://api.hot.dev/mcp/my-org/production/weather \
 # data: {"jsonrpc":"2.0","id":4,"result":{...}}
 ```
 
-### Example: Legacy HTTP+SSE Transport
+### Example: Deprecated HTTP+SSE Transport
 
 ```bash
 # 1) Open SSE stream and capture the endpoint event
@@ -466,7 +466,7 @@ curl -X POST "https://api.hot.dev/mcp/my-org/production/weather/messages?session
 Most MCP-compatible AI clients can connect directly to your Hot MCP endpoint. Configure them with:
 
 - **URL**: `https://api.hot.dev/mcp/{org}/{env}/{service}` (or `https://your-domain.com/mcp/{service}` with a [custom domain](#custom-domain-urls))
-- **Transport**: Streamable HTTP (preferred) or HTTP+SSE (legacy clients)
+- **Transport**: Streamable HTTP (preferred) or HTTP+SSE (deprecated compatibility)
 - **Authentication**: Bearer token (API key, service key, or session). Not required for tools with `auth: "none"`.
 
 ## Caller Identity (`hot.request`)

@@ -268,9 +268,15 @@ pub async fn create_service_key(
 /// GET /v1/service-keys — List service keys for the authenticated API key
 pub async fn list_service_keys(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<ServiceKeyResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can list service keys. Sessions and service keys cannot list service keys.",
+    )?;
+
     let encryption = get_encryption();
     let org_id = super::get_org_id_for_env(&db, &api_key.env_id).await?;
 
@@ -313,9 +319,15 @@ pub async fn list_service_keys(
 /// GET /v1/service-keys/{service_key_id} — Get a specific service key
 pub async fn get_service_key(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(service_key_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<ServiceKeyResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can read service keys. Sessions and service keys cannot read service keys.",
+    )?;
+
     let encryption = get_encryption();
     let org_id = super::get_org_id_for_env(&db, &api_key.env_id).await?;
 
@@ -452,9 +464,15 @@ pub async fn update_service_key(
 /// DELETE /v1/service-keys/{service_key_id} — Revoke a specific service key
 pub async fn revoke_service_key(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Path(service_key_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can revoke service keys. Sessions and service keys cannot revoke service keys.",
+    )?;
+
     // Verify the service key belongs to this API key
     let service_key = ServiceKey::get_service_key(&db, &service_key_id)
         .await
@@ -491,8 +509,14 @@ pub async fn revoke_service_key(
 /// DELETE /v1/service-keys — Revoke all active service keys for the authenticated API key
 pub async fn revoke_all_service_keys(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<Json<ApiResponse<RevokeAllServiceKeysResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    super::require_api_key(
+        &auth,
+        "Only API keys can revoke service keys. Sessions and service keys cannot revoke service keys.",
+    )?;
+
     let revoked_count = ServiceKey::revoke_all_by_api_key(&db, &api_key.api_key_id)
         .await
         .map_err(|e| {

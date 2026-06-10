@@ -6,8 +6,8 @@
 //!   - **Streamable HTTP** (2025-03-26): `POST /mcp/{org}/{service}`
 //!     Modern transport. JSON-RPC request in, JSON or SSE response out.
 //!   - **HTTP+SSE** (2024-11-05): `GET /mcp/{org}/{service}` + `POST /mcp/{org}/{service}/messages`
-//!     Legacy transport. GET opens persistent SSE stream, POST sends messages, responses
-//!     flow back over the SSE stream.
+//!     Deprecated transport kept for compatibility. GET opens persistent SSE
+//!     stream, POST sends messages, responses flow back over the SSE stream.
 //!
 //! The org slug in the URL provides multi-tenant namespace isolation.
 //! The environment is determined by the API key.
@@ -24,6 +24,9 @@ use axum::{
 };
 use hot::db::{build::Build, mcp_tool::McpTool, org::Org, project::Project};
 use hot::permission::actions;
+use hot::stream::{
+    McpSseTransportPrincipal, McpSseTransportSessionBinding, McpSseTransportSessionStore,
+};
 use hot::val::Val;
 
 use crate::access_log::OptionalAccessId;
@@ -36,6 +39,7 @@ use serde_json::Value as JsonValue;
 use std::convert::Infallible;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::ApiStateData;
@@ -336,6 +340,14 @@ fn get_event_queue(
 // MCP-specific error codes
 const MCP_DISABLED: i32 = -32001;
 const MCP_PUBSUB_UNAVAILABLE: i32 = -32003;
+const MAX_MCP_HTTP_SSE_MESSAGE_TASKS: usize = 1024;
+static MCP_HTTP_SSE_MESSAGE_SEMAPHORE: OnceCell<Arc<tokio::sync::Semaphore>> = OnceCell::new();
+
+fn mcp_http_sse_message_semaphore() -> Arc<tokio::sync::Semaphore> {
+    MCP_HTTP_SSE_MESSAGE_SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_MCP_HTTP_SSE_MESSAGE_TASKS)))
+        .clone()
+}
 
 /// Resolved context for an MCP request, including optional authentication.
 struct McpContext {
@@ -600,6 +612,7 @@ pub async fn mcp_handler_domain(
     .await
 }
 
+#[derive(Clone)]
 enum McpRouteSource {
     Path {
         org_slug: String,
@@ -613,6 +626,19 @@ enum McpRouteSource {
 }
 
 impl McpRouteSource {
+    fn sse_transport_route_key(&self) -> String {
+        match self {
+            McpRouteSource::Path {
+                org_slug,
+                env_name,
+                service,
+            } => format!("path:{}/{}/{}", org_slug, env_name, service),
+            McpRouteSource::Domain { resolved, service } => {
+                format!("domain:{}:{}:{}", resolved.domain, resolved.env_id, service)
+            }
+        }
+    }
+
     async fn resolve(
         self,
         db: &hot::db::DatabasePool,
@@ -629,6 +655,88 @@ impl McpRouteSource {
             }
         }
     }
+}
+
+fn mcp_sse_transport_principal(auth: &AuthContext) -> McpSseTransportPrincipal {
+    match auth {
+        AuthContext::ApiKey(api_key) => McpSseTransportPrincipal::ApiKey(api_key.api_key_id),
+        AuthContext::Session { session, .. } => {
+            McpSseTransportPrincipal::Session(session.session_id)
+        }
+        AuthContext::ServiceKey { service_key, .. } => {
+            McpSseTransportPrincipal::ServiceKey(service_key.service_key_id)
+        }
+    }
+}
+
+fn mcp_sse_transport_principal_from_context(
+    ctx: &McpContext,
+) -> Result<McpSseTransportPrincipal, (StatusCode, Json<ApiErrorResponse>)> {
+    let (auth, _) = ctx.auth.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiErrorResponse::new(
+                "unauthorized",
+                "MCP HTTP+SSE transport requires authentication",
+            )),
+        )
+    })?;
+
+    Ok(mcp_sse_transport_principal(auth))
+}
+
+fn mcp_sse_transport_session_expires_at(ttl: Duration) -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+        + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(300))
+}
+
+fn mcp_sse_transport_session_not_found() -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiErrorResponse::new(
+            "mcp_transport_session_not_found",
+            "MCP HTTP+SSE transport session was not found or has expired",
+        )),
+    )
+}
+
+fn mcp_sse_transport_session_store_error(
+    action: &str,
+    error: impl std::fmt::Display,
+) -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiErrorResponse::internal_error(&format!(
+            "Failed to {} MCP HTTP+SSE transport session: {}",
+            action, error
+        ))),
+    )
+}
+
+fn verify_mcp_sse_transport_session_binding(
+    binding: &McpSseTransportSessionBinding,
+    ctx: &McpContext,
+    route_key: &str,
+    principal: &McpSseTransportPrincipal,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if binding.is_expired() {
+        return Err(mcp_sse_transport_session_not_found());
+    }
+
+    if binding.env_id != ctx.env.env_id
+        || binding.route_key != route_key
+        || &binding.principal != principal
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new(
+                "mcp_transport_session_mismatch",
+                "MCP HTTP+SSE transport session does not match this route or credential",
+            )),
+        ));
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -886,8 +994,9 @@ async fn handle_tools_call_streaming(
         }
     };
 
-    // Per-tool auth check: if the tool requires auth, credentials must be present
-    if tool.auth_mode() == "required" {
+    // Per-tool auth check: only exact `auth: "none"` is public. Missing,
+    // malformed, or unknown values require auth.
+    if !tool.is_public() {
         match &ctx.auth {
             Some((auth_ctx, _)) => {
                 // Permission check for scoped credentials (sessions and service keys).
@@ -1081,15 +1190,18 @@ async fn handle_tools_call_streaming(
     // so would be less affected, but subscribing first is correct for both.
     use hot::stream::StreamSubscriberFactory;
 
-    let subscriber = stream_pubsub.subscribe(stream_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to subscribe to stream pub/sub: {}",
-                e
-            ))),
-        )
-    })?;
+    let subscriber = stream_pubsub
+        .subscribe_in_env(ctx.env.env_id, stream_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&format!(
+                    "Failed to subscribe to stream pub/sub: {}",
+                    e
+                ))),
+            )
+        })?;
 
     // Now enqueue the message (subscriber is already listening)
     use hot::queue::Queue;
@@ -1134,7 +1246,7 @@ async fn handle_tools_call_streaming(
     let request_id = id;
 
     let sse_stream = async_stream::stream! {
-        use hot::stream::StreamEvent;
+        use hot::stream::{StreamEvent, StreamNext};
 
         let deadline = tokio::time::Instant::now()
             + tokio::time::Duration::from_secs(timeout_seconds);
@@ -1155,7 +1267,7 @@ async fn handle_tools_call_streaming(
             tokio::select! {
                 event = async { subscriber.next().await } => {
                     match event {
-                        Some(StreamEvent::RunStart { run_id: started_run_id, .. }) => {
+                        StreamNext::Event(StreamEvent::RunStart { run_id: started_run_id, .. }) => {
                             // Send MCP log notification (spec §Logging)
                             let notification = serde_json::json!({
                                 "jsonrpc": "2.0",
@@ -1175,7 +1287,7 @@ async fn handle_tools_call_streaming(
                                 );
                             }
                         }
-                        Some(StreamEvent::StreamData { data_type, payload, .. }) => {
+                        StreamNext::Event(StreamEvent::StreamData { data_type, payload, .. }) => {
                             // Forward stream data as MCP log notification
                             let notification = serde_json::json!({
                                 "jsonrpc": "2.0",
@@ -1195,20 +1307,21 @@ async fn handle_tools_call_streaming(
                                 );
                             }
                         }
-                        Some(StreamEvent::RunStop { result, .. }) => {
+                        StreamNext::Event(StreamEvent::RunStop { result, .. }) => {
                             outcome = Some(Outcome::Stopped { result });
                             break;
                         }
-                        Some(StreamEvent::RunFail { error, .. }) => {
+                        StreamNext::Event(StreamEvent::RunFail { error, .. }) => {
                             outcome = Some(Outcome::Failed { error });
                             break;
                         }
-                        Some(StreamEvent::RunCancel { reason, .. }) => {
+                        StreamNext::Event(StreamEvent::RunCancel { reason, .. }) => {
                             outcome = Some(Outcome::Cancelled { reason });
                             break;
                         }
-                        Some(StreamEvent::TaskMessage { .. }) => {}
-                        None => {
+                        StreamNext::Event(StreamEvent::TaskMessage { .. }) => {}
+                        StreamNext::Idle => {}
+                        StreamNext::Closed => {
                             // Subscriber closed unexpectedly
                             break;
                         }
@@ -1401,7 +1514,7 @@ fn try_extract_content(value: &JsonValue) -> Option<ToolResultContent> {
 }
 
 // ============================================================================
-// Legacy HTTP+SSE Transport (2024-11-05 spec)
+// Deprecated HTTP+SSE Transport (2024-11-05 spec)
 // ============================================================================
 //
 // For older MCP clients (e.g. Claude Desktop) that only speak the original
@@ -1414,29 +1527,29 @@ fn try_extract_content(value: &JsonValue) -> Option<ToolResultContent> {
 //
 // ## Horizontal scalability
 //
-// Session routing uses the same `StreamPubSub` abstraction as everything else:
+// Transport session routing uses the same `StreamPubSub` abstraction as everything else:
 //   - **Local dev**: in-memory broadcast channels (single process)
 //   - **Production**: Redis pub/sub (any instance can handle GET or POST)
 //
-// The session UUID is used as a `stream_id` for the pub/sub channel.
+// The transport session UUID is used as a `stream_id` for the pub/sub channel.
 // `StreamData` events carry the JSON-RPC response payload between the
 // POST handler and the SSE stream, regardless of which server instance
 // handles each side.
 
-/// The data_type used for MCP legacy session messages in StreamData events.
-const MCP_SESSION_DATA_TYPE: &str = "mcp:session:response";
+/// The data_type used for MCP HTTP+SSE transport session messages in StreamData events.
+const MCP_HTTP_SSE_SESSION_DATA_TYPE: &str = "mcp:session:response";
 
-fn legacy_session_timeout(conf: &Val) -> tokio::time::Duration {
-    let seconds = conf.get_int_or_default("mcp.legacy.session-timeout", 300);
+fn mcp_http_sse_session_timeout(conf: &Val) -> tokio::time::Duration {
+    let seconds = conf.get_int_or_default("mcp.http-sse.session-timeout", 300);
     tokio::time::Duration::from_secs(seconds.max(1) as u64)
 }
 
 /// GET /mcp/{org_slug}/{env_name}/{service}
 ///
-/// Opens a persistent SSE stream for the legacy MCP HTTP+SSE transport.
+/// Opens a persistent SSE stream for the deprecated MCP HTTP+SSE transport.
 /// The first event is `endpoint` with the URL the client should POST to.
 /// Subsequent events are JSON-RPC responses/notifications routed from
-/// `mcp_legacy_messages_handler` via the shared pub/sub layer.
+/// `mcp_http_sse_messages_handler` via the shared pub/sub layer.
 pub async fn mcp_sse_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
@@ -1446,7 +1559,20 @@ pub async fn mcp_sse_handler(
     (StatusCode, Json<ApiErrorResponse>),
 > {
     let messages_path_prefix = format!("/mcp/{}/{}/{}", org_slug, env_name, service);
-    mcp_sse_handler_core(db, conf, stream_pubsub, headers, messages_path_prefix).await
+    let source = McpRouteSource::Path {
+        org_slug,
+        env_name,
+        service,
+    };
+    mcp_sse_handler_core(
+        db,
+        conf,
+        stream_pubsub,
+        headers,
+        messages_path_prefix,
+        source,
+    )
+    .await
 }
 
 /// SSE handler for custom domain routes (`GET /mcp/{service}`).
@@ -1459,7 +1585,7 @@ pub async fn mcp_sse_handler_domain(
     Sse<impl futures::stream::Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
-    let _resolved = resolved.ok_or_else(|| {
+    let resolved = resolved.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ApiErrorResponse::not_found(
@@ -1468,7 +1594,19 @@ pub async fn mcp_sse_handler_domain(
         )
     })?;
     let messages_path_prefix = format!("/mcp/{}", service);
-    mcp_sse_handler_core(db, conf, stream_pubsub, headers, messages_path_prefix).await
+    let source = McpRouteSource::Domain {
+        resolved: resolved.0,
+        service,
+    };
+    mcp_sse_handler_core(
+        db,
+        conf,
+        stream_pubsub,
+        headers,
+        messages_path_prefix,
+        source,
+    )
+    .await
 }
 
 async fn mcp_sse_handler_core(
@@ -1477,6 +1615,7 @@ async fn mcp_sse_handler_core(
     stream_pubsub: Option<Arc<hot::stream::StreamPubSub>>,
     headers: HeaderMap,
     messages_path_prefix: String,
+    source: McpRouteSource,
 ) -> Result<
     Sse<impl futures::stream::Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
@@ -1489,50 +1628,74 @@ async fn mcp_sse_handler_core(
         ));
     }
 
+    let route_key = source.sse_transport_route_key();
     let auth = try_authenticate(&db, &headers).await?;
-    if auth.is_none() {
-        return Err((
+    let auth = auth.ok_or_else(|| {
+        (
             StatusCode::UNAUTHORIZED,
             Json(ApiErrorResponse::new(
                 "unauthorized",
-                "Legacy MCP transport requires authentication. Provide Authorization: Bearer <token>",
+                "MCP HTTP+SSE transport requires authentication. Provide Authorization: Bearer <token>",
             )),
-        ));
-    }
+        )
+    })?;
+    let ctx = source.resolve(&db, Some(auth)).await?;
+    let env_id = ctx.env.env_id;
+    let principal = mcp_sse_transport_principal_from_context(&ctx)?;
 
-    let pubsub = stream_pubsub.as_ref().ok_or_else(|| {
+    let pubsub = stream_pubsub.as_ref().cloned().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ApiErrorResponse::new(
                 "pubsub_unavailable",
-                "Stream pub/sub is required for legacy MCP transport",
+                "Stream pub/sub is required for MCP HTTP+SSE transport",
             )),
         )
     })?;
 
-    let session_id = Uuid::now_v7();
+    let transport_session_id = Uuid::now_v7();
+    let session_timeout = mcp_http_sse_session_timeout(&conf);
 
-    let messages_path = format!("{}/messages?sessionId={}", messages_path_prefix, session_id);
+    let messages_path = format!(
+        "{}/messages?sessionId={}",
+        messages_path_prefix, transport_session_id
+    );
 
     use hot::stream::StreamSubscriberFactory;
-    let subscriber = pubsub.subscribe(session_id).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to subscribe to session pub/sub: {}",
-                e
-            ))),
-        )
-    })?;
+    let subscriber = pubsub
+        .subscribe_in_env(env_id, transport_session_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&format!(
+                    "Failed to subscribe to session pub/sub: {}",
+                    e
+                ))),
+            )
+        })?;
+
+    let binding = McpSseTransportSessionBinding {
+        transport_session_id,
+        env_id,
+        route_key,
+        principal,
+        expires_at: mcp_sse_transport_session_expires_at(session_timeout),
+    };
+    pubsub
+        .put_mcp_sse_transport_session(binding, session_timeout)
+        .await
+        .map_err(|e| mcp_sse_transport_session_store_error("create", e))?;
 
     tracing::info!(
-        "MCP legacy SSE: session {} opened for {}",
-        session_id,
+        "MCP HTTP+SSE: transport session {} opened for {}",
+        transport_session_id,
         messages_path_prefix
     );
 
+    let pubsub_for_cleanup = Arc::clone(&pubsub);
     let stream = async_stream::stream! {
-        use hot::stream::StreamEvent;
+        use hot::stream::{StreamEvent, StreamNext};
 
         // First event: tell the client where to POST messages
         yield Ok::<SseEvent, Infallible>(
@@ -1542,7 +1705,6 @@ async fn mcp_sse_handler_core(
         );
 
         let mut subscriber = subscriber;
-        let session_timeout = legacy_session_timeout(&conf);
         let deadline = tokio::time::Instant::now() + session_timeout;
 
         // Receive responses from the pub/sub channel and forward as SSE events
@@ -1550,8 +1712,8 @@ async fn mcp_sse_handler_core(
             tokio::select! {
                 event = async { subscriber.next().await } => {
                     match event {
-                        Some(StreamEvent::StreamData { payload, data_type, .. })
-                            if data_type == MCP_SESSION_DATA_TYPE =>
+                        StreamNext::Event(StreamEvent::StreamData { payload, data_type, .. })
+                            if data_type == MCP_HTTP_SSE_SESSION_DATA_TYPE =>
                         {
                             // The payload is a JSON-RPC response string
                             if let Some(data) = payload.as_str() {
@@ -1560,10 +1722,11 @@ async fn mcp_sse_handler_core(
                                 );
                             }
                         }
-                        Some(_) => {
+                        StreamNext::Event(_) => {
                             // Ignore other event types on this channel
                         }
-                        None => {
+                        StreamNext::Idle => {}
+                        StreamNext::Closed => {
                             // Subscriber closed
                             break;
                         }
@@ -1576,7 +1739,21 @@ async fn mcp_sse_handler_core(
             }
         }
 
-        tracing::info!("MCP legacy SSE: session {} closed", session_id);
+        if let Err(e) = pubsub_for_cleanup
+            .delete_mcp_sse_transport_session(transport_session_id)
+            .await
+        {
+            tracing::warn!(
+                "MCP HTTP+SSE: failed to delete transport session {}: {}",
+                transport_session_id,
+                e
+            );
+        }
+
+        tracing::info!(
+            "MCP HTTP+SSE: transport session {} closed",
+            transport_session_id
+        );
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
@@ -1584,16 +1761,16 @@ async fn mcp_sse_handler_core(
 
 /// POST /mcp/{org_slug}/{env_name}/{service}/messages?sessionId={id}
 ///
-/// Receives JSON-RPC messages for the legacy MCP HTTP+SSE transport.
+/// Receives JSON-RPC messages for the deprecated MCP HTTP+SSE transport.
 /// Routes the message through the standard MCP handler logic, then publishes
 /// the response through the shared pub/sub layer so it reaches the SSE
 /// stream (which may be on a different server instance).
 /// Returns HTTP 202 Accepted immediately (response comes via SSE).
-pub async fn mcp_legacy_messages_handler(
+pub async fn mcp_http_sse_messages_handler(
     State(state): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
-    query: Query<LegacyMessageQuery>,
+    query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
@@ -1602,16 +1779,16 @@ pub async fn mcp_legacy_messages_handler(
         env_name,
         service,
     };
-    mcp_legacy_messages_inner(state, access_id, query, headers, request, source).await
+    mcp_http_sse_messages_inner(state, access_id, query, headers, request, source).await
 }
 
-/// Legacy messages handler for custom domain routes (`POST /mcp/{service}/messages`).
-pub async fn mcp_legacy_messages_handler_domain(
+/// HTTP+SSE messages handler for custom domain routes (`POST /mcp/{service}/messages`).
+pub async fn mcp_http_sse_messages_handler_domain(
     State(state): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
     resolved: Option<Extension<ResolvedDomain>>,
     Path(service): Path<String>,
-    query: Query<LegacyMessageQuery>,
+    query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
@@ -1626,50 +1803,83 @@ pub async fn mcp_legacy_messages_handler_domain(
         })?
         .0;
     let source = McpRouteSource::Domain { resolved, service };
-    mcp_legacy_messages_inner(state, access_id, query, headers, request, source).await
+    mcp_http_sse_messages_inner(state, access_id, query, headers, request, source).await
 }
 
-async fn mcp_legacy_messages_inner(
+async fn mcp_http_sse_messages_inner(
     state: ApiStateData,
     access_id: Option<Uuid>,
-    query: Query<LegacyMessageQuery>,
+    query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
     request: JsonRpcRequest,
     source: McpRouteSource,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
-    let session_id = Uuid::parse_str(&query.session_id).map_err(|_| {
+    let transport_session_id = Uuid::parse_str(&query.transport_session_id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ApiErrorResponse::bad_request("Invalid session ID")),
+            Json(ApiErrorResponse::bad_request(
+                "Invalid MCP transport session ID",
+            )),
         )
     })?;
 
-    let (_db, _storage, _conf, stream_pubsub) = &state;
+    let (db, _storage, _conf, stream_pubsub) = &state;
 
     let pubsub = stream_pubsub.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ApiErrorResponse::new(
                 "pubsub_unavailable",
-                "Stream pub/sub is required for legacy MCP transport",
+                "Stream pub/sub is required for MCP HTTP+SSE transport",
             )),
         )
     })?;
 
-    if request.method.starts_with("notifications/") {
-        return Ok(StatusCode::ACCEPTED);
-    }
+    let route_key = source.sse_transport_route_key();
+    let auth = try_authenticate(db, &headers).await?;
+    let auth = auth.ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiErrorResponse::new(
+                "unauthorized",
+                "MCP HTTP+SSE transport requires authentication. Provide Authorization: Bearer <token>",
+            )),
+        )
+    })?;
+    let ctx = source.clone().resolve(db, Some(auth)).await?;
+    let env_id = ctx.env.env_id;
+    let principal = mcp_sse_transport_principal_from_context(&ctx)?;
+    let binding = pubsub
+        .get_mcp_sse_transport_session(transport_session_id)
+        .await
+        .map_err(|e| mcp_sse_transport_session_store_error("load", e))?
+        .ok_or_else(mcp_sse_transport_session_not_found)?;
+    verify_mcp_sse_transport_session_binding(&binding, &ctx, &route_key, &principal)?;
+
+    let permit = mcp_http_sse_message_semaphore()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ApiErrorResponse::new(
+                    "too_many_requests",
+                    "Too many MCP HTTP+SSE messages are being processed. Try again shortly.",
+                )),
+            )
+        })?;
 
     let state_clone = state.clone();
     let pubsub_clone = pubsub.clone();
     tokio::spawn(async move {
-        process_legacy_message_request(
+        let _permit = permit;
+        process_mcp_http_sse_message_request(
             state_clone,
             headers,
             access_id,
             source,
             request,
-            session_id,
+            transport_session_id,
+            env_id,
             pubsub_clone,
         )
         .await;
@@ -1678,13 +1888,15 @@ async fn mcp_legacy_messages_inner(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn process_legacy_message_request(
+#[allow(clippy::too_many_arguments)]
+async fn process_mcp_http_sse_message_request(
     state: ApiStateData,
     headers: HeaderMap,
     access_id: Option<Uuid>,
     source: McpRouteSource,
     request: JsonRpcRequest,
-    session_id: Uuid,
+    transport_session_id: Uuid,
+    env_id: Uuid,
     pubsub: Arc<hot::stream::StreamPubSub>,
 ) {
     let (db, _, conf, stream_pubsub) = &state;
@@ -1706,14 +1918,20 @@ async fn process_legacy_message_request(
             let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
                 Ok(b) => b,
                 Err(e) => {
-                    tracing::error!("MCP legacy: failed to read response body: {}", e);
+                    tracing::error!("MCP HTTP+SSE: failed to read response body: {}", e);
                     let error = JsonRpcResponse::error(
                         request_id,
                         INTERNAL_ERROR,
                         "Failed to read MCP response body".to_string(),
                         None,
                     );
-                    publish_legacy_session_payload(&pubsub, session_id, &error).await;
+                    publish_mcp_http_sse_session_payload(
+                        &pubsub,
+                        transport_session_id,
+                        env_id,
+                        &error,
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1729,19 +1947,37 @@ async fn process_legacy_message_request(
                 let body_str = String::from_utf8_lossy(&body_bytes);
                 for payload in extract_sse_data_payloads(&body_str) {
                     if !payload.is_empty() {
-                        publish_legacy_session_payload_str(&pubsub, session_id, payload).await;
+                        publish_mcp_http_sse_session_payload_str(
+                            &pubsub,
+                            transport_session_id,
+                            env_id,
+                            payload,
+                        )
+                        .await;
                     }
                 }
             } else {
                 // JSON response — forward directly
                 let body_str = String::from_utf8_lossy(&body_bytes).trim().to_string();
                 if !body_str.is_empty() {
-                    publish_legacy_session_payload_str(&pubsub, session_id, body_str).await;
+                    publish_mcp_http_sse_session_payload_str(
+                        &pubsub,
+                        transport_session_id,
+                        env_id,
+                        body_str,
+                    )
+                    .await;
                 }
             }
         }
         Err((_status, error_json)) => {
-            publish_legacy_session_payload(&pubsub, session_id, &error_json.0).await;
+            publish_mcp_http_sse_session_payload(
+                &pubsub,
+                transport_session_id,
+                env_id,
+                &error_json.0,
+            )
+            .await;
         }
     }
 }
@@ -1770,19 +2006,22 @@ fn extract_sse_data_payloads(sse: &str) -> Vec<String> {
     payloads
 }
 
-async fn publish_legacy_session_payload(
+async fn publish_mcp_http_sse_session_payload(
     pubsub: &Arc<hot::stream::StreamPubSub>,
-    session_id: Uuid,
+    transport_session_id: Uuid,
+    env_id: Uuid,
     payload: &impl serde::Serialize,
 ) {
     if let Ok(payload_str) = serde_json::to_string(payload) {
-        publish_legacy_session_payload_str(pubsub, session_id, payload_str).await;
+        publish_mcp_http_sse_session_payload_str(pubsub, transport_session_id, env_id, payload_str)
+            .await;
     }
 }
 
-async fn publish_legacy_session_payload_str(
+async fn publish_mcp_http_sse_session_payload_str(
     pubsub: &Arc<hot::stream::StreamPubSub>,
-    session_id: Uuid,
+    transport_session_id: Uuid,
+    env_id: Uuid,
     payload: String,
 ) {
     use hot::stream::{StreamEvent, StreamPublisher};
@@ -1790,25 +2029,26 @@ async fn publish_legacy_session_payload_str(
     let event = StreamEvent::StreamData {
         stream_data_id: Uuid::now_v7(),
         run_id: Uuid::now_v7(),
-        stream_id: session_id,
-        data_type: MCP_SESSION_DATA_TYPE.to_string(),
+        env_id: Some(env_id),
+        stream_id: transport_session_id,
+        data_type: MCP_HTTP_SSE_SESSION_DATA_TYPE.to_string(),
         payload: serde_json::Value::String(payload),
     };
 
     if let Err(e) = pubsub.publish(event).await {
         tracing::warn!(
-            "MCP legacy: failed to publish session payload for {}: {}",
-            session_id,
+            "MCP HTTP+SSE: failed to publish transport session payload for {}: {}",
+            transport_session_id,
             e
         );
     }
 }
 
-/// Query parameters for the legacy messages endpoint
+/// Query parameters for the HTTP+SSE messages endpoint.
 #[derive(Debug, Deserialize)]
-pub struct LegacyMessageQuery {
+pub struct HttpSseMessageQuery {
     #[serde(rename = "sessionId")]
-    pub session_id: String,
+    pub transport_session_id: String,
 }
 
 // ============================================================================
@@ -1924,9 +2164,12 @@ mod tests {
         (state, api_key, pubsub)
     }
 
-    fn extract_payload(event: hot::stream::StreamEvent) -> String {
+    fn extract_payload(event: hot::stream::StreamNext) -> String {
         match event {
-            hot::stream::StreamEvent::StreamData { payload, .. } => payload
+            hot::stream::StreamNext::Event(hot::stream::StreamEvent::StreamData {
+                payload,
+                ..
+            }) => payload
                 .as_str()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| payload.to_string()),
@@ -1935,21 +2178,24 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_session_timeout_default_and_bounds() {
+    fn test_mcp_http_sse_session_timeout_default_and_bounds() {
         let default_conf = val!({});
         assert_eq!(
-            legacy_session_timeout(&default_conf),
+            mcp_http_sse_session_timeout(&default_conf),
             Duration::from_secs(300)
         );
 
-        let custom_conf = val!({"mcp": {"legacy": {"session-timeout": 42i64}}});
+        let custom_conf = val!({"mcp": {"http-sse": {"session-timeout": 42i64}}});
         assert_eq!(
-            legacy_session_timeout(&custom_conf),
+            mcp_http_sse_session_timeout(&custom_conf),
             Duration::from_secs(42)
         );
 
-        let zero_conf = val!({"mcp": {"legacy": {"session-timeout": 0i64}}});
-        assert_eq!(legacy_session_timeout(&zero_conf), Duration::from_secs(1));
+        let zero_conf = val!({"mcp": {"http-sse": {"session-timeout": 0i64}}});
+        assert_eq!(
+            mcp_http_sse_session_timeout(&zero_conf),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
@@ -2021,16 +2267,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_legacy_message_request_publishes_initialize_response() {
+    async fn test_process_mcp_http_sse_message_request_publishes_initialize_response() {
         let conf = val!({"mcp": {"enabled": true}});
         let (state, _api_key, pubsub) = make_test_state(conf, true).await;
         let pubsub = pubsub.unwrap();
-        let session_id = Uuid::now_v7();
+        let transport_session_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
 
         use hot::stream::StreamSubscriberFactory;
-        let mut subscriber = pubsub.subscribe(session_id).await.unwrap();
+        let mut subscriber = pubsub
+            .subscribe_in_env(env_id, transport_session_id)
+            .await
+            .unwrap();
 
-        process_legacy_message_request(
+        process_mcp_http_sse_message_request(
             state,
             HeaderMap::new(),
             None,
@@ -2049,14 +2299,14 @@ mod tests {
                     "clientInfo": {"name": "test", "version": "1.0"}
                 })),
             },
-            session_id,
+            transport_session_id,
+            env_id,
             pubsub.clone(),
         )
         .await;
 
         let event = tokio::time::timeout(Duration::from_secs(1), subscriber.next())
             .await
-            .unwrap()
             .unwrap();
         let payload = extract_payload(event);
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -2065,16 +2315,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_legacy_message_request_publishes_jsonrpc_error() {
+    async fn test_process_mcp_http_sse_message_request_does_not_cross_env_session_channel() {
         let conf = val!({"mcp": {"enabled": true}});
         let (state, _api_key, pubsub) = make_test_state(conf, true).await;
         let pubsub = pubsub.unwrap();
-        let session_id = Uuid::now_v7();
+        let transport_session_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let other_env_id = Uuid::now_v7();
 
         use hot::stream::StreamSubscriberFactory;
-        let mut subscriber = pubsub.subscribe(session_id).await.unwrap();
+        let mut subscriber = pubsub
+            .subscribe_in_env(env_id, transport_session_id)
+            .await
+            .unwrap();
+        let mut other_env_subscriber = pubsub
+            .subscribe_in_env(other_env_id, transport_session_id)
+            .await
+            .unwrap();
 
-        process_legacy_message_request(
+        process_mcp_http_sse_message_request(
+            state,
+            HeaderMap::new(),
+            None,
+            McpRouteSource::Path {
+                org_slug: "local".to_string(),
+                env_name: "development".to_string(),
+                service: "svc".to_string(),
+            },
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(10)),
+                method: "initialize".to_string(),
+                params: Some(json!({
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "test",
+                        "version": "1.0",
+                    },
+                })),
+            },
+            transport_session_id,
+            env_id,
+            pubsub.clone(),
+        )
+        .await;
+
+        let event = tokio::time::timeout(Duration::from_secs(1), subscriber.next())
+            .await
+            .unwrap();
+        let payload = extract_payload(event);
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["id"], 10);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), other_env_subscriber.next())
+                .await
+                .is_err(),
+            "MCP HTTP+SSE transport session response should not be delivered across env-scoped channels"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_mcp_http_sse_message_request_publishes_jsonrpc_error() {
+        let conf = val!({"mcp": {"enabled": true}});
+        let (state, _api_key, pubsub) = make_test_state(conf, true).await;
+        let pubsub = pubsub.unwrap();
+        let transport_session_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+
+        use hot::stream::StreamSubscriberFactory;
+        let mut subscriber = pubsub
+            .subscribe_in_env(env_id, transport_session_id)
+            .await
+            .unwrap();
+
+        process_mcp_http_sse_message_request(
             state,
             HeaderMap::new(),
             None,
@@ -2089,14 +2405,14 @@ mod tests {
                 method: "initialize".to_string(),
                 params: None,
             },
-            session_id,
+            transport_session_id,
+            env_id,
             pubsub.clone(),
         )
         .await;
 
         let event = tokio::time::timeout(Duration::from_secs(1), subscriber.next())
             .await
-            .unwrap()
             .unwrap();
         let payload = extract_payload(event);
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -2105,28 +2421,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_messages_handler_returns_accepted_immediately_and_publishes() {
-        let conf = val!({"mcp": {"enabled": true}});
-        let (state, _api_key, pubsub) = make_test_state(conf, true).await;
-        let pubsub = pubsub.unwrap();
-        let session_id = Uuid::now_v7();
+    async fn test_mcp_http_sse_messages_handler_returns_accepted_immediately_and_publishes() {
+        let ctx = make_auth_test_context().await;
+        let headers = bearer_header(&ctx.api_key_token);
+        let auth = try_authenticate(&ctx.state.0, &headers)
+            .await
+            .unwrap()
+            .unwrap();
+        let env_id = auth.0.env_id();
+        let principal = mcp_sse_transport_principal(&auth.0);
+        let pubsub = ctx.state.3.as_ref().unwrap().clone();
+        let transport_session_id = Uuid::now_v7();
+        let route_key = format!("path:{}/{}/{}", ctx.org_slug, ctx.env_name, ctx.service);
+        let session_timeout = mcp_http_sse_session_timeout(&ctx.state.2);
 
         use hot::stream::StreamSubscriberFactory;
-        let mut subscriber = pubsub.subscribe(session_id).await.unwrap();
+        let mut subscriber = pubsub
+            .subscribe_in_env(env_id, transport_session_id)
+            .await
+            .unwrap();
+        pubsub
+            .put_mcp_sse_transport_session(
+                McpSseTransportSessionBinding {
+                    transport_session_id,
+                    env_id,
+                    route_key,
+                    principal,
+                    expires_at: mcp_sse_transport_session_expires_at(session_timeout),
+                },
+                session_timeout,
+            )
+            .await
+            .unwrap();
 
         let started = Instant::now();
-        let status = mcp_legacy_messages_handler(
-            State(state),
+        let status = mcp_http_sse_messages_handler(
+            State(ctx.state.clone()),
             OptionalAccessId(None),
             Path((
-                "local".to_string(),
-                "development".to_string(),
-                "svc".to_string(),
+                ctx.org_slug.clone(),
+                ctx.env_name.clone(),
+                ctx.service.clone(),
             )),
-            Query(LegacyMessageQuery {
-                session_id: session_id.to_string(),
+            Query(HttpSseMessageQuery {
+                transport_session_id: transport_session_id.to_string(),
             }),
-            HeaderMap::new(),
+            headers,
             Json(JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 id: Some(json!(3)),
@@ -2140,12 +2480,11 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(
             started.elapsed() < Duration::from_millis(500),
-            "Legacy POST should return quickly with 202"
+            "HTTP+SSE POST should return quickly with 202"
         );
 
         let event = tokio::time::timeout(Duration::from_secs(1), subscriber.next())
             .await
-            .unwrap()
             .unwrap();
         let payload = extract_payload(event);
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -2154,7 +2493,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_get_handler_requires_auth() {
+    async fn test_mcp_http_sse_messages_handler_rejects_missing_transport_session_binding() {
+        let ctx = make_auth_test_context().await;
+        let transport_session_id = Uuid::now_v7();
+
+        let result = mcp_http_sse_messages_handler(
+            State(ctx.state.clone()),
+            OptionalAccessId(None),
+            Path((ctx.org_slug, ctx.env_name, ctx.service)),
+            Query(HttpSseMessageQuery {
+                transport_session_id: transport_session_id.to_string(),
+            }),
+            bearer_header(&ctx.api_key_token),
+            Json(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(4)),
+                method: "ping".to_string(),
+                params: None,
+            }),
+        )
+        .await;
+
+        let (status, error) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error.0.error.code, "mcp_transport_session_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_http_sse_messages_handler_rejects_principal_mismatch() {
+        let ctx = make_auth_test_context().await;
+        let headers = bearer_header(&ctx.api_key_token);
+        let auth = try_authenticate(&ctx.state.0, &headers)
+            .await
+            .unwrap()
+            .unwrap();
+        let env_id = auth.0.env_id();
+        let pubsub = ctx.state.3.as_ref().unwrap().clone();
+        let transport_session_id = Uuid::now_v7();
+        let session_timeout = mcp_http_sse_session_timeout(&ctx.state.2);
+
+        pubsub
+            .put_mcp_sse_transport_session(
+                McpSseTransportSessionBinding {
+                    transport_session_id,
+                    env_id,
+                    route_key: format!("path:{}/{}/{}", ctx.org_slug, ctx.env_name, ctx.service),
+                    principal: McpSseTransportPrincipal::ApiKey(Uuid::now_v7()),
+                    expires_at: mcp_sse_transport_session_expires_at(session_timeout),
+                },
+                session_timeout,
+            )
+            .await
+            .unwrap();
+
+        let result = mcp_http_sse_messages_handler(
+            State(ctx.state.clone()),
+            OptionalAccessId(None),
+            Path((ctx.org_slug, ctx.env_name, ctx.service)),
+            Query(HttpSseMessageQuery {
+                transport_session_id: transport_session_id.to_string(),
+            }),
+            headers,
+            Json(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(5)),
+                method: "ping".to_string(),
+                params: None,
+            }),
+        )
+        .await;
+
+        let (status, error) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error.0.error.code, "mcp_transport_session_mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_http_sse_get_handler_requires_auth() {
         let conf = val!({"mcp": {"enabled": true}});
         let (state, _api_key, _) = make_test_state(conf, true).await;
 
@@ -2455,6 +2870,7 @@ mod tests {
 
         let event = StreamEvent::RunStop {
             run_id: worker_run_id,
+            env_id: Uuid::now_v7(),
             stream_id,
             event_id: None,
             result: Some(serde_json::json!("test result")),
@@ -2472,6 +2888,7 @@ mod tests {
 
         let event = StreamEvent::RunFail {
             run_id,
+            env_id: Uuid::now_v7(),
             stream_id: Uuid::now_v7(),
             event_id: None,
             error: Some("test error".to_string()),
@@ -2487,6 +2904,7 @@ mod tests {
 
         let event = StreamEvent::RunCancel {
             run_id,
+            env_id: Uuid::now_v7(),
             stream_id: Uuid::now_v7(),
             event_id: None,
             reason: Some("cancelled".to_string()),
@@ -2501,6 +2919,7 @@ mod tests {
 
         let event = StreamEvent::RunStart {
             run_id: Uuid::now_v7(),
+            env_id: Uuid::now_v7(),
             stream_id: Uuid::now_v7(),
             event_id: None,
         };
@@ -3294,10 +3713,10 @@ mod tests {
         );
     }
 
-    // --- Legacy SSE requires auth ---
+    // --- HTTP+SSE requires auth ---
 
     #[tokio::test]
-    async fn test_auth_legacy_sse_without_credentials_returns_401() {
+    async fn test_auth_http_sse_without_credentials_returns_401() {
         let ctx = make_auth_test_context().await;
         let result = mcp_sse_handler(
             State(ctx.state.clone()),
@@ -3314,7 +3733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_auth_legacy_sse_with_valid_credentials_returns_sse() {
+    async fn test_auth_http_sse_with_valid_credentials_returns_sse() {
         let ctx = make_auth_test_context().await;
         let result = mcp_sse_handler(
             State(ctx.state.clone()),
