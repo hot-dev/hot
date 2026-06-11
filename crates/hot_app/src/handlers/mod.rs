@@ -115,7 +115,8 @@ pub use keys::{
 };
 pub use mcp_tools::{mcp_service_detail_handler, mcp_services_list_handler};
 pub use oauth::{
-    github_auth_handler, github_callback_handler, google_auth_handler, google_callback_handler,
+    github_auth_handler, github_callback_handler, github_select_email_handler,
+    github_select_email_post_handler, google_auth_handler, google_callback_handler,
 };
 pub use orgs::{
     legacy_org_redirect, org_users_edit_handler, org_users_edit_post_handler,

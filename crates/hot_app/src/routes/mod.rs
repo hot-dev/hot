@@ -510,6 +510,10 @@ pub fn routes(
         .route("/auth/google/callback", get(google_callback_handler))
         .route("/auth/github", get(github_auth_handler))
         .route("/auth/github/callback", get(github_callback_handler))
+        .route(
+            "/auth/github/select-email",
+            get(github_select_email_handler).post(github_select_email_post_handler),
+        )
         .with_state(db.clone());
 
     // Webhook routes (no authentication required)

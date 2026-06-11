@@ -430,7 +430,7 @@ pub fn build_removal_cookie(name: &'static str) -> axum_extra::extract::cookie::
 
 /// Get session secret from environment variable
 /// In development mode, falls back to a default secret for convenience
-fn get_session_secret() -> Result<String, String> {
+pub(crate) fn get_session_secret() -> Result<String, String> {
     match env::var("HOT_APP_SESSION_SECRET") {
         Ok(secret) if !secret.is_empty() => Ok(secret),
         _ => {

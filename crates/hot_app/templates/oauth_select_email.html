@@ -1,0 +1,37 @@
+{% extends "public_layout.html" %}
+
+{% block content %}
+<div class="flex justify-center items-center mt-10">
+    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
+        <div class="mb-6 text-center">
+            <h1 class="text-xl font-bold mb-2">Choose your email</h1>
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+                Your GitHub account has multiple verified emails. Pick the one
+                to use for your hot.dev account.
+            </p>
+        </div>
+
+        <form action="/auth/github/select-email" method="post">
+            <div class="mb-6 space-y-3">
+                {% for email in emails %}
+                <label class="flex items-center gap-3 p-3 border border-gray-300 dark:border-gray-700 rounded-md cursor-pointer hover:bg-gray-100 dark:hover:bg-[#222] transition-colors">
+                    <input type="radio" name="email" value="{{ email }}" {% if loop.first %}checked{% endif %}
+                        class="h-4 w-4 border-gray-300 dark:border-gray-700 text-red-500 focus:ring-red-500" />
+                    <span class="font-mono text-sm">{{ email }}</span>
+                </label>
+                {% endfor %}
+            </div>
+
+            <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50">
+                Continue
+            </button>
+        </form>
+
+        <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-800 text-center">
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+                Changed your mind? <a href="/signin" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Back to sign in</a>
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}

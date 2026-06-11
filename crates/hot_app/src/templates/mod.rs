@@ -1651,6 +1651,14 @@ pub struct CheckEmail<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "oauth_select_email.html")]
+pub struct OAuthSelectEmail<'a> {
+    pub title: &'a str,
+    pub page_context: PublicPageContext,
+    pub emails: &'a [String],
+}
+
+#[derive(Template)]
 #[template(path = "verification_error.html")]
 pub struct VerificationError<'a> {
     pub title: &'a str,
