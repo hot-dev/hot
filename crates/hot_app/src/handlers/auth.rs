@@ -160,16 +160,11 @@ pub async fn signin_post_handler(
             // Generate JWT token for the user
             match generate_token(&user.user_id, &conf) {
                 Ok(token) => {
-                    // Set JWT cookie (24 hours expiration, HttpOnly, Secure in production)
-                    let mut cookie =
-                        axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-                    cookie.set_path("/");
-                    cookie.set_max_age(time::Duration::days(1));
-                    cookie.set_http_only(true);
-                    cookie.set_secure(!hot::env::is_local_dev());
-                    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-                    let updated_cookies = cookies.add(cookie);
+                    let updated_cookies = cookies.add(crate::auth::build_cookie(
+                        JWT_COOKIE_NAME,
+                        token,
+                        time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
+                    ));
 
                     // Set default org/env cookies if they don't exist yet
                     let cookies_with_defaults =
@@ -186,11 +181,12 @@ pub async fn signin_post_handler(
                     // Add cross-subdomain presence cookie for hot.dev
                     let final_cookies = add_presence_cookie(cookies_with_defaults);
 
-                    // Authentication successful, redirect to `next` if provided (must start with /), otherwise dashboard
+                    // Authentication successful, redirect to `next` if it's a
+                    // safe same-site path, otherwise dashboard
                     let redirect_to = form
                         .next
                         .as_deref()
-                        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+                        .filter(|n| crate::auth::is_safe_next(n))
                         .unwrap_or("/");
                     Ok((final_cookies, Redirect::to(redirect_to)))
                 }
@@ -243,30 +239,14 @@ pub async fn signout_handler(cookies: CookieJar) -> (CookieJar, Redirect) {
         return (cookies, Redirect::to("/"));
     }
 
-    // Clear the JWT cookie by setting it to expire immediately
-    let mut jwt_cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, "");
-    jwt_cookie.set_path("/");
-    jwt_cookie.set_max_age(time::Duration::seconds(0));
-    jwt_cookie.set_http_only(true);
-    jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    // Clear the org cookie
-    let mut org_cookie =
-        axum_extra::extract::cookie::Cookie::new(crate::auth::CURRENT_ORG_COOKIE_NAME, "");
-    org_cookie.set_path("/");
-    org_cookie.set_max_age(time::Duration::seconds(0));
-    org_cookie.set_http_only(true);
-    org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    // Clear the env cookie
-    let mut env_cookie =
-        axum_extra::extract::cookie::Cookie::new(crate::auth::CURRENT_ENV_COOKIE_NAME, "");
-    env_cookie.set_path("/");
-    env_cookie.set_max_age(time::Duration::seconds(0));
-    env_cookie.set_http_only(true);
-    env_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    let cookies_cleared = cookies.add(jwt_cookie).add(org_cookie).add(env_cookie);
+    let cookies_cleared = cookies
+        .add(crate::auth::build_removal_cookie(JWT_COOKIE_NAME))
+        .add(crate::auth::build_removal_cookie(
+            crate::auth::CURRENT_ORG_COOKIE_NAME,
+        ))
+        .add(crate::auth::build_removal_cookie(
+            crate::auth::CURRENT_ENV_COOKIE_NAME,
+        ));
 
     // Remove cross-subdomain presence cookie
     let final_cookies = remove_presence_cookie(cookies_cleared);
@@ -937,6 +917,17 @@ async fn handle_already_verified(
     cookies: CookieJar,
     verification: &EmailVerification,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
+    // Time-bound the idempotent re-login: scanner/second-browser tolerance is
+    // only intended within the original verification window. Without this
+    // check, every verification email would remain a permanent no-password
+    // login link for anyone who obtains it later.
+    if verification.expires_at < Utc::now() {
+        return Err(render_verification_error(
+            "Already verified",
+            "This email has already been verified. Please sign in.",
+        ));
+    }
+
     let Ok(user) = User::get_user_by_email(db, &verification.email).await else {
         // Verification is marked verified but no user exists — very unusual
         // (would require a partial signup failure). Don't strand the user.
@@ -1436,16 +1427,11 @@ pub async fn claim_handle_post_handler(
         )
         .await;
 
-        let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
+        let updated_cookies = cookies.add(crate::auth::build_cookie(
             crate::auth::CURRENT_ORG_COOKIE_NAME,
             existing.org_id.to_string(),
-        );
-        org_cookie.set_path("/");
-        org_cookie.set_max_age(time::Duration::days(365));
-        org_cookie.set_http_only(true);
-        org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        org_cookie.set_secure(!hot::env::is_local_dev());
-        let updated_cookies = cookies.add(org_cookie);
+            time::Duration::days(365),
+        ));
 
         let target = if !plan.is_empty() {
             format!(
@@ -1517,16 +1503,11 @@ pub async fn claim_handle_post_handler(
     };
 
     // Set the newly created org as current
-    let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
+    let updated_cookies = cookies.add(crate::auth::build_cookie(
         crate::auth::CURRENT_ORG_COOKIE_NAME,
         org_id.to_string(),
-    );
-    org_cookie.set_path("/");
-    org_cookie.set_max_age(time::Duration::days(365));
-    org_cookie.set_http_only(true);
-    org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    org_cookie.set_secure(!hot::env::is_local_dev());
-    let updated_cookies = cookies.add(org_cookie);
+        time::Duration::days(365),
+    ));
 
     // Redirect to billing (slug-scoped, so the next request doesn't depend
     // on the org cookie surviving the redirect) if a plan was selected,

@@ -668,6 +668,19 @@ pub async fn process_invite_code(
         .is_valid()
         .map_err(|e| format!("Invalid invite: {}", e))?;
 
+    // Invites are email-bound: the code alone must not grant org membership.
+    // Enforced here (not just on the /invite accept page) so the signup,
+    // signin, and OAuth invite_code paths all carry the same policy.
+    let user = User::get_user(db, user_id)
+        .await
+        .map_err(|e| format!("Failed to load user: {}", e))?;
+    if !user.email.eq_ignore_ascii_case(&invite.email) {
+        return Err(format!(
+            "This invite was sent to {}. Ask an organization admin to invite {} instead.",
+            invite.email, user.email
+        ));
+    }
+
     // Check if user is already a member of the organization
     if hot::db::org::OrgUser::get_org_user(db, &invite.org_id, user_id)
         .await
@@ -761,32 +774,20 @@ pub async fn set_default_org_env_cookies(
         .await
         .map_err(|e| format!("Failed to get organization environments: {}", e))?;
 
-    // Set organization cookie
-    let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
+    // Set organization cookie (365d, matching the claim-handle/verify paths)
+    let mut updated_cookies = cookies.add(crate::auth::build_cookie(
         crate::auth::CURRENT_ORG_COOKIE_NAME,
         earliest_org.org_id.to_string(),
-    );
-    org_cookie.set_path("/");
-    org_cookie.set_max_age(time::Duration::days(30));
-    org_cookie.set_http_only(true);
-    org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    org_cookie.set_secure(!hot::env::is_local_dev());
-
-    let mut updated_cookies = cookies.add(org_cookie);
+        time::Duration::days(365),
+    ));
 
     // Set environment cookie if available
     if let Some(earliest_env) = org_envs.first() {
-        let mut env_cookie = axum_extra::extract::cookie::Cookie::new(
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
             crate::auth::CURRENT_ENV_COOKIE_NAME,
             earliest_env.env_id.to_string(),
-        );
-        env_cookie.set_path("/");
-        env_cookie.set_max_age(time::Duration::days(30));
-        env_cookie.set_http_only(true);
-        env_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        env_cookie.set_secure(!hot::env::is_local_dev());
-
-        updated_cookies = updated_cookies.add(env_cookie);
+            time::Duration::days(365),
+        ));
     }
 
     Ok(updated_cookies)
@@ -799,13 +800,13 @@ pub const PRESENCE_COOKIE_NAME: &str = "hot_signed_in";
 /// Add the cross-subdomain presence cookie to indicate the user is signed in
 /// This cookie is readable by both app.hot.dev and hot.dev
 pub fn add_presence_cookie(cookies: CookieJar) -> CookieJar {
-    let mut cookie = axum_extra::extract::cookie::Cookie::new(PRESENCE_COOKIE_NAME, "1");
-    cookie.set_path("/");
-    cookie.set_max_age(time::Duration::days(30));
+    let mut cookie = crate::auth::build_cookie(
+        PRESENCE_COOKIE_NAME,
+        "1".to_string(),
+        time::Duration::days(30),
+    );
     // Not HttpOnly - needs to be readable by JavaScript on hot.dev
     cookie.set_http_only(false);
-    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    cookie.set_secure(!hot::env::is_local_dev());
 
     // Set domain for cross-subdomain sharing (e.g., .hot.dev)
     if let Some(domain) = hot::env::get_cookie_domain() {
@@ -817,12 +818,8 @@ pub fn add_presence_cookie(cookies: CookieJar) -> CookieJar {
 
 /// Remove the cross-subdomain presence cookie on sign out
 pub fn remove_presence_cookie(cookies: CookieJar) -> CookieJar {
-    let mut cookie = axum_extra::extract::cookie::Cookie::new(PRESENCE_COOKIE_NAME, "");
-    cookie.set_path("/");
-    cookie.set_max_age(time::Duration::seconds(0));
+    let mut cookie = crate::auth::build_removal_cookie(PRESENCE_COOKIE_NAME);
     cookie.set_http_only(false);
-    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    cookie.set_secure(!hot::env::is_local_dev());
 
     // Must use same domain to clear the cookie
     if let Some(domain) = hot::env::get_cookie_domain() {

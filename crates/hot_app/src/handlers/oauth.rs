@@ -67,61 +67,45 @@ pub async fn google_auth_handler(
         })?;
 
     // Store CSRF token in secure cookie
-    let mut state_cookie = axum_extra::extract::cookie::Cookie::new(
+    let mut updated_cookies = cookies.add(crate::auth::build_cookie(
         OAUTH_STATE_COOKIE_NAME,
         csrf_token.secret().clone(),
-    );
-    state_cookie.set_path("/");
-    state_cookie.set_max_age(time::Duration::minutes(10));
-    state_cookie.set_http_only(true);
-    state_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    let mut updated_cookies = cookies.add(state_cookie);
+        time::Duration::minutes(10),
+    ));
 
     // Store invite code in cookie if provided
     if let Some(invite_code) = params.invite_code {
-        let mut invite_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_INVITE_COOKIE_NAME, invite_code);
-        invite_cookie.set_path("/");
-        invite_cookie.set_max_age(time::Duration::minutes(10));
-        invite_cookie.set_http_only(true);
-        invite_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(invite_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_INVITE_COOKIE_NAME,
+            invite_code,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store next URL in cookie if provided (for post-login redirect)
-    if let Some(next) = params
-        .next
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-    {
-        let mut next_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_NEXT_COOKIE_NAME, next);
-        next_cookie.set_path("/");
-        next_cookie.set_max_age(time::Duration::minutes(10));
-        next_cookie.set_http_only(true);
-        next_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(next_cookie);
+    if let Some(next) = params.next.filter(|n| crate::auth::is_safe_next(n)) {
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_NEXT_COOKIE_NAME,
+            next,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store plan and billing in cookies if provided (for post-signup plan flow)
     if let Some(plan) = params.plan.filter(|p| !p.is_empty()) {
-        let mut plan_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_PLAN_COOKIE_NAME, plan);
-        plan_cookie.set_path("/");
-        plan_cookie.set_max_age(time::Duration::minutes(10));
-        plan_cookie.set_http_only(true);
-        plan_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(plan_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_PLAN_COOKIE_NAME,
+            plan,
+            time::Duration::minutes(10),
+        ));
     }
 
     if let Some(billing) = params.billing.filter(|b| !b.is_empty()) {
-        let mut billing_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_BILLING_COOKIE_NAME, billing);
-        billing_cookie.set_path("/");
-        billing_cookie.set_max_age(time::Duration::minutes(10));
-        billing_cookie.set_http_only(true);
-        billing_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(billing_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_BILLING_COOKIE_NAME,
+            billing,
+            time::Duration::minutes(10),
+        ));
     }
 
     Ok((updated_cookies, Redirect::to(auth_url.as_str())))
@@ -204,18 +188,17 @@ pub async fn google_callback_handler(
         .map_err(|e| Html(format!("Failed to generate authentication token: {}", e)))?;
 
     // Set JWT cookie
-    let mut jwt_cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-    jwt_cookie.set_path("/");
-    jwt_cookie.set_max_age(time::Duration::days(1));
-    jwt_cookie.set_http_only(true);
-    jwt_cookie.set_secure(!hot::env::is_local_dev());
-    jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+    let jwt_cookie = crate::auth::build_cookie(
+        JWT_COOKIE_NAME,
+        token,
+        time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
+    );
 
     // Read cookies before clearing
     let next_url = cookies
         .get(OAUTH_NEXT_COOKIE_NAME)
         .map(|c| c.value().to_string())
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+        .filter(|n| crate::auth::is_safe_next(n));
 
     let oauth_plan = cookies
         .get(OAUTH_PLAN_COOKIE_NAME)
@@ -277,61 +260,45 @@ pub async fn github_auth_handler(
         })?;
 
     // Store CSRF token in secure cookie
-    let mut state_cookie = axum_extra::extract::cookie::Cookie::new(
+    let mut updated_cookies = cookies.add(crate::auth::build_cookie(
         OAUTH_STATE_COOKIE_NAME,
         csrf_token.secret().clone(),
-    );
-    state_cookie.set_path("/");
-    state_cookie.set_max_age(time::Duration::minutes(10));
-    state_cookie.set_http_only(true);
-    state_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    let mut updated_cookies = cookies.add(state_cookie);
+        time::Duration::minutes(10),
+    ));
 
     // Store invite code in cookie if provided
     if let Some(invite_code) = params.invite_code {
-        let mut invite_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_INVITE_COOKIE_NAME, invite_code);
-        invite_cookie.set_path("/");
-        invite_cookie.set_max_age(time::Duration::minutes(10));
-        invite_cookie.set_http_only(true);
-        invite_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(invite_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_INVITE_COOKIE_NAME,
+            invite_code,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store next URL in cookie if provided (for post-login redirect)
-    if let Some(next) = params
-        .next
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-    {
-        let mut next_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_NEXT_COOKIE_NAME, next);
-        next_cookie.set_path("/");
-        next_cookie.set_max_age(time::Duration::minutes(10));
-        next_cookie.set_http_only(true);
-        next_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(next_cookie);
+    if let Some(next) = params.next.filter(|n| crate::auth::is_safe_next(n)) {
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_NEXT_COOKIE_NAME,
+            next,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store plan and billing in cookies if provided (for post-signup plan flow)
     if let Some(plan) = params.plan.filter(|p| !p.is_empty()) {
-        let mut plan_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_PLAN_COOKIE_NAME, plan);
-        plan_cookie.set_path("/");
-        plan_cookie.set_max_age(time::Duration::minutes(10));
-        plan_cookie.set_http_only(true);
-        plan_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(plan_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_PLAN_COOKIE_NAME,
+            plan,
+            time::Duration::minutes(10),
+        ));
     }
 
     if let Some(billing) = params.billing.filter(|b| !b.is_empty()) {
-        let mut billing_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_BILLING_COOKIE_NAME, billing);
-        billing_cookie.set_path("/");
-        billing_cookie.set_max_age(time::Duration::minutes(10));
-        billing_cookie.set_http_only(true);
-        billing_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(billing_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_BILLING_COOKIE_NAME,
+            billing,
+            time::Duration::minutes(10),
+        ));
     }
 
     Ok((updated_cookies, Redirect::to(auth_url.as_str())))
@@ -378,10 +345,10 @@ pub async fn github_callback_handler(
         Html("Failed to fetch user information from GitHub".to_string())
     })?;
 
-    // Check if we got an email
+    // Require a VERIFIED email from GitHub (resolved via /user/emails)
     let email = user_info.email.ok_or_else(|| {
         Html(
-            "Could not retrieve your email from GitHub. Please make your email public or verify it."
+            "Your GitHub account has no verified email address. Please verify an email on GitHub and try again."
                 .to_string(),
         )
     })?;
@@ -414,18 +381,17 @@ pub async fn github_callback_handler(
         .map_err(|e| Html(format!("Failed to generate authentication token: {}", e)))?;
 
     // Set JWT cookie
-    let mut jwt_cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-    jwt_cookie.set_path("/");
-    jwt_cookie.set_max_age(time::Duration::days(1));
-    jwt_cookie.set_http_only(true);
-    jwt_cookie.set_secure(!hot::env::is_local_dev());
-    jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+    let jwt_cookie = crate::auth::build_cookie(
+        JWT_COOKIE_NAME,
+        token,
+        time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
+    );
 
     // Read cookies before clearing
     let next_url = cookies
         .get(OAUTH_NEXT_COOKIE_NAME)
         .map(|c| c.value().to_string())
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+        .filter(|n| crate::auth::is_safe_next(n));
 
     let oauth_plan = cookies
         .get(OAUTH_PLAN_COOKIE_NAME)
@@ -466,6 +432,25 @@ async fn handle_oauth_user(
     provider_user_id: &str,
     name: Option<&str>,
 ) -> Result<(User, bool), String> {
+    // Resolution order:
+    //   1. provider_user_id — the stable key. Survives the user changing
+    //      their email at the provider and changes to our email-resolution
+    //      policy (e.g. verified-primary vs public-profile email).
+    //   2. email match — links the provider to an existing account
+    //      (first OAuth login for an email/password user).
+    //   3. create a new user.
+    if let Ok(auth) = UserAuth::get_by_provider_user_id(db, provider, provider_user_id).await {
+        let user = User::get_user(db, &auth.user_id)
+            .await
+            .map_err(|e| format!("Failed to load user for OAuth login: {}", e))?;
+        tracing::info!(
+            "User {} logged in with {} (matched by provider_user_id)",
+            user.email,
+            provider
+        );
+        return Ok((user, false));
+    }
+
     // Check if user already exists with this email
     match User::get_user_by_email(db, email).await {
         Ok(user) => {
@@ -552,10 +537,7 @@ fn clear_oauth_cookies(cookies: CookieJar) -> CookieJar {
 
     let mut jar = cookies;
     for name in cookie_names {
-        let mut c = axum_extra::extract::cookie::Cookie::new(name, "");
-        c.set_path("/");
-        c.set_max_age(time::Duration::seconds(0));
-        jar = jar.add(c);
+        jar = jar.add(crate::auth::build_removal_cookie(name));
     }
     jar
 }

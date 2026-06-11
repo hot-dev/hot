@@ -363,6 +363,43 @@ pub const CURRENT_ORG_COOKIE_NAME: &str = "hot_current_org";
 // Cookie name for the current environment
 pub const CURRENT_ENV_COOKIE_NAME: &str = "hot_current_env";
 
+/// Session length in days for the JWT cookie and token (30-day sessions with
+/// sliding refresh in the session middleware; see `session_middleware`).
+pub const SESSION_COOKIE_DAYS: i64 = 30;
+
+/// Is `next` a safe same-site redirect target?
+///
+/// Accepts only absolute paths within this origin. Rejects:
+/// - protocol-relative URLs (`//evil.com`)
+/// - backslash variants (`/\evil.com`) which some browsers normalize to `//`
+pub fn is_safe_next(next: &str) -> bool {
+    next.starts_with('/') && !next.starts_with("//") && !next.contains('\\')
+}
+
+/// Build a session-scoped cookie with the hardened defaults used everywhere
+/// in hot_app: path `/`, HttpOnly, SameSite=Lax, Secure outside local dev.
+///
+/// Callers that need a JS-readable cookie (e.g. the cross-subdomain presence
+/// cookie) should call `.set_http_only(false)` on the result.
+pub fn build_cookie(
+    name: &'static str,
+    value: String,
+    max_age: time::Duration,
+) -> axum_extra::extract::cookie::Cookie<'static> {
+    let mut cookie = axum_extra::extract::cookie::Cookie::new(name, value);
+    cookie.set_path("/");
+    cookie.set_max_age(max_age);
+    cookie.set_http_only(true);
+    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+    cookie.set_secure(!hot::env::is_local_dev());
+    cookie
+}
+
+/// Build an expired cookie that clears `name` on the client.
+pub fn build_removal_cookie(name: &'static str) -> axum_extra::extract::cookie::Cookie<'static> {
+    build_cookie(name, String::new(), time::Duration::seconds(0))
+}
+
 /// Get session secret from environment variable
 /// In development mode, falls back to a default secret for convenience
 fn get_session_secret() -> Result<String, String> {
@@ -382,7 +419,7 @@ fn get_session_secret() -> Result<String, String> {
     }
 }
 
-/// Get session timeout in hours from conf, with default of 24 hours
+/// Get session timeout in hours from conf, defaulting to 30 days.
 fn get_session_timeout_hours(conf: &Val) -> i64 {
     conf.get("app")
         .and_then(|app| app.get("session"))
@@ -391,7 +428,7 @@ fn get_session_timeout_hours(conf: &Val) -> i64 {
             Val::Int(i) => Some(i),
             _ => None,
         })
-        .unwrap_or(24) // Default to 24 hours
+        .unwrap_or(SESSION_COOKIE_DAYS * 24)
 }
 
 /// Generate a JWT token for a user using configuration
