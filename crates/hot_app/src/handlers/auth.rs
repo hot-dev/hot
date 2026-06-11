@@ -350,15 +350,6 @@ pub async fn signup_post_handler(
         ));
     }
 
-    // Global signup cap — a backstop against mass account creation that
-    // slips past the edge per-IP limits.
-    if crate::rate_limit::check_signup_global().is_err() {
-        tracing::warn!("Global signup rate limit hit (email: {})", form.email);
-        return Err(render_error(
-            "We're receiving an unusually high volume of signups right now. Please try again in a little while.",
-        ));
-    }
-
     // Anti-bot check 1: Honeypot field
     // If the hidden "website" field has a value, it's likely a bot
     // Silently return success to not tip off the bot
@@ -414,6 +405,16 @@ pub async fn signup_post_handler(
         && existing.is_valid().is_ok()
     {
         return Ok(render_check_email(&form.email, true, plan == "hot-free").into_response());
+    }
+
+    // Global signup cap — a backstop against mass account creation that
+    // slips past the edge per-IP limits. Count only plausible new-account
+    // attempts, after CSRF/honeypot/validation have filtered junk traffic.
+    if crate::rate_limit::check_signup_global().is_err() {
+        tracing::warn!("Global signup rate limit hit (email: {})", form.email);
+        return Err(render_error(
+            "We're receiving an unusually high volume of signups right now. Please try again in a little while.",
+        ));
     }
 
     // Hash the password

@@ -198,7 +198,7 @@ async fn duplicate_email_signup_offers_signin_link() {
     let form = submit_signup("alice@example.com", client.prime_csrf());
     let resp = client
         .post_form(
-            "/signup?plan=hot-free&billing=monthly",
+            "/signup?invite_code=test-invite-code&plan=hot-free&billing=monthly",
             &as_form_slice(&form),
         )
         .await;
@@ -209,8 +209,11 @@ async fn duplicate_email_signup_offers_signin_link() {
         "expected duplicate-email error"
     );
     assert!(
-        resp.body.contains("Sign in instead") && resp.body.contains("/signin?plan=hot-free"),
-        "duplicate-email error must link to signin preserving plan params, got: {}",
+        resp.body.contains("Sign in instead")
+            && resp.body.contains("/signin?invite_code=test-invite-code")
+            && resp.body.contains("plan=hot-free")
+            && resp.body.contains("billing=monthly"),
+        "duplicate-email error must link to signin preserving invite and plan params, got: {}",
         resp.body.chars().take(600).collect::<String>()
     );
 }
