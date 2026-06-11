@@ -1609,9 +1609,6 @@ pub struct SignUp<'a> {
     pub plan: &'a str,
     pub plan_display_name: &'a str,
     pub billing: &'a str,
-    pub org_name: &'a str,
-    pub org_slug: &'a str,
-    pub account_type: &'a str,
     pub form_token: &'a str,
 }
 

@@ -103,9 +103,6 @@ pub struct SignupForm {
     pub email: String,
     pub password: String,
     pub name: Option<String>,
-    pub org_name: Option<String>,
-    pub org_slug: Option<String>,
-    pub account_type: Option<String>,
     // Anti-bot fields
     pub website: Option<String>, // Honeypot field - should always be empty
     pub form_token: Option<String>, // Time-based token to prevent fast submissions
@@ -151,10 +148,15 @@ pub async fn signin_post_handler(
 
     match authenticate_user(&db, &form.email, &form.password).await {
         Ok(user) => {
-            // Process invite code if provided
-            if !invite_code.is_empty() {
-                let _ = process_invite_code(&db, &user.user_id, &invite_code).await;
-                // We don't fail if invite processing fails, just continue
+            // Process invite code if provided. On failure, sign the user in
+            // anyway but land them on the invite page, which explains why
+            // the invite could not be applied (mismatched email, expired, …).
+            let mut invite_error_redirect: Option<String> = None;
+            if !invite_code.is_empty()
+                && let Err(e) = process_invite_code(&db, &user.user_id, &invite_code).await
+            {
+                tracing::warn!("Invite processing failed during signin: {}", e);
+                invite_error_redirect = Some(format!("/invite?code={}", invite_code));
             }
 
             // Generate JWT token for the user
@@ -181,13 +183,15 @@ pub async fn signin_post_handler(
                     // Add cross-subdomain presence cookie for hot.dev
                     let final_cookies = add_presence_cookie(cookies_with_defaults);
 
-                    // Authentication successful, redirect to `next` if it's a
-                    // safe same-site path, otherwise dashboard
-                    let redirect_to = form
-                        .next
-                        .as_deref()
-                        .filter(|n| crate::auth::is_safe_next(n))
-                        .unwrap_or("/");
+                    // Authentication successful. Invite problems take
+                    // priority, then `next` if it's a safe same-site path,
+                    // otherwise dashboard.
+                    let redirect_to = invite_error_redirect.as_deref().unwrap_or_else(|| {
+                        form.next
+                            .as_deref()
+                            .filter(|n| crate::auth::is_safe_next(n))
+                            .unwrap_or("/")
+                    });
                     Ok((final_cookies, Redirect::to(redirect_to)))
                 }
                 Err(err) => {
@@ -289,9 +293,6 @@ pub async fn signup_handler(
         plan: &plan,
         plan_display_name: &plan_display_name,
         billing: &billing,
-        org_name: "",
-        org_slug: "",
-        account_type: "individual",
         form_token: &form_token,
     };
 
@@ -343,9 +344,10 @@ fn get_plan_display_name(plan_id: &str) -> String {
 pub async fn signup_post_handler(
     State(db): State<Arc<DatabasePool>>,
     Extension(conf): Extension<Val>,
+    cookies: CookieJar,
     Query(params): Query<AHashMap<String, String>>,
     Form(form): Form<SignupForm>,
-) -> Result<Html<String>, Html<String>> {
+) -> Result<axum::response::Response, Html<String>> {
     let invite_code = params.get("invite_code").cloned().unwrap_or_default();
     let plan = params.get("plan").cloned().unwrap_or_default();
     let billing = params
@@ -362,8 +364,6 @@ pub async fn signup_post_handler(
             &invite_code,
             &plan,
             &billing,
-            form.org_name.as_deref().unwrap_or(""),
-            form.org_slug.as_deref().unwrap_or(""),
         )
     };
 
@@ -378,7 +378,7 @@ pub async fn signup_post_handler(
     // Silently return success to not tip off the bot
     if form.website.as_ref().is_some_and(|w| !w.is_empty()) {
         tracing::warn!("Honeypot triggered on signup for email: {}", form.email);
-        return Ok(render_check_email(&form.email, false, plan == "hot-free"));
+        return Ok(render_check_email(&form.email, false, plan == "hot-free").into_response());
     }
 
     // Anti-bot check 2: Form submission timing
@@ -415,95 +415,72 @@ pub async fn signup_post_handler(
         return Err(render_error("Password must be at least 8 characters"));
     }
 
-    // Determine account type (default to "individual")
-    let account_type = form
-        .account_type
-        .as_deref()
-        .unwrap_or("individual")
-        .to_string();
-
     // Name is always required
     if form.name.as_deref().unwrap_or("").trim().is_empty() {
         return Err(render_error("Full name is required"));
     }
 
-    let is_invite_signup = !invite_code.is_empty();
-
     // Check for an existing account FIRST. If the user is already registered,
-    // the right answer is "go sign in" regardless of what slug they typed.
+    // the right answer is "go sign in".
     if User::get_user_by_email(&db, &form.email).await.is_ok() {
         return Err(render_error("A user with this email already exists"));
     }
 
-    // Check pending verification for this email BEFORE the slug check, so
-    // a user who refreshes the signup form (same email, same slug) just
-    // gets re-shown the "check your email" page instead of a spurious
-    // "handle is already taken" message caused by their own pending record.
+    // A user who refreshes the signup form (same email) just gets re-shown
+    // the "check your email" page instead of starting over.
     if let Ok(Some(existing)) = EmailVerification::get_pending_by_email(&db, &form.email).await
         && existing.is_valid().is_ok()
     {
-        return Ok(render_check_email(&form.email, true, plan == "hot-free"));
-    }
-
-    if !is_invite_signup {
-        let org_slug = form.org_slug.as_deref().unwrap_or("").trim();
-
-        if account_type == "organization" {
-            let org_name = form.org_name.as_deref().unwrap_or("").trim();
-            if org_name.is_empty() {
-                return Err(render_error("Organization name is required"));
-            }
-        }
-
-        // Full slug validation: format + reserved (baked-in + the
-        // deployment-supplied `hot.org.reserved-slugs` list) + existing orgs +
-        // pending verifications. On "taken", suggest an alternative so the
-        // user has a one-click retry.
-        let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
-        match crate::slug::ensure_available_with_extra(&db, org_slug, &extra_reserved).await {
-            Ok(()) => {}
-            Err(crate::slug::SlugError::Taken) => {
-                let suggestion = crate::slug::suggest_alternative(&db, org_slug).await;
-                return Err(render_signup_with_error_full(
-                    &format!(
-                        "{} Try \u{201c}{}\u{201d}.",
-                        crate::slug::SlugError::Taken.message(),
-                        suggestion
-                    ),
-                    &form.email,
-                    form.name.as_deref().unwrap_or(""),
-                    &invite_code,
-                    &plan,
-                    &billing,
-                    form.org_name.as_deref().unwrap_or(""),
-                    &suggestion,
-                ));
-            }
-            Err(e) => return Err(render_error(e.message())),
-        }
+        return Ok(render_check_email(&form.email, true, plan == "hot-free").into_response());
     }
 
     // Hash the password
     let password_hash = hot::auth::hash_password_with_random_salt(&form.password)
         .map_err(|_| render_error("Failed to process your request. Please try again."))?;
 
+    // Invite fast path: when the signup email exactly matches the invite
+    // email, the invite delivery already proved the user controls this
+    // mailbox — skip the verification email and log them straight in.
+    // Mismatched emails fall through to normal verification (and the
+    // email-binding check in process_invite_code will reject the invite).
+    if !invite_code.is_empty()
+        && let Ok(invite) = hot::db::invite::Invite::get_invite_by_code(&db, &invite_code).await
+        && invite.is_valid().is_ok()
+        && invite.email.eq_ignore_ascii_case(form.email.trim())
+    {
+        let user_id =
+            create_user_with_password(&db, &form.email, form.name.as_deref(), &password_hash)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Invite fast-path user creation failed: {}", e);
+                    render_error("Failed to create your account. Please try again.")
+                })?;
+
+        if let Err(e) = process_invite_code(&db, &user_id, &invite_code).await {
+            // User exists but didn't join the org; show the reason and let
+            // them sign in (they'll land on claim-handle without an org).
+            tracing::warn!("Invite fast-path processing failed: {}", e);
+            return Err(render_error(&format!(
+                "Your account was created, but the invite could not be applied: {}",
+                e
+            )));
+        }
+
+        let final_cookies = sign_in_cookies(&db, &conf, cookies, &user_id)
+            .await
+            .map_err(|_| render_error("Your account was created. Please sign in to continue."))?;
+
+        tracing::info!(
+            "User {} signed up via matching invite (verification skipped)",
+            form.email
+        );
+        return Ok((final_cookies, Redirect::to("/")).into_response());
+    }
+
     // Generate verification token and ID
     let verification_id = uuid::Uuid::now_v7();
     let verification_token = EmailVerification::generate_token();
     let expires_at = Utc::now() + chrono::Duration::hours(24);
-
-    // Normalize empty strings to None so downstream checks (`is_some()`) are
-    // accurate — individual signups submit a hidden empty `org_name` field.
-    let org_name_trimmed = form
-        .org_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let org_slug_trimmed = form
-        .org_slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
 
     // Create the email verification record
     EmailVerification::insert(
@@ -518,8 +495,6 @@ pub async fn signup_post_handler(
         } else {
             Some(&invite_code)
         },
-        org_name_trimmed,
-        org_slug_trimmed,
         if plan.is_empty() { None } else { Some(&plan) },
         if plan.is_empty() {
             None
@@ -527,7 +502,6 @@ pub async fn signup_post_handler(
             Some(&billing)
         },
         expires_at,
-        Some(&account_type),
     )
     .await
     .map_err(|e| {
@@ -547,7 +521,61 @@ pub async fn signup_post_handler(
     }
 
     // Show the "check your email" page
-    Ok(render_check_email(&form.email, false, plan == "hot-free"))
+    Ok(render_check_email(&form.email, false, plan == "hot-free").into_response())
+}
+
+/// Create a user + email_password auth row. `password_hash` is the JSON
+/// payload produced by `hash_password_with_random_salt`.
+async fn create_user_with_password(
+    db: &DatabasePool,
+    email: &str,
+    name: Option<&str>,
+    password_hash: &str,
+) -> Result<uuid::Uuid, String> {
+    let user_id = uuid::Uuid::now_v7();
+    let user_auth_id = uuid::Uuid::now_v7();
+
+    User::insert_user(db, &user_id, email, name, Some(&user_id))
+        .await
+        .map_err(|e| format!("insert_user failed: {:?}", e))?;
+
+    let auth_data: serde_json::Value = serde_json::from_str(password_hash)
+        .map_err(|e| format!("invalid password hash payload: {:?}", e))?;
+
+    hot::db::user::UserAuth::insert_user_auth(
+        db,
+        &user_auth_id,
+        &user_id,
+        "email_password",
+        email,
+        Some(&auth_data),
+        &user_id,
+    )
+    .await
+    .map_err(|e| format!("insert_user_auth failed: {:?}", e))?;
+
+    Ok(user_id)
+}
+
+/// Set the full sign-in cookie set for a user: JWT session cookie, default
+/// org/env cookies (when none are set), and the cross-subdomain presence
+/// cookie.
+async fn sign_in_cookies(
+    db: &DatabasePool,
+    conf: &Val,
+    cookies: CookieJar,
+    user_id: &uuid::Uuid,
+) -> Result<CookieJar, String> {
+    let token = generate_token(user_id, conf)?;
+    let updated_cookies = cookies.add(crate::auth::build_cookie(
+        JWT_COOKIE_NAME,
+        token,
+        time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
+    ));
+    let cookies_with_org = set_default_org_env_cookies(db, user_id, updated_cookies.clone())
+        .await
+        .unwrap_or(updated_cookies);
+    Ok(add_presence_cookie(cookies_with_org))
 }
 
 /// Render the "check your email" page
@@ -615,287 +643,83 @@ pub async fn verify_email_handler(
         }
     }
 
-    // If a user record already exists for this email, we're in one of two
-    // recoverable states:
-    //   (a) a prior verify attempt created the user + auth rows but then
-    //       failed on org creation — leaving the verification NOT marked
-    //       verified. We want to retry org creation now.
-    //   (b) someone signed up with the same email between our two checks
-    //       (truly rare). Safest thing is still to continue with org
-    //       creation against the existing user — worst case the org
-    //       insert fails and we redirect to claim-handle, same as any
-    //       other signup mismatch.
-    //
-    // Either way, reuse the existing user rather than erroring out.
-    let user_name = verification.name.as_deref().unwrap_or("User");
+    // If a user record already exists for this email, reuse it: either a
+    // prior verify attempt partially completed, or someone signed up with
+    // the same email between checks (truly rare).
     let user_id = match User::get_user_by_email(&db, &verification.email).await {
         Ok(existing) => existing.user_id,
-        Err(_) => {
-            let new_user_id = uuid::Uuid::now_v7();
-            let user_auth_id = uuid::Uuid::now_v7();
-
-            User::insert_user(
-                &db,
-                &new_user_id,
-                &verification.email,
-                Some(user_name),
-                Some(&new_user_id),
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user during verification: {:?}", e);
-                render_verification_error(
-                    "Account creation failed",
-                    "Failed to create your account. Please try again.",
-                )
-            })?;
-
-            let auth_data: serde_json::Value = serde_json::from_str(&verification.password_hash)
-                .map_err(|e| {
-                    tracing::error!("Failed to parse password hash: {:?}", e);
-                    render_verification_error(
-                        "Account creation failed",
-                        "Failed to create your account. Please try again.",
-                    )
-                })?;
-
-            hot::db::user::UserAuth::insert_user_auth(
-                &db,
-                &user_auth_id,
-                &new_user_id,
-                "email_password",
-                &verification.email,
-                Some(&auth_data),
-                &new_user_id,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user auth during verification: {:?}", e);
-                render_verification_error(
-                    "Account creation failed",
-                    "Failed to create your account. Please try again.",
-                )
-            })?;
-
-            new_user_id
-        }
-    };
-
-    // Determine account type from verification record
-    let account_type = verification.account_type.as_deref().unwrap_or("individual");
-
-    // Create org if slug was provided during signup. `create_org` is
-    // idempotent for slugs owned by this user (adopts orphans from prior
-    // partial attempts) and self-rolls-back on post-insert failure, so the
-    // only way this returns Err is if the slug is genuinely owned by someone
-    // else — i.e. it was grabbed between signup and verify by a different
-    // user creating an org via /orgs/new.
-    //
-    // In that rare case we don't strand the user: log them in and forward
-    // to /claim-handle?taken=slug so they can pick an alternative in one step.
-    //
-    // Track BOTH org_id AND slug so we can redirect directly to
-    // `/@{slug}/billing/checkout` and skip the cookie-roundtrip through
-    // `/billing/create-checkout-form`. The roundtrip is fragile: if the
-    // org cookie doesn't make it back to the browser, the next request's
-    // session middleware sees `current_org=None` and bounces the user to
-    // `/claim-handle` even though their org was just created. Direct
-    // routing avoids that whole class of failure.
-    let created_org: Option<(uuid::Uuid, String)> =
-        if let Some(org_slug) = verification.org_slug.as_deref() {
-            let org_name = if account_type == "organization" {
-                verification.org_name.as_deref().unwrap_or(user_name)
-            } else {
-                user_name
-            };
-
-            match create_org(&db, &user_id, org_name, org_slug, account_type).await {
-                Ok(org_id) => {
-                    // Read-after-write sanity check. `create_org` returning
-                    // Ok means insert_org committed (or an existing owned
-                    // row was adopted). If we can't fetch it back by slug
-                    // immediately afterwards, something is *very* wrong
-                    // (replica lag, schema mismatch, parallel deletion,
-                    // mis-cased slug, etc.) and constructing a `/@{slug}/`
-                    // URL would silently 404 the user. Log loud and treat
-                    // it as a creation failure so the caller falls through
-                    // to the recovery path instead of generating a dead
-                    // redirect.
-                    match hot::db::org::Org::get_org_by_slug(&db, org_slug).await {
-                        Ok(found) if found.org_id == org_id => {
-                            tracing::info!(
-                                "verify_email_handler: created/adopted org {} (slug {}) for \
-                                 user {} — confirmed visible",
-                                org_id,
-                                org_slug,
-                                verification.email
-                            );
-                            Some((org_id, org_slug.to_string()))
-                        }
-                        Ok(found) => {
-                            tracing::error!(
-                                "verify_email_handler: post-create read-back returned a \
-                                 DIFFERENT org for slug {} (got org_id {}, expected {}) — \
-                                 user {} — refusing to redirect to dead URL",
-                                org_slug,
-                                found.org_id,
-                                org_id,
-                                verification.email
-                            );
-                            None
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "verify_email_handler: create_org returned Ok({}) for slug {} \
-                                 but get_org_by_slug immediately afterwards failed: {:?} — \
-                                 user {} — refusing to redirect to dead URL",
-                                org_id,
-                                org_slug,
-                                e,
-                                verification.email
-                            );
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "verify_email_handler: org creation failed for user {} (slug {}): {} \
-                         — forwarding to claim-handle?taken={}",
-                        verification.email,
-                        org_slug,
-                        e,
-                        org_slug
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-    let created_org_id = created_org.as_ref().map(|(id, _)| *id);
-
-    // Process invite code if provided (for non-paid signups)
-    if let Some(invite_code) = &verification.invite_code {
-        let _ = process_invite_code(&db, &user_id, invite_code).await;
-    }
-
-    // Mark verification as completed only once we've got the user in a
-    // good steady state (org exists, or the caller never asked for one).
-    //
-    // If we wanted an org but couldn't create it, leaving the verification
-    // unverified lets the user click the link again (which now hits our
-    // idempotent create_org + owned-orphan recovery) — far friendlier than
-    // stranding them at /claim-handle with a ghost handle.
-    let verification_complete = verification.org_slug.is_none() || created_org_id.is_some();
-    if verification_complete {
-        let _ = EmailVerification::mark_verified(&db, &verification.verification_id).await;
-    }
-
-    // Generate JWT token for the user
-    let token = generate_token(&user_id, &conf).map_err(|e| {
-        tracing::error!("Failed to generate token during verification: {:?}", e);
-        render_verification_error(
-            "Account created",
-            "Your account was created successfully! Please sign in.",
+        Err(_) => create_user_with_password(
+            &db,
+            &verification.email,
+            Some(verification.name.as_deref().unwrap_or("User")),
+            &verification.password_hash,
         )
-    })?;
-
-    // Set JWT cookie
-    let mut cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-    cookie.set_path("/");
-    cookie.set_max_age(time::Duration::days(1));
-    cookie.set_http_only(true);
-    cookie.set_secure(!hot::env::is_local_dev());
-    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    let updated_cookies = cookies.add(cookie);
-
-    // Set default org/env cookies (prefer newly created org)
-    let cookies_with_org = if let Some(org_id) = created_org_id {
-        let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
-            crate::auth::CURRENT_ORG_COOKIE_NAME,
-            org_id.to_string(),
-        );
-        org_cookie.set_path("/");
-        org_cookie.set_max_age(time::Duration::days(365));
-        org_cookie.set_http_only(true);
-        org_cookie.set_secure(!hot::env::is_local_dev());
-        org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies.add(org_cookie)
-    } else {
-        set_default_org_env_cookies(&db, &user_id, updated_cookies.clone())
-            .await
-            .unwrap_or(updated_cookies)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create user during verification: {}", e);
+            render_verification_error(
+                "Account creation failed",
+                "Failed to create your account. Please try again.",
+            )
+        })?,
     };
 
-    // Add cross-subdomain presence cookie
-    let final_cookies = add_presence_cookie(cookies_with_org);
+    // Process invite code if provided. Failures (expired invite, email
+    // mismatch, revoked) are surfaced instead of silently dropped — the
+    // account is created either way, so tell the user what happened.
+    let mut invite_joined = false;
+    if let Some(invite_code) = &verification.invite_code {
+        match process_invite_code(&db, &user_id, invite_code).await {
+            Ok(()) => invite_joined = true,
+            Err(e) => {
+                tracing::warn!(
+                    "verify_email_handler: invite processing failed for {}: {}",
+                    verification.email,
+                    e
+                );
+                let _ = EmailVerification::mark_verified(&db, &verification.verification_id).await;
+                return Err(render_verification_error(
+                    "Invite could not be applied",
+                    &format!(
+                        "Your email is verified and your account was created, but the invite \
+                         could not be applied: {} You can sign in to continue.",
+                        e
+                    ),
+                ));
+            }
+        }
+    }
+
+    let _ = EmailVerification::mark_verified(&db, &verification.verification_id).await;
+
+    let final_cookies = sign_in_cookies(&db, &conf, cookies, &user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to sign in during verification: {}", e);
+            render_verification_error(
+                "Account created",
+                "Your account was created successfully! Please sign in.",
+            )
+        })?;
 
     tracing::info!("User {} verified and logged in", verification.email);
 
-    // If org creation failed but signup wanted one, forward to /claim-handle.
-    // The claim-handle page will pre-fill a suggested slug (an *alternative*
-    // to the taken one) and preserve plan params.
-    let org_creation_needed_but_failed =
-        verification.org_slug.is_some() && created_org_id.is_none();
-    if org_creation_needed_but_failed {
-        let plan = verification.plan.as_deref().unwrap_or("");
-        let billing = verification.billing.as_deref().unwrap_or("monthly");
-        // Pass the taken slug so /claim-handle can suggest a real alternative
-        // (e.g. `alice-2`) instead of echoing the base back at the user.
-        let taken = verification.org_slug.as_deref().unwrap_or("");
-        let mut qs = Vec::new();
-        if !plan.is_empty() {
-            qs.push(format!("plan={}", plan));
-            qs.push(format!("billing={}", billing));
-        }
-        if !taken.is_empty() {
-            qs.push(format!("taken={}", taken));
-        }
-        let target = if qs.is_empty() {
-            "/claim-handle".to_string()
-        } else {
-            format!("/claim-handle?{}", qs.join("&"))
-        };
-        return Ok((final_cookies, Redirect::to(&target)));
-    }
-
-    // If a plan was selected, redirect to billing checkout.
-    //
-    // Prefer the org-slug-scoped URL when we know the slug — this avoids
-    // the `/billing/create-checkout-form` indirection that depends on the
-    // org cookie surviving the redirect. If for any reason we don't have
-    // a slug here (no org_slug on the verification record), fall back to
-    // the cookie-based handler.
-    if verification.plan.is_some() {
-        let plan = verification.plan.as_deref().unwrap_or("hot-cloud-starter");
-        let billing = verification.billing.as_deref().unwrap_or("monthly");
-        let target = if let Some((_, slug)) = created_org.as_ref() {
-            tracing::info!(
-                "verify_email_handler: redirecting user {} directly to /@{}/billing/checkout",
-                verification.email,
-                slug
-            );
-            format!(
-                "/@{}/billing/checkout?plan={}&billing={}",
-                slug, plan, billing
-            )
-        } else {
-            tracing::info!(
-                "verify_email_handler: no created_org slug; falling back to \
-                 /billing/create-checkout-form for user {}",
-                verification.email
-            );
-            format!(
-                "/billing/create-checkout-form?plan={}&billing={}",
-                plan, billing
-            )
-        };
-        Ok((final_cookies, Redirect::to(&target)))
+    // Handles are claimed after verification: invite joiners already have an
+    // org to land in, everyone else goes to /claim-handle (carrying plan
+    // params so checkout follows the handle claim).
+    let target = if invite_joined {
+        "/".to_string()
     } else {
-        Ok((final_cookies, Redirect::to("/")))
-    }
+        match verification.plan.as_deref() {
+            Some(plan) => format!(
+                "/claim-handle?plan={}&billing={}",
+                plan,
+                verification.billing.as_deref().unwrap_or("monthly")
+            ),
+            None => "/claim-handle".to_string(),
+        }
+    };
+    Ok((final_cookies, Redirect::to(&target)))
 }
 
 /// Handles a verify-email click on an already-verified token.
@@ -946,116 +770,37 @@ async fn handle_already_verified(
         verification.email
     );
 
-    // Pick the org that was requested at signup if it exists and belongs to
-    // this user; otherwise fall back to any org they have.
     let user_orgs = hot::db::org::Org::get_orgs_by_user(db, &user.user_id)
         .await
         .unwrap_or_default();
-    let mut chosen_org = verification
-        .org_slug
-        .as_deref()
-        .and_then(|slug| user_orgs.iter().find(|o| o.slug == slug).cloned())
-        .or_else(|| user_orgs.first().cloned());
+    let chosen_org = user_orgs.first().cloned();
 
-    // Orphan recovery: the requested slug may exist in `org` but the
-    // membership row might be missing (partial failure from a prior
-    // attempt, before `create_org` was transactional). If the user owns
-    // that `org` row, heal the link + env here so they land on their org.
-    if chosen_org.is_none()
-        && let Some(slug) = verification.org_slug.as_deref()
-        && let Ok(existing) = hot::db::org::Org::get_org_by_slug(db, slug).await
-        && existing.created_by_user_id == user.user_id
-    {
-        tracing::info!(
-            "handle_already_verified: adopting orphan org {} for user {}",
-            existing.org_id,
-            user.user_id
-        );
-        crate::handlers::ensure_org_membership_and_env(db, &existing.org_id, &user.user_id).await;
-        chosen_org = Some(existing);
-    }
-
-    let token = generate_token(&user.user_id, conf).map_err(|_| {
-        render_verification_error(
-            "Session error",
-            "Your account is verified, but we couldn't sign you in. Please sign in.",
-        )
-    })?;
-
-    let mut jwt_cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-    jwt_cookie.set_path("/");
-    jwt_cookie.set_max_age(time::Duration::days(1));
-    jwt_cookie.set_http_only(true);
-    jwt_cookie.set_secure(!hot::env::is_local_dev());
-    jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    let updated_cookies = cookies.add(jwt_cookie);
-
-    let cookies_with_org = if let Some(org) = chosen_org.as_ref() {
-        let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
-            crate::auth::CURRENT_ORG_COOKIE_NAME,
-            org.org_id.to_string(),
-        );
-        org_cookie.set_path("/");
-        org_cookie.set_max_age(time::Duration::days(365));
-        org_cookie.set_http_only(true);
-        org_cookie.set_secure(!hot::env::is_local_dev());
-        org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies.add(org_cookie)
-    } else {
-        set_default_org_env_cookies(db, &user.user_id, updated_cookies.clone())
-            .await
-            .unwrap_or(updated_cookies)
-    };
-
-    let final_cookies = add_presence_cookie(cookies_with_org);
+    let final_cookies = sign_in_cookies(db, conf, cookies, &user.user_id)
+        .await
+        .map_err(|_| {
+            render_verification_error(
+                "Session error",
+                "Your account is verified, but we couldn't sign you in. Please sign in.",
+            )
+        })?;
 
     // Decide where to send them next. Mirrors the first-time verify logic:
-    //  - no org yet → /claim-handle (so they can pick a handle)
-    //  - plan selected + no subscription yet → billing checkout (slug-scoped)
-    //  - plan selected + subscription exists → dashboard (already paid)
-    //  - no plan → dashboard
-    //
-    // When `chosen_org` is set we route directly to `/@{slug}/billing/checkout`
-    // so the next request doesn't need the org cookie to make it back —
-    // that round-trip has been the source of "user lands on /claim-handle
-    // after verify" reports.
+    //  - no org yet → /claim-handle (carrying plan params)
+    //  - org + plan + no subscription yet → billing checkout (slug-scoped)
+    //  - otherwise → dashboard
     let plan = verification.plan.as_deref().unwrap_or("");
     let billing = verification.billing.as_deref().unwrap_or("monthly");
 
     let target = match chosen_org.as_ref() {
-        None if !plan.is_empty() => {
-            tracing::info!(
-                "handle_already_verified: no org for user {}; redirecting to /claim-handle",
-                verification.email
-            );
-            format!("/claim-handle?plan={}&billing={}", plan, billing)
-        }
-        None => {
-            tracing::info!(
-                "handle_already_verified: no org for user {}; redirecting to /claim-handle",
-                verification.email
-            );
-            "/claim-handle".to_string()
-        }
+        None if !plan.is_empty() => format!("/claim-handle?plan={}&billing={}", plan, billing),
+        None => "/claim-handle".to_string(),
         Some(org) if !plan.is_empty() => {
             let has_subscription = hot::db::OrgPlan::get_by_org_id(db, &org.org_id)
                 .await
                 .is_ok();
             if has_subscription {
-                tracing::info!(
-                    "handle_already_verified: user {} already has subscription on org {}; \
-                     redirecting to dashboard",
-                    verification.email,
-                    org.slug
-                );
                 "/".to_string()
             } else {
-                tracing::info!(
-                    "handle_already_verified: redirecting user {} directly to \
-                     /@{}/billing/checkout",
-                    verification.email,
-                    org.slug
-                );
                 format!(
                     "/@{}/billing/checkout?plan={}&billing={}",
                     org.slug, plan, billing
@@ -1146,7 +891,6 @@ fn render_verification_error(title: &str, message: &str) -> Html<String> {
 }
 
 // Helper function to render signup form with error
-#[allow(clippy::too_many_arguments)]
 fn render_signup_with_error_full(
     error_message: &str,
     email: &str,
@@ -1154,8 +898,6 @@ fn render_signup_with_error_full(
     invite_code: &str,
     plan: &str,
     billing: &str,
-    org_name: &str,
-    org_slug: &str,
 ) -> Html<String> {
     let plan_display_name = get_plan_display_name(plan);
     let form_token = generate_form_token();
@@ -1169,9 +911,6 @@ fn render_signup_with_error_full(
         plan,
         plan_display_name: &plan_display_name,
         billing,
-        org_name,
-        org_slug,
-        account_type: "individual",
         form_token: &form_token,
     };
 
@@ -1207,20 +946,15 @@ pub async fn claim_handle_handler(
         .unwrap_or_else(|| "monthly".to_string());
 
     // User already has a handle — no need to claim one. Check the session
-    // snapshot first, then fall back to a full recovery (fresh DB read of
-    // user_orgs + auto-create from pending email_verification slug). This
-    // is the safety net for any path that put us at /claim-handle without
-    // a current_org despite the user having completed signup.
+    // snapshot first, then a fresh DB read (covers the org cookie not having
+    // made it back to the browser yet).
     let existing_slug: Option<String> = if let Some(org) = &session.current_org {
         Some(org.slug.clone())
     } else {
-        crate::handlers::recover_or_create_org_for_user(
-            &db,
-            &session.current_user_id(),
-            &session.user.email,
-            &session.user_name,
-        )
-        .await
+        hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id())
+            .await
+            .ok()
+            .and_then(|orgs| orgs.first().map(|o| o.slug.clone()))
     };
 
     if let Some(slug) = existing_slug {
@@ -1242,54 +976,37 @@ pub async fn claim_handle_handler(
         return Redirect::to("/").into_response();
     }
 
-    // If the user was redirected here because a specific slug was taken at
-    // verify-time (see `verify_email_handler`'s graceful-degrade path), pick
-    // an *alternative* to that slug so we never echo the taken one back at
-    // them. Otherwise derive a fresh base from the user's name.
+    // Pre-fill the slug field with an available suggestion derived from the
+    // user's name so they have a one-click path forward.
+    // slugify: lowercase, replace non-alphanumeric runs with hyphens, trim hyphens.
     let extra_reserved = crate::slug::extra_reserved_from_conf(&conf);
-    let taken = params.get("taken").map(String::as_str).unwrap_or("").trim();
-    let (error_banner, suggested) = if !taken.is_empty()
-        && crate::slug::validate_format_with_extra(taken, &extra_reserved).is_ok()
-    {
-        let alt = crate::slug::suggest_alternative(&db, taken).await;
-        (
-            format!(
-                "\u{201c}{}\u{201d} was just taken. Try \u{201c}{}\u{201d} instead.",
-                taken, alt
-            ),
-            alt,
-        )
+    let base = session
+        .user_name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let base: String = base
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let suggested = if crate::slug::validate_format_with_extra(&base, &extra_reserved).is_ok() {
+        crate::slug::suggest_available(&db, &base).await
     } else {
-        // slugify: lowercase, replace non-alphanumeric runs with hyphens, trim hyphens.
-        let base = session
-            .user_name
-            .to_lowercase()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_lowercase() || c.is_ascii_digit() {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>();
-        let base: String = base
-            .split('-')
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("-");
-        let s = if crate::slug::validate_format_with_extra(&base, &extra_reserved).is_ok() {
-            crate::slug::suggest_available(&db, &base).await
-        } else {
-            String::new()
-        };
-        (String::new(), s)
+        String::new()
     };
 
     let template = templates::ClaimHandle {
         title: "Claim Your Handle",
         page_context: templates::PublicPageContext::new("claim-handle"),
-        error_message: &error_banner,
+        error_message: "",
         org_name: "",
         org_slug: &suggested,
         account_type: "individual",
@@ -1317,25 +1034,12 @@ pub async fn claim_handle_post_handler(
 
     let account_type = form.account_type.as_deref().unwrap_or("individual");
 
-    // If the user already has an org (or had one in flight from signup),
-    // don't create a duplicate — just forward them. Keeps /claim-handle
-    // idempotent for users who already have a handle, and means a refresh
-    // / double-submit / racing-tab can never silently create a SECOND org.
-    //
-    // We only run the FULL recover_or_create path here when the user
-    // submitted an EMPTY slug. With a non-empty slug we want their submitted
-    // value to take precedence over whatever was on a stale verification
-    // record — they may be deliberately picking something different.
+    // If the user already has an org, don't create a duplicate — just
+    // forward them. Keeps /claim-handle idempotent for users who already
+    // have a handle, and means a refresh / double-submit / racing-tab can
+    // never silently create a SECOND org.
     let user_has_org = if let Some(org) = &session.current_org {
         Some(org.slug.clone())
-    } else if form.org_slug.trim().is_empty() {
-        crate::handlers::recover_or_create_org_for_user(
-            &db,
-            &session.current_user_id(),
-            &session.user.email,
-            &session.user_name,
-        )
-        .await
     } else {
         match hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id()).await {
             Ok(orgs) if !orgs.is_empty() => Some(orgs[0].slug.clone()),

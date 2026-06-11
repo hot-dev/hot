@@ -1,21 +1,11 @@
-//! Integration tests for the signup → verify → claim-handle flow.
+//! Integration tests for slug availability and suggestion logic used by
+//! `/claim-handle` (handles are claimed post-verification, so availability
+//! is purely a question of existing orgs).
 //!
-//! These tests focus on the slug-reservation logic that sits between
-//! `signup_post_handler`, `verify_email_handler`, and `claim_handle_post_handler`.
 //! They run against an in-memory SQLite database with the real migrations
 //! applied, so we exercise the same schema production uses.
-//!
-//! The regression these tests protect against is:
-//!   1. A user signs up with handle `alice` (row written to `email_verification`
-//!      with a pending status).
-//!   2. Another user creates an org with handle `alice` before the first
-//!      user clicks their verification link.
-//!   3. When the first user verifies, `create_org` fails with a duplicate-key
-//!      violation — we must recover gracefully and suggest a unique alternative
-//!      (`alice-2`, `alice-3`, …) rather than echoing the rejected slug back.
 
-use chrono::{Duration, Utc};
-use hot::db::{self, DatabasePool, EmailVerification};
+use hot::db::{self, DatabasePool};
 use hot::val;
 use hot_app::handlers::create_org;
 use hot_app::slug::{self, SlugError};
@@ -63,32 +53,6 @@ async fn insert_test_user(db: &DatabasePool, email: &str) -> Uuid {
     user_id
 }
 
-async fn insert_pending_verification(
-    db: &DatabasePool,
-    email: &str,
-    slug: &str,
-    expires_in: Duration,
-) {
-    let verification_id = Uuid::now_v7();
-    EmailVerification::insert(
-        db,
-        &verification_id,
-        email,
-        Some("Test User"),
-        "fake-password-hash",
-        &format!("token-{}", verification_id),
-        None,
-        None,
-        Some(slug),
-        Some("hot-free"),
-        Some("monthly"),
-        Utc::now() + expires_in,
-        Some("individual"),
-    )
-    .await
-    .expect("EmailVerification::insert failed");
-}
-
 // ---------------------------------------------------------------------------
 // Slug availability: existing org
 // ---------------------------------------------------------------------------
@@ -119,36 +83,6 @@ async fn slug_unavailable_after_create_org() {
         slug::ensure_available(&db, "alice").await,
         Err(SlugError::Taken)
     );
-}
-
-// ---------------------------------------------------------------------------
-// Slug availability: pending email verification (soft reservation)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn pending_verification_reserves_slug() {
-    let db = setup_db().await;
-
-    // Alice signs up but hasn't clicked the verification link yet.
-    insert_pending_verification(&db, "alice@example.com", "alice", Duration::hours(24)).await;
-
-    // Bob can't grab `alice` out from under her.
-    assert!(!slug::is_available(&db, "alice").await);
-    assert_eq!(
-        slug::ensure_available(&db, "alice").await,
-        Err(SlugError::Taken)
-    );
-}
-
-#[tokio::test]
-async fn expired_verification_releases_slug() {
-    let db = setup_db().await;
-
-    // Alice's signup expired without being verified.
-    insert_pending_verification(&db, "alice@example.com", "alice", Duration::hours(-1)).await;
-
-    // Slug should be available again.
-    assert!(slug::is_available(&db, "alice").await);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,61 +137,4 @@ async fn suggest_available_skips_taken_variants() {
         .unwrap();
 
     assert_eq!(slug::suggest_available(&db, "alice").await, "alice-4");
-}
-
-#[tokio::test]
-async fn suggest_available_considers_pending_verifications() {
-    let db = setup_db().await;
-    let u1 = insert_test_user(&db, "a@example.com").await;
-
-    // alice is a real org; alice-2 is soft-reserved by a pending signup.
-    create_org(&db, &u1, "Alice", "alice", "individual")
-        .await
-        .unwrap();
-    insert_pending_verification(&db, "bob@example.com", "alice-2", Duration::hours(24)).await;
-
-    // Suggestion should skip both and land on alice-3.
-    assert_eq!(slug::suggest_available(&db, "alice").await, "alice-3");
-}
-
-// ---------------------------------------------------------------------------
-// End-to-end flow: race between two signups using the same handle
-// ---------------------------------------------------------------------------
-
-/// Simulates a signup race:
-///
-///   t0: Alice submits `/signup` with handle `alice` → pending verification row.
-///   t1: Another user happens to create an org with slug `alice` (e.g. they got
-///       their verification email first, or an admin provisioned it).
-///   t2: Alice clicks her verification link. `create_org` fails because the
-///       slug is no longer unique. `verify_email_handler` must redirect her
-///       to `/claim-handle?taken=alice`, and the suggested alternative must
-///       NOT be `alice`.
-#[tokio::test]
-async fn signup_race_produces_unique_suggestion() {
-    let db = setup_db().await;
-
-    // t0: Alice signs up.
-    insert_pending_verification(&db, "alice@example.com", "alice", Duration::hours(24)).await;
-
-    // t1: Someone else claims `alice` first.
-    let other = insert_test_user(&db, "sneaky@example.com").await;
-    create_org(&db, &other, "Sneaky", "alice", "individual")
-        .await
-        .expect("create_org failed for second user");
-
-    // t2: Alice's verification triggers create_org, which would fail. We
-    // simulate the recovery path: ask for a suggestion DIFFERENT from the
-    // rejected slug.
-    let suggestion = slug::suggest_alternative(&db, "alice").await;
-    assert_ne!(
-        suggestion, "alice",
-        "suggestion must not echo the taken slug"
-    );
-    assert_eq!(suggestion, "alice-2");
-    assert!(
-        slug::is_available(&db, &suggestion).await,
-        "suggestion {} should actually be available",
-        suggestion
-    );
 }

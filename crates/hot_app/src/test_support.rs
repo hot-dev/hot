@@ -171,6 +171,11 @@ impl TestClient {
         &self.cookies
     }
 
+    /// Drop all cookies — simulates a fresh browser session.
+    pub fn clear_cookies(&mut self) {
+        self.cookies = CookieJar::default();
+    }
+
     /// GET `path`. Cookies are attached from the jar and merged from
     /// `Set-Cookie` response headers into the jar.
     pub async fn get(&mut self, path: &str) -> TestResponse {

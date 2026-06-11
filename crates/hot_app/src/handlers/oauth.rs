@@ -176,11 +176,15 @@ pub async fn google_callback_handler(
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    // Process invite code if provided
+    // Process invite code if provided. On failure, complete the sign-in but
+    // land on the invite page, which explains why it could not be applied.
+    let mut invite_error_redirect: Option<String> = None;
     if let Some(invite_code) = invite_code.as_ref()
         && !invite_code.is_empty()
+        && let Err(e) = process_invite_code(&db, &user.user_id, invite_code).await
     {
-        let _ = process_invite_code(&db, &user.user_id, invite_code).await;
+        tracing::warn!("Invite processing failed during OAuth signin: {}", e);
+        invite_error_redirect = Some(format!("/invite?code={}", invite_code));
     }
 
     // Generate JWT token
@@ -216,16 +220,22 @@ pub async fn google_callback_handler(
     // Add cross-subdomain presence cookie
     let final_cookies = add_presence_cookie(updated_cookies);
 
-    // Determine redirect: new users go to claim-handle, existing users go to dashboard/plan
-    let redirect_to = determine_oauth_redirect(
-        next_url.as_deref(),
-        oauth_plan.as_deref(),
-        oauth_billing.as_deref(),
-        is_new_user,
-        &db,
-        &user,
-    )
-    .await;
+    // Determine redirect: invite problems take priority, then new users go
+    // to claim-handle, existing users go to dashboard/plan
+    let redirect_to = match invite_error_redirect {
+        Some(target) => target,
+        None => {
+            determine_oauth_redirect(
+                next_url.as_deref(),
+                oauth_plan.as_deref(),
+                oauth_billing.as_deref(),
+                is_new_user,
+                &db,
+                &user,
+            )
+            .await
+        }
+    };
 
     Ok((final_cookies, Redirect::to(&redirect_to)))
 }
@@ -369,11 +379,15 @@ pub async fn github_callback_handler(
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    // Process invite code if provided
+    // Process invite code if provided. On failure, complete the sign-in but
+    // land on the invite page, which explains why it could not be applied.
+    let mut invite_error_redirect: Option<String> = None;
     if let Some(invite_code) = invite_code.as_ref()
         && !invite_code.is_empty()
+        && let Err(e) = process_invite_code(&db, &user.user_id, invite_code).await
     {
-        let _ = process_invite_code(&db, &user.user_id, invite_code).await;
+        tracing::warn!("Invite processing failed during OAuth signin: {}", e);
+        invite_error_redirect = Some(format!("/invite?code={}", invite_code));
     }
 
     // Generate JWT token
@@ -409,16 +423,22 @@ pub async fn github_callback_handler(
     // Add cross-subdomain presence cookie
     let final_cookies = add_presence_cookie(updated_cookies);
 
-    // Determine redirect: new users go to claim-handle, existing users go to dashboard/plan
-    let redirect_to = determine_oauth_redirect(
-        next_url.as_deref(),
-        oauth_plan.as_deref(),
-        oauth_billing.as_deref(),
-        is_new_user,
-        &db,
-        &user,
-    )
-    .await;
+    // Determine redirect: invite problems take priority, then new users go
+    // to claim-handle, existing users go to dashboard/plan
+    let redirect_to = match invite_error_redirect {
+        Some(target) => target,
+        None => {
+            determine_oauth_redirect(
+                next_url.as_deref(),
+                oauth_plan.as_deref(),
+                oauth_billing.as_deref(),
+                is_new_user,
+                &db,
+                &user,
+            )
+            .await
+        }
+    };
 
     Ok((final_cookies, Redirect::to(&redirect_to)))
 }

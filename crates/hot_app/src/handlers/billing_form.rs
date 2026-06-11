@@ -30,26 +30,17 @@ pub async fn checkout_form_handler(
         .cloned()
         .unwrap_or_else(|| "monthly".to_string());
 
-    // Resolve the org to bill against.
-    //
-    // Prefer `session.current_org` (set by the cookie) when present, but
-    // fall back to a full recover (fresh DB read + auto-create from the
-    // pending email_verification slug). The session snapshot can be a
-    // beat behind on a freshly-created org — that's exactly the case for
-    // users coming from verify-email if their org cookie didn't make it
-    // back. And a previously-failed org-create from the verify path would
-    // strand the user with no org at all; recover_or_create makes that
-    // self-healing instead of dumping the user on /claim-handle.
+    // Resolve the org to bill against. Prefer `session.current_org` (set by
+    // the cookie) when present, with a fresh DB read as fallback — the
+    // session snapshot can be a beat behind on a freshly-created org. Users
+    // with no org yet are sent to /claim-handle to pick a handle first.
     let org_slug: Option<String> = if let Some(org) = session.current_org.as_ref() {
         Some(org.slug.clone())
     } else {
-        crate::handlers::recover_or_create_org_for_user(
-            &db,
-            &session.current_user_id(),
-            &session.user.email,
-            &session.user_name,
-        )
-        .await
+        hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id())
+            .await
+            .ok()
+            .and_then(|orgs| orgs.first().map(|o| o.slug.clone()))
     };
 
     if let Some(slug) = org_slug {
@@ -80,55 +71,9 @@ pub async fn org_checkout_form_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Query(params): Query<AHashMap<String, String>>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    // Verify org exists. If it doesn't, this might be a verify-email
-    // redirect pointing at a slug that *should* exist for this user but
-    // didn't get created (e.g. transient failure during verify). Check
-    // the user's pending verification — if it claims this slug, create
-    // it now and proceed instead of bouncing them with a 404.
-    let org = match hot::db::org::Org::get_org_by_slug(&db, &org_slug).await {
-        Ok(o) => o,
-        Err(_) => {
-            tracing::info!(
-                "org_checkout_form_handler: slug {} not found; attempting fix-forward \
-                 recovery for user {}",
-                org_slug,
-                session.user.email
-            );
-            let recovered = crate::handlers::recover_or_create_org_for_user(
-                &db,
-                &session.current_user_id(),
-                &session.user.email,
-                &session.user_name,
-            )
-            .await;
-            match recovered {
-                Some(slug) => {
-                    let plan_q = params
-                        .get("plan")
-                        .map(|p| format!("?plan={}", p))
-                        .unwrap_or_default();
-                    let billing_q = params
-                        .get("billing")
-                        .map(|b| {
-                            if plan_q.is_empty() {
-                                format!("?billing={}", b)
-                            } else {
-                                format!("&billing={}", b)
-                            }
-                        })
-                        .unwrap_or_default();
-                    return Ok(Redirect::to(&format!(
-                        "/@{}/billing/checkout{}{}",
-                        slug, plan_q, billing_q
-                    ))
-                    .into_response());
-                }
-                None => {
-                    return Err((StatusCode::NOT_FOUND, "Organization not found".to_string()));
-                }
-            }
-        }
-    };
+    let org = hot::db::org::Org::get_org_by_slug(&db, &org_slug)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Organization not found".to_string()))?;
 
     // Check via a direct membership query rather than `session.user_orgs`
     // because the session snapshot can be a beat behind on freshly-created
