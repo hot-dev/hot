@@ -68,6 +68,7 @@ pub async fn checkout_form_handler(
 pub async fn org_checkout_form_handler(
     Path(org_slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
+    axum::extract::Extension(conf): axum::extract::Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Query(params): Query<AHashMap<String, String>>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
@@ -134,6 +135,28 @@ pub async fn org_checkout_form_handler(
     let plan = Plan::get_by_plan_id(&db, plan_id)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid plan".to_string()))?;
+
+    // Free plan: don't make the user click through a "Complete Subscription"
+    // form for a $0 plan — go straight to the provider checkout (which
+    // handles the card-verification-only session) just like submitting the
+    // form would. The admin check above already gates this.
+    if plan_id == "hot-free"
+        && let Ok(checkout_url) = billing_provider()
+            .create_checkout(BillingCheckoutRequest {
+                db: &db,
+                conf: &conf,
+                org_id: org.org_id,
+                org_slug: &org.slug,
+                org_name: &org.name,
+                user_id: session.user.user_id,
+                user_email: &session.user.email,
+                plan_id,
+                billing_period: &billing_period,
+            })
+            .await
+    {
+        return Ok(Redirect::to(&checkout_url).into_response());
+    }
 
     let template = templates::OrgCheckoutForm {
         title: "Complete Subscription",

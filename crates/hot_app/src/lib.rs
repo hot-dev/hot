@@ -6,6 +6,7 @@ pub mod database_bootstrap;
 pub mod email;
 pub mod handlers;
 pub mod oauth;
+pub mod rate_limit;
 pub mod routes;
 pub mod server;
 pub mod slug;

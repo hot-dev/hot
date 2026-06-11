@@ -20,6 +20,8 @@
         </div>
 
         <form action="/signin{% if invite_code != "" %}?invite_code={{ invite_code }}{% endif %}" method="post">
+            <!-- CSRF double-submit token -->
+            <input type="hidden" name="form_token" value="{{ form_token }}" />
             {% if next != "" %}
             <input type="hidden" name="next" value="{{ next }}" />
             {% elif plan != "" %}

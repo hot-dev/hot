@@ -10,7 +10,7 @@
 use chrono::{Duration, Utc};
 use hot::db::{DatabasePool, EmailVerification};
 use hot::val;
-use hot_app::test_support::{TestClient, mint_form_token};
+use hot_app::test_support::TestClient;
 use uuid::Uuid;
 
 /// Helpers
@@ -22,8 +22,9 @@ async fn read_pending_token(db: &DatabasePool, email: &str) -> String {
     verification.verification_token
 }
 
-fn submit_signup(email: &str) -> Vec<(&'static str, String)> {
-    let form_token = mint_form_token();
+/// Build a signup form. `form_token` must come from `client.prime_csrf()`
+/// (CSRF double-submit: the cookie and the field have to match).
+fn submit_signup(email: &str, form_token: String) -> Vec<(&'static str, String)> {
     vec![
         ("email", email.to_string()),
         ("password", "supersecret123".to_string()),
@@ -71,7 +72,7 @@ async fn hot_cloud_signup_without_plan_redirects_to_plan_picker() {
 async fn hot_cloud_signup_post_without_plan_is_rejected() {
     let mut client = TestClient::new_with_conf(hot_cloud_billing_conf()).await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     let resp = client.post_form("/signup", &as_form_slice(&form)).await;
 
     resp.assert_status(axum::http::StatusCode::OK);
@@ -94,7 +95,7 @@ async fn hot_cloud_signup_post_without_plan_is_rejected() {
 async fn signup_creates_pending_verification_and_renders_check_email() {
     let mut client = TestClient::new().await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     let resp = client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -121,7 +122,7 @@ async fn signup_creates_pending_verification_and_renders_check_email() {
 async fn duplicate_signup_reshows_check_email_page() {
     let mut client = TestClient::new().await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -132,7 +133,7 @@ async fn duplicate_signup_reshows_check_email_page() {
 
     // Submitting again with the same email must not create a second row and
     // should re-show the check-email page.
-    let form2 = submit_signup("alice@example.com");
+    let form2 = submit_signup("alice@example.com", client.prime_csrf());
     let resp = client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -146,6 +147,289 @@ async fn duplicate_signup_reshows_check_email_page() {
     );
 }
 
+#[tokio::test]
+async fn signup_post_without_csrf_token_is_rejected() {
+    let mut client = TestClient::new().await;
+
+    // No prime_csrf(): neither the cookie nor the field is present.
+    let form = vec![
+        ("email", "alice@example.com".to_string()),
+        ("password", "supersecret123".to_string()),
+        ("name", "Alice Example".to_string()),
+        ("website", String::new()),
+    ];
+    let resp = client
+        .post_form(
+            "/signup?plan=hot-free&billing=monthly",
+            &as_form_slice(&form),
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        resp.body.contains("session expired") || resp.body.contains("try submitting"),
+        "missing CSRF token must re-render the form with an error, got: {}",
+        resp.body.chars().take(400).collect::<String>()
+    );
+    assert!(
+        EmailVerification::get_pending_by_email(client.db(), "alice@example.com")
+            .await
+            .expect("query")
+            .is_none(),
+        "no verification row may be created without a valid CSRF token"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_email_signup_offers_signin_link() {
+    let mut client = TestClient::new().await;
+
+    let user_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &user_id,
+        "alice@example.com",
+        Some("Alice"),
+        Some(&user_id),
+    )
+    .await
+    .expect("insert user");
+
+    let form = submit_signup("alice@example.com", client.prime_csrf());
+    let resp = client
+        .post_form(
+            "/signup?plan=hot-free&billing=monthly",
+            &as_form_slice(&form),
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        resp.body.contains("already exists"),
+        "expected duplicate-email error"
+    );
+    assert!(
+        resp.body.contains("Sign in instead") && resp.body.contains("/signin?plan=hot-free"),
+        "duplicate-email error must link to signin preserving plan params, got: {}",
+        resp.body.chars().take(600).collect::<String>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Invite fast path: matching email skips verification entirely
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn invite_signup_with_matching_email_skips_verification() {
+    let mut client = TestClient::new().await;
+
+    // Org admin invites bob@example.com.
+    let admin_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &admin_id,
+        "admin@example.com",
+        Some("Admin"),
+        Some(&admin_id),
+    )
+    .await
+    .expect("insert admin");
+    let org_id =
+        hot_app::handlers::create_org(client.db(), &admin_id, "Acme", "acme", "organization")
+            .await
+            .expect("create org");
+    hot::db::Invite::insert_invite(
+        client.db(),
+        &Uuid::now_v7(),
+        "test-invite-code",
+        "bob@example.com",
+        &org_id,
+        1,
+        &admin_id,
+        Utc::now() + Duration::days(7),
+    )
+    .await
+    .expect("insert invite");
+
+    // Bob signs up with the exact invite email: no verification email, he is
+    // signed in immediately and lands in the org.
+    let form = vec![
+        ("email", "bob@example.com".to_string()),
+        ("password", "supersecret123".to_string()),
+        ("name", "Bob Example".to_string()),
+        ("website", String::new()),
+        ("form_token", client.prime_csrf()),
+    ];
+    let resp = client
+        .post_form(
+            "/signup?invite_code=test-invite-code",
+            &as_form_slice(&form),
+        )
+        .await;
+
+    assert!(
+        resp.status.is_redirection(),
+        "matching-email invite signup should redirect (logged in), got {}: {}",
+        resp.status,
+        resp.body.chars().take(300).collect::<String>()
+    );
+    assert!(
+        client.cookies().get("hot_auth_token").is_some(),
+        "invite fast path must set the session cookie"
+    );
+    assert!(
+        EmailVerification::get_pending_by_email(client.db(), "bob@example.com")
+            .await
+            .expect("query")
+            .is_none(),
+        "no pending verification row may exist for the invite fast path"
+    );
+
+    // Bob is a member of the org.
+    let bob = hot::db::User::get_user_by_email(client.db(), "bob@example.com")
+        .await
+        .expect("bob exists");
+    let orgs = hot::db::org::Org::get_orgs_by_user(client.db(), &bob.user_id)
+        .await
+        .expect("query orgs");
+    assert!(
+        orgs.iter().any(|o| o.org_id == org_id),
+        "invite fast path must add the user to the inviting org"
+    );
+}
+
+#[tokio::test]
+async fn invite_signup_with_mismatched_email_falls_back_to_verification() {
+    let mut client = TestClient::new().await;
+
+    let admin_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &admin_id,
+        "admin2@example.com",
+        Some("Admin"),
+        Some(&admin_id),
+    )
+    .await
+    .expect("insert admin");
+    let org_id =
+        hot_app::handlers::create_org(client.db(), &admin_id, "Bcme", "bcme", "organization")
+            .await
+            .expect("create org");
+    hot::db::Invite::insert_invite(
+        client.db(),
+        &Uuid::now_v7(),
+        "mismatch-invite-code",
+        "carol@example.com",
+        &org_id,
+        1,
+        &admin_id,
+        Utc::now() + Duration::days(7),
+    )
+    .await
+    .expect("insert invite");
+
+    // Signing up with a DIFFERENT email goes through normal verification.
+    let form = vec![
+        ("email", "mallory@example.com".to_string()),
+        ("password", "supersecret123".to_string()),
+        ("name", "Mallory".to_string()),
+        ("website", String::new()),
+        ("form_token", client.prime_csrf()),
+    ];
+    let resp = client
+        .post_form(
+            "/signup?invite_code=mismatch-invite-code",
+            &as_form_slice(&form),
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        client.cookies().get("hot_auth_token").is_none(),
+        "mismatched invite email must NOT be signed in directly"
+    );
+    assert!(
+        EmailVerification::get_pending_by_email(client.db(), "mallory@example.com")
+            .await
+            .expect("query")
+            .is_some(),
+        "mismatched invite email must go through email verification"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting & resend cap
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn signin_is_rate_limited_per_email() {
+    let mut client = TestClient::new().await;
+
+    // Unique email so the process-wide limiter doesn't collide with other
+    // tests in this binary.
+    let email = format!("ratelimit-{}@example.com", Uuid::now_v7());
+
+    let mut last_body = String::new();
+    // SIGNIN_MAX_PER_EMAIL is 10; the 11th attempt must be limited.
+    for _ in 0..11 {
+        let token = client.prime_csrf();
+        let form = vec![
+            ("email", email.clone()),
+            ("password", "wrong-password".to_string()),
+            ("form_token", token),
+        ];
+        let resp = client.post_form("/signin", &as_form_slice(&form)).await;
+        last_body = resp.body;
+    }
+
+    assert!(
+        last_body.contains("Too many sign-in attempts"),
+        "11th signin for one email must be rate limited, got: {}",
+        last_body.chars().take(400).collect::<String>()
+    );
+}
+
+#[tokio::test]
+async fn resend_cap_renders_explicit_messaging() {
+    let mut client = TestClient::new().await;
+
+    let form = submit_signup("alice@example.com", client.prime_csrf());
+    client
+        .post_form(
+            "/signup?plan=hot-free&billing=monthly",
+            &as_form_slice(&form),
+        )
+        .await;
+
+    // Exhaust the per-row resend cap (5 attempts).
+    let verification = EmailVerification::get_pending_by_email(client.db(), "alice@example.com")
+        .await
+        .expect("query")
+        .expect("pending row");
+    for _ in 0..5 {
+        EmailVerification::increment_attempts(client.db(), &verification.verification_id)
+            .await
+            .expect("increment attempts");
+    }
+
+    let resp = client
+        .post_form("/resend-verification", &[("email", "alice@example.com")])
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        resp.body.contains("resend limit"),
+        "capped resend must explain the limit instead of silently re-showing \
+         the page, got: {}",
+        resp.body.chars().take(400).collect::<String>()
+    );
+    assert!(
+        !resp.body.contains("Resend verification email"),
+        "the resend button should be hidden once the cap is reached"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Happy path: verify → claim-handle (handles are claimed post-verification)
 // ---------------------------------------------------------------------------
@@ -154,7 +438,7 @@ async fn duplicate_signup_reshows_check_email_page() {
 async fn verify_happy_path_logs_in_and_redirects_to_claim_handle() {
     let mut client = TestClient::new().await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -195,7 +479,7 @@ async fn verify_happy_path_logs_in_and_redirects_to_claim_handle() {
 async fn claim_handle_post_creates_org_and_redirects_to_billing() {
     let mut client = TestClient::new().await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -250,7 +534,7 @@ async fn claim_handle_suggests_alternative_when_slug_taken() {
         .expect("create_org for squatter");
 
     // Alice signs up, verifies, then tries to claim "alice".
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -290,7 +574,7 @@ async fn claim_handle_suggests_alternative_when_slug_taken() {
 async fn verify_link_is_idempotent_across_multiple_clicks() {
     let mut client = TestClient::new().await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",
@@ -329,7 +613,7 @@ async fn verify_link_is_idempotent_across_multiple_clicks() {
 async fn expired_verified_token_no_longer_logs_in() {
     let mut client = TestClient::new().await;
 
-    let form = submit_signup("alice@example.com");
+    let form = submit_signup("alice@example.com", client.prime_csrf());
     client
         .post_form(
             "/signup?plan=hot-free&billing=monthly",

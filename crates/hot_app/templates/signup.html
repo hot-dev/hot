@@ -29,6 +29,9 @@
             {% if error_message != "" %}
             <div class="mt-4 p-3 bg-red-100 border border-red-500 text-red-700 rounded-md">
                 {{ error_message }}
+                {% if show_signin_link %}
+                <a href="/signin{% if plan != "" %}?plan={{ plan }}{% if billing != "" %}&billing={{ billing }}{% endif %}{% endif %}" class="underline font-medium">Sign in instead</a>
+                {% endif %}
             </div>
             {% endif %}
         </div>
@@ -39,7 +42,7 @@
                 <label for="website">Website</label>
                 <input type="text" id="website" name="website" tabindex="-1" autocomplete="off" />
             </div>
-            <!-- Anti-bot: form token for timing validation -->
+            <!-- CSRF double-submit token -->
             <input type="hidden" name="form_token" value="{{ form_token }}" />
 
             <div class="mb-6">

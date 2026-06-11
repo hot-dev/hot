@@ -10,8 +10,7 @@ use axum_extra::extract::CookieJar;
 use chrono::Utc;
 use hot::db::{DatabasePool, EmailVerification, User};
 use hot::val::Val;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use time;
 
@@ -21,80 +20,13 @@ use super::{
     remove_presence_cookie, set_default_org_env_cookies,
 };
 
-// Minimum time (in seconds) required between form load and submission
-// Submissions faster than this are likely bots
-const MIN_FORM_SUBMISSION_TIME_SECS: i64 = 3;
-
-// Claims for the form anti-bot token
-#[derive(Debug, Serialize, Deserialize)]
-struct FormTokenClaims {
-    iat: i64, // Issued at timestamp
-    exp: i64, // Expiration (to prevent token reuse)
-}
-
-/// Generate a form token for anti-bot protection
-/// The token contains the current timestamp and expires after 1 hour
-fn generate_form_token() -> String {
-    let secret = get_form_token_secret();
-    let now = Utc::now().timestamp();
-
-    let claims = FormTokenClaims {
-        iat: now,
-        exp: now + 3600, // Token valid for 1 hour
-    };
-
-    let key = EncodingKey::from_secret(secret.as_ref());
-    encode(&Header::default(), &claims, &key).unwrap_or_default()
-}
-
-/// Validate form token and check if enough time has passed since form was loaded
-/// Returns Ok(()) if valid, Err(message) if invalid or too fast
-fn validate_form_token(token: &str) -> Result<(), &'static str> {
-    let secret = get_form_token_secret();
-    let key = DecodingKey::from_secret(secret.as_ref());
-
-    let token_data = decode::<FormTokenClaims>(token, &key, &Validation::default())
-        .map_err(|_| "Invalid form submission. Please try again.")?;
-
-    let now = Utc::now().timestamp();
-    let elapsed = now - token_data.claims.iat;
-
-    if elapsed < MIN_FORM_SUBMISSION_TIME_SECS {
-        return Err("Please take a moment to fill out the form.");
-    }
-
-    Ok(())
-}
-
-/// Get the secret for form token signing (reuses session secret)
-fn get_form_token_secret() -> String {
-    std::env::var("HOT_APP_SESSION_SECRET")
-        .unwrap_or_else(|_| "hotdev-form-token-secret-change-in-production".to_string())
-}
-
-/// Mint a form token for integration tests, backdated past the minimum
-/// submission time so the anti-bot check accepts immediate-on-submit tests.
-///
-/// Only available when the `test-utils` feature is enabled. Do not call this
-/// from non-test code.
-#[cfg(feature = "test-utils")]
-pub fn mint_form_token_for_tests() -> String {
-    let secret = get_form_token_secret();
-    let now = Utc::now().timestamp();
-    let claims = FormTokenClaims {
-        iat: now - (MIN_FORM_SUBMISSION_TIME_SECS + 1),
-        exp: now + 3600,
-    };
-    let key = EncodingKey::from_secret(secret.as_ref());
-    encode(&Header::default(), &claims, &key).unwrap_or_default()
-}
-
 // Form data structure for signin
 #[derive(Deserialize, Debug)]
 pub struct SigninForm {
     pub email: String,
     pub password: String,
     pub next: Option<String>,
+    pub form_token: Option<String>, // CSRF double-submit token
 }
 
 // Form data structure for user signup
@@ -105,11 +37,12 @@ pub struct SignupForm {
     pub name: Option<String>,
     // Anti-bot fields
     pub website: Option<String>, // Honeypot field - should always be empty
-    pub form_token: Option<String>, // Time-based token to prevent fast submissions
+    pub form_token: Option<String>, // CSRF double-submit token
 }
 
 pub async fn signin_handler(
     Extension(conf): Extension<Val>,
+    cookies: CookieJar,
     Query(params): Query<AHashMap<String, String>>,
 ) -> impl IntoResponse {
     // In ordinary local development, redirect to dashboard since auto-login is enabled.
@@ -124,6 +57,9 @@ pub async fn signin_handler(
     let plan = params.get("plan").cloned().unwrap_or_default();
     let billing = params.get("billing").cloned().unwrap_or_default();
 
+    let csrf_token = crate::auth::generate_csrf_token();
+    let updated_cookies = cookies.add(crate::auth::build_csrf_cookie(csrf_token.clone()));
+
     let template = templates::SignIn {
         title: "Sign In",
         page_context: templates::PublicPageContext::new_with_conf("signin", &conf),
@@ -132,9 +68,10 @@ pub async fn signin_handler(
         next: &next,
         plan: &plan,
         billing: &billing,
+        form_token: &csrf_token,
     };
 
-    Html(template.render().unwrap()).into_response()
+    (updated_cookies, Html(template.render().unwrap())).into_response()
 }
 
 pub async fn signin_post_handler(
@@ -145,6 +82,52 @@ pub async fn signin_post_handler(
     Form(form): Form<SigninForm>,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
     let invite_code = params.get("invite_code").cloned().unwrap_or_default();
+    let plan = params.get("plan").cloned().unwrap_or_default();
+    let billing = params.get("billing").cloned().unwrap_or_default();
+
+    // The CSRF cookie value is also what error re-renders embed as the form
+    // token, so the user can correct and resubmit without a page reload.
+    let csrf_cookie_value = cookies
+        .get(crate::auth::CSRF_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
+
+    // Error re-renders preserve plan/billing so a user who arrived from the
+    // pricing page doesn't lose their plan selection on a typo'd password.
+    let render_signin_error = |error_message: &str| {
+        let template = templates::SignIn {
+            title: "Sign In",
+            page_context: templates::PublicPageContext::new_with_conf("signin", &conf),
+            error_message,
+            invite_code: invite_code.as_str(),
+            next: form.next.as_deref().unwrap_or(""),
+            plan: &plan,
+            billing: &billing,
+            form_token: &csrf_cookie_value,
+        };
+        Html(template.render().unwrap())
+    };
+
+    // CSRF double-submit check
+    if !crate::auth::validate_csrf(&cookies, form.form_token.as_deref()) {
+        tracing::warn!("CSRF validation failed on signin for email: {}", form.email);
+        return Err(render_signin_error(
+            "Your session expired. Please try signing in again.",
+        ));
+    }
+
+    // Per-email rate limit. Keyed on the target account (not the client IP,
+    // which isn't trustworthy behind the CDN/LB chain) so a credential-
+    // stuffing run against one mailbox locks that mailbox's attempts, not
+    // the whole site. Counted before the password check so failed and
+    // successful attempts both consume budget.
+    if let Err(retry_after) = crate::rate_limit::check_signin(&form.email) {
+        tracing::warn!("Signin rate limit hit for email: {}", form.email);
+        return Err(render_signin_error(&format!(
+            "Too many sign-in attempts for this email. Please try again in {} minutes.",
+            retry_after.div_ceil(60).max(1)
+        )));
+    }
 
     match authenticate_user(&db, &form.email, &form.password).await {
         Ok(user) => {
@@ -196,35 +179,16 @@ pub async fn signin_post_handler(
                 }
                 Err(err) => {
                     // Token generation failed
-                    let next_val = form.next.as_deref().unwrap_or("");
-                    let template = templates::SignIn {
-                        title: "Sign In",
-                        page_context: templates::PublicPageContext::new_with_conf("signin", &conf),
-                        error_message: &format!("Authentication failed: {}", err),
-                        invite_code: invite_code.as_str(),
-                        next: next_val,
-                        plan: "",
-                        billing: "",
-                    };
-
-                    Err(Html(template.render().unwrap()))
+                    Err(render_signin_error(&format!(
+                        "Authentication failed: {}",
+                        err
+                    )))
                 }
             }
         }
         Err(error_message) => {
             // Authentication failed, show signin page with error
-            let next_val = form.next.as_deref().unwrap_or("");
-            let template = templates::SignIn {
-                title: "Sign In",
-                page_context: templates::PublicPageContext::new_with_conf("signin", &conf),
-                error_message: &error_message,
-                invite_code: invite_code.as_str(),
-                next: next_val,
-                plan: "",
-                billing: "",
-            };
-
-            Err(Html(template.render().unwrap()))
+            Err(render_signin_error(&error_message))
         }
     }
 }
@@ -261,6 +225,7 @@ pub async fn signout_handler(cookies: CookieJar) -> (CookieJar, Redirect) {
 
 pub async fn signup_handler(
     Extension(conf): Extension<Val>,
+    cookies: CookieJar,
     Query(params): Query<AHashMap<String, String>>,
 ) -> impl IntoResponse {
     // In ordinary local development, redirect to dashboard since auto-login is enabled.
@@ -280,8 +245,9 @@ pub async fn signup_handler(
     // Get plan display name
     let plan_display_name = get_plan_display_name(&plan);
 
-    // Generate anti-bot form token
-    let form_token = generate_form_token();
+    // CSRF double-submit token: cookie + hidden form field
+    let csrf_token = crate::auth::generate_csrf_token();
+    let updated_cookies = cookies.add(crate::auth::build_csrf_cookie(csrf_token.clone()));
 
     let template = templates::SignUp {
         title: "Sign Up",
@@ -293,10 +259,11 @@ pub async fn signup_handler(
         plan: &plan,
         plan_display_name: &plan_display_name,
         billing: &billing,
-        form_token: &form_token,
+        form_token: &csrf_token,
+        show_signin_link: false,
     };
 
-    Html(template.render().unwrap()).into_response()
+    (updated_cookies, Html(template.render().unwrap())).into_response()
 }
 
 /// Plan selection page for signup - shown when no plan is pre-selected
@@ -355,8 +322,15 @@ pub async fn signup_post_handler(
         .cloned()
         .unwrap_or_else(|| "monthly".to_string());
 
+    // Error re-renders embed the existing CSRF cookie value so the user can
+    // correct and resubmit without reloading the page.
+    let csrf_cookie_value = cookies
+        .get(crate::auth::CSRF_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
+
     // Helper to render error with all fields
-    let render_error = |msg: &str| {
+    let render_error_with = |msg: &str, show_signin_link: bool| {
         render_signup_with_error_full(
             msg,
             &form.email,
@@ -364,12 +338,24 @@ pub async fn signup_post_handler(
             &invite_code,
             &plan,
             &billing,
+            &csrf_cookie_value,
+            show_signin_link,
         )
     };
+    let render_error = |msg: &str| render_error_with(msg, false);
 
     if hot::product::billing_enabled(&conf) && invite_code.is_empty() && plan.is_empty() {
         return Err(render_error(
             "Please choose a plan before creating your account.",
+        ));
+    }
+
+    // Global signup cap — a backstop against mass account creation that
+    // slips past the edge per-IP limits.
+    if crate::rate_limit::check_signup_global().is_err() {
+        tracing::warn!("Global signup rate limit hit (email: {})", form.email);
+        return Err(render_error(
+            "We're receiving an unusually high volume of signups right now. Please try again in a little while.",
         ));
     }
 
@@ -381,20 +367,13 @@ pub async fn signup_post_handler(
         return Ok(render_check_email(&form.email, false, plan == "hot-free").into_response());
     }
 
-    // Anti-bot check 2: Form submission timing
-    // Reject submissions that happen too quickly (likely automated)
-    if let Some(token) = &form.form_token {
-        if let Err(msg) = validate_form_token(token) {
-            tracing::warn!(
-                "Form token validation failed on signup for email: {}",
-                form.email
-            );
-            return Err(render_error(msg));
-        }
-    } else {
-        // Missing token - could be a bot that didn't load the form properly
-        tracing::warn!("Missing form token on signup for email: {}", form.email);
-        return Err(render_error("Invalid form submission. Please try again."));
+    // CSRF double-submit check (also catches bots that POST without ever
+    // loading the form, since they won't have the cookie)
+    if !crate::auth::validate_csrf(&cookies, form.form_token.as_deref()) {
+        tracing::warn!("CSRF validation failed on signup for email: {}", form.email);
+        return Err(render_error(
+            "Your session expired. Please try submitting the form again.",
+        ));
     }
 
     // Validate form data
@@ -423,7 +402,10 @@ pub async fn signup_post_handler(
     // Check for an existing account FIRST. If the user is already registered,
     // the right answer is "go sign in".
     if User::get_user_by_email(&db, &form.email).await.is_ok() {
-        return Err(render_error("A user with this email already exists"));
+        return Err(render_error_with(
+            "A user with this email already exists.",
+            true,
+        ));
     }
 
     // A user who refreshes the signup form (same email) just gets re-shown
@@ -580,12 +562,24 @@ async fn sign_in_cookies(
 
 /// Render the "check your email" page
 fn render_check_email(email: &str, already_pending: bool, is_free_plan: bool) -> Html<String> {
+    render_check_email_full(email, already_pending, is_free_plan, false)
+}
+
+/// Render the "check your email" page; `resend_capped` swaps the resend form
+/// for an explanation of the resend limit.
+fn render_check_email_full(
+    email: &str,
+    already_pending: bool,
+    is_free_plan: bool,
+    resend_capped: bool,
+) -> Html<String> {
     let template = templates::CheckEmail {
         title: "Check Your Email",
         page_context: templates::PublicPageContext::new("signup"),
         email,
         already_pending,
         is_free_plan,
+        resend_capped,
     };
 
     Html(template.render().unwrap())
@@ -819,6 +813,14 @@ pub async fn resend_verification_handler(
     Extension(conf): Extension<Val>,
     Form(form): Form<ResendVerificationForm>,
 ) -> impl IntoResponse {
+    // Per-email rate limit before any DB work; render the same page either
+    // way so the endpoint doesn't reveal whether the email exists.
+    if let Err(retry_after) = crate::rate_limit::check_resend(&form.email) {
+        tracing::warn!("Resend rate limit hit for email: {}", form.email);
+        let _ = retry_after;
+        return Html(render_check_email_full(&form.email, true, false, true).0);
+    }
+
     // Find the pending verification
     let verification = match EmailVerification::get_pending_by_email(&db, &form.email).await {
         Ok(Some(v)) => v,
@@ -831,14 +833,7 @@ pub async fn resend_verification_handler(
     // Check attempt limits (max 5 resends)
     if verification.attempts >= 5 {
         let is_free = verification.plan.as_deref() == Some("hot-free");
-        let template = templates::CheckEmail {
-            title: "Check Your Email",
-            page_context: templates::PublicPageContext::new("signup"),
-            email: &form.email,
-            already_pending: true,
-            is_free_plan: is_free,
-        };
-        return Html(template.render().unwrap());
+        return Html(render_check_email_full(&form.email, true, is_free, true).0);
     }
 
     // Increment attempts
@@ -891,6 +886,7 @@ fn render_verification_error(title: &str, message: &str) -> Html<String> {
 }
 
 // Helper function to render signup form with error
+#[allow(clippy::too_many_arguments)]
 fn render_signup_with_error_full(
     error_message: &str,
     email: &str,
@@ -898,9 +894,10 @@ fn render_signup_with_error_full(
     invite_code: &str,
     plan: &str,
     billing: &str,
+    form_token: &str,
+    show_signin_link: bool,
 ) -> Html<String> {
     let plan_display_name = get_plan_display_name(plan);
-    let form_token = generate_form_token();
     let template = templates::SignUp {
         title: "Sign Up",
         page_context: templates::PublicPageContext::new("signup"),
@@ -911,7 +908,8 @@ fn render_signup_with_error_full(
         plan,
         plan_display_name: &plan_display_name,
         billing,
-        form_token: &form_token,
+        form_token,
+        show_signin_link,
     };
 
     Html(template.render().unwrap())
