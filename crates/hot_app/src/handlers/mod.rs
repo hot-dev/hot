@@ -115,7 +115,8 @@ pub use keys::{
 };
 pub use mcp_tools::{mcp_service_detail_handler, mcp_services_list_handler};
 pub use oauth::{
-    github_auth_handler, github_callback_handler, google_auth_handler, google_callback_handler,
+    github_auth_handler, github_callback_handler, github_select_email_handler,
+    github_select_email_post_handler, google_auth_handler, google_callback_handler,
 };
 pub use orgs::{
     legacy_org_redirect, org_users_edit_handler, org_users_edit_post_handler,
@@ -510,111 +511,6 @@ pub async fn create_org(
     Ok(org_id)
 }
 
-/// "Fix-forward" org recovery for an authenticated user with no current org.
-///
-/// Anchors the rule that **a user who completed signup must never be asked to
-/// pick a handle they already chose**. This is the safety net for when the
-/// normal verify→create_org→cookie path didn't leave them with a usable
-/// session for any reason (mail-scanner pre-fetch, dropped cookies, partial
-/// failure, transient DB error, you name it).
-///
-/// Resolution order:
-///   1. If the user already has any org → return its slug (nothing to do).
-///   2. If their most recent `email_verification` row carries an `org_slug` →
-///      try to claim it via `create_org` (idempotent for owned slugs). On
-///      success, return the slug.
-///   3. If that slug is owned by a *different* user (lost a race), pick a
-///      `suggest_alternative` slug and create that.
-///   4. If there's no verification record with a slug at all → return None
-///      so the caller can fall back to rendering the claim-handle form
-///      (legitimate case for new OAuth users).
-///
-/// This intentionally returns the **slug** (not the org id) because every
-/// caller wants to redirect to a `/@{slug}/...` URL anyway. The returned
-/// slug is guaranteed to belong to the user.
-pub async fn recover_or_create_org_for_user(
-    db: &DatabasePool,
-    user_id: &Uuid,
-    user_email: &str,
-    user_name: &str,
-) -> Option<String> {
-    if let Ok(orgs) = hot::db::org::Org::get_orgs_by_user(db, user_id).await
-        && let Some(org) = orgs.first()
-    {
-        return Some(org.slug.clone());
-    }
-
-    let verification = match hot::db::EmailVerification::get_latest_by_email(db, user_email).await {
-        Ok(Some(v)) => v,
-        _ => {
-            tracing::info!(
-                "recover_or_create_org_for_user: no email_verification record for {} — \
-                 user must claim a handle (typical OAuth signup)",
-                user_email
-            );
-            return None;
-        }
-    };
-
-    let Some(requested_slug) = verification.org_slug.as_deref() else {
-        tracing::info!(
-            "recover_or_create_org_for_user: latest email_verification for {} has no org_slug \
-             — user must claim a handle",
-            user_email
-        );
-        return None;
-    };
-
-    let account_type = verification.account_type.as_deref().unwrap_or("individual");
-    let org_name = if account_type == "organization" {
-        verification.org_name.as_deref().unwrap_or(user_name)
-    } else {
-        user_name
-    };
-
-    match create_org(db, user_id, org_name, requested_slug, account_type).await {
-        Ok(_) => {
-            tracing::info!(
-                "recover_or_create_org_for_user: recovered org {} for user {} from \
-                 pending verification",
-                requested_slug,
-                user_email
-            );
-            Some(requested_slug.to_string())
-        }
-        Err(e) => {
-            tracing::warn!(
-                "recover_or_create_org_for_user: requested slug {} unavailable for user {}: \
-                 {} — trying an alternative",
-                requested_slug,
-                user_email,
-                e
-            );
-            let alternative = crate::slug::suggest_alternative(db, requested_slug).await;
-            match create_org(db, user_id, org_name, &alternative, account_type).await {
-                Ok(_) => {
-                    tracing::info!(
-                        "recover_or_create_org_for_user: created alternative org {} for user {}",
-                        alternative,
-                        user_email
-                    );
-                    Some(alternative)
-                }
-                Err(e2) => {
-                    tracing::error!(
-                        "recover_or_create_org_for_user: alternative slug {} also failed for \
-                         user {}: {} — falling back to claim-handle form",
-                        alternative,
-                        user_email,
-                        e2
-                    );
-                    None
-                }
-            }
-        }
-    }
-}
-
 /// Ensure the given `user_id` is an admin member of `org_id`, and that the
 /// org has at least one env. Both inserts are silently best-effort — a
 /// unique-constraint failure here means the rows already exist, which is
@@ -667,6 +563,19 @@ pub async fn process_invite_code(
     invite
         .is_valid()
         .map_err(|e| format!("Invalid invite: {}", e))?;
+
+    // Invites are email-bound: the code alone must not grant org membership.
+    // Enforced here (not just on the /invite accept page) so the signup,
+    // signin, and OAuth invite_code paths all carry the same policy.
+    let user = User::get_user(db, user_id)
+        .await
+        .map_err(|e| format!("Failed to load user: {}", e))?;
+    if !user.email.eq_ignore_ascii_case(&invite.email) {
+        return Err(format!(
+            "This invite was sent to {}. Ask an organization admin to invite {} instead.",
+            invite.email, user.email
+        ));
+    }
 
     // Check if user is already a member of the organization
     if hot::db::org::OrgUser::get_org_user(db, &invite.org_id, user_id)
@@ -761,32 +670,20 @@ pub async fn set_default_org_env_cookies(
         .await
         .map_err(|e| format!("Failed to get organization environments: {}", e))?;
 
-    // Set organization cookie
-    let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
+    // Set organization cookie (365d, matching the claim-handle/verify paths)
+    let mut updated_cookies = cookies.add(crate::auth::build_cookie(
         crate::auth::CURRENT_ORG_COOKIE_NAME,
         earliest_org.org_id.to_string(),
-    );
-    org_cookie.set_path("/");
-    org_cookie.set_max_age(time::Duration::days(30));
-    org_cookie.set_http_only(true);
-    org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    org_cookie.set_secure(!hot::env::is_local_dev());
-
-    let mut updated_cookies = cookies.add(org_cookie);
+        time::Duration::days(365),
+    ));
 
     // Set environment cookie if available
     if let Some(earliest_env) = org_envs.first() {
-        let mut env_cookie = axum_extra::extract::cookie::Cookie::new(
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
             crate::auth::CURRENT_ENV_COOKIE_NAME,
             earliest_env.env_id.to_string(),
-        );
-        env_cookie.set_path("/");
-        env_cookie.set_max_age(time::Duration::days(30));
-        env_cookie.set_http_only(true);
-        env_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        env_cookie.set_secure(!hot::env::is_local_dev());
-
-        updated_cookies = updated_cookies.add(env_cookie);
+            time::Duration::days(365),
+        ));
     }
 
     Ok(updated_cookies)
@@ -799,13 +696,13 @@ pub const PRESENCE_COOKIE_NAME: &str = "hot_signed_in";
 /// Add the cross-subdomain presence cookie to indicate the user is signed in
 /// This cookie is readable by both app.hot.dev and hot.dev
 pub fn add_presence_cookie(cookies: CookieJar) -> CookieJar {
-    let mut cookie = axum_extra::extract::cookie::Cookie::new(PRESENCE_COOKIE_NAME, "1");
-    cookie.set_path("/");
-    cookie.set_max_age(time::Duration::days(30));
+    let mut cookie = crate::auth::build_cookie(
+        PRESENCE_COOKIE_NAME,
+        "1".to_string(),
+        time::Duration::days(30),
+    );
     // Not HttpOnly - needs to be readable by JavaScript on hot.dev
     cookie.set_http_only(false);
-    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    cookie.set_secure(!hot::env::is_local_dev());
 
     // Set domain for cross-subdomain sharing (e.g., .hot.dev)
     if let Some(domain) = hot::env::get_cookie_domain() {
@@ -817,12 +714,8 @@ pub fn add_presence_cookie(cookies: CookieJar) -> CookieJar {
 
 /// Remove the cross-subdomain presence cookie on sign out
 pub fn remove_presence_cookie(cookies: CookieJar) -> CookieJar {
-    let mut cookie = axum_extra::extract::cookie::Cookie::new(PRESENCE_COOKIE_NAME, "");
-    cookie.set_path("/");
-    cookie.set_max_age(time::Duration::seconds(0));
+    let mut cookie = crate::auth::build_removal_cookie(PRESENCE_COOKIE_NAME);
     cookie.set_http_only(false);
-    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    cookie.set_secure(!hot::env::is_local_dev());
 
     // Must use same domain to clear the cookie
     if let Some(domain) = hot::env::get_cookie_domain() {

@@ -249,22 +249,12 @@ pub fn extra_reserved_from_conf(conf: &Val) -> Vec<String> {
         .collect()
 }
 
-/// Is this slug currently available? Checks:
-/// - existing orgs (hard conflict)
-/// - non-expired pending email verifications (soft reservation)
+/// Is this slug currently available (no existing org owns it)?
 ///
-/// Assumes [`validate_format`] already passed.
+/// Assumes [`validate_format`] already passed. Handles are claimed
+/// post-verification, so there are no pending reservations to consider.
 pub async fn is_available(db: &DatabasePool, slug: &str) -> bool {
-    if hot::db::org::Org::get_org_by_slug(db, slug).await.is_ok() {
-        return false;
-    }
-    if hot::db::EmailVerification::has_pending_slug(db, slug)
-        .await
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    true
+    hot::db::org::Org::get_org_by_slug(db, slug).await.is_err()
 }
 
 /// Full validation: format + reserved + availability.

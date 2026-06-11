@@ -4,6 +4,8 @@ use crate::oauth::{
     OAuthConfig, create_github_client, create_google_client, exchange_code_for_token,
     fetch_github_user_info, fetch_google_user_info, get_github_auth_url, get_google_auth_url,
 };
+use crate::templates;
+use askama::Template;
 use axum::extract::Extension;
 use axum::extract::{Query, State};
 use axum::response::{Html, Redirect};
@@ -20,6 +22,7 @@ const OAUTH_INVITE_COOKIE_NAME: &str = "hot_oauth_invite";
 const OAUTH_NEXT_COOKIE_NAME: &str = "hot_oauth_next";
 const OAUTH_PLAN_COOKIE_NAME: &str = "hot_oauth_plan";
 const OAUTH_BILLING_COOKIE_NAME: &str = "hot_oauth_billing";
+const OAUTH_PENDING_COOKIE_NAME: &str = "hot_oauth_pending";
 
 /// Query parameters for OAuth initiation
 #[derive(Deserialize, Debug)]
@@ -67,61 +70,45 @@ pub async fn google_auth_handler(
         })?;
 
     // Store CSRF token in secure cookie
-    let mut state_cookie = axum_extra::extract::cookie::Cookie::new(
+    let mut updated_cookies = cookies.add(crate::auth::build_cookie(
         OAUTH_STATE_COOKIE_NAME,
         csrf_token.secret().clone(),
-    );
-    state_cookie.set_path("/");
-    state_cookie.set_max_age(time::Duration::minutes(10));
-    state_cookie.set_http_only(true);
-    state_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    let mut updated_cookies = cookies.add(state_cookie);
+        time::Duration::minutes(10),
+    ));
 
     // Store invite code in cookie if provided
     if let Some(invite_code) = params.invite_code {
-        let mut invite_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_INVITE_COOKIE_NAME, invite_code);
-        invite_cookie.set_path("/");
-        invite_cookie.set_max_age(time::Duration::minutes(10));
-        invite_cookie.set_http_only(true);
-        invite_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(invite_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_INVITE_COOKIE_NAME,
+            invite_code,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store next URL in cookie if provided (for post-login redirect)
-    if let Some(next) = params
-        .next
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-    {
-        let mut next_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_NEXT_COOKIE_NAME, next);
-        next_cookie.set_path("/");
-        next_cookie.set_max_age(time::Duration::minutes(10));
-        next_cookie.set_http_only(true);
-        next_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(next_cookie);
+    if let Some(next) = params.next.filter(|n| crate::auth::is_safe_next(n)) {
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_NEXT_COOKIE_NAME,
+            next,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store plan and billing in cookies if provided (for post-signup plan flow)
     if let Some(plan) = params.plan.filter(|p| !p.is_empty()) {
-        let mut plan_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_PLAN_COOKIE_NAME, plan);
-        plan_cookie.set_path("/");
-        plan_cookie.set_max_age(time::Duration::minutes(10));
-        plan_cookie.set_http_only(true);
-        plan_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(plan_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_PLAN_COOKIE_NAME,
+            plan,
+            time::Duration::minutes(10),
+        ));
     }
 
     if let Some(billing) = params.billing.filter(|b| !b.is_empty()) {
-        let mut billing_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_BILLING_COOKIE_NAME, billing);
-        billing_cookie.set_path("/");
-        billing_cookie.set_max_age(time::Duration::minutes(10));
-        billing_cookie.set_http_only(true);
-        billing_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(billing_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_BILLING_COOKIE_NAME,
+            billing,
+            time::Duration::minutes(10),
+        ));
     }
 
     Ok((updated_cookies, Redirect::to(auth_url.as_str())))
@@ -176,11 +163,6 @@ pub async fn google_callback_handler(
         ));
     }
 
-    // Get invite code from cookie if present
-    let invite_code = cookies
-        .get(OAUTH_INVITE_COOKIE_NAME)
-        .map(|c| c.value().to_string());
-
     // Handle user creation or login
     let (user, is_new_user) = handle_oauth_user(
         &db,
@@ -192,30 +174,52 @@ pub async fn google_callback_handler(
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    // Process invite code if provided
+    complete_oauth_signin(&db, &conf, cookies, user, is_new_user).await
+}
+
+/// Finish an OAuth sign-in once a user record has been resolved: process the
+/// invite cookie, set the session cookies, clear the OAuth cookies, and
+/// compute the redirect. Shared by the Google/GitHub callbacks and the
+/// GitHub email-selection POST.
+async fn complete_oauth_signin(
+    db: &DatabasePool,
+    conf: &Val,
+    cookies: CookieJar,
+    user: User,
+    is_new_user: bool,
+) -> Result<(CookieJar, Redirect), Html<String>> {
+    // Get invite code from cookie if present
+    let invite_code = cookies
+        .get(OAUTH_INVITE_COOKIE_NAME)
+        .map(|c| c.value().to_string());
+
+    // Process invite code if provided. On failure, complete the sign-in but
+    // land on the invite page, which explains why it could not be applied.
+    let mut invite_error_redirect: Option<String> = None;
     if let Some(invite_code) = invite_code.as_ref()
         && !invite_code.is_empty()
+        && let Err(e) = process_invite_code(db, &user.user_id, invite_code).await
     {
-        let _ = process_invite_code(&db, &user.user_id, invite_code).await;
+        tracing::warn!("Invite processing failed during OAuth signin: {}", e);
+        invite_error_redirect = Some(format!("/invite?code={}", invite_code));
     }
 
     // Generate JWT token
-    let token = generate_token(&user.user_id, &conf)
+    let token = generate_token(&user.user_id, conf)
         .map_err(|e| Html(format!("Failed to generate authentication token: {}", e)))?;
 
     // Set JWT cookie
-    let mut jwt_cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-    jwt_cookie.set_path("/");
-    jwt_cookie.set_max_age(time::Duration::days(1));
-    jwt_cookie.set_http_only(true);
-    jwt_cookie.set_secure(!hot::env::is_local_dev());
-    jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+    let jwt_cookie = crate::auth::build_cookie(
+        JWT_COOKIE_NAME,
+        token,
+        time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
+    );
 
     // Read cookies before clearing
     let next_url = cookies
         .get(OAUTH_NEXT_COOKIE_NAME)
         .map(|c| c.value().to_string())
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+        .filter(|n| crate::auth::is_safe_next(n));
 
     let oauth_plan = cookies
         .get(OAUTH_PLAN_COOKIE_NAME)
@@ -233,16 +237,22 @@ pub async fn google_callback_handler(
     // Add cross-subdomain presence cookie
     let final_cookies = add_presence_cookie(updated_cookies);
 
-    // Determine redirect: new users go to claim-handle, existing users go to dashboard/plan
-    let redirect_to = determine_oauth_redirect(
-        next_url.as_deref(),
-        oauth_plan.as_deref(),
-        oauth_billing.as_deref(),
-        is_new_user,
-        &db,
-        &user,
-    )
-    .await;
+    // Determine redirect: invite problems take priority, then new users go
+    // to claim-handle, existing users go to dashboard/plan
+    let redirect_to = match invite_error_redirect {
+        Some(target) => target,
+        None => {
+            determine_oauth_redirect(
+                next_url.as_deref(),
+                oauth_plan.as_deref(),
+                oauth_billing.as_deref(),
+                is_new_user,
+                db,
+                &user,
+            )
+            .await
+        }
+    };
 
     Ok((final_cookies, Redirect::to(&redirect_to)))
 }
@@ -277,61 +287,45 @@ pub async fn github_auth_handler(
         })?;
 
     // Store CSRF token in secure cookie
-    let mut state_cookie = axum_extra::extract::cookie::Cookie::new(
+    let mut updated_cookies = cookies.add(crate::auth::build_cookie(
         OAUTH_STATE_COOKIE_NAME,
         csrf_token.secret().clone(),
-    );
-    state_cookie.set_path("/");
-    state_cookie.set_max_age(time::Duration::minutes(10));
-    state_cookie.set_http_only(true);
-    state_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    let mut updated_cookies = cookies.add(state_cookie);
+        time::Duration::minutes(10),
+    ));
 
     // Store invite code in cookie if provided
     if let Some(invite_code) = params.invite_code {
-        let mut invite_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_INVITE_COOKIE_NAME, invite_code);
-        invite_cookie.set_path("/");
-        invite_cookie.set_max_age(time::Duration::minutes(10));
-        invite_cookie.set_http_only(true);
-        invite_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(invite_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_INVITE_COOKIE_NAME,
+            invite_code,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store next URL in cookie if provided (for post-login redirect)
-    if let Some(next) = params
-        .next
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-    {
-        let mut next_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_NEXT_COOKIE_NAME, next);
-        next_cookie.set_path("/");
-        next_cookie.set_max_age(time::Duration::minutes(10));
-        next_cookie.set_http_only(true);
-        next_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(next_cookie);
+    if let Some(next) = params.next.filter(|n| crate::auth::is_safe_next(n)) {
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_NEXT_COOKIE_NAME,
+            next,
+            time::Duration::minutes(10),
+        ));
     }
 
     // Store plan and billing in cookies if provided (for post-signup plan flow)
     if let Some(plan) = params.plan.filter(|p| !p.is_empty()) {
-        let mut plan_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_PLAN_COOKIE_NAME, plan);
-        plan_cookie.set_path("/");
-        plan_cookie.set_max_age(time::Duration::minutes(10));
-        plan_cookie.set_http_only(true);
-        plan_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(plan_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_PLAN_COOKIE_NAME,
+            plan,
+            time::Duration::minutes(10),
+        ));
     }
 
     if let Some(billing) = params.billing.filter(|b| !b.is_empty()) {
-        let mut billing_cookie =
-            axum_extra::extract::cookie::Cookie::new(OAUTH_BILLING_COOKIE_NAME, billing);
-        billing_cookie.set_path("/");
-        billing_cookie.set_max_age(time::Duration::minutes(10));
-        billing_cookie.set_http_only(true);
-        billing_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-        updated_cookies = updated_cookies.add(billing_cookie);
+        updated_cookies = updated_cookies.add(crate::auth::build_cookie(
+            OAUTH_BILLING_COOKIE_NAME,
+            billing,
+            time::Duration::minutes(10),
+        ));
     }
 
     Ok((updated_cookies, Redirect::to(auth_url.as_str())))
@@ -378,18 +372,67 @@ pub async fn github_callback_handler(
         Html("Failed to fetch user information from GitHub".to_string())
     })?;
 
-    // Check if we got an email
-    let email = user_info.email.ok_or_else(|| {
+    // Require a VERIFIED email from GitHub (resolved via /user/emails)
+    let primary_email = user_info.email.clone().ok_or_else(|| {
         Html(
-            "Could not retrieve your email from GitHub. Please make your email public or verify it."
+            "Your GitHub account has no verified email address. Please verify an email on GitHub and try again."
                 .to_string(),
         )
     })?;
+    let provider_user_id = user_info.id.to_string();
 
-    // Get invite code from cookie if present
-    let invite_code = cookies
+    // Decide which verified email to use for this GitHub identity:
+    //  1. Identity already linked → email is irrelevant, log straight in.
+    //  2. Invite email matches one of the verified emails → use it (the
+    //     invite delivery proved the user wants that address here).
+    //  3. Multiple verified emails, none disambiguated → ask the user.
+    //  4. Otherwise → primary verified email.
+    let identity_linked = UserAuth::get_by_provider_user_id(&db, "github", &provider_user_id)
+        .await
+        .is_ok();
+
+    let invite_email = match cookies
         .get(OAUTH_INVITE_COOKIE_NAME)
-        .map(|c| c.value().to_string());
+        .map(|c| c.value().to_string())
+        .filter(|c| !c.is_empty())
+    {
+        Some(code) => hot::db::invite::Invite::get_invite_by_code(&db, &code)
+            .await
+            .ok()
+            .map(|invite| invite.email),
+        None => None,
+    };
+
+    let email = if identity_linked {
+        primary_email
+    } else if let Some(matched) =
+        resolve_invite_email(invite_email.as_deref(), &user_info.verified_emails)
+    {
+        tracing::info!("GitHub OAuth email resolved via invite match: {}", matched);
+        matched
+    } else if user_info.verified_emails.len() > 1 {
+        // Ambiguous: let the user pick. Stash the OAuth result in a signed,
+        // short-lived cookie so the selection POST can finish the sign-in
+        // without re-running the provider flow. The other OAuth cookies
+        // (invite/plan/billing/next) stay in place until completion.
+        let pending = PendingEmailSelection {
+            provider: "github".to_string(),
+            provider_user_id,
+            name: user_info.name.clone(),
+            emails: user_info.verified_emails.clone(),
+            exp: (chrono::Utc::now() + chrono::Duration::minutes(10)).timestamp() as usize,
+        };
+        let state = encode_pending_selection(&pending)
+            .map_err(|e| Html(format!("Failed to prepare email selection: {}", e)))?;
+        let updated_cookies = cookies.add(crate::auth::build_cookie(
+            OAUTH_PENDING_COOKIE_NAME,
+            state,
+            time::Duration::minutes(10),
+        ));
+        return Ok((updated_cookies, Redirect::to("/auth/github/select-email")));
+    } else {
+        primary_email
+    };
 
     // Handle user creation or login
     let (user, is_new_user) = handle_oauth_user(
@@ -402,59 +445,112 @@ pub async fn github_callback_handler(
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    // Process invite code if provided
-    if let Some(invite_code) = invite_code.as_ref()
-        && !invite_code.is_empty()
-    {
-        let _ = process_invite_code(&db, &user.user_id, invite_code).await;
-    }
+    complete_oauth_signin(&db, &conf, cookies, user, is_new_user).await
+}
 
-    // Generate JWT token
-    let token = generate_token(&user.user_id, &conf)
-        .map_err(|e| Html(format!("Failed to generate authentication token: {}", e)))?;
+/// If an invite is in play and its email is among the user's verified
+/// provider emails, that's the email to use — case-insensitive match,
+/// returning the provider's casing.
+fn resolve_invite_email(invite_email: Option<&str>, verified: &[String]) -> Option<String> {
+    let invite_email = invite_email?;
+    verified
+        .iter()
+        .find(|e| e.eq_ignore_ascii_case(invite_email))
+        .cloned()
+}
 
-    // Set JWT cookie
-    let mut jwt_cookie = axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-    jwt_cookie.set_path("/");
-    jwt_cookie.set_max_age(time::Duration::days(1));
-    jwt_cookie.set_http_only(true);
-    jwt_cookie.set_secure(!hot::env::is_local_dev());
-    jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+/// Signed, short-lived state carried between the GitHub callback and the
+/// email-selection POST. The JWT signature prevents tampering with the email
+/// list; `exp` bounds the window.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PendingEmailSelection {
+    provider: String,
+    provider_user_id: String,
+    name: Option<String>,
+    emails: Vec<String>,
+    exp: usize,
+}
 
-    // Read cookies before clearing
-    let next_url = cookies
-        .get(OAUTH_NEXT_COOKIE_NAME)
-        .map(|c| c.value().to_string())
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
-
-    let oauth_plan = cookies
-        .get(OAUTH_PLAN_COOKIE_NAME)
-        .map(|c| c.value().to_string())
-        .filter(|p| !p.is_empty());
-
-    let oauth_billing = cookies
-        .get(OAUTH_BILLING_COOKIE_NAME)
-        .map(|c| c.value().to_string())
-        .filter(|b| !b.is_empty());
-
-    // Clear all OAuth cookies
-    let updated_cookies = clear_oauth_cookies(cookies.add(jwt_cookie));
-
-    // Add cross-subdomain presence cookie
-    let final_cookies = add_presence_cookie(updated_cookies);
-
-    // Determine redirect: new users go to claim-handle, existing users go to dashboard/plan
-    let redirect_to = determine_oauth_redirect(
-        next_url.as_deref(),
-        oauth_plan.as_deref(),
-        oauth_billing.as_deref(),
-        is_new_user,
-        &db,
-        &user,
+fn encode_pending_selection(pending: &PendingEmailSelection) -> Result<String, String> {
+    let secret = crate::auth::get_session_secret()?;
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        pending,
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_ref()),
     )
-    .await;
+    .map_err(|e| format!("Failed to encode pending selection: {}", e))
+}
 
-    Ok((final_cookies, Redirect::to(&redirect_to)))
+fn decode_pending_selection(token: &str) -> Result<PendingEmailSelection, String> {
+    let secret = crate::auth::get_session_secret()?;
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_required_spec_claims(&["exp"]);
+    jsonwebtoken::decode::<PendingEmailSelection>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(secret.as_ref()),
+        &validation,
+    )
+    .map(|data| data.claims)
+    .map_err(|e| format!("Invalid or expired email selection session: {}", e))
+}
+
+/// GET /auth/github/select-email — show the verified-email picker for a
+/// pending GitHub sign-in.
+pub async fn github_select_email_handler(cookies: CookieJar) -> Result<Html<String>, Redirect> {
+    let Some(state) = cookies.get(OAUTH_PENDING_COOKIE_NAME).map(|c| c.value()) else {
+        // No pending selection (expired, or direct navigation) — restart.
+        return Err(Redirect::to("/signin"));
+    };
+    let pending = decode_pending_selection(state).map_err(|_| Redirect::to("/signin"))?;
+
+    let template = templates::OAuthSelectEmail {
+        title: "Choose Your Email",
+        page_context: templates::PublicPageContext::new("signin"),
+        emails: &pending.emails,
+    };
+    Ok(Html(template.render().unwrap()))
+}
+
+/// Form body for the email-selection POST.
+#[derive(Deserialize, Debug)]
+pub struct SelectEmailForm {
+    pub email: String,
+}
+
+/// POST /auth/github/select-email — complete a pending GitHub sign-in with
+/// the chosen verified email.
+pub async fn github_select_email_post_handler(
+    State(db): State<Arc<DatabasePool>>,
+    Extension(conf): Extension<Val>,
+    cookies: CookieJar,
+    axum::extract::Form(form): axum::extract::Form<SelectEmailForm>,
+) -> Result<(CookieJar, Redirect), Html<String>> {
+    let state = cookies
+        .get(OAUTH_PENDING_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .ok_or_else(|| Html("Your sign-in session expired. Please sign in again.".to_string()))?;
+    let pending = decode_pending_selection(&state).map_err(Html)?;
+
+    // The chosen email must be one of the verified emails captured at
+    // callback time — the signed state is the source of truth.
+    let email = pending
+        .emails
+        .iter()
+        .find(|e| e.eq_ignore_ascii_case(form.email.trim()))
+        .cloned()
+        .ok_or_else(|| Html("Please choose one of your verified GitHub emails.".to_string()))?;
+
+    let (user, is_new_user) = handle_oauth_user(
+        &db,
+        &email,
+        &pending.provider,
+        &pending.provider_user_id,
+        pending.name.as_deref(),
+    )
+    .await
+    .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
+
+    complete_oauth_signin(&db, &conf, cookies, user, is_new_user).await
 }
 
 /// Handle OAuth user creation or login
@@ -466,6 +562,25 @@ async fn handle_oauth_user(
     provider_user_id: &str,
     name: Option<&str>,
 ) -> Result<(User, bool), String> {
+    // Resolution order:
+    //   1. provider_user_id — the stable key. Survives the user changing
+    //      their email at the provider and changes to our email-resolution
+    //      policy (e.g. verified-primary vs public-profile email).
+    //   2. email match — links the provider to an existing account
+    //      (first OAuth login for an email/password user).
+    //   3. create a new user.
+    if let Ok(auth) = UserAuth::get_by_provider_user_id(db, provider, provider_user_id).await {
+        let user = User::get_user(db, &auth.user_id)
+            .await
+            .map_err(|e| format!("Failed to load user for OAuth login: {}", e))?;
+        tracing::info!(
+            "User {} logged in with {} (matched by provider_user_id)",
+            user.email,
+            provider
+        );
+        return Ok((user, false));
+    }
+
     // Check if user already exists with this email
     match User::get_user_by_email(db, email).await {
         Ok(user) => {
@@ -548,14 +663,12 @@ fn clear_oauth_cookies(cookies: CookieJar) -> CookieJar {
         OAUTH_NEXT_COOKIE_NAME,
         OAUTH_PLAN_COOKIE_NAME,
         OAUTH_BILLING_COOKIE_NAME,
+        OAUTH_PENDING_COOKIE_NAME,
     ];
 
     let mut jar = cookies;
     for name in cookie_names {
-        let mut c = axum_extra::extract::cookie::Cookie::new(name, "");
-        c.set_path("/");
-        c.set_max_age(time::Duration::seconds(0));
-        jar = jar.add(c);
+        jar = jar.add(crate::auth::build_removal_cookie(name));
     }
     jar
 }
@@ -638,6 +751,66 @@ fn compute_oauth_redirect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invite_email_matches_verified_case_insensitive() {
+        let verified = vec![
+            "Work@Example.com".to_string(),
+            "home@example.com".to_string(),
+        ];
+        let result = resolve_invite_email(Some("work@example.com"), &verified);
+        // Provider casing wins
+        assert_eq!(result, Some("Work@Example.com".to_string()));
+    }
+
+    #[test]
+    fn invite_email_not_in_verified_list_is_no_match() {
+        let verified = vec!["home@example.com".to_string()];
+        assert_eq!(
+            resolve_invite_email(Some("work@example.com"), &verified),
+            None
+        );
+    }
+
+    #[test]
+    fn no_invite_email_is_no_match() {
+        let verified = vec!["home@example.com".to_string()];
+        assert_eq!(resolve_invite_email(None, &verified), None);
+    }
+
+    #[test]
+    fn pending_selection_round_trips() {
+        let pending = PendingEmailSelection {
+            provider: "github".to_string(),
+            provider_user_id: "12345".to_string(),
+            name: Some("Test User".to_string()),
+            emails: vec!["a@example.com".to_string(), "b@example.com".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::minutes(10)).timestamp() as usize,
+        };
+        let token = encode_pending_selection(&pending).unwrap();
+        let decoded = decode_pending_selection(&token).unwrap();
+        assert_eq!(decoded.provider_user_id, "12345");
+        assert_eq!(decoded.emails, pending.emails);
+    }
+
+    #[test]
+    fn expired_pending_selection_is_rejected() {
+        let pending = PendingEmailSelection {
+            provider: "github".to_string(),
+            provider_user_id: "12345".to_string(),
+            name: None,
+            emails: vec!["a@example.com".to_string()],
+            // Past the default 60s validation leeway
+            exp: (chrono::Utc::now() - chrono::Duration::minutes(5)).timestamp() as usize,
+        };
+        let token = encode_pending_selection(&pending).unwrap();
+        assert!(decode_pending_selection(&token).is_err());
+    }
+
+    #[test]
+    fn tampered_pending_selection_is_rejected() {
+        assert!(decode_pending_selection("not.a.jwt").is_err());
+    }
 
     // New-user priority: new OAuth users must pick a handle before anything
     // else, so /claim-handle wins over both `next` and plan-based routing.

@@ -363,9 +363,74 @@ pub const CURRENT_ORG_COOKIE_NAME: &str = "hot_current_org";
 // Cookie name for the current environment
 pub const CURRENT_ENV_COOKIE_NAME: &str = "hot_current_env";
 
+/// Session length in days for the JWT cookie and token (30-day sessions with
+/// sliding refresh in the session middleware; see `session_middleware`).
+pub const SESSION_COOKIE_DAYS: i64 = 30;
+
+/// Cookie name for the CSRF double-submit token used on guest auth forms
+/// (signin / signup). The same random value is set as a cookie and embedded
+/// as a hidden form field; a POST is only accepted when the two match.
+pub const CSRF_COOKIE_NAME: &str = "hot_csrf";
+
+/// Generate a random CSRF token (double-submit pattern; the value carries no
+/// claims, it only has to be unguessable and match the cookie).
+pub fn generate_csrf_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// Build the CSRF cookie for `token` (1h lifetime, enough for a form fill).
+pub fn build_csrf_cookie(token: String) -> axum_extra::extract::cookie::Cookie<'static> {
+    build_cookie(CSRF_COOKIE_NAME, token, time::Duration::hours(1))
+}
+
+/// Validate a submitted form token against the CSRF cookie. Both must be
+/// present, non-empty, and equal.
+pub fn validate_csrf(cookies: &CookieJar, form_token: Option<&str>) -> bool {
+    let Some(cookie_value) = cookies.get(CSRF_COOKIE_NAME).map(|c| c.value()) else {
+        return false;
+    };
+    match form_token {
+        Some(token) if !token.is_empty() => token == cookie_value,
+        _ => false,
+    }
+}
+
+/// Is `next` a safe same-site redirect target?
+///
+/// Accepts only absolute paths within this origin. Rejects:
+/// - protocol-relative URLs (`//evil.com`)
+/// - backslash variants (`/\evil.com`) which some browsers normalize to `//`
+pub fn is_safe_next(next: &str) -> bool {
+    next.starts_with('/') && !next.starts_with("//") && !next.contains('\\')
+}
+
+/// Build a session-scoped cookie with the hardened defaults used everywhere
+/// in hot_app: path `/`, HttpOnly, SameSite=Lax, Secure outside local dev.
+///
+/// Callers that need a JS-readable cookie (e.g. the cross-subdomain presence
+/// cookie) should call `.set_http_only(false)` on the result.
+pub fn build_cookie(
+    name: &'static str,
+    value: String,
+    max_age: time::Duration,
+) -> axum_extra::extract::cookie::Cookie<'static> {
+    let mut cookie = axum_extra::extract::cookie::Cookie::new(name, value);
+    cookie.set_path("/");
+    cookie.set_max_age(max_age);
+    cookie.set_http_only(true);
+    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+    cookie.set_secure(!hot::env::is_local_dev());
+    cookie
+}
+
+/// Build an expired cookie that clears `name` on the client.
+pub fn build_removal_cookie(name: &'static str) -> axum_extra::extract::cookie::Cookie<'static> {
+    build_cookie(name, String::new(), time::Duration::seconds(0))
+}
+
 /// Get session secret from environment variable
 /// In development mode, falls back to a default secret for convenience
-fn get_session_secret() -> Result<String, String> {
+pub(crate) fn get_session_secret() -> Result<String, String> {
     match env::var("HOT_APP_SESSION_SECRET") {
         Ok(secret) if !secret.is_empty() => Ok(secret),
         _ => {
@@ -382,7 +447,7 @@ fn get_session_secret() -> Result<String, String> {
     }
 }
 
-/// Get session timeout in hours from conf, with default of 24 hours
+/// Get session timeout in hours from conf, defaulting to 30 days.
 fn get_session_timeout_hours(conf: &Val) -> i64 {
     conf.get("app")
         .and_then(|app| app.get("session"))
@@ -391,7 +456,7 @@ fn get_session_timeout_hours(conf: &Val) -> i64 {
             Val::Int(i) => Some(i),
             _ => None,
         })
-        .unwrap_or(24) // Default to 24 hours
+        .unwrap_or(SESSION_COOKIE_DAYS * 24)
 }
 
 /// Generate a JWT token for a user using configuration
@@ -430,6 +495,36 @@ pub fn get_user_id_from_cookies(cookies: &CookieJar) -> Option<Uuid> {
     cookies
         .get(JWT_COOKIE_NAME)
         .and_then(|cookie| validate_token(cookie.value()).ok())
+}
+
+/// Sliding session refresh: if the JWT in the cookie jar is past half its
+/// lifetime, mint a fresh token. Returns the new cookie to set, or `None`
+/// when the current token is still young (or absent/invalid — expiry is the
+/// signin flow's problem, not the refresher's).
+fn refresh_session_cookie(
+    cookies: &CookieJar,
+    conf: &Val,
+) -> Option<axum_extra::extract::cookie::Cookie<'static>> {
+    let token = cookies.get(JWT_COOKIE_NAME)?.value();
+    let secret = get_session_secret().ok()?;
+    let key = DecodingKey::from_secret(secret.as_ref());
+    let claims = decode::<Claims>(token, &key, &Validation::new(Algorithm::HS256))
+        .ok()?
+        .claims;
+
+    let now = Utc::now().timestamp();
+    let half_life = (claims.exp as i64 - claims.iat as i64) / 2;
+    if now - claims.iat as i64 <= half_life {
+        return None;
+    }
+
+    let user_id = Uuid::parse_str(&claims.sub).ok()?;
+    let new_token = generate_token(&user_id, conf).ok()?;
+    Some(build_cookie(
+        JWT_COOKIE_NAME,
+        new_token,
+        time::Duration::days(SESSION_COOKIE_DAYS),
+    ))
 }
 
 /// Extract current_org_id from cookie in request
@@ -571,21 +666,24 @@ pub async fn session_middleware(
                 let mut updated_cookies = cookies.clone();
                 let mut cookies_changed = false;
 
+                // Sliding session refresh: re-issue the JWT once it's past
+                // half its life so active users never hit the 30-day expiry.
+                if let Some(refreshed) = refresh_session_cookie(&cookies, &conf) {
+                    updated_cookies = updated_cookies.add(refreshed);
+                    cookies_changed = true;
+                    tracing::debug!("Refreshed session JWT for user {}", user_id);
+                }
+
                 // Check if org_id in session differs from cookie (fallback occurred)
                 if let Some(current_org) = &session.current_org {
                     let cookie_org_id = get_current_org_id_from_cookies(&cookies);
                     if cookie_org_id.as_deref() != Some(&current_org.org_id.to_string()) {
                         // Update org_id cookie to match the fallback value
-                        let mut org_cookie = axum_extra::extract::cookie::Cookie::new(
+                        updated_cookies = updated_cookies.add(build_cookie(
                             CURRENT_ORG_COOKIE_NAME,
                             current_org.org_id.to_string(),
-                        );
-                        org_cookie.set_path("/");
-                        org_cookie.set_max_age(time::Duration::days(365));
-                        org_cookie.set_http_only(true);
-                        org_cookie.set_secure(!hot::env::is_local_dev());
-                        org_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-                        updated_cookies = updated_cookies.add(org_cookie);
+                            time::Duration::days(365),
+                        ));
                         cookies_changed = true;
                         tracing::info!(
                             "Updated org_id cookie to {} after fallback",
@@ -599,16 +697,11 @@ pub async fn session_middleware(
                     let cookie_env_id = get_current_env_id_from_cookies(&cookies);
                     if cookie_env_id.as_deref() != Some(&current_env.env_id.to_string()) {
                         // Update env_id cookie to match the fallback value
-                        let mut env_cookie = axum_extra::extract::cookie::Cookie::new(
+                        updated_cookies = updated_cookies.add(build_cookie(
                             CURRENT_ENV_COOKIE_NAME,
                             current_env.env_id.to_string(),
-                        );
-                        env_cookie.set_path("/");
-                        env_cookie.set_max_age(time::Duration::days(365));
-                        env_cookie.set_http_only(true);
-                        env_cookie.set_secure(!hot::env::is_local_dev());
-                        env_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-                        updated_cookies = updated_cookies.add(env_cookie);
+                            time::Duration::days(365),
+                        ));
                         cookies_changed = true;
                         tracing::info!(
                             "Updated env_id cookie to {} after fallback",
@@ -651,16 +744,11 @@ pub async fn session_middleware(
                 // Generate JWT token for auto-login
                 match generate_token(&user.user_id, &conf) {
                     Ok(token) => {
-                        // Create JWT cookie
-                        let mut jwt_cookie =
-                            axum_extra::extract::cookie::Cookie::new(JWT_COOKIE_NAME, token);
-                        jwt_cookie.set_path("/");
-                        jwt_cookie.set_max_age(time::Duration::days(1));
-                        jwt_cookie.set_http_only(true);
-                        jwt_cookie.set_secure(!hot::env::is_local_dev());
-                        jwt_cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-                        let cookies_with_jwt = cookies.clone().add(jwt_cookie);
+                        let cookies_with_jwt = cookies.clone().add(build_cookie(
+                            JWT_COOKIE_NAME,
+                            token,
+                            time::Duration::days(1),
+                        ));
 
                         // Set default org/env cookies if not already set
                         let cookies_with_defaults = if get_current_org_id_from_cookies(

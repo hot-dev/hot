@@ -133,6 +133,10 @@ pub struct GitHubUserInfo {
     pub email: Option<String>,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    /// All VERIFIED emails on the GitHub account (primary first), resolved
+    /// via `/user/emails`. Not part of the `/user` payload itself.
+    #[serde(default)]
+    pub verified_emails: Vec<String>,
 }
 
 /// GitHub email response (from /user/emails endpoint)
@@ -204,19 +208,40 @@ pub async fn fetch_github_user_info(access_token: &str) -> Result<GitHubUserInfo
         .await
         .map_err(|e| format!("Failed to parse GitHub user info: {}", e))?;
 
-    // If email is not public, fetch from emails endpoint
-    if user_info.email.is_none()
-        && let Ok(emails) = fetch_github_emails(access_token).await
-    {
-        // Find primary verified email
-        user_info.email = emails
-            .iter()
-            .find(|e| e.primary && e.verified)
-            .or_else(|| emails.iter().find(|e| e.verified))
-            .map(|e| e.email.clone());
-    }
+    // Always resolve the email through /user/emails filtered to VERIFIED
+    // addresses. The public profile email on /user carries no verification
+    // guarantee, so it is never used — if no verified email exists, fail
+    // and let the callback surface a clear message.
+    let emails = fetch_github_emails(access_token).await?;
+    user_info.email = select_github_email(&emails);
+    user_info.verified_emails = verified_github_emails(&emails);
 
     Ok(user_info)
+}
+
+/// All verified emails, primary first, preserving GitHub's order otherwise.
+/// Used by the callback's email-selection logic (invite match / picker).
+pub fn verified_github_emails(emails: &[GitHubEmail]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(primary) = emails.iter().find(|e| e.primary && e.verified) {
+        out.push(primary.email.clone());
+    }
+    for e in emails.iter().filter(|e| e.verified && !e.primary) {
+        out.push(e.email.clone());
+    }
+    out
+}
+
+/// Pick the email to use from GitHub's `/user/emails` response:
+/// primary+verified first, then any verified, else None.
+///
+/// Pure function (no I/O) so the selection policy is unit-testable.
+pub fn select_github_email(emails: &[GitHubEmail]) -> Option<String> {
+    emails
+        .iter()
+        .find(|e| e.primary && e.verified)
+        .or_else(|| emails.iter().find(|e| e.verified))
+        .map(|e| e.email.clone())
 }
 
 /// Fetch GitHub user emails
@@ -299,6 +324,86 @@ pub async fn exchange_code_for_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_github_email_prefers_primary_verified() {
+        let emails = vec![
+            GitHubEmail {
+                email: "old@example.com".to_string(),
+                primary: false,
+                verified: true,
+            },
+            GitHubEmail {
+                email: "main@example.com".to_string(),
+                primary: true,
+                verified: true,
+            },
+        ];
+        assert_eq!(
+            select_github_email(&emails),
+            Some("main@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn select_github_email_falls_back_to_any_verified() {
+        let emails = vec![
+            GitHubEmail {
+                email: "unverified@example.com".to_string(),
+                primary: true,
+                verified: false,
+            },
+            GitHubEmail {
+                email: "verified@example.com".to_string(),
+                primary: false,
+                verified: true,
+            },
+        ];
+        assert_eq!(
+            select_github_email(&emails),
+            Some("verified@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn select_github_email_rejects_all_unverified() {
+        let emails = vec![GitHubEmail {
+            email: "unverified@example.com".to_string(),
+            primary: true,
+            verified: false,
+        }];
+        assert_eq!(select_github_email(&emails), None);
+        assert_eq!(select_github_email(&[]), None);
+    }
+
+    #[test]
+    fn verified_github_emails_primary_first_unverified_excluded() {
+        let emails = vec![
+            GitHubEmail {
+                email: "unverified@example.com".to_string(),
+                primary: false,
+                verified: false,
+            },
+            GitHubEmail {
+                email: "other@example.com".to_string(),
+                primary: false,
+                verified: true,
+            },
+            GitHubEmail {
+                email: "main@example.com".to_string(),
+                primary: true,
+                verified: true,
+            },
+        ];
+        assert_eq!(
+            verified_github_emails(&emails),
+            vec![
+                "main@example.com".to_string(),
+                "other@example.com".to_string()
+            ]
+        );
+        assert!(verified_github_emails(&[]).is_empty());
+    }
 
     #[test]
     fn google_auth_url_includes_redirect_scope_and_invite_state() {

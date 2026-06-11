@@ -171,6 +171,22 @@ impl TestClient {
         &self.cookies
     }
 
+    /// Drop all cookies — simulates a fresh browser session.
+    pub fn clear_cookies(&mut self) {
+        self.cookies = CookieJar::default();
+    }
+
+    /// Prime the CSRF double-submit cookie and return the matching form
+    /// token, mirroring what a GET of the signin/signup page does. Use the
+    /// returned value as the `form_token` form field.
+    pub fn prime_csrf(&mut self) -> String {
+        let token = crate::auth::generate_csrf_token();
+        self.cookies
+            .inner
+            .insert(crate::auth::CSRF_COOKIE_NAME.to_string(), token.clone());
+        token
+    }
+
     /// GET `path`. Cookies are attached from the jar and merged from
     /// `Set-Cookie` response headers into the jar.
     pub async fn get(&mut self, path: &str) -> TestResponse {
@@ -354,18 +370,6 @@ impl CookieJar {
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers re-exported for test convenience
-// ---------------------------------------------------------------------------
-
-/// Mint a form token backdated past the anti-bot minimum submission time.
-///
-/// Re-exported from `handlers::auth::mint_form_token_for_tests` so tests can
-/// import it from a single stable path.
-pub fn mint_form_token() -> String {
-    crate::handlers::auth::mint_form_token_for_tests()
 }
 
 // ---------------------------------------------------------------------------

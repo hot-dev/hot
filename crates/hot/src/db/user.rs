@@ -565,6 +565,48 @@ impl UserAuth {
         Ok(())
     }
 
+    /// Get an OAuth user_auth row by the provider's stable user id.
+    ///
+    /// `auth_data` stores `{"provider_user_id": ...}` for every OAuth row, so
+    /// this is the lookup that survives a user changing their email at the
+    /// provider (the `auth_identifier` email is just what it was at link time).
+    pub async fn get_by_provider_user_id(
+        db: &crate::db::DatabasePool,
+        auth_type: &str,
+        provider_user_id: &str,
+    ) -> Result<UserAuth, UserError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let user_auth = sqlx::query_as::<_, UserAuth>(
+                    "SELECT user_auth_id, user_id, auth_type, auth_identifier, auth_data, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user_auth WHERE auth_type = $1 AND auth_data->>'provider_user_id' = $2",
+                )
+                .bind(auth_type)
+                .bind(provider_user_id)
+                .fetch_one(pg_pool)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => UserError::NotFound,
+                    other => UserError::Database(other),
+                })?;
+                Ok(user_auth)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let user_auth = sqlx::query_as::<_, UserAuth>(
+                    "SELECT user_auth_id, user_id, auth_type, auth_identifier, auth_data, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user_auth WHERE auth_type = ? AND json_extract(auth_data, '$.provider_user_id') = ?",
+                )
+                .bind(auth_type)
+                .bind(provider_user_id)
+                .fetch_one(sqlite_pool)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => UserError::NotFound,
+                    other => UserError::Database(other),
+                })?;
+                Ok(user_auth)
+            }
+        }
+    }
+
     /// Get user auths by user ID
     pub async fn get_user_auths_by_user(
         db: &crate::db::DatabasePool,

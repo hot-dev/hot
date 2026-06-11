@@ -1595,6 +1595,7 @@ pub struct SignIn<'a> {
     pub next: &'a str,
     pub plan: &'a str,
     pub billing: &'a str,
+    pub form_token: &'a str,
 }
 
 #[derive(Template)]
@@ -1609,10 +1610,10 @@ pub struct SignUp<'a> {
     pub plan: &'a str,
     pub plan_display_name: &'a str,
     pub billing: &'a str,
-    pub org_name: &'a str,
-    pub org_slug: &'a str,
-    pub account_type: &'a str,
     pub form_token: &'a str,
+    /// When true, the error box includes a "sign in instead" link
+    /// (used for the duplicate-email error).
+    pub show_signin_link: bool,
 }
 
 #[derive(Template)]
@@ -1645,6 +1646,16 @@ pub struct CheckEmail<'a> {
     pub email: &'a str,
     pub already_pending: bool,
     pub is_free_plan: bool,
+    /// When true, hide the resend form and explain the resend cap.
+    pub resend_capped: bool,
+}
+
+#[derive(Template)]
+#[template(path = "oauth_select_email.html")]
+pub struct OAuthSelectEmail<'a> {
+    pub title: &'a str,
+    pub page_context: PublicPageContext,
+    pub emails: &'a [String],
 }
 
 #[derive(Template)]

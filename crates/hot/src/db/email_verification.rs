@@ -82,15 +82,12 @@ pub struct EmailVerification {
     pub verification_token: String,
     pub status_id: i16,
     pub invite_code: Option<String>,
-    pub org_name: Option<String>,
-    pub org_slug: Option<String>,
     pub plan: Option<String>,
     pub billing: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub verified_at: Option<DateTime<Utc>>,
     pub attempts: i32,
-    pub account_type: Option<String>,
 }
 
 impl EmailVerification {
@@ -102,7 +99,7 @@ impl EmailVerification {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE verification_id = ?",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE verification_id = ?",
                 )
                 .bind(verification_id)
                 .fetch_optional(pool)
@@ -112,7 +109,7 @@ impl EmailVerification {
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE verification_id = $1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE verification_id = $1",
                 )
                 .bind(verification_id)
                 .fetch_optional(pool)
@@ -131,7 +128,7 @@ impl EmailVerification {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE verification_token = ?",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE verification_token = ?",
                 )
                 .bind(token)
                 .fetch_optional(pool)
@@ -141,7 +138,7 @@ impl EmailVerification {
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE verification_token = $1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE verification_token = $1",
                 )
                 .bind(token)
                 .fetch_optional(pool)
@@ -160,7 +157,7 @@ impl EmailVerification {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE email = ? AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = ? AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
@@ -170,7 +167,7 @@ impl EmailVerification {
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE email = $1 AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = $1 AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
@@ -195,7 +192,7 @@ impl EmailVerification {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE email = ? ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = ? ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
@@ -205,48 +202,13 @@ impl EmailVerification {
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, created_at, expires_at, verified_at, attempts, account_type FROM email_verification WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
                 .await?;
 
                 Ok(row)
-            }
-        }
-    }
-
-    /// Check whether any non-expired pending verification has reserved this slug.
-    /// Returns true if the slug is currently held by an unverified signup that
-    /// hasn't expired. Expired pending rows are treated as "free" so abandoned
-    /// signups don't lock handles forever.
-    pub async fn has_pending_slug(
-        db: &crate::db::DatabasePool,
-        slug: &str,
-    ) -> Result<bool, EmailVerificationError> {
-        let now = Utc::now();
-        match db {
-            crate::db::DatabasePool::Sqlite(pool) => {
-                let row: Option<(i64,)> = sqlx::query_as(
-                    "SELECT 1 FROM email_verification \
-                     WHERE org_slug = ? AND status_id = 1 AND expires_at > ? LIMIT 1",
-                )
-                .bind(slug)
-                .bind(now)
-                .fetch_optional(pool)
-                .await?;
-                Ok(row.is_some())
-            }
-            crate::db::DatabasePool::Postgres(pool) => {
-                let row: Option<(i32,)> = sqlx::query_as(
-                    "SELECT 1 FROM email_verification \
-                     WHERE org_slug = $1 AND status_id = 1 AND expires_at > $2 LIMIT 1",
-                )
-                .bind(slug)
-                .bind(now)
-                .fetch_optional(pool)
-                .await?;
-                Ok(row.is_some())
             }
         }
     }
@@ -261,17 +223,14 @@ impl EmailVerification {
         password_hash: &str,
         verification_token: &str,
         invite_code: Option<&str>,
-        org_name: Option<&str>,
-        org_slug: Option<&str>,
         plan: Option<&str>,
         billing: Option<&str>,
         expires_at: DateTime<Utc>,
-        account_type: Option<&str>,
     ) -> Result<(), EmailVerificationError> {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 sqlx::query(
-                    "INSERT INTO email_verification (verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, expires_at, account_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO email_verification (verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(verification_id)
                 .bind(email)
@@ -280,18 +239,15 @@ impl EmailVerification {
                 .bind(verification_token)
                 .bind(VerificationStatus::Pending.as_id())
                 .bind(invite_code)
-                .bind(org_name)
-                .bind(org_slug)
                 .bind(plan)
                 .bind(billing)
                 .bind(expires_at)
-                .bind(account_type)
                 .execute(pool)
                 .await?;
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO email_verification (verification_id, email, name, password_hash, verification_token, status_id, invite_code, org_name, org_slug, plan, billing, expires_at, account_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                    "INSERT INTO email_verification (verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 )
                 .bind(verification_id)
                 .bind(email)
@@ -300,12 +256,9 @@ impl EmailVerification {
                 .bind(verification_token)
                 .bind(VerificationStatus::Pending.as_id())
                 .bind(invite_code)
-                .bind(org_name)
-                .bind(org_slug)
                 .bind(plan)
                 .bind(billing)
                 .bind(expires_at)
-                .bind(account_type)
                 .execute(pool)
                 .await?;
             }
