@@ -1644,6 +1644,7 @@ pub struct CheckEmail<'a> {
     pub title: &'a str,
     pub page_context: PublicPageContext,
     pub email: &'a str,
+    pub form_token: &'a str,
     pub already_pending: bool,
     pub is_free_plan: bool,
     /// When true, hide the resend form and explain the resend cap.

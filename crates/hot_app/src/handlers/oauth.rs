@@ -132,6 +132,14 @@ pub async fn google_callback_handler(
         return Err(Html("Invalid OAuth state (mismatch)".to_string()));
     }
 
+    if let Err(retry_after) = crate::rate_limit::check_oauth_callback_global(&conf, "google") {
+        tracing::warn!(provider = "google", "OAuth callback global backstop hit");
+        return Err(Html(format!(
+            "We're receiving an unusually high volume of sign-ins right now. Please try again in {} minutes.",
+            retry_after.div_ceil(60).max(1)
+        )));
+    }
+
     let config = OAuthConfig::from_env();
     let google_config = config
         .google
@@ -166,6 +174,7 @@ pub async fn google_callback_handler(
     // Handle user creation or login
     let (user, is_new_user) = handle_oauth_user(
         &db,
+        &conf,
         &user_info.email,
         "google",
         &user_info.id,
@@ -349,6 +358,14 @@ pub async fn github_callback_handler(
         return Err(Html("Invalid OAuth state (mismatch)".to_string()));
     }
 
+    if let Err(retry_after) = crate::rate_limit::check_oauth_callback_global(&conf, "github") {
+        tracing::warn!(provider = "github", "OAuth callback global backstop hit");
+        return Err(Html(format!(
+            "We're receiving an unusually high volume of sign-ins right now. Please try again in {} minutes.",
+            retry_after.div_ceil(60).max(1)
+        )));
+    }
+
     let config = OAuthConfig::from_env();
     let github_config = config
         .github
@@ -437,6 +454,7 @@ pub async fn github_callback_handler(
     // Handle user creation or login
     let (user, is_new_user) = handle_oauth_user(
         &db,
+        &conf,
         &email,
         "github",
         &user_info.id.to_string(),
@@ -542,6 +560,7 @@ pub async fn github_select_email_post_handler(
 
     let (user, is_new_user) = handle_oauth_user(
         &db,
+        &conf,
         &email,
         &pending.provider,
         &pending.provider_user_id,
@@ -557,6 +576,7 @@ pub async fn github_select_email_post_handler(
 /// Returns (User, is_new_user)
 async fn handle_oauth_user(
     db: &DatabasePool,
+    conf: &Val,
     email: &str,
     provider: &str, // "google" or "github"
     provider_user_id: &str,
@@ -618,6 +638,21 @@ async fn handle_oauth_user(
         }
         Err(_) => {
             // User doesn't exist, create new user with OAuth
+            if let Err(retry_after) =
+                crate::rate_limit::check_oauth_new_identity(conf, provider, provider_user_id, email)
+            {
+                tracing::warn!(
+                    provider,
+                    key_type = "oauth-new-identity",
+                    key_hash = crate::rate_limit::key_fingerprint(provider_user_id),
+                    "OAuth new-user rate limit hit"
+                );
+                return Err(format!(
+                    "Too many OAuth signup attempts. Please try again in {} minutes.",
+                    retry_after.div_ceil(60).max(1)
+                ));
+            }
+
             let user_id = Uuid::now_v7();
             let user_auth_id = Uuid::now_v7();
 

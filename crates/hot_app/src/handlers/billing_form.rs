@@ -140,8 +140,28 @@ pub async fn org_checkout_form_handler(
     // form for a $0 plan — go straight to the provider checkout (which
     // handles the card-verification-only session) just like submitting the
     // form would. The admin check above already gates this.
-    if plan_id == "hot-free"
-        && let Ok(checkout_url) = billing_provider()
+    if plan_id == "hot-free" {
+        if let Err(retry_after) =
+            crate::rate_limit::check_checkout(&conf, &session.user.user_id, &org.org_id, plan_id)
+        {
+            tracing::warn!(
+                key_type = "checkout",
+                key_hash = crate::rate_limit::key_fingerprint(&format!(
+                    "{}:{}:{}",
+                    session.user.user_id, org.org_id, plan_id
+                )),
+                "Checkout rate limit hit"
+            );
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "Too many checkout attempts. Please try again in {} minutes.",
+                    retry_after.div_ceil(60).max(1)
+                ),
+            ));
+        }
+
+        if let Ok(checkout_url) = billing_provider()
             .create_checkout(BillingCheckoutRequest {
                 db: &db,
                 conf: &conf,
@@ -154,8 +174,9 @@ pub async fn org_checkout_form_handler(
                 billing_period: &billing_period,
             })
             .await
-    {
-        return Ok(Redirect::to(&checkout_url).into_response());
+        {
+            return Ok(Redirect::to(&checkout_url).into_response());
+        }
     }
 
     let template = templates::OrgCheckoutForm {
@@ -216,6 +237,26 @@ pub async fn org_create_checkout_handler(
         .get("billing_period")
         .cloned()
         .unwrap_or_else(|| "monthly".to_string());
+
+    if let Err(retry_after) =
+        crate::rate_limit::check_checkout(&conf, &session.user.user_id, &org.org_id, plan_id)
+    {
+        tracing::warn!(
+            key_type = "checkout",
+            key_hash = crate::rate_limit::key_fingerprint(&format!(
+                "{}:{}:{}",
+                session.user.user_id, org.org_id, plan_id
+            )),
+            "Checkout rate limit hit"
+        );
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Too many checkout attempts. Please try again in {} minutes.",
+                retry_after.div_ceil(60).max(1)
+            ),
+        ));
+    }
 
     let checkout_url = billing_provider()
         .create_checkout(BillingCheckoutRequest {

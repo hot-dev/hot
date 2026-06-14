@@ -121,8 +121,12 @@ pub async fn signin_post_handler(
     // stuffing run against one mailbox locks that mailbox's attempts, not
     // the whole site. Counted before the password check so failed and
     // successful attempts both consume budget.
-    if let Err(retry_after) = crate::rate_limit::check_signin(&form.email) {
-        tracing::warn!("Signin rate limit hit for email: {}", form.email);
+    if let Err(retry_after) = crate::rate_limit::check_signin(&conf, &form.email) {
+        tracing::warn!(
+            key_type = "email",
+            key_hash = crate::rate_limit::key_fingerprint(&form.email),
+            "Signin rate limit hit"
+        );
         return Err(render_signin_error(&format!(
             "Too many sign-in attempts for this email. Please try again in {} minutes.",
             retry_after.div_ceil(60).max(1)
@@ -354,8 +358,15 @@ pub async fn signup_post_handler(
     // If the hidden "website" field has a value, it's likely a bot
     // Silently return success to not tip off the bot
     if form.website.as_ref().is_some_and(|w| !w.is_empty()) {
-        tracing::warn!("Honeypot triggered on signup for email: {}", form.email);
-        return Ok(render_check_email(&form.email, false, plan == "hot-free").into_response());
+        tracing::warn!(
+            key_type = "email",
+            key_hash = crate::rate_limit::key_fingerprint(&form.email),
+            "Honeypot triggered on signup"
+        );
+        return Ok(
+            render_check_email(&form.email, false, plan == "hot-free", &csrf_cookie_value)
+                .into_response(),
+        );
     }
 
     // CSRF double-submit check (also catches bots that POST without ever
@@ -404,14 +415,28 @@ pub async fn signup_post_handler(
     if let Ok(Some(existing)) = EmailVerification::get_pending_by_email(&db, &form.email).await
         && existing.is_valid().is_ok()
     {
-        return Ok(render_check_email(&form.email, true, plan == "hot-free").into_response());
+        return Ok(
+            render_check_email(&form.email, true, plan == "hot-free", &csrf_cookie_value)
+                .into_response(),
+        );
+    }
+
+    if crate::rate_limit::check_signup_email(&conf, &form.email).is_err() {
+        tracing::warn!(
+            key_type = "email",
+            key_hash = crate::rate_limit::key_fingerprint(&form.email),
+            "Signup per-email rate limit hit"
+        );
+        return Err(render_error(
+            "Too many signup attempts for this email. Please try again in a little while.",
+        ));
     }
 
     // Global signup cap — a backstop against mass account creation that
     // slips past the edge per-IP limits. Count only plausible new-account
     // attempts, after CSRF/honeypot/validation have filtered junk traffic.
-    if crate::rate_limit::check_signup_global().is_err() {
-        tracing::warn!("Global signup rate limit hit (email: {})", form.email);
+    if crate::rate_limit::check_signup_global(&conf).is_err() {
+        tracing::warn!(key_type = "global", "Global signup rate limit hit");
         return Err(render_error(
             "We're receiving an unusually high volume of signups right now. Please try again in a little while.",
         ));
@@ -504,7 +529,10 @@ pub async fn signup_post_handler(
     }
 
     // Show the "check your email" page
-    Ok(render_check_email(&form.email, false, plan == "hot-free").into_response())
+    Ok(
+        render_check_email(&form.email, false, plan == "hot-free", &csrf_cookie_value)
+            .into_response(),
+    )
 }
 
 /// Create a user + email_password auth row. `password_hash` is the JSON
@@ -562,8 +590,13 @@ async fn sign_in_cookies(
 }
 
 /// Render the "check your email" page
-fn render_check_email(email: &str, already_pending: bool, is_free_plan: bool) -> Html<String> {
-    render_check_email_full(email, already_pending, is_free_plan, false)
+fn render_check_email(
+    email: &str,
+    already_pending: bool,
+    is_free_plan: bool,
+    form_token: &str,
+) -> Html<String> {
+    render_check_email_full(email, already_pending, is_free_plan, false, form_token)
 }
 
 /// Render the "check your email" page; `resend_capped` swaps the resend form
@@ -573,11 +606,13 @@ fn render_check_email_full(
     already_pending: bool,
     is_free_plan: bool,
     resend_capped: bool,
+    form_token: &str,
 ) -> Html<String> {
     let template = templates::CheckEmail {
         title: "Check Your Email",
         page_context: templates::PublicPageContext::new("signup"),
         email,
+        form_token,
         already_pending,
         is_free_plan,
         resend_capped,
@@ -812,14 +847,40 @@ async fn handle_already_verified(
 pub async fn resend_verification_handler(
     State(db): State<Arc<DatabasePool>>,
     Extension(conf): Extension<Val>,
+    cookies: CookieJar,
     Form(form): Form<ResendVerificationForm>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if !crate::auth::validate_csrf(&cookies, form.form_token.as_deref()) {
+        tracing::warn!(
+            key_type = "email",
+            key_hash = crate::rate_limit::key_fingerprint(&form.email),
+            "CSRF validation failed on resend verification"
+        );
+        let fresh_token = crate::auth::generate_csrf_token();
+        let updated_cookies = cookies.add(crate::auth::build_csrf_cookie(fresh_token.clone()));
+        return (
+            updated_cookies,
+            render_check_email_full(&form.email, true, false, false, &fresh_token),
+        )
+            .into_response();
+    }
+
+    let form_token = cookies
+        .get(crate::auth::CSRF_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .unwrap_or_default();
+
     // Per-email rate limit before any DB work; render the same page either
     // way so the endpoint doesn't reveal whether the email exists.
-    if let Err(retry_after) = crate::rate_limit::check_resend(&form.email) {
-        tracing::warn!("Resend rate limit hit for email: {}", form.email);
+    if let Err(retry_after) = crate::rate_limit::check_resend(&conf, &form.email) {
+        tracing::warn!(
+            key_type = "email",
+            key_hash = crate::rate_limit::key_fingerprint(&form.email),
+            "Resend rate limit hit"
+        );
         let _ = retry_after;
-        return Html(render_check_email_full(&form.email, true, false, true).0);
+        return render_check_email_full(&form.email, true, false, true, &form_token)
+            .into_response();
     }
 
     // Find the pending verification
@@ -827,14 +888,15 @@ pub async fn resend_verification_handler(
         Ok(Some(v)) => v,
         _ => {
             // Don't reveal whether email exists
-            return Html(render_check_email(&form.email, false, false).0);
+            return render_check_email(&form.email, false, false, &form_token).into_response();
         }
     };
 
     // Check attempt limits (max 5 resends)
     if verification.attempts >= 5 {
         let is_free = verification.plan.as_deref() == Some("hot-free");
-        return Html(render_check_email_full(&form.email, true, is_free, true).0);
+        return render_check_email_full(&form.email, true, is_free, true, &form_token)
+            .into_response();
     }
 
     // Increment attempts
@@ -865,13 +927,14 @@ pub async fn resend_verification_handler(
     }
 
     let is_free = verification.plan.as_deref() == Some("hot-free");
-    Html(render_check_email(&form.email, false, is_free).0)
+    render_check_email(&form.email, false, is_free, &form_token).into_response()
 }
 
 /// Form data for resend verification
 #[derive(Deserialize, Debug)]
 pub struct ResendVerificationForm {
     pub email: String,
+    pub form_token: Option<String>,
 }
 
 /// Render verification error page
@@ -1147,6 +1210,20 @@ pub async fn claim_handle_post_handler(
             "/".to_string()
         };
         return Ok((updated_cookies, Redirect::to(&target)));
+    }
+
+    if let Err(retry_after) =
+        crate::rate_limit::check_claim_handle(&conf, &session.current_user_id())
+    {
+        tracing::warn!(
+            key_type = "user",
+            key_hash = crate::rate_limit::key_fingerprint(&session.current_user_id().to_string()),
+            "Claim-handle rate limit hit"
+        );
+        return Err(render_error(&format!(
+            "Too many handle claim attempts. Please try again in {} minutes.",
+            retry_after.div_ceil(60).max(1)
+        )));
     }
 
     // Full availability check: existing orgs + pending verifications.
