@@ -55,6 +55,21 @@ fn hot_cloud_billing_conf() -> hot::val::Val {
     })
 }
 
+fn conf_with_signup_email_limit(max: i64) -> hot::val::Val {
+    val!({
+        "app": {
+            "host": "localhost",
+            "port": 4680,
+            "abuse-limits": {
+                "signup-email": {
+                    "max": max,
+                    "window-secs": 60,
+                },
+            },
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Signup → pending verification row
 // ---------------------------------------------------------------------------
@@ -177,6 +192,44 @@ async fn signup_post_without_csrf_token_is_rejected() {
             .expect("query")
             .is_none(),
         "no verification row may be created without a valid CSRF token"
+    );
+}
+
+#[tokio::test]
+async fn signup_per_email_limit_blocks_after_expired_pending_attempt() {
+    let mut client = TestClient::new_with_conf(conf_with_signup_email_limit(1)).await;
+    let email = format!("limit-{}@example.com", Uuid::now_v7());
+
+    let form = submit_signup(&email, client.prime_csrf());
+    client
+        .post_form(
+            "/signup?plan=hot-free&billing=monthly",
+            &as_form_slice(&form),
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+
+    let verification = EmailVerification::get_pending_by_email(client.db(), &email)
+        .await
+        .expect("query")
+        .expect("pending row");
+    EmailVerification::mark_expired(client.db(), &verification.verification_id)
+        .await
+        .expect("expire pending row");
+
+    let form2 = submit_signup(&email, client.prime_csrf());
+    let resp = client
+        .post_form(
+            "/signup?plan=hot-free&billing=monthly",
+            &as_form_slice(&form2),
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        resp.body.contains("Too many signup attempts"),
+        "expected per-email signup limiter, got: {}",
+        resp.body.chars().take(500).collect::<String>()
     );
 }
 
@@ -416,8 +469,15 @@ async fn resend_cap_renders_explicit_messaging() {
             .expect("increment attempts");
     }
 
+    let token = client.prime_csrf();
     let resp = client
-        .post_form("/resend-verification", &[("email", "alice@example.com")])
+        .post_form(
+            "/resend-verification",
+            &[
+                ("email", "alice@example.com"),
+                ("form_token", token.as_str()),
+            ],
+        )
         .await;
 
     resp.assert_status(axum::http::StatusCode::OK);
@@ -430,6 +490,52 @@ async fn resend_cap_renders_explicit_messaging() {
     assert!(
         !resp.body.contains("Resend verification email"),
         "the resend button should be hidden once the cap is reached"
+    );
+}
+
+#[tokio::test]
+async fn resend_without_csrf_rerenders_with_fresh_retry_form() {
+    let mut client = TestClient::new().await;
+
+    let form = submit_signup("csrf-resend@example.com", client.prime_csrf());
+    client
+        .post_form(
+            "/signup?plan=hot-free&billing=monthly",
+            &as_form_slice(&form),
+        )
+        .await;
+
+    let verification =
+        EmailVerification::get_pending_by_email(client.db(), "csrf-resend@example.com")
+            .await
+            .expect("query")
+            .expect("pending row");
+    assert_eq!(verification.attempts, 0);
+
+    client.clear_cookies();
+    let resp = client
+        .post_form(
+            "/resend-verification",
+            &[("email", "csrf-resend@example.com")],
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        resp.body.contains("Resend verification email")
+            && resp.body.contains("name=\"form_token\""),
+        "missing-CSRF resend should show a fresh retry form, got: {}",
+        resp.body.chars().take(500).collect::<String>()
+    );
+
+    let verification =
+        EmailVerification::get_pending_by_email(client.db(), "csrf-resend@example.com")
+            .await
+            .expect("query")
+            .expect("pending row");
+    assert_eq!(
+        verification.attempts, 0,
+        "CSRF-invalid resend must not consume DB resend attempts"
     );
 }
 

@@ -30,6 +30,7 @@ use crate::ApiStateData;
 use crate::auth::{AuthContext, authenticate_token};
 use crate::domain_resolver::ResolvedDomain;
 use crate::models::ApiErrorResponse;
+use crate::rate_limit::{self, PublicRateLimitMode, RateLimitExceeded};
 
 use super::request::{
     RequestBody, build_call_event_data, build_request_val, hash_sensitive_request_fields,
@@ -441,6 +442,33 @@ async fn webhook_handler_inner(
     } else {
         None
     };
+
+    let map_rate_limit = |exceeded: RateLimitExceeded| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiErrorResponse::new(
+                "rate_limit_exceeded",
+                format!(
+                    "{} Retry after {} seconds.",
+                    exceeded.message, exceeded.retry_after_secs
+                ),
+            )),
+        )
+    };
+
+    rate_limit::check_org_rate_limit(
+        db,
+        &ctx.org.org_id,
+        PublicRateLimitMode::from_conf(conf),
+        "webhook",
+    )
+    .await
+    .map_err(map_rate_limit)?;
+
+    let _inflight_guard =
+        rate_limit::check_public_org_inflight(db, conf, &ctx.org.org_id, "webhook")
+            .await
+            .map_err(map_rate_limit)?;
 
     // Build the unified HttpRequest value using the shared builder.
     // Includes method, url, headers, query, body, body-raw, ip, and auth (when authenticated).

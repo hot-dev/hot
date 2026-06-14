@@ -438,6 +438,27 @@ pub async fn orgs_create_handler(
                 .clone()
                 .unwrap_or_else(|| "monthly".to_string());
 
+            if let Err(retry_after) = crate::rate_limit::check_checkout(
+                &conf,
+                &session.user.user_id,
+                &org_id,
+                &plan_id_str,
+            ) {
+                tracing::warn!(
+                    key_type = "checkout",
+                    key_hash = crate::rate_limit::key_fingerprint(&format!(
+                        "{}:{}:{}",
+                        session.user.user_id, org_id, plan_id_str
+                    )),
+                    "Checkout rate limit hit"
+                );
+                tracing::info!(
+                    "Checkout throttled after org creation; retry_after_secs={}",
+                    retry_after
+                );
+                return Ok((jar, Redirect::to(&format!("/@{}/billing", form.slug))));
+            }
+
             let checkout_url = match billing_provider()
                 .create_checkout(BillingCheckoutRequest {
                     db: &db,

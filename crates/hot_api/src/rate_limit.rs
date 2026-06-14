@@ -26,6 +26,7 @@ use axum::{
 };
 use hot::db::env::Env;
 use hot::db::features::Features;
+use hot::val::Val;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -127,6 +128,8 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// Remove org entries whose newest request is older than this.
 const STALE_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
 
+const DEFAULT_PUBLIC_ORG_INFLIGHT_LIMIT: i64 = 50;
+
 impl SlidingWindowLimiter {
     fn new() -> Self {
         Self {
@@ -186,6 +189,7 @@ struct RateLimitState {
     env_to_org: EnvToOrgCache,
     features: FeaturesCache,
     limiter: SlidingWindowLimiter,
+    inflight: InFlightLimiter,
 }
 
 static STATE: once_cell::sync::Lazy<RateLimitState> =
@@ -193,7 +197,179 @@ static STATE: once_cell::sync::Lazy<RateLimitState> =
         env_to_org: EnvToOrgCache::new(),
         features: FeaturesCache::new(Duration::from_secs(60)),
         limiter: SlidingWindowLimiter::new(),
+        inflight: InFlightLimiter::new(),
     });
+
+// ============================================================================
+// In-flight limiter (per org)
+// ============================================================================
+
+struct InFlightLimiter {
+    counts: Mutex<AHashMap<Uuid, usize>>,
+}
+
+impl InFlightLimiter {
+    fn new() -> Self {
+        Self {
+            counts: Mutex::new(AHashMap::new()),
+        }
+    }
+
+    fn try_acquire(&'static self, org_id: Uuid, max: usize) -> Result<InFlightGuard, usize> {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let count = counts.entry(org_id).or_default();
+        if *count >= max {
+            return Err(*count);
+        }
+        *count += 1;
+        Ok(InFlightGuard {
+            org_id,
+            limiter: self,
+        })
+    }
+
+    fn release(&self, org_id: &Uuid) {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = counts.get_mut(org_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(org_id);
+            }
+        }
+    }
+}
+
+/// RAII guard that releases an in-flight slot when the request completes.
+pub struct InFlightGuard {
+    org_id: Uuid,
+    limiter: &'static InFlightLimiter,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.limiter.release(&self.org_id);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicRateLimitMode {
+    Observe,
+    Enforce,
+}
+
+impl PublicRateLimitMode {
+    pub fn from_conf(conf: &Val) -> Self {
+        match conf
+            .get_str_or_default("api.public-org-rate-limit-mode", "observe")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "enforce" => Self::Enforce,
+            _ => Self::Observe,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RateLimitExceeded {
+    pub retry_after_secs: u64,
+    pub message: String,
+}
+
+pub fn rate_limit_response(exceeded: RateLimitExceeded) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [("Retry-After", exceeded.retry_after_secs.to_string())],
+        axum::Json(serde_json::json!({
+            "error": exceeded.message,
+            "retry_after": exceeded.retry_after_secs
+        })),
+    )
+        .into_response()
+}
+
+async fn org_rate_limit_rps(db: &hot::db::DatabasePool, org_id: &Uuid) -> i64 {
+    if let Some(rps) = STATE.features.get(org_id) {
+        return rps;
+    }
+
+    let features = Features::resolve_for_org(db, org_id).await;
+    let rps = features.rate_limit_rps();
+    STATE.features.insert(*org_id, rps);
+    rps
+}
+
+pub async fn check_org_rate_limit(
+    db: &hot::db::DatabasePool,
+    org_id: &Uuid,
+    mode: PublicRateLimitMode,
+    context: &'static str,
+) -> Result<(), RateLimitExceeded> {
+    let rate_limit_rps = org_rate_limit_rps(db, org_id).await;
+    if rate_limit_rps < 0 {
+        return Ok(());
+    }
+
+    if let Err(retry_after) = STATE.limiter.check(org_id, rate_limit_rps) {
+        let retry_after_secs = retry_after.ceil() as u64;
+        match mode {
+            PublicRateLimitMode::Observe => {
+                tracing::warn!(
+                    context,
+                    org_id = %org_id,
+                    retry_after_secs,
+                    "Public org RPS limit would have been hit"
+                );
+                Ok(())
+            }
+            PublicRateLimitMode::Enforce => Err(RateLimitExceeded {
+                retry_after_secs,
+                message: "Rate limit exceeded".to_string(),
+            }),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn check_public_org_inflight(
+    db: &hot::db::DatabasePool,
+    conf: &Val,
+    org_id: &Uuid,
+    context: &'static str,
+) -> Result<Option<InFlightGuard>, RateLimitExceeded> {
+    let rate_limit_rps = org_rate_limit_rps(db, org_id).await;
+    if rate_limit_rps < 0 {
+        return Ok(None);
+    }
+
+    let configured = conf.get_int_or_default(
+        "api.public-org-inflight-limit",
+        DEFAULT_PUBLIC_ORG_INFLIGHT_LIMIT,
+    );
+    if configured <= 0 {
+        return Ok(None);
+    }
+
+    match STATE.inflight.try_acquire(*org_id, configured as usize) {
+        Ok(guard) => Ok(Some(guard)),
+        Err(current) => {
+            tracing::warn!(
+                context,
+                org_id = %org_id,
+                current,
+                limit = configured,
+                "Public org in-flight limit hit"
+            );
+            Err(RateLimitExceeded {
+                retry_after_secs: 1,
+                message: "Too many requests are currently running for this organization"
+                    .to_string(),
+            })
+        }
+    }
+}
 
 // ============================================================================
 // Middleware
@@ -233,33 +409,10 @@ pub async fn rate_limit_middleware(
         }
     };
 
-    // Get rate_limit_rps for org (cached with 60s TTL)
-    let rate_limit_rps = if let Some(rps) = STATE.features.get(&org_id) {
-        rps
-    } else {
-        let features = Features::resolve_for_org(&db, &org_id).await;
-        let rps = features.rate_limit_rps();
-        STATE.features.insert(org_id, rps);
-        rps
-    };
-
-    // -1 means unlimited — skip the check
-    if rate_limit_rps < 0 {
-        return next.run(request).await;
-    }
-
-    // Enforce the sliding window
-    if let Err(retry_after) = STATE.limiter.check(&org_id, rate_limit_rps) {
-        let retry_after_ceil = retry_after.ceil() as u64;
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [("Retry-After", retry_after_ceil.to_string())],
-            axum::Json(serde_json::json!({
-                "error": "Rate limit exceeded",
-                "retry_after": retry_after_ceil
-            })),
-        )
-            .into_response();
+    if let Err(exceeded) =
+        check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Enforce, "api-v1").await
+    {
+        return rate_limit_response(exceeded);
     }
 
     next.run(request).await
@@ -272,6 +425,15 @@ pub async fn rate_limit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn memory_db() -> hot::db::DatabasePool {
+        hot::db::create_db_pool(&hot::val!({
+            "uri": "sqlite::memory:",
+            "schema": "hot",
+        }))
+        .await
+        .expect("create memory db")
+    }
 
     #[test]
     fn test_sliding_window_allows_within_limit() {
@@ -340,5 +502,102 @@ mod tests {
         // After TTL expires, entry should be stale
         std::thread::sleep(Duration::from_millis(60));
         assert!(cache.get(&org_id).is_none());
+    }
+
+    #[test]
+    fn public_rate_limit_mode_defaults_to_observe() {
+        let empty = Val::map_empty();
+        assert_eq!(
+            PublicRateLimitMode::from_conf(&empty),
+            PublicRateLimitMode::Observe
+        );
+
+        let enforce = hot::val!({
+            "api": {
+                "public-org-rate-limit-mode": "enforce",
+            },
+        });
+        assert_eq!(
+            PublicRateLimitMode::from_conf(&enforce),
+            PublicRateLimitMode::Enforce
+        );
+    }
+
+    #[test]
+    fn inflight_limiter_releases_on_drop() {
+        let limiter = Box::leak(Box::new(InFlightLimiter::new()));
+        let org_id = Uuid::new_v4();
+
+        let guard = limiter.try_acquire(org_id, 1).unwrap();
+        assert!(limiter.try_acquire(org_id, 1).is_err());
+        drop(guard);
+        assert!(limiter.try_acquire(org_id, 1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn public_org_rps_observe_allows_would_block() {
+        let db = memory_db().await;
+        let org_id = Uuid::new_v4();
+        STATE.features.insert(org_id, 1);
+
+        assert!(
+            check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Observe, "test")
+                .await
+                .is_ok()
+        );
+        assert!(
+            check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Observe, "test")
+                .await
+                .is_ok(),
+            "observe mode should log but allow over-limit requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_org_rps_enforce_blocks() {
+        let db = memory_db().await;
+        let org_id = Uuid::new_v4();
+        STATE.features.insert(org_id, 1);
+
+        assert!(
+            check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Enforce, "test")
+                .await
+                .is_ok()
+        );
+        let err = check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Enforce, "test")
+            .await
+            .expect_err("enforce mode should block over-limit requests");
+        assert_eq!(err.message, "Rate limit exceeded");
+        assert!(err.retry_after_secs >= 1);
+    }
+
+    #[tokio::test]
+    async fn public_org_inflight_helper_blocks_and_releases() {
+        let db = memory_db().await;
+        let org_id = Uuid::new_v4();
+        STATE.features.insert(org_id, 1);
+        let conf = hot::val!({
+            "api": {
+                "public-org-inflight-limit": 1,
+            },
+        });
+
+        let guard = check_public_org_inflight(&db, &conf, &org_id, "test")
+            .await
+            .expect("first acquire should not error")
+            .expect("limited org should return a guard");
+        assert!(
+            check_public_org_inflight(&db, &conf, &org_id, "test")
+                .await
+                .is_err(),
+            "second acquire should hit the configured in-flight cap"
+        );
+        drop(guard);
+        assert!(
+            check_public_org_inflight(&db, &conf, &org_id, "test")
+                .await
+                .expect("acquire after drop should not error")
+                .is_some()
+        );
     }
 }
