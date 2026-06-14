@@ -113,6 +113,26 @@ pub async fn create_checkout_handler(
         ));
     }
 
+    if let Err(retry_after) =
+        crate::rate_limit::check_checkout(&conf, &session.user.user_id, &org.org_id, &form.plan_id)
+    {
+        tracing::warn!(
+            key_type = "checkout",
+            key_hash = crate::rate_limit::key_fingerprint(&format!(
+                "{}:{}:{}",
+                session.user.user_id, org.org_id, form.plan_id
+            )),
+            "Checkout rate limit hit"
+        );
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Too many checkout attempts. Please try again in {} minutes.",
+                retry_after.div_ceil(60).max(1)
+            ),
+        ));
+    }
+
     let checkout_url = billing_provider()
         .create_checkout(BillingCheckoutRequest {
             db: &db,
