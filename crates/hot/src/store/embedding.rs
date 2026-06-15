@@ -30,13 +30,13 @@ pub trait EmbeddingProvider: Send + Sync {
 pub mod local {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::OnceCell;
 
     pub struct LocalEmbeddingProvider {
         model_name: String,
         cache_dir: PathBuf,
-        model: OnceCell<Arc<fastembed::TextEmbedding>>,
+        model: OnceCell<Arc<Mutex<fastembed::TextEmbedding>>>,
     }
 
     impl LocalEmbeddingProvider {
@@ -48,7 +48,7 @@ pub mod local {
             }
         }
 
-        async fn get_model(&self) -> Result<Arc<fastembed::TextEmbedding>, String> {
+        async fn get_model(&self) -> Result<Arc<Mutex<fastembed::TextEmbedding>>, String> {
             self.model
                 .get_or_try_init(|| async {
                     let model_name = self.model_name.clone();
@@ -84,7 +84,7 @@ pub mod local {
                         let model = fastembed::TextEmbedding::try_new(init)
                             .map_err(|e| format!("Failed to load embedding model: {e}"))?;
 
-                        Ok(Arc::new(model))
+                        Ok(Arc::new(Mutex::new(model)))
                     })
                     .await
                     .map_err(|e| format!("Embedding model init task failed: {e}"))?
@@ -100,6 +100,9 @@ pub mod local {
             let model = self.get_model().await?;
             let text = text.to_string();
             tokio::task::spawn_blocking(move || {
+                let mut model = model
+                    .lock()
+                    .map_err(|e| format!("Embedding model lock poisoned: {e}"))?;
                 let results = model
                     .embed(vec![text], None)
                     .map_err(|e| format!("Embedding failed: {e}"))?;
@@ -116,6 +119,9 @@ pub mod local {
             let model = self.get_model().await?;
             let texts: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
             tokio::task::spawn_blocking(move || {
+                let mut model = model
+                    .lock()
+                    .map_err(|e| format!("Embedding model lock poisoned: {e}"))?;
                 model
                     .embed(texts, None)
                     .map_err(|e| format!("Batch embedding failed: {e}"))
@@ -144,6 +150,93 @@ pub mod local {
 
         fn provider_type(&self) -> &str {
             "local"
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::LazyLock;
+
+        const TEST_MODEL_NAME: &str = "bge-small-en-v1.5";
+        const TEST_MODEL_DIMENSIONS: usize = 384;
+
+        static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+            LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+        fn test_cache_dir() -> String {
+            std::env::var("HOT_LOCAL_EMBEDDING_TEST_CACHE").unwrap_or_else(|_| {
+                std::env::temp_dir()
+                    .join("hot-local-embedding-tests")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        }
+
+        fn test_provider() -> LocalEmbeddingProvider {
+            LocalEmbeddingProvider::new(TEST_MODEL_NAME, &test_cache_dir())
+        }
+
+        fn assert_embedding_shape(embedding: &[f32]) {
+            assert_eq!(embedding.len(), TEST_MODEL_DIMENSIONS);
+            assert!(
+                embedding.iter().all(|value| value.is_finite()),
+                "embedding contained a non-finite value"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "downloads and initializes a FastEmbed ONNX model"]
+        async fn local_embedding_provider_embeds_single_and_batch() {
+            let _guard = TEST_LOCK.lock().await;
+            let provider = test_provider();
+
+            assert_eq!(provider.provider_type(), "local");
+            assert_eq!(provider.model_name(), TEST_MODEL_NAME);
+            assert_eq!(provider.dimensions(), TEST_MODEL_DIMENSIONS as u32);
+
+            provider.ensure_ready().await.unwrap();
+
+            let single = provider
+                .embed("hot local embedding smoke test")
+                .await
+                .unwrap();
+            assert_embedding_shape(&single);
+
+            let batch = provider
+                .embed_batch(&[
+                    "hot local embedding batch test one",
+                    "hot local embedding batch test two",
+                ])
+                .await
+                .unwrap();
+            assert_eq!(batch.len(), 2);
+            for embedding in batch {
+                assert_embedding_shape(&embedding);
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "downloads and initializes a FastEmbed ONNX model"]
+        async fn local_embedding_provider_handles_concurrent_embeds() {
+            let _guard = TEST_LOCK.lock().await;
+            let provider = Arc::new(test_provider());
+            provider.ensure_ready().await.unwrap();
+
+            let handles = (0..4)
+                .map(|idx| {
+                    let provider = Arc::clone(&provider);
+                    tokio::spawn(async move {
+                        let text = format!("hot local embedding concurrent test {idx}");
+                        provider.embed(&text).await
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                let embedding = handle.await.unwrap().unwrap();
+                assert_embedding_shape(&embedding);
+            }
         }
     }
 }
