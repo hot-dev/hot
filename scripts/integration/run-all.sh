@@ -22,11 +22,11 @@ PKG_DELAY=${PKG_DELAY:-5}
 
 # ── Package groups ──────────────────────────────────────────────
 
-AI_PKGS=(anthropic gemini openai xai)
+AI_PKGS=(anthropic gemini openai qwen xai)
 AWS_PKGS=(aws-bedrock aws-dynamodb aws-lambda aws-s3 aws-secrets-manager aws-ses aws-sns aws-sqs)
 BAAS_PKGS=(supabase supabase-admin)
 EMAIL_PKGS=(postmark resend)
-MESSAGING_PKGS=(slack telegram)
+MESSAGING_PKGS=(discord slack telegram twilio)
 PROTOCOL_PKGS=(json-rpc mcp)
 
 ALL_PKGS=("${AI_PKGS[@]}" "${AWS_PKGS[@]}" "${BAAS_PKGS[@]}" "${EMAIL_PKGS[@]}" "${MESSAGING_PKGS[@]}" "${PROTOCOL_PKGS[@]}")

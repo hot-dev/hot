@@ -59,6 +59,7 @@ fn test_var_roundtrip() {
         deep_set: None,
         deep_path: None,
         meta: None,
+        type_annotation: None,
         src: None,
     };
     assert_roundtrip(&var, "simple Var");
@@ -70,6 +71,7 @@ fn test_var_roundtrip() {
         meta: Some(Meta {
             val: Val::Bool(true),
         }),
+        type_annotation: None,
         src: Some(Source::new(
             Some("test.hot".to_string()),
             1,  // line
@@ -102,9 +104,9 @@ fn test_value_ref_roundtrip() {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         },
-        data: None,
         src: None,
     }));
     assert_roundtrip(&var_ref, "Value::Ref(Var)");
@@ -124,6 +126,7 @@ fn test_value_fn_roundtrip() {
         deep_set: None,
         deep_path: None,
         meta: None,
+        type_annotation: None,
         src: None,
     };
     let fn_def = FnDef {
@@ -149,6 +152,7 @@ fn test_value_lambda_roundtrip() {
         deep_set: None,
         deep_path: None,
         meta: None,
+        type_annotation: None,
         src: None,
     };
     let lambda = Lambda {
@@ -178,9 +182,9 @@ fn test_value_template_literal_roundtrip() {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             })))),
             TemplatePart::Text("!".to_string()),
@@ -229,6 +233,7 @@ fn test_scope_roundtrip() {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         },
         Value::Val(Val::Int(42), None),
@@ -239,6 +244,7 @@ fn test_scope_roundtrip() {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         },
         Value::Val(Val::from("hello"), None),
@@ -257,6 +263,7 @@ fn test_namespace_roundtrip() {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         },
         Value::Ref(Ref::Ns(NsRef {
@@ -292,6 +299,7 @@ fn test_program_roundtrip() {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         },
         Value::Val(Val::Null, None),
@@ -328,6 +336,7 @@ fn test_deeply_nested_value_roundtrip() {
         deep_set: None,
         deep_path: None,
         meta: None,
+        type_annotation: None,
         src: None,
     };
     let lambda = Value::Lambda(Lambda {
@@ -483,9 +492,9 @@ fn test_all_value_variants_covered() {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             })),
             "FnCall" => Value::FnCall(FnCall {

@@ -242,7 +242,7 @@ Any type fn (value: Any): Any                            // Identity (no constra
 Fn type fn (value: Str | Fn): Fn                         // Function reference
 Var type fn (value: Str | Var): Var                      // Variable reference
 Namespace type fn (value: Str | Namespace): Namespace    // Namespace reference
-untype fn (form: Any): Any                               // Strip $type/$val wrappers from typed structures
+untype fn (form: Any): Any                               // Strip internal type metadata from typed structures
 ```
 
 ### JSON

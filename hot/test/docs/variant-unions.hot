@@ -333,6 +333,8 @@ meta ["test"] fn () {
   result match up {
     Direction.Up => "matched up"
     Direction.Down => "matched down"
+    Direction.Left => "matched left"
+    Direction.Right => "matched right"
   }
 
   assert-eq("matched up", result, "match should return 'matched up'")
@@ -346,6 +348,8 @@ meta ["test"] fn () {
   result: All<Map> match up {
     Direction.Up => "matched up"
     Direction.Down => "matched down"
+    Direction.Left => "matched left"
+    Direction.Right => "matched right"
   }
 
   assert-eq(1, length(result), "match All<Map> should have 1 entry")

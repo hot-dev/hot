@@ -172,13 +172,7 @@ pub enum CacheableRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheableVarRef {
     pub var: CacheableVar,
-    pub data: Option<CacheableVarData>,
     pub src: Option<CacheableSource>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheableVarData {
-    pub type_annotation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +197,8 @@ pub struct CacheableVar {
     pub deep_set: Option<CacheableDeepPath>,
     pub deep_path: Option<CacheableDeepPath>,
     pub meta: Option<CacheableMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
     pub src: Option<CacheableSource>,
 }
 
@@ -499,15 +495,8 @@ impl From<&crate::lang::ast::Var> for CacheableVar {
             deep_set: var.deep_set.as_ref().map(CacheableDeepPath::from),
             deep_path: var.deep_path.as_ref().map(CacheableDeepPath::from),
             meta: var.meta.as_ref().map(CacheableMeta::from),
+            type_annotation: var.type_annotation.clone(),
             src: var.src.as_ref().map(CacheableSource::from),
-        }
-    }
-}
-
-impl From<&crate::lang::ast::VarData> for CacheableVarData {
-    fn from(vd: &crate::lang::ast::VarData) -> Self {
-        CacheableVarData {
-            type_annotation: vd.type_annotation.clone(),
         }
     }
 }
@@ -516,7 +505,6 @@ impl From<&crate::lang::ast::VarRef> for CacheableVarRef {
     fn from(vr: &crate::lang::ast::VarRef) -> Self {
         CacheableVarRef {
             var: CacheableVar::from(&vr.var),
-            data: vr.data.as_ref().map(CacheableVarData::from),
             src: vr.src.as_ref().map(CacheableSource::from),
         }
     }
@@ -864,17 +852,8 @@ impl TryFrom<CacheableVar> for crate::lang::ast::Var {
             deep_set: cv.deep_set.map(DeepPath::try_from).transpose()?,
             deep_path: cv.deep_path.map(DeepPath::try_from).transpose()?,
             meta: cv.meta.map(Meta::try_from).transpose()?,
+            type_annotation: cv.type_annotation,
             src: cv.src.map(Source::try_from).transpose()?,
-        })
-    }
-}
-
-impl TryFrom<CacheableVarData> for crate::lang::ast::VarData {
-    type Error = String;
-
-    fn try_from(cvd: CacheableVarData) -> Result<Self, Self::Error> {
-        Ok(crate::lang::ast::VarData {
-            type_annotation: cvd.type_annotation,
         })
     }
 }
@@ -883,10 +862,9 @@ impl TryFrom<CacheableVarRef> for crate::lang::ast::VarRef {
     type Error = String;
 
     fn try_from(cvr: CacheableVarRef) -> Result<Self, Self::Error> {
-        use crate::lang::ast::{Source, Var, VarData, VarRef};
+        use crate::lang::ast::{Source, Var, VarRef};
         Ok(VarRef {
             var: Var::try_from(cvr.var)?,
-            data: cvr.data.map(VarData::try_from).transpose()?,
             src: cvr.src.map(Source::try_from).transpose()?,
         })
     }
@@ -1552,6 +1530,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             Value::Val(Val::Map(Box::new(map)), None),
@@ -1576,6 +1555,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         };
 
@@ -1602,6 +1582,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             Value::Val(Val::Map(Box::new(map)), None),
@@ -1631,6 +1612,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         };
 

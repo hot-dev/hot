@@ -1184,6 +1184,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             lazy: false,

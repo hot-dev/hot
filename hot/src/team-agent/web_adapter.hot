@@ -148,7 +148,7 @@ meta {
     """
 }
 fn (request: HttpRequest): HttpResponse {
-    body or(request.body, request.data, {})
+    body or(request.body, {})
     im to-incoming(body)
     ::agent/process-incoming(im)
     ::hot::http/HttpResponse({status: 200, body: {ok: true, session_id: im.session.id}})

@@ -405,6 +405,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             crate::lang::ast::Value::Val(Val::Map(Box::new(map)), None),
@@ -466,6 +467,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         };
 
@@ -489,6 +491,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             crate::lang::ast::Value::Val(Val::from("hello"), None),
@@ -504,6 +507,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             crate::lang::ast::Value::Val(Val::Map(Box::new(map)), None),
@@ -525,6 +529,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             crate::lang::ast::Value::TemplateLiteral(template_lit),
@@ -539,6 +544,7 @@ mod tests {
                         deep_set: None,
                         deep_path: None,
                         meta: None,
+                        type_annotation: None,
                         src: None,
                     },
                     lazy: false,
@@ -555,6 +561,7 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
             crate::lang::ast::Value::Fn(vec![fn_def]),
@@ -600,6 +607,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         };
         let original_val = original_ns.scope.vars.get(&int_map_var).unwrap();

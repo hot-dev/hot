@@ -150,7 +150,7 @@ on-stripe-payment meta {
   webhook: {service: "billing", path: "/stripe"},
 }
 fn (request) {
-  process-payment(or(request.body, request.data))
+  process-payment(or(request.body, {}))
   {ok: true}
 }
 ```
@@ -541,7 +541,7 @@ qualifier LeadQualifier({
 
 on-signup meta {agent: LeadQualifier, webhook: {service: "leads", path: "/signup"}}
 fn (request) {
-  send("lead:new", or(request.body, request.data))
+  send("lead:new", or(request.body, {}))
   {ok: true}
 }
 

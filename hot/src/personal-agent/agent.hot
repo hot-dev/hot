@@ -248,7 +248,7 @@ meta {
     },
 }
 fn (request: HttpRequest): HttpResponse {
-    body or(request.body, request.data, {})
+    body or(request.body, {})
     identity identity-from-body(body)
     text or(body.text, body.message, "")
     ::agent-runtime/register-session(runtime, identity-session(identity))

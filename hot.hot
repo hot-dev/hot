@@ -39,9 +39,9 @@ hot.project.hot-dev.deps {
     // the demo agent.
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/openai":    { "local": "./hot/pkg/openai" },
-    // "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
-    // "hot.dev/xai": { "local": "./hot/pkg/xai" },
-    // "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
+    "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    "hot.dev/xai": { "local": "./hot/pkg/xai" },
+    "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
 
     // AWS packages
     // "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
@@ -55,55 +55,54 @@ hot.project.hot-dev.deps {
     // "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
 
     // Discord packages
-    // "hot.dev/discord-core": { "local": "./hot/pkg/discord-core" },
-    // "hot.dev/discord-guilds": { "local": "./hot/pkg/discord-guilds" },
-    // "hot.dev/discord-interactions": { "local": "./hot/pkg/discord-interactions" },
-    // "hot.dev/discord-messages": { "local": "./hot/pkg/discord-messages" },
-    // "hot.dev/discord-misc": { "local": "./hot/pkg/discord-misc" },
-    // "hot.dev/discord-oauth": { "local": "./hot/pkg/discord-oauth" },
-    // "hot.dev/discord-users": { "local": "./hot/pkg/discord-users" },
-    // "hot.dev/discord-voice": { "local": "./hot/pkg/discord-voice" },
-    // "hot.dev/discord-webhooks": { "local": "./hot/pkg/discord-webhooks" },
+    "hot.dev/discord-core": { "local": "./hot/pkg/discord-core" },
+    "hot.dev/discord-guilds": { "local": "./hot/pkg/discord-guilds" },
+    "hot.dev/discord-interactions": { "local": "./hot/pkg/discord-interactions" },
+    "hot.dev/discord-messages": { "local": "./hot/pkg/discord-messages" },
+    "hot.dev/discord-misc": { "local": "./hot/pkg/discord-misc" },
+    "hot.dev/discord-oauth": { "local": "./hot/pkg/discord-oauth" },
+    "hot.dev/discord-users": { "local": "./hot/pkg/discord-users" },
+    "hot.dev/discord-voice": { "local": "./hot/pkg/discord-voice" },
+    "hot.dev/discord-webhooks": { "local": "./hot/pkg/discord-webhooks" },
 
     // Email packages
-    // "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
-    // "hot.dev/resend": { "local": "./hot/pkg/resend" },
+    "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
+    "hot.dev/resend": { "local": "./hot/pkg/resend" },
 
     // Slack packages
-    // "hot.dev/slack": { "local": "./hot/pkg/slack" },
-    // "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
+    "hot.dev/slack": { "local": "./hot/pkg/slack" },
+    "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
 
     // Communication packages
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
-    "hot.dev/slack":    { "local": "./hot/pkg/slack" },
 
     // Stripe packages
-    // "hot.dev/stripe-billing": { "local": "./hot/pkg/stripe-billing" },
-    // "hot.dev/stripe-checkout": { "local": "./hot/pkg/stripe-checkout" },
-    // "hot.dev/stripe-climate": { "local": "./hot/pkg/stripe-climate" },
-    // "hot.dev/stripe-connect": { "local": "./hot/pkg/stripe-connect" },
-    // "hot.dev/stripe-core": { "local": "./hot/pkg/stripe-core" },
-    // "hot.dev/stripe-customers": { "local": "./hot/pkg/stripe-customers" },
-    // "hot.dev/stripe-entitlements": { "local": "./hot/pkg/stripe-entitlements" },
-    // "hot.dev/stripe-files": { "local": "./hot/pkg/stripe-files" },
-    // "hot.dev/stripe-identity": { "local": "./hot/pkg/stripe-identity" },
-    // "hot.dev/stripe-issuing": { "local": "./hot/pkg/stripe-issuing" },
-    // "hot.dev/stripe-misc": { "local": "./hot/pkg/stripe-misc" },
-    // "hot.dev/stripe-payments": { "local": "./hot/pkg/stripe-payments" },
-    // "hot.dev/stripe-products": { "local": "./hot/pkg/stripe-products" },
-    // "hot.dev/stripe-radar": { "local": "./hot/pkg/stripe-radar" },
-    // "hot.dev/stripe-reporting": { "local": "./hot/pkg/stripe-reporting" },
-    // "hot.dev/stripe-subscriptions": { "local": "./hot/pkg/stripe-subscriptions" },
-    // "hot.dev/stripe-tax": { "local": "./hot/pkg/stripe-tax" },
-    // "hot.dev/stripe-terminal": { "local": "./hot/pkg/stripe-terminal" },
-    // "hot.dev/stripe-treasury": { "local": "./hot/pkg/stripe-treasury" },
-    // "hot.dev/stripe-webhooks": { "local": "./hot/pkg/stripe-webhooks" },
+    "hot.dev/stripe-billing": { "local": "./hot/pkg/stripe-billing" },
+    "hot.dev/stripe-checkout": { "local": "./hot/pkg/stripe-checkout" },
+    "hot.dev/stripe-climate": { "local": "./hot/pkg/stripe-climate" },
+    "hot.dev/stripe-connect": { "local": "./hot/pkg/stripe-connect" },
+    "hot.dev/stripe-core": { "local": "./hot/pkg/stripe-core" },
+    "hot.dev/stripe-customers": { "local": "./hot/pkg/stripe-customers" },
+    "hot.dev/stripe-entitlements": { "local": "./hot/pkg/stripe-entitlements" },
+    "hot.dev/stripe-files": { "local": "./hot/pkg/stripe-files" },
+    "hot.dev/stripe-identity": { "local": "./hot/pkg/stripe-identity" },
+    "hot.dev/stripe-issuing": { "local": "./hot/pkg/stripe-issuing" },
+    "hot.dev/stripe-misc": { "local": "./hot/pkg/stripe-misc" },
+    "hot.dev/stripe-payments": { "local": "./hot/pkg/stripe-payments" },
+    "hot.dev/stripe-products": { "local": "./hot/pkg/stripe-products" },
+    "hot.dev/stripe-radar": { "local": "./hot/pkg/stripe-radar" },
+    "hot.dev/stripe-reporting": { "local": "./hot/pkg/stripe-reporting" },
+    "hot.dev/stripe-subscriptions": { "local": "./hot/pkg/stripe-subscriptions" },
+    "hot.dev/stripe-tax": { "local": "./hot/pkg/stripe-tax" },
+    "hot.dev/stripe-terminal": { "local": "./hot/pkg/stripe-terminal" },
+    "hot.dev/stripe-treasury": { "local": "./hot/pkg/stripe-treasury" },
+    "hot.dev/stripe-webhooks": { "local": "./hot/pkg/stripe-webhooks" },
 
     // Twilio package
-    // "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
+    "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
 
     // Backend-as-a-Service
-    // "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
+    "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
 
     // Box tool packages (container-based CLI tools)
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
@@ -258,6 +257,34 @@ hot.project.pkg-test-mcp.deps {
     "hot.dev/hot-ai":   { "local": "./hot/pkg/hot-ai" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" }
 }
+
+// anthropic unit tests (hermetic; live smoke tests self-gate on HOT_LIVE_TESTS)
+hot.project.pkg-test-anthropic.src.paths ["./hot/pkg/anthropic/src"]
+hot.project.pkg-test-anthropic.test.paths ["./hot/pkg/anthropic/test"]
+hot.project.pkg-test-anthropic.test.capture true
+hot.project.pkg-test-anthropic.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// openai unit tests (hermetic; live smoke tests self-gate on HOT_LIVE_TESTS)
+hot.project.pkg-test-openai.src.paths ["./hot/pkg/openai/src"]
+hot.project.pkg-test-openai.test.paths ["./hot/pkg/openai/test"]
+hot.project.pkg-test-openai.test.capture true
+hot.project.pkg-test-openai.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// supabase unit tests (pure-Hot filter/query builders, no network required)
+hot.project.pkg-test-supabase.src.paths ["./hot/pkg/supabase/src"]
+hot.project.pkg-test-supabase.test.paths ["./hot/pkg/supabase/test"]
+hot.project.pkg-test-supabase.test.capture true
+hot.project.pkg-test-supabase.deps {}
+
+// supabase-admin unit tests (pure-Hot path builders, no network required)
+hot.project.pkg-test-supabase-admin.src.paths ["./hot/pkg/supabase-admin/src"]
+hot.project.pkg-test-supabase-admin.test.paths ["./hot/pkg/supabase-admin/test"]
+hot.project.pkg-test-supabase-admin.test.capture true
+hot.project.pkg-test-supabase-admin.deps {}
 
 // =============================================================================
 // TeamAgent Agent Demo
@@ -470,6 +497,26 @@ hot.project.pkg-integration-telegram.src.paths ["./hot/pkg/telegram/src"]
 hot.project.pkg-integration-telegram.test.paths ["./hot/pkg/telegram/integration-test"]
 hot.project.pkg-integration-telegram.test.capture true
 hot.project.pkg-integration-telegram.deps {}
+
+// Discord integration tests
+hot.project.pkg-integration-discord.src.paths ["./hot/pkg/discord/src"]
+hot.project.pkg-integration-discord.test.paths ["./hot/pkg/discord/integration-test"]
+hot.project.pkg-integration-discord.test.capture true
+hot.project.pkg-integration-discord.deps {}
+
+// Twilio integration tests
+hot.project.pkg-integration-twilio.src.paths ["./hot/pkg/twilio/src"]
+hot.project.pkg-integration-twilio.test.paths ["./hot/pkg/twilio/integration-test"]
+hot.project.pkg-integration-twilio.test.capture true
+hot.project.pkg-integration-twilio.deps {}
+
+// Qwen integration tests
+hot.project.pkg-integration-qwen.src.paths ["./hot/pkg/qwen/src"]
+hot.project.pkg-integration-qwen.test.paths ["./hot/pkg/qwen/integration-test"]
+hot.project.pkg-integration-qwen.test.capture true
+hot.project.pkg-integration-qwen.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
 
 // JSON-RPC integration tests
 hot.project.pkg-integration-json-rpc.src.paths ["./hot/pkg/json-rpc/src"]

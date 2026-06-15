@@ -513,14 +513,15 @@ greet fn
 
 ## Untyping for Serialization
 
-Typed values carry `$type` and `$val` metadata internally. Use `untype` before
-serializing typed data for JSON APIs or storage that expects plain maps:
+Typed values carry internal runtime metadata. User code should rely on normal
+field access, `match`, and `is-type`; use `untype` before serializing typed data
+for JSON APIs or storage that expects plain maps:
 
 ```hot
 User type { id: Str, email: Str }
 user User({id: "u1", email: "a@example.com"})
 
-to-json(user)          // includes $type/$val
+to-json(user)          // includes internal type metadata
 to-json(untype(user))  // {"id":"u1","email":"a@example.com"}
 ```
 

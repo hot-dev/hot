@@ -6,8 +6,9 @@ meta {
     on-event: "demo:webhook"
 }
 fn (request) {
-    event-type or(request.body.type, request.data.type)
-    payload or(request.body.data.object, request.data.data.object)
+    body or(request.body, {})
+    event-type body.type
+    payload body.data.object
 
     cond {
         eq(event-type, "payment_intent.succeeded") => {

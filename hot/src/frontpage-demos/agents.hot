@@ -39,7 +39,7 @@ meta {
     on-event: "demo:lead-signup"
 }
 fn (request) {
-  lead or(request.body, request.data)
+  lead or(request.body, {})
   ::store/put(leads, or(lead.email, Uuid()), lead)
   send("lead:new", lead)
   {ok: true}
@@ -146,7 +146,7 @@ meta {
     webhook: {service: "leads", path: "/crm-update"},
 }
 fn (request) {
-  data or(request.body, request.data)
+  data or(request.body, {})
   ::store/put(leads, or(data.email, Uuid()), {
     ...data,
     source: "crm",
