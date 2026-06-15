@@ -1,0 +1,109 @@
+::aws::s3::presigned ns
+
+// S3 Presigned URL operations
+
+::ctx ::hot::ctx
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+s3-endpoint ::aws::core/s3-endpoint
+sign-url ::aws::core/sign-url
+
+// Generate a presigned URL for S3 GET operations
+generate-presigned-url
+meta {
+    doc: """
+    Generate a presigned URL for downloading an S3 object.
+
+    The URL allows temporary access to the object without credentials.
+    expires_in is in seconds (default 3600 = 1 hour, max 604800 = 7 days).
+
+    **Example**
+
+    ```hot
+    // Generate a 1-hour download URL
+    url ::aws::s3::presigned/generate-presigned-url("my-bucket", "path/to/file.pdf", 3600)
+    // => "https://my-bucket.s3.amazonaws.com/path/to/file.pdf?X-Amz-Algorithm=..."
+
+    // Download using the presigned URL (no AWS credentials needed)
+    ::http ::hot::http
+    response ::http/get(url)
+    response.body  // => file contents
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, expires_in: Int): Str {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    sign-url("GET", url, region, "s3", credentials, expires_in)
+},
+(bucket: Str, key: Str): Str {
+    generate-presigned-url(bucket, key, 3600)
+}
+
+// Generate a presigned URL for S3 PUT operations (upload)
+generate-presigned-upload-url
+meta {
+    doc: """
+    Generate a presigned URL for uploading an S3 object.
+
+    The URL allows temporary upload access without credentials.
+    expires_in is in seconds (default 3600 = 1 hour, max 604800 = 7 days).
+
+    **Example**
+
+    ```hot
+    // Generate a 1-hour upload URL
+    url ::aws::s3::presigned/generate-presigned-upload-url("my-bucket", "uploads/file.txt", 3600)
+
+    // Upload using the presigned URL (no AWS credentials needed)
+    ::http ::hot::http
+    ::http/put(url, "File content here")
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, expires_in: Int): Str {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    sign-url("PUT", url, region, "s3", credentials, expires_in)
+},
+(bucket: Str, key: Str): Str {
+    generate-presigned-upload-url(bucket, key, 3600)
+}
+
+// Generate a presigned URL for S3 DELETE operations
+generate-presigned-delete-url
+meta {
+    doc: """
+    Generate a presigned URL for deleting an S3 object.
+
+    The URL allows temporary delete access without credentials.
+    expires_in is in seconds (default 3600 = 1 hour, max 604800 = 7 days).
+
+    **Example**
+
+    ```hot
+    url ::aws::s3::presigned/generate-presigned-delete-url("my-bucket", "path/to/file.txt", 3600)
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, expires_in: Int): Str {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    sign-url("DELETE", url, region, "s3", credentials, expires_in)
+},
+(bucket: Str, key: Str): Str {
+    generate-presigned-delete-url(bucket, key, 3600)
+}

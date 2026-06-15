@@ -1,0 +1,34 @@
+::aws::bedrock ns
+meta {
+    ctx: {"aws.access-key-id": {required: true}, "aws.secret-access-key": {required: true}, "aws.session-token": {required: false}, "aws.region": {required: false}}
+}
+
+// AWS Bedrock Package
+// Provides foundation model inference (Claude, Titan, Llama, Mistral, and more)
+
+// Re-export core AWS types
+Credentials ::aws::core/Credentials
+AwsError ::aws::core/AwsError
+
+// Re-export Bedrock types
+InvokeModelResponse ::aws::bedrock::invoke/InvokeModelResponse
+ConverseResponse ::aws::bedrock::converse/ConverseResponse
+Message ::aws::bedrock::converse/Message
+ContentBlock ::aws::bedrock::converse/ContentBlock
+FoundationModel ::aws::bedrock::models/FoundationModel
+ListFoundationModelsResponse ::aws::bedrock::models/ListFoundationModelsResponse
+
+// Re-export model invocation operations
+invoke-model ::aws::bedrock::invoke/invoke-model
+invoke-claude ::aws::bedrock::invoke/invoke-claude
+invoke-titan ::aws::bedrock::invoke/invoke-titan
+invoke-llama ::aws::bedrock::invoke/invoke-llama
+invoke-mistral ::aws::bedrock::invoke/invoke-mistral
+
+// Re-export converse API (unified interface)
+converse ::aws::bedrock::converse/converse
+converse-stream ::aws::bedrock::converse/converse-stream
+
+// Re-export model management
+list-foundation-models ::aws::bedrock::models/list-foundation-models
+get-foundation-model ::aws::bedrock::models/get-foundation-model

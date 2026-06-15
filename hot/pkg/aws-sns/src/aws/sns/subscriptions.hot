@@ -1,0 +1,397 @@
+::aws::sns::subscriptions ns
+
+// SNS Subscription operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Subscription type
+Subscription type {
+    subscription_arn: Str?,
+    owner: Str?,
+    protocol: Str?,
+    endpoint: Str?,
+    topic_arn: Str?
+}
+
+// Subscribe response
+SubscribeResponse type {
+    subscription_arn: Str?
+}
+
+// List subscriptions response
+ListSubscriptionsResponse type {
+    subscriptions: Vec<Subscription>,
+    next_token: Str?
+}
+
+// Get subscription attributes response
+GetSubscriptionAttributesResponse type {
+    attributes: Map
+}
+
+// Subscribe to a topic
+subscribe
+meta {
+    doc: """
+    Subscribe an endpoint to an SNS topic.
+
+    Supported protocols: "http", "https", "email", "email-json", "sms",
+    "sqs", "lambda", "application", "firehose".
+
+    **Example**
+
+    ```hot
+    // Subscribe an SQS queue
+    result ::aws::sns::subscriptions/subscribe(topic-arn, "sqs", queue-arn)
+    result.subscription_arn  // => "arn:aws:sns:us-east-1:123456:my-topic:abc-123..."
+
+    // Subscribe a Lambda function
+    ::aws::sns::subscriptions/subscribe(topic-arn, "lambda", lambda-arn)
+
+    // Subscribe with filter policy
+    ::aws::sns::subscriptions/subscribe(topic-arn, "sqs", queue-arn, {
+        FilterPolicy: to-json({event_type: ["order", "payment"]})
+    })
+    ```
+    """
+}
+fn
+(topic_arn: Str, protocol: Str, endpoint: Str, attributes: Map): SubscribeResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {
+        TopicArn: topic_arn,
+        Protocol: protocol,
+        Endpoint: endpoint
+    }
+
+    with-attributes if(is-empty(attributes), request-body,
+        {...request-body, Attributes: attributes}
+    )
+
+    body to-json(with-attributes)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.Subscribe",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SubscribeResponse({
+            subscription_arn: response.body.SubscriptionArn
+        }),
+        err(AwsError(response))
+    )
+},
+(topic_arn: Str, protocol: Str, endpoint: Str): SubscribeResponse | AwsError {
+    subscribe(topic_arn, protocol, endpoint, {})
+}
+
+// Unsubscribe from a topic
+unsubscribe
+meta {
+    doc: """
+    Unsubscribe from an SNS topic.
+
+    **Example**
+
+    ```hot
+    ::aws::sns::subscriptions/unsubscribe(subscription-arn)
+    ```
+    """
+}
+fn (subscription_arn: Str): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        SubscriptionArn: subscription_arn
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.Unsubscribe",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}
+
+// Confirm a subscription (for HTTP/HTTPS endpoints)
+confirm-subscription
+meta {
+    doc: """
+    Confirm a pending subscription using the token from the confirmation message.
+
+    Required for HTTP/HTTPS and email subscriptions.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::subscriptions/confirm-subscription(topic-arn, confirmation-token)
+    result.subscription_arn  // => "arn:aws:sns:us-east-1:123456:my-topic:abc-123..."
+    ```
+    """
+}
+fn (topic_arn: Str, token: Str): SubscribeResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        TopicArn: topic_arn,
+        Token: token
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.ConfirmSubscription",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SubscribeResponse({
+            subscription_arn: response.body.SubscriptionArn
+        }),
+        err(AwsError(response))
+    )
+}
+
+// List all subscriptions
+list-subscriptions
+meta {
+    doc: """
+    List all subscriptions across all topics. Supports pagination via next_token.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::subscriptions/list-subscriptions()
+    result.subscriptions
+    // => [{subscription_arn: "arn:...", protocol: "sqs", endpoint: "arn:aws:sqs:...", ...}]
+    ```
+    """
+}
+fn
+(next_token: Str): ListSubscriptionsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {}
+
+    with-token if(is-null(next_token), request-body,
+        {...request-body, NextToken: next_token}
+    )
+
+    body to-json(with-token)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.ListSubscriptions",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ListSubscriptionsResponse({
+            subscriptions: if(is-null(response.body.Subscriptions), [], map(response.body.Subscriptions, Subscription({
+                subscription_arn: %.SubscriptionArn,
+                owner: %.Owner,
+                protocol: %.Protocol,
+                endpoint: %.Endpoint,
+                topic_arn: %.TopicArn
+            }))),
+            next_token: response.body.NextToken
+        }),
+        err(AwsError(response))
+    )
+},
+(): ListSubscriptionsResponse | AwsError {
+    list-subscriptions(null)
+}
+
+// List subscriptions by topic
+list-subscriptions-by-topic
+meta {
+    doc: """
+    List all subscriptions for a specific topic. Supports pagination via next_token.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::subscriptions/list-subscriptions-by-topic(topic-arn)
+    length(result.subscriptions)  // => 3
+    ```
+    """
+}
+fn
+(topic_arn: Str, next_token: Str): ListSubscriptionsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {
+        TopicArn: topic_arn
+    }
+
+    with-token if(is-null(next_token), request-body,
+        {...request-body, NextToken: next_token}
+    )
+
+    body to-json(with-token)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.ListSubscriptionsByTopic",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ListSubscriptionsResponse({
+            subscriptions: if(is-null(response.body.Subscriptions), [], map(response.body.Subscriptions, Subscription({
+                subscription_arn: %.SubscriptionArn,
+                owner: %.Owner,
+                protocol: %.Protocol,
+                endpoint: %.Endpoint,
+                topic_arn: %.TopicArn
+            }))),
+            next_token: response.body.NextToken
+        }),
+        err(AwsError(response))
+    )
+},
+(topic_arn: Str): ListSubscriptionsResponse | AwsError {
+    list-subscriptions-by-topic(topic_arn, null)
+}
+
+// Get subscription attributes
+get-subscription-attributes
+meta {
+    doc: """
+    Get attributes of an SNS subscription.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::subscriptions/get-subscription-attributes(subscription-arn)
+    result.attributes  // => {Protocol: "sqs", Endpoint: "arn:aws:sqs:...", ...}
+    ```
+    """
+}
+fn (subscription_arn: Str): GetSubscriptionAttributesResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        SubscriptionArn: subscription_arn
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.GetSubscriptionAttributes",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        GetSubscriptionAttributesResponse({
+            attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Set subscription attributes
+set-subscription-attributes
+meta {
+    doc: """
+    Set a single attribute of an SNS subscription.
+
+    Common attribute names: FilterPolicy, FilterPolicyScope, RawMessageDelivery, RedrivePolicy.
+
+    **Example**
+
+    ```hot
+    // Enable raw message delivery for SQS
+    ::aws::sns::subscriptions/set-subscription-attributes(subscription-arn, "RawMessageDelivery", "true")
+
+    // Set a filter policy
+    ::aws::sns::subscriptions/set-subscription-attributes(
+        subscription-arn,
+        "FilterPolicy",
+        to-json({event_type: ["order"]})
+    )
+    ```
+    """
+}
+fn (subscription_arn: Str, attribute_name: Str, attribute_value: Str): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        SubscriptionArn: subscription_arn,
+        AttributeName: attribute_name,
+        AttributeValue: attribute_value
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.SetSubscriptionAttributes",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}

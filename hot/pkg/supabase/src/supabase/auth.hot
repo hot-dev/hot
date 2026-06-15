@@ -66,6 +66,7 @@ result.user.id  // => "uuid-..."
 """
 }
 fn (request: SignUpRequest): AuthResponse {
+  security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {password: request.password}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -73,7 +74,7 @@ fn (request: SignUpRequest): AuthResponse {
     |> assoc-some("data", request.data)
     |> assoc-some("code_challenge", request.code_challenge)
     |> assoc-some("code_challenge_method", request.code_challenge_method)
-    |> assoc-some("gotrue_meta_security", if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null))
+    |> assoc-some("gotrue_meta_security", security)
 
   ::api/request("POST", "/auth/v1/signup", {}, body)
 }
@@ -110,10 +111,11 @@ session.user.id        // => "uuid-..."
 """
 }
 fn (request: SignInPasswordRequest): AuthResponse {
+  security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {password: request.password}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
-    |> assoc-some("gotrue_meta_security", if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null))
+    |> assoc-some("gotrue_meta_security", security)
 
   ::api/request("POST", "/auth/v1/token?grant_type=password", {}, body)
 }
@@ -152,6 +154,7 @@ Send a magic link (email) or OTP code (phone). The user clicks the link or enter
 """
 }
 fn (request: SignInOtpRequest): Map {
+  security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -160,7 +163,7 @@ fn (request: SignInOtpRequest): Map {
     |> assoc-some("data", request.data)
     |> assoc-some("code_challenge", request.code_challenge)
     |> assoc-some("code_challenge_method", request.code_challenge_method)
-    |> assoc-some("gotrue_meta_security", if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null))
+    |> assoc-some("gotrue_meta_security", security)
 
   ::api/request("POST", "/auth/v1/otp", {}, body)
 }

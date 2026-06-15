@@ -4405,7 +4405,7 @@ impl VirtualMachine {
         };
 
         matches!(map.get(&Val::from("$optional")), Some(Val::Bool(true)))
-            || matches!(map.get(&Val::from("$type")), Some(Val::Str(t)) if &**t == "Null")
+            || matches!(map.get(&Val::from("$type")), Some(Val::Str(t)) if Self::normalized_builtin_type_name(t) == Some("Null"))
             || matches!(map.get(&Val::from("$literal")), Some(Val::Str(t)) if &**t == "null")
     }
 
@@ -4446,18 +4446,43 @@ impl VirtualMachine {
             return false;
         };
 
-        match type_name {
-            "Any" => true,
-            "Str" | "String" => matches!(value, Val::Str(_)),
-            "Int" | "Integer" => matches!(value, Val::Int(_)),
-            "Dec" | "Number" => matches!(value, Val::Dec(_) | Val::Int(_)),
-            "Bool" | "Boolean" => matches!(value, Val::Bool(_)),
-            "Null" => matches!(value, Val::Null),
-            "Vec" => matches!(value, Val::Vec(_)),
-            "Map" => matches!(value, Val::Map(_)),
-            "Byte" => matches!(value, Val::Byte(_)),
-            "Bytes" => matches!(value, Val::Bytes(_)),
+        match Self::normalized_builtin_type_name(type_name) {
+            Some("Any") => true,
+            Some("Str") => matches!(value, Val::Str(_)),
+            Some("Int") => matches!(value, Val::Int(_)),
+            Some("Dec") => matches!(value, Val::Dec(_) | Val::Int(_)),
+            Some("Bool") => matches!(value, Val::Bool(_)),
+            Some("Null") => matches!(value, Val::Null),
+            Some("Vec") => matches!(value, Val::Vec(_)),
+            Some("Map") => matches!(value, Val::Map(_)),
+            Some("Byte") => matches!(value, Val::Byte(_)),
+            Some("Bytes") => matches!(value, Val::Bytes(_)),
             _ => false,
+        }
+    }
+
+    fn normalized_builtin_type_name(type_name: &str) -> Option<&'static str> {
+        let normalized = type_name.trim_end_matches('?');
+        let short_name = if let Some(hot_type_name) = normalized.strip_prefix("::hot::type/") {
+            hot_type_name
+        } else if normalized.contains('/') {
+            return None;
+        } else {
+            normalized
+        };
+
+        match short_name {
+            "Any" => Some("Any"),
+            "Str" | "String" => Some("Str"),
+            "Int" | "Integer" => Some("Int"),
+            "Dec" | "Number" => Some("Dec"),
+            "Bool" | "Boolean" => Some("Bool"),
+            "Null" => Some("Null"),
+            "Vec" => Some("Vec"),
+            "Map" => Some("Map"),
+            "Byte" => Some("Byte"),
+            "Bytes" => Some("Bytes"),
+            _ => None,
         }
     }
 
@@ -4484,10 +4509,6 @@ impl VirtualMachine {
             return false;
         };
         Self::is_builtin_type(type_name)
-            || matches!(
-                type_name,
-                "String" | "Integer" | "Number" | "Boolean" | "Byte" | "Bytes"
-            )
     }
 
     fn type_info_type_name(type_info: &Val) -> Option<&str> {
@@ -4511,11 +4532,10 @@ impl VirtualMachine {
     }
 
     fn type_info_preserves_result_values(type_info: &Val) -> bool {
-        if let Some(type_name) = Self::type_info_type_name(type_info) {
-            let normalized = type_name.trim_end_matches('?');
-            if normalized == "Any" || normalized.ends_with("/Any") {
-                return true;
-            }
+        if let Some(type_name) = Self::type_info_type_name(type_info)
+            && Self::normalized_builtin_type_name(type_name) == Some("Any")
+        {
+            return true;
         }
 
         let Val::Map(map) = type_info else {
@@ -4539,21 +4559,7 @@ impl VirtualMachine {
 
     /// Check if a type name is a builtin type (doesn't need typed construction)
     fn is_builtin_type(type_name: &str) -> bool {
-        matches!(
-            type_name,
-            "Str"
-                | "String"
-                | "Int"
-                | "Integer"
-                | "Dec"
-                | "Number"
-                | "Bool"
-                | "Boolean"
-                | "Null"
-                | "Vec"
-                | "Map"
-                | "Any"
-        )
+        Self::normalized_builtin_type_name(type_name).is_some()
     }
 
     /// Look up a variable in the scope chain (lexical scoping)

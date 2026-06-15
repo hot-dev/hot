@@ -536,7 +536,7 @@ untype
 meta {
     core: true,
     doc: """
-    Transform Hot typed structures to simple Val structures by removing $type and $val metadata.
+    Transform Hot typed structures to simple Val structures by removing internal type metadata.
 
     **Example**
 

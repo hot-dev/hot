@@ -1,0 +1,192 @@
+::aws::dynamodb::batch ns
+
+// DynamoDB batch operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Batch get response
+BatchGetResponse type {
+    responses: Map,
+    unprocessed_keys: Map?,
+    consumed_capacity: Vec<Map>?
+}
+
+// Batch write response
+BatchWriteResponse type {
+    unprocessed_items: Map?,
+    consumed_capacity: Vec<Map>?
+}
+
+// Batch get items from multiple tables
+batch-get-item
+meta {
+    doc: """
+    Get multiple items from one or more tables in a single request. Max 100 items.
+
+    **Example**
+
+    ```hot
+    request-items batch-get-keys("my-table", [
+        {pk: {S: "user-1"}, sk: {S: "profile"}},
+        {pk: {S: "user-2"}, sk: {S: "profile"}}
+    ])
+    result ::aws::dynamodb::batch/batch-get-item(request-items)
+    items result.responses["my-table"]
+    ```
+    """
+}
+fn (request_items: Map): BatchGetResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    body to-json({
+        RequestItems: request_items
+    })
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.BatchGetItem",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        BatchGetResponse({
+            responses: if(is-null(response.body.Responses), {}, response.body.Responses),
+            unprocessed_keys: response.body.UnprocessedKeys,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Batch write items to multiple tables
+batch-write-item
+meta {
+    doc: """
+    Put or delete multiple items in one or more tables in a single request. Max 25 items.
+
+    **Example**
+
+    ```hot
+    // Batch put items
+    request-items batch-put-items("my-table", [
+        {pk: {S: "user-1"}, sk: {S: "profile"}, name: {S: "Alice"}},
+        {pk: {S: "user-2"}, sk: {S: "profile"}, name: {S: "Bob"}}
+    ])
+    result ::aws::dynamodb::batch/batch-write-item(request-items)
+
+    // Batch delete items
+    request-items batch-delete-keys("my-table", [
+        {pk: {S: "user-1"}, sk: {S: "profile"}},
+        {pk: {S: "user-2"}, sk: {S: "profile"}}
+    ])
+    ::aws::dynamodb::batch/batch-write-item(request-items)
+    ```
+    """
+}
+fn (request_items: Map): BatchWriteResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    body to-json({
+        RequestItems: request_items
+    })
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.BatchWriteItem",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        BatchWriteResponse({
+            unprocessed_items: response.body.UnprocessedItems,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Helper to create a batch get request for a single table
+batch-get-keys
+meta {
+    doc: """
+    Helper to create a batch get request structure for a single table.
+
+    **Example**
+
+    ```hot
+    request-items ::aws::dynamodb::batch/batch-get-keys("my-table", [
+        {pk: {S: "user-1"}, sk: {S: "profile"}},
+        {pk: {S: "user-2"}, sk: {S: "profile"}}
+    ])
+    // => {"my-table": {Keys: [...]}}
+    ```
+    """
+}
+fn (table_name: Str, keys: Vec<Map>): Map {
+    Map([[table_name, { Keys: keys }]])
+}
+
+// Helper to create a batch put request for a single table
+batch-put-items
+meta {
+    doc: """
+    Helper to create a batch write request structure for putting items to a single table.
+
+    **Example**
+
+    ```hot
+    request-items ::aws::dynamodb::batch/batch-put-items("my-table", [
+        {pk: {S: "user-1"}, name: {S: "Alice"}},
+        {pk: {S: "user-2"}, name: {S: "Bob"}}
+    ])
+    // => {"my-table": [{PutRequest: {Item: ...}}, ...]}
+    ```
+    """
+}
+fn (table_name: Str, items: Vec<Map>): Map {
+    requests map(items, { PutRequest: { Item: % } })
+    Map([[table_name, requests]])
+}
+
+// Helper to create a batch delete request for a single table
+batch-delete-keys
+meta {
+    doc: """
+    Helper to create a batch write request structure for deleting items from a single table.
+
+    **Example**
+
+    ```hot
+    request-items ::aws::dynamodb::batch/batch-delete-keys("my-table", [
+        {pk: {S: "user-1"}, sk: {S: "profile"}},
+        {pk: {S: "user-2"}, sk: {S: "profile"}}
+    ])
+    // => {"my-table": [{DeleteRequest: {Key: ...}}, ...]}
+    ```
+    """
+}
+fn (table_name: Str, keys: Vec<Map>): Map {
+    requests map(keys, { DeleteRequest: { Key: % } })
+    Map([[table_name, requests]])
+}

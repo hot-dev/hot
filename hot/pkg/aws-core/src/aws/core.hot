@@ -1,0 +1,637 @@
+::aws::core ns
+
+// Namespace aliases
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+// Crypto imports for AWS Signature V4
+sha256 ::hot::hash/sha256
+hmac-sha256 ::hot::hmac/hmac-sha256
+hmac-sha256-bytes ::hot::hmac/hmac-sha256-bytes
+
+// String utilities
+split ::hot::str/split
+join ::hot::str/join
+trim ::hot::str/trim
+lowercase ::hot::str/lowercase
+pad-start ::hot::str/pad-start
+starts-with ::hot::str/starts-with
+replace ::hot::str/replace
+uppercase ::hot::str/uppercase
+contains ::hot::str/contains
+
+// Time utilities - use now() for UTC time
+now ::hot::time/now
+
+// AWS Credentials type
+Credentials
+meta { doc: """AWS credentials used for signing requests.""" }
+type {
+    access_key_id: Str,
+    secret_access_key: Str,
+    session_token: Str?
+}
+
+// AWS Region type
+Region
+meta { doc: """AWS region identifier.""" }
+type {
+    name: Str
+}
+
+// AWS Error response type
+AwsError
+meta { doc: """Error response from an AWS service request.""" }
+type {
+    status: Int,
+    code: Str?,
+    message: Str?,
+    request_id: Str?,
+    body: Any
+}
+
+// Convert HTTP response to AwsError
+HttpResponse -> AwsError fn (response: HttpResponse): AwsError {
+    AwsError({
+        status: response.status,
+        code: null,
+        message: null,
+        request_id: null,
+        body: response.body
+    })
+}
+
+// Get AWS credentials from context
+get-credentials
+meta {
+    doc: """Get AWS credentials from context (aws.access-key-id, aws.secret-access-key)""",
+    ctx: {
+        "aws.access-key-id": {},
+        "aws.secret-access-key": {},
+        "aws.session-token": {required: false}
+    }
+}
+fn (): Credentials {
+    access_key_id ::ctx/get("aws.access-key-id")
+    secret_access_key ::ctx/get("aws.secret-access-key")
+    session_token ::ctx/get("aws.session-token")
+
+    Credentials({access_key_id, secret_access_key, session_token})
+}
+
+// Get AWS region from context
+get-region
+meta {
+    doc: """Get AWS region from context (aws.region). Defaults to us-east-1 if not set.""",
+    ctx: {"aws.region": {required: false, default: "us-east-1"}}
+}
+fn (): Str {
+    ctx-region ::ctx/get("aws.region")
+    if(is-null(ctx-region), "us-east-1", ctx-region)
+}
+
+// =============================================================================
+// AWS Signature V4 Implementation
+// =============================================================================
+
+// Parse URL to extract host, path, and query string
+parse-url
+meta {
+    doc: """Parse a URL into components: {host, path, query}"""
+}
+fn (url: Str): Map {
+    // Remove protocol
+    without-protocol if(starts-with(url, "https://"),
+        slice(url, 8, length(url)),
+        if(starts-with(url, "http://"),
+            slice(url, 7, length(url)),
+            url
+        )
+    )
+
+    // FIRST split by "?" to separate query string (which may contain "/" in values)
+    url-query-parts split(without-protocol, "?")
+    host-and-path first(url-query-parts)
+    query if(gt(length(url-query-parts), 1), get(url-query-parts, 1), "")
+
+    // NOW split host from path using "/"
+    parts-by-slash split(host-and-path, "/")
+    host first(parts-by-slash)
+    rest-parts rest(parts-by-slash)
+    path if(is-empty(rest-parts),
+        "/",
+        `/${join(rest-parts, "/")}`
+    )
+
+    {host, path, query}
+}
+
+// Get current UTC timestamp in AWS format
+get-amz-date
+meta {
+    doc: """Get current UTC timestamp in AWS format (YYYYMMDD'T'HHMMSS'Z')"""
+}
+fn (): Str {
+    // now() returns Instant which is UTC
+    // Str(instant) gives ISO format like "2024-12-04T15:30:00Z"
+    instant now()
+    iso Str(instant)
+
+    // Parse ISO format: "YYYY-MM-DDTHH:MM:SSZ"
+    // We need: "YYYYMMDDTHHMMSSZ"
+    date-part slice(iso, 0, 10)  // "YYYY-MM-DD"
+    time-part slice(iso, 11, 19) // "HH:MM:SS"
+
+    // Remove dashes from date
+    date-parts split(date-part, "-")
+    year-str first(date-parts)
+    month-str get(date-parts, 1)
+    day-str get(date-parts, 2)
+
+    // Remove colons from time
+    time-parts split(time-part, ":")
+    hour-str first(time-parts)
+    minute-str get(time-parts, 1)
+    second-str get(time-parts, 2)
+
+    `${year-str}${month-str}${day-str}T${hour-str}${minute-str}${second-str}Z`
+}
+
+// Get date stamp (YYYYMMDD)
+get-date-stamp
+meta {
+    doc: """Get current UTC date in AWS format (YYYYMMDD)"""
+}
+fn (): Str {
+    // now() returns Instant which is UTC
+    instant now()
+    iso Str(instant)
+
+    // Parse ISO format: "YYYY-MM-DDTHH:MM:SSZ"
+    date-part slice(iso, 0, 10)  // "YYYY-MM-DD"
+
+    // Remove dashes from date
+    date-parts split(date-part, "-")
+    year-str first(date-parts)
+    month-str get(date-parts, 1)
+    day-str get(date-parts, 2)
+
+    `${year-str}${month-str}${day-str}`
+}
+
+// URI encode a string (AWS-style)
+uri-encode
+meta {
+    doc: """URI encode a string for AWS canonical request. Encodes all characters except unreserved characters."""
+}
+fn (s: Str): Str {
+    // For now, return as-is - a full implementation would encode special chars
+    // AWS requires encoding everything except: A-Z a-z 0-9 - _ . ~
+    s
+}
+
+// URL-encode a single value for AWS canonical query string
+// Only encodes characters that must be encoded per RFC 3986 + AWS requirements
+url-encode-value
+meta {
+    doc: """URL-encode a value for AWS query string (encodes / and other special chars)"""
+}
+fn (value: Str): Str {
+    // Replace special characters that need encoding
+    // Note: using replace-all via recursion for each character
+    v1 replace-all-char(value, "/", "%2F")
+    v2 replace-all-char(v1, ":", "%3A")
+    v3 replace-all-char(v2, " ", "%20")
+    v4 replace-all-char(v3, "+", "%2B")
+    v5 replace-all-char(v4, "?", "%3F")
+    v6 replace-all-char(v5, "#", "%23")
+    v6
+}
+
+// URL-encode a path for AWS canonical URI (does NOT encode /)
+url-encode-path
+meta {
+    doc: """URL-encode a URI path for AWS canonical request (encodes : but not /)"""
+}
+fn (path: Str): Str {
+    // Encode special characters except /
+    v1 replace-all-char(path, ":", "%3A")
+    v2 replace-all-char(v1, " ", "%20")
+    v3 replace-all-char(v2, "+", "%2B")
+    v4 replace-all-char(v3, "?", "%3F")
+    v5 replace-all-char(v4, "#", "%23")
+    v5
+}
+
+// Helper to replace all occurrences of a character
+replace-all-char
+meta {
+    doc: """Replace all occurrences of char in string"""
+}
+fn cond (s: Str, from: Str, to: Str): Str {
+    not(contains(s, from)) => { s }
+    => {
+        // Split by the character and join with replacement
+        parts split(s, from)
+        join(parts, to)
+    }
+}
+
+// Encode a single query parameter (key=value)
+encode-query-param
+meta {
+    doc: """URL-encode the value part of a query parameter"""
+}
+fn (param: Str): Str {
+    // Split by = - first part is key, rest is value (may contain =)
+    parts split(param, "=")
+    if(lt(length(parts), 2),
+        param,  // No = found, return as-is
+        {
+            key first(parts)
+            // Value is everything after the first =
+            value-parts rest(parts)
+            value join(value-parts, "=")
+            encoded-value url-encode-value(value)
+            `${key}=${encoded-value}`
+        }
+    )
+}
+
+// Sort query parameters for canonical query string
+sort-query-params
+meta {
+    doc: """Sort and URL-encode query parameters for AWS canonical request"""
+}
+fn (query: Str): Str {
+    if(or(is-null(query), eq(query, "")),
+        "",
+        query
+            |> split("&")
+            |> map(encode-query-param)
+            |> sort
+            |> join("&")
+    )
+}
+
+// Create canonical headers string
+canonical-headers
+meta {
+    doc: """Create canonical headers string for AWS Signature V4"""
+}
+fn (headers: Map): Str {
+    // Get sorted lowercase header names and values
+    // For now, just format the headers we have
+    header-lines map(keys(headers), `${lowercase(%)}:${trim(Str(headers[%]))}`)
+    sorted-lines sort(header-lines)
+    `${join(sorted-lines, "\n")}\n`
+}
+
+// Create signed headers string
+signed-headers
+meta {
+    doc: """Create signed headers list (semicolon-separated lowercase header names)"""
+}
+fn (headers: Map): Str {
+    headers
+        |> keys
+        |> map(lowercase)
+        |> sort
+        |> join(";")
+}
+
+// Derive the signing key using HMAC chain
+derive-signing-key
+meta {
+    doc: """Derive AWS signing key using HMAC-SHA256 chain"""
+}
+fn (secret_key: Str, date_stamp: Str, region: Str, service: Str): Bytes {
+    k-secret `AWS4${secret_key}`
+    k-date hmac-sha256-bytes(k-secret, date_stamp)
+    k-region hmac-sha256-bytes(k-date, region)
+    k-service hmac-sha256-bytes(k-region, service)
+    k-signing hmac-sha256-bytes(k-service, "aws4_request")
+    k-signing
+}
+
+// Create the canonical request string
+create-canonical-request
+meta {
+    doc: """Create AWS Signature V4 canonical request string"""
+}
+fn (method: Str, path: Str, query: Str, headers-str: Str, signed-headers-str: Str, payload-hash: Str): Str {
+    join([method, path, query, headers-str, signed-headers-str, payload-hash], "\n")
+}
+
+// Create the string to sign
+create-string-to-sign
+meta {
+    doc: """Create AWS Signature V4 string to sign"""
+}
+fn (amz-date: Str, date-stamp: Str, region: Str, service: Str, canonical-request-hash: Str): Str {
+    algorithm "AWS4-HMAC-SHA256"
+    credential-scope `${date-stamp}/${region}/${service}/aws4_request`
+    join([algorithm, amz-date, credential-scope, canonical-request-hash], "\n")
+}
+
+// Generate AWS Signature V4 headers
+sign-request
+meta {
+    doc: """Sign a request using AWS Signature V4. Returns headers map with Authorization header."""
+}
+fn (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str): Map {
+    // Parse URL
+    url-parts parse-url(url)
+
+    // Get timestamps
+    amz-date get-amz-date()
+    date-stamp slice(amz-date, 0, 8)
+
+    // Hash the payload
+    payload-hash sha256(if(is-null(payload), "", payload))
+
+    // Build headers with required AWS headers
+    base-headers {...headers, "x-amz-date": amz-date, "x-amz-content-sha256": payload-hash}
+
+    // Add session token if present (not null and not empty)
+    with-token if(or(is-null(credentials.session_token), eq(credentials.session_token, "")),
+        base-headers,
+        {...base-headers, "x-amz-security-token": credentials.session_token}
+    )
+
+    // Ensure host header is present
+    all-headers if(is-null(with-token.Host),
+        {...with-token, "Host": url-parts.host},
+        with-token
+    )
+
+    // Create canonical request components
+    // URL-encode the path for the canonical URI (encodes : but not /)
+    canonical-uri url-encode-path(url-parts.path)
+    canonical-query-string sort-query-params(url-parts.query)
+    canonical-headers-str canonical-headers(all-headers)
+    signed-headers-str signed-headers(all-headers)
+
+    // Create canonical request
+    canonical-request create-canonical-request(
+        method,
+        canonical-uri,
+        canonical-query-string,
+        canonical-headers-str,
+        signed-headers-str,
+        payload-hash
+    )
+
+    // Hash the canonical request
+    canonical-request-hash sha256(canonical-request)
+
+    // Create string to sign
+    string-to-sign create-string-to-sign(
+        amz-date,
+        date-stamp,
+        region,
+        service,
+        canonical-request-hash
+    )
+
+    // Derive signing key
+    signing-key derive-signing-key(
+        credentials.secret_access_key,
+        date-stamp,
+        region,
+        service
+    )
+
+    // Calculate signature
+    signature hmac-sha256(signing-key, string-to-sign)
+
+    // Build authorization header
+    credential-scope `${date-stamp}/${region}/${service}/aws4_request`
+    authorization-header `AWS4-HMAC-SHA256 Credential=${credentials.access_key_id}/${credential-scope}, SignedHeaders=${signed-headers-str}, Signature=${signature}`
+
+    // Return headers with authorization
+    {...all-headers, "Authorization": authorization-header}
+}
+
+// Make an authenticated AWS request
+request
+meta {
+    doc: """
+    Make an authenticated request to an AWS service endpoint.
+
+    Handles credential retrieval and Signature V4 signing automatically.
+    Used internally by all AWS service packages.
+    """
+}
+fn (method: Str, url: Str, service: Str, region: Str, headers: Map, body: Str): HttpResponse {
+    credentials get-credentials()
+    signed-headers sign-request(method, url, region, service, credentials, headers, body)
+    http-request(HttpRequest({
+        method: method,
+        url: url,
+        headers: signed-headers,
+        body: body
+    }))
+}
+
+// =============================================================================
+// AWS Signature V4 Query String Signing (for Presigned URLs)
+// =============================================================================
+
+// Generate a presigned URL using AWS Signature V4 query string signing
+sign-url
+meta {
+    doc: """
+    Sign a URL using AWS Signature V4 query string signing.
+
+    This is used for presigned URLs where the signature goes in the query string
+    instead of headers. The returned URL can be used by anyone without credentials.
+
+    Parameters:
+    - method: HTTP method (GET, PUT, etc.)
+    - url: Base URL to sign
+    - region: AWS region
+    - service: AWS service name (s3, etc.)
+    - credentials: AWS credentials
+    - expires_in: URL expiration time in seconds (default 3600 = 1 hour, max 604800 = 7 days)
+    """
+}
+fn
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials, expires_in: Int): Str {
+    // Parse URL to get host, path, and existing query
+    url-parts parse-url(url)
+    host url-parts.host
+    path url-parts.path
+    existing-query url-parts.query
+
+    // Get timestamps
+    amz-date get-amz-date()
+    date-stamp slice(amz-date, 0, 8)
+
+    // Build credential scope
+    credential-scope `${date-stamp}/${region}/${service}/aws4_request`
+
+    // URL-encode the credential (the / characters must be encoded)
+    credential-value `${credentials.access_key_id}/${credential-scope}`
+    encoded-credential url-encode-value(credential-value)
+
+    // Build the required query parameters
+    // These must be in the canonical query string for signing
+    base-params [
+        `X-Amz-Algorithm=AWS4-HMAC-SHA256`,
+        `X-Amz-Credential=${encoded-credential}`,
+        `X-Amz-Date=${amz-date}`,
+        `X-Amz-Expires=${expires_in}`,
+        `X-Amz-SignedHeaders=host`
+    ]
+
+    // Add session token if present
+    params-with-token if(or(is-null(credentials.session_token), eq(credentials.session_token, "")),
+        base-params,
+        concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`])
+    )
+
+    // Combine with existing query params
+    all-params if(eq(existing-query, ""),
+        params-with-token,
+        concat(params-with-token, split(existing-query, "&"))
+    )
+
+    // Sort all query parameters for canonical query string
+    sorted-params sort(all-params)
+    canonical-query-string join(sorted-params, "&")
+
+    // Build canonical headers (only host for presigned URLs)
+    canonical-headers-str `host:${host}\n`
+    signed-headers-str "host"
+
+    // For presigned URLs, payload is always UNSIGNED-PAYLOAD
+    payload-hash "UNSIGNED-PAYLOAD"
+
+    // URL-encode the path for the canonical URI
+    canonical-uri url-encode-path(path)
+
+    // Create canonical request
+    canonical-request create-canonical-request(
+        method,
+        canonical-uri,
+        canonical-query-string,
+        canonical-headers-str,
+        signed-headers-str,
+        payload-hash
+    )
+
+    // Hash the canonical request
+    canonical-request-hash sha256(canonical-request)
+
+    // Create string to sign
+    string-to-sign create-string-to-sign(
+        amz-date,
+        date-stamp,
+        region,
+        service,
+        canonical-request-hash
+    )
+
+    // Derive signing key
+    signing-key derive-signing-key(
+        credentials.secret_access_key,
+        date-stamp,
+        region,
+        service
+    )
+
+    // Calculate signature
+    signature hmac-sha256(signing-key, string-to-sign)
+
+    // Build the final presigned URL
+    // Get the base URL (protocol + host)
+    protocol if(starts-with(url, "http://"), "http://", "https://")
+    base-url `${protocol}${host}${path}`
+
+    // Add all query params plus signature
+    `${base-url}?${canonical-query-string}&X-Amz-Signature=${signature}`
+},
+// Convenience overload with default expiration (1 hour)
+(method: Str, url: Str, region: Str, service: Str, credentials: Credentials): Str {
+    sign-url(method, url, region, service, credentials, 3600)
+}
+
+// S3 endpoint helper
+s3-endpoint
+meta {
+    doc: """Get the S3 endpoint URL for a given bucket and region"""
+}
+fn (bucket: Str, region: Str): Str {
+    if(eq(region, "us-east-1"),
+        `https://${bucket}.s3.amazonaws.com`,
+        `https://${bucket}.s3.${region}.amazonaws.com`
+    )
+}
+
+// SES endpoint helper
+ses-endpoint
+meta {
+    doc: """Get the SES endpoint URL for a given region"""
+}
+fn (region: Str): Str {
+    `https://email.${region}.amazonaws.com`
+}
+
+// Lambda endpoint helper
+lambda-endpoint
+meta {
+    doc: """Get the Lambda endpoint URL for a given region"""
+}
+fn (region: Str): Str {
+    `https://lambda.${region}.amazonaws.com`
+}
+
+// SQS endpoint helper
+sqs-endpoint
+meta {
+    doc: """Get the SQS endpoint URL for a given region"""
+}
+fn (region: Str): Str {
+    `https://sqs.${region}.amazonaws.com`
+}
+
+// DynamoDB endpoint helper
+dynamodb-endpoint
+meta {
+    doc: """Get the DynamoDB endpoint URL for a given region"""
+}
+fn (region: Str): Str {
+    `https://dynamodb.${region}.amazonaws.com`
+}
+
+// Secrets Manager endpoint helper
+secrets-manager-endpoint
+meta {
+    doc: """Get the Secrets Manager endpoint URL for a given region"""
+}
+fn (region: Str): Str {
+    `https://secretsmanager.${region}.amazonaws.com`
+}
+
+// Bedrock endpoint helper
+bedrock-endpoint
+meta {
+    doc: """Get the Bedrock control plane endpoint URL for a given region"""
+}
+fn (region: Str): Str {
+    `https://bedrock.${region}.amazonaws.com`
+}
+
+// Bedrock Runtime endpoint helper
+bedrock-runtime-endpoint
+meta {
+    doc: """Get the Bedrock runtime endpoint URL for model invocation"""
+}
+fn (region: Str): Str {
+    `https://bedrock-runtime.${region}.amazonaws.com`
+}

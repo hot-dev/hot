@@ -6,6 +6,7 @@ use hot::lang::ast::Program;
 use hot::lang::bytecode::NamespaceRegistry;
 use hot::lang::compiler::Compiler;
 use hot::lang::compiler::core_registry::CoreVariableRegistry;
+use hot::lang::compiler::type_checker::{TypeChecker, TypeExpr};
 use hot::lang::errors::{CompilerError, CompilerErrors};
 use hot::lang::repl::{ReplConfig, ReplSession};
 use hot::lang::runtime::resolution::UnifiedResolver;
@@ -374,6 +375,13 @@ impl LanguageServer for Backend {
                     }
                 }
             }
+        }
+
+        // Check for dot-access field completion: `value.` or `value.fi`
+        if let Some(dot_ctx) = extract_dot_field_context(prefix)
+            && let Some(items) = self.complete_dot_fields(&text, position.line as usize, &dot_ctx)
+        {
+            return Ok(Some(CompletionResponse::Array(items)));
         }
 
         // Check for struct field completion: TypeName({ or TypeName({field: value,
@@ -1323,6 +1331,57 @@ impl Backend {
             .collect();
 
         if items.is_empty() { None } else { Some(items) }
+    }
+
+    fn complete_dot_fields(
+        &self,
+        file_content: &str,
+        line_index: usize,
+        ctx: &DotFieldContext,
+    ) -> Option<Vec<CompletionItem>> {
+        let mut synthetic = file_content
+            .lines()
+            .take(line_index)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !synthetic.ends_with('\n') {
+            synthetic.push('\n');
+        }
+        synthetic.push_str("__hot_lsp_expr ");
+        synthetic.push_str(&ctx.base_expr);
+        synthetic.push('\n');
+
+        let program = hot::lang::parser::parse_hot(&synthetic).ok()?;
+        let expr_value = program.namespaces.values().find_map(|namespace| {
+            namespace.scope.vars.iter().find_map(|(var, value)| {
+                (var.sym.name() == "__hot_lsp_expr").then(|| value.clone())
+            })
+        })?;
+
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        let expr_type = checker.infer_value_type_for_lsp(&expr_value);
+        let fields = checker.known_fields_for_type(&expr_type)?;
+
+        let mut items: Vec<CompletionItem> = fields
+            .into_iter()
+            .filter(|(name, _)| name.starts_with(&ctx.field_prefix))
+            .map(|(name, field_type)| CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(format!("{}: {}", name, Self::format_type_expr(&field_type))),
+                insert_text: Some(name),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            })
+            .collect();
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+
+        if items.is_empty() { None } else { Some(items) }
+    }
+
+    fn format_type_expr(type_expr: &TypeExpr) -> String {
+        type_expr.to_string()
     }
 
     /// Get metadata from a variable (the Var itself, not the Value)
@@ -3055,6 +3114,11 @@ struct TypeFieldContext {
     type_name: String,
 }
 
+struct DotFieldContext {
+    base_expr: String,
+    field_prefix: String,
+}
+
 /// Extract namespace completion context from prefix (e.g., "::hot::" or "::hot::math")
 fn extract_namespace_context(prefix: &str) -> Option<NamespaceContext> {
     // Check if this contains a '/' which indicates variable context, not namespace
@@ -3094,6 +3158,47 @@ fn extract_variable_context(prefix: &str) -> Option<VariableContext> {
         }
     }
     None
+}
+
+/// Extract dot-field completion context from a line prefix.
+/// Examples:
+/// - `user.` -> base `user`, prefix ``
+/// - `user.profile.na` -> base `user.profile`, prefix `na`
+fn extract_dot_field_context(prefix: &str) -> Option<DotFieldContext> {
+    let dot_pos = prefix.rfind('.')?;
+    let field_prefix = prefix[dot_pos + 1..].trim();
+    if !field_prefix
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return None;
+    }
+
+    let before_dot = prefix[..dot_pos].trim_end();
+    let mut start = before_dot.len();
+    for (idx, ch) in before_dot.char_indices().rev() {
+        if ch.is_ascii_alphanumeric()
+            || ch == '_'
+            || ch == '-'
+            || ch == '.'
+            || ch == ']'
+            || ch == '['
+        {
+            start = idx;
+        } else {
+            break;
+        }
+    }
+
+    let base_expr = before_dot[start..].trim();
+    if base_expr.is_empty() {
+        return None;
+    }
+
+    Some(DotFieldContext {
+        base_expr: base_expr.to_string(),
+        field_prefix: field_prefix.to_string(),
+    })
 }
 
 /// Extract type field completion context from prefix
@@ -3664,5 +3769,29 @@ fn load_conf_file(conf_path: &str) -> Result<Val, String> {
             tracing::warn!("Failed to evaluate config {}: {}", conf_path, e);
             Ok(Val::map_empty())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_dot_field_context_after_trigger_dot() {
+        let ctx = extract_dot_field_context("    user.profile.").expect("dot context");
+        assert_eq!(ctx.base_expr, "user.profile");
+        assert_eq!(ctx.field_prefix, "");
+    }
+
+    #[test]
+    fn extracts_dot_field_context_with_partial_field() {
+        let ctx = extract_dot_field_context("value user.na").expect("dot context");
+        assert_eq!(ctx.base_expr, "user");
+        assert_eq!(ctx.field_prefix, "na");
+    }
+
+    #[test]
+    fn rejects_dot_field_context_with_invalid_suffix() {
+        assert!(extract_dot_field_context("value user.\"").is_none());
     }
 }

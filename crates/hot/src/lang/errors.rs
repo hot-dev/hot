@@ -273,6 +273,14 @@ pub enum CompilerError {
         note: Option<String>,
         location: Option<ErrorLocation>,
     },
+    /// A statically known record/struct type does not contain the requested
+    /// field. This rolls out as a warning first because runtime map access is
+    /// still permissive and returns null for missing fields.
+    UnknownField {
+        type_name: String,
+        field_name: String,
+        location: Option<ErrorLocation>,
+    },
 }
 
 impl fmt::Display for CompilerError {
@@ -935,6 +943,31 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::UnknownField {
+                type_name,
+                field_name,
+                location,
+            } => {
+                let body = format!(
+                    "`{}` does not have a known field `{}`",
+                    type_name, field_name
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
         }
     }
 }
@@ -1064,6 +1097,7 @@ impl CompilerErrors {
             CompilerError::OpenLiteralUnionMismatch { location, .. } => location.as_ref(),
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
+            CompilerError::UnknownField { location, .. } => location.as_ref(),
         }?;
 
         let source_name = if let Some(file) = &location.file {
@@ -1504,6 +1538,23 @@ impl CompilerErrors {
                             .with_color(label_color),
                     );
             }
+            CompilerError::UnknownField {
+                type_name,
+                field_name,
+                ..
+            } => {
+                report = report
+                    .with_code("unknown-field")
+                    .with_message(format!("Unknown field `{}`", field_name))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!(
+                                "`{}` does not have a known field `{}`",
+                                type_name, field_name
+                            ))
+                            .with_color(label_color),
+                    );
+            }
         }
 
         let mut buffer = Vec::new();
@@ -1567,6 +1618,7 @@ impl CompilerError {
             CompilerError::OpenLiteralUnionMismatch { location, .. } => location.as_ref(),
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
+            CompilerError::UnknownField { location, .. } => location.as_ref(),
         }
     }
 
@@ -1574,7 +1626,9 @@ impl CompilerError {
     /// warning; everything else is a hard error that fails compilation.
     pub fn severity(&self) -> DiagnosticSeverity {
         match self {
-            CompilerError::DeprecatedUsage { .. } => DiagnosticSeverity::Warning,
+            CompilerError::DeprecatedUsage { .. } | CompilerError::UnknownField { .. } => {
+                DiagnosticSeverity::Warning
+            }
             _ => DiagnosticSeverity::Error,
         }
     }
@@ -1617,6 +1671,7 @@ impl CompilerError {
             CompilerError::OpenLiteralUnionMismatch { .. } => "open-literal-union-mismatch",
             CompilerError::NestedTypeImplementation { .. } => "nested-type-implementation",
             CompilerError::DeprecatedUsage { .. } => "deprecated-usage",
+            CompilerError::UnknownField { .. } => "unknown-field",
         }
     }
 }
@@ -1732,6 +1787,26 @@ mod diagnostic_tests {
         assert_eq!(d.code, "deprecated-usage");
         assert_eq!(d.severity, DiagnosticSeverity::Warning.as_lsp_number());
         assert_eq!(d.severity, 2);
+    }
+
+    #[test]
+    fn unknown_field_warning_uses_stable_code_and_warning_severity() {
+        let mut errors = CompilerErrors::new();
+        errors.add_warning(CompilerError::UnknownField {
+            type_name: "A".to_string(),
+            field_name: "b".to_string(),
+            location: Some(loc(3, 5, 3, "/tmp/x.hot")),
+        });
+
+        assert!(errors.is_empty(), "unknown-field is rollout warning only");
+        assert!(errors.has_warnings());
+
+        let diags = errors.to_diagnostics();
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d.code, "unknown-field");
+        assert_eq!(d.severity, DiagnosticSeverity::Warning.as_lsp_number());
+        assert!(d.message.contains("known field `b`"));
     }
 
     #[test]

@@ -1,13 +1,13 @@
 #!/bin/bash
-# doc-snippets.sh - Extract and inject Hot code snippets into documentation
+# hot-static-checks.sh - Run Hot static checks and documentation snippet validation
 #
 # Usage:
-#   ./scripts/doc-snippets.sh check     # Verify all snippets compile and referenced snippets exist
-#   ./scripts/doc-snippets.sh test      # Run tests in doc example files
-#   ./scripts/doc-snippets.sh extract   # Show all available snippets
-#   ./scripts/doc-snippets.sh inject    # Generate markdown with injected snippets (stdout)
-#   ./scripts/doc-snippets.sh build     # Build docs with injected snippets to resources/docs-built/
-#   ./scripts/doc-snippets.sh eval      # Evaluate a snippet and show its result
+#   ./scripts/hot-static-checks.sh check     # Run Hot checks and verify doc snippets
+#   ./scripts/hot-static-checks.sh test      # Run tests in doc example files
+#   ./scripts/hot-static-checks.sh extract   # Show all available snippets
+#   ./scripts/hot-static-checks.sh inject    # Generate markdown with injected snippets (stdout)
+#   ./scripts/hot-static-checks.sh build     # Build docs with injected snippets to resources/docs-built/
+#   ./scripts/hot-static-checks.sh eval      # Evaluate a snippet and show its result
 #
 # Snippet format in .hot files:
 #   // @doc: snippet-name
@@ -107,12 +107,12 @@ cmd_extract() {
     done
 }
 
-# Command: check - verify snippets compile and references are valid
+# Command: check - run Hot static checks and verify doc snippets
 cmd_check() {
     local errors=0
 
-    echo "Checking doc examples..."
-    echo "========================"
+    echo "Running Hot static checks..."
+    echo "============================"
 
     # In CI, use the context file with placeholder API keys
     local ctx_args=""
@@ -120,20 +120,32 @@ cmd_check() {
         ctx_args="--ctx hot/ci.ctx.hot"
     fi
 
-    # 1. Run hot check on all example files
+    # 1. Run hot check on the default project and doc example files.
     echo ""
-    echo -e "${YELLOW}Step 1: Syntax check${NC}"
+    echo -e "${YELLOW}Step 1: Default project check${NC}"
     if cargo run --quiet -- check --with-tests true $ctx_args 2>/dev/null; then
-        echo -e "${GREEN}✓ All example files pass syntax check${NC}"
+        echo -e "${GREEN}✓ Default project and doc examples pass static check${NC}"
     else
-        echo -e "${RED}✗ Syntax errors in example files${NC}"
+        echo -e "${RED}✗ Default project static check failed${NC}"
         cargo run -- check --with-tests true $ctx_args
         errors=$((errors + 1))
     fi
 
-    # 2. Check that all referenced snippets exist
+    # 2. Run the aggregate package check so optional packages stay type-checked
+    # without making the default hot-dev project depend on every package.
     echo ""
-    echo -e "${YELLOW}Step 2: Verify snippet references${NC}"
+    echo -e "${YELLOW}Step 2: Package aggregate check${NC}"
+    if cargo run --quiet -- check -p hot-pkg-all --with-tests true $ctx_args 2>/dev/null; then
+        echo -e "${GREEN}✓ Package aggregate passes static check${NC}"
+    else
+        echo -e "${RED}✗ Package aggregate static check failed${NC}"
+        cargo run -- check -p hot-pkg-all --with-tests true $ctx_args
+        errors=$((errors + 1))
+    fi
+
+    # 3. Check that all referenced snippets exist
+    echo ""
+    echo -e "${YELLOW}Step 3: Verify snippet references${NC}"
 
     local missing=0
     while IFS= read -r ref; do

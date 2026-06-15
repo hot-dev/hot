@@ -1,0 +1,217 @@
+::aws::test::eventstream ns
+meta ["test"]
+
+::hot::test use
+
+// Imports for test helpers
+concat ::hot::coll/concat
+length ::hot::coll/length
+keys ::hot::coll/keys
+from-int ::hot::bytes/from-int
+crc32 ::hot::bytes/crc32
+// Use Bytes() to convert string to bytes
+contains ::hot::str/contains
+
+// ============================================================================
+// Test Helpers
+// ============================================================================
+
+// Build a minimal valid event stream message for testing
+// This creates a message with no headers and empty payload
+build-minimal-message
+fn (): Bytes {
+    // Prelude: total_length=16, headers_length=0
+    // Message is: [total:4][headers_len:4][prelude_crc:4][payload:0][msg_crc:4]
+    prelude Bytes([0, 0, 0, 16, 0, 0, 0, 0])
+    prelude-crc crc32(prelude)
+
+    // Build message without final CRC
+    prelude-crc-bytes from-int(prelude-crc, 4)
+
+    // Message so far: prelude + prelude_crc (no payload)
+    message-without-crc concat(prelude, prelude-crc-bytes)
+
+    // Calculate message CRC
+    message-crc crc32(message-without-crc)
+    message-crc-bytes from-int(message-crc, 4)
+
+    // Full message
+    concat(message-without-crc, message-crc-bytes)
+}
+
+
+// Build a message with a single string header
+build-message-with-header
+fn (name: Str, value: Str): Bytes {
+    // Build header bytes
+    name-bytes Bytes(name)
+    value-bytes Bytes(value)
+    name-len length(name-bytes)
+    value-len length(value-bytes)
+
+    // Header format: [name_len:1][name:*][type:1][value_len:2][value:*]
+    // Type 7 = string
+    header-bytes concat(Bytes([name-len]), name-bytes)
+    header-bytes concat(header-bytes, Bytes([7]))  // String type
+    value-len-bytes from-int(value-len, 2)
+    header-bytes concat(header-bytes, value-len-bytes)
+    header-bytes concat(header-bytes, value-bytes)
+
+    headers-len length(header-bytes)
+
+    // Total length = 16 (overhead) + headers_len + 0 (no payload)
+    total-len add(16, headers-len)
+
+    // Build prelude
+    total-len-bytes from-int(total-len, 4)
+    headers-len-bytes from-int(headers-len, 4)
+    prelude concat(total-len-bytes, headers-len-bytes)
+
+    // Prelude CRC
+    prelude-crc crc32(prelude)
+    prelude-crc-bytes from-int(prelude-crc, 4)
+
+    // Message without final CRC
+    message-without-crc concat(prelude, prelude-crc-bytes)
+    message-without-crc concat(message-without-crc, header-bytes)
+
+    // Message CRC
+    message-crc crc32(message-without-crc)
+    message-crc-bytes from-int(message-crc, 4)
+
+    concat(message-without-crc, message-crc-bytes)
+}
+
+
+// Build a message with payload
+build-message-with-payload
+fn (payload-str: Str): Bytes {
+    payload-bytes Bytes(payload-str)
+    payload-len length(payload-bytes)
+
+    // Total length = 16 (overhead) + 0 (no headers) + payload_len
+    total-len add(16, payload-len)
+
+    // Build prelude
+    total-len-bytes from-int(total-len, 4)
+    headers-len-bytes from-int(0, 4)
+    prelude concat(total-len-bytes, headers-len-bytes)
+
+    // Prelude CRC
+    prelude-crc crc32(prelude)
+    prelude-crc-bytes from-int(prelude-crc, 4)
+
+    // Message without final CRC
+    message-without-crc concat(prelude, prelude-crc-bytes)
+    message-without-crc concat(message-without-crc, payload-bytes)
+
+    // Message CRC
+    message-crc crc32(message-without-crc)
+    message-crc-bytes from-int(message-crc, 4)
+
+    concat(message-without-crc, message-crc-bytes)
+}
+
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test-parse-minimal-message
+meta ["test"]
+fn () {
+    message-bytes build-minimal-message()
+    result ::aws::eventstream/parse-message(message-bytes)
+
+    assert(result.ok, "Should parse successfully")
+    assert-eq(result.bytes_consumed, 16, "Should consume 16 bytes")
+    header-keys keys(result.message.headers)
+    assert-eq(length(header-keys), 0, "Should have no headers")
+    assert-eq(length(result.message.payload), 0, "Should have empty payload")
+}
+
+
+test-parse-message-too-short
+meta ["test"]
+fn () {
+    // Less than minimum 16 bytes
+    short-data Bytes([0, 0, 0, 16, 0, 0, 0, 0])
+    result ::aws::eventstream/parse-message(short-data)
+
+    assert(not(result.ok), "Should fail for short message")
+    assert(contains(result.error, "too short"), "Error should mention too short")
+}
+
+
+// NOTE: This test is temporarily disabled due to a Hot VM limitation
+// (TailCall not implemented for recursive functions)
+// test-parse-message-with-string-header
+// meta ["test"]
+// fn () {
+//     message-bytes build-message-with-header(":event-type", "contentBlockDelta")
+//     result ::aws::eventstream/parse-message(message-bytes)
+//
+//     assert(result.ok, "Should parse successfully")
+//     event-type ::aws::eventstream/get-header(result.message, ":event-type")
+//     assert-eq(event-type, "contentBlockDelta", "Should have correct header value")
+// }
+
+
+test-parse-message-with-payload
+meta ["test"]
+fn () {
+    payload-text "{\"delta\":{\"text\":\"Hello\"}}"
+    message-bytes build-message-with-payload(payload-text)
+    result ::aws::eventstream/parse-message(message-bytes)
+
+    assert(result.ok, "Should parse successfully")
+    payload-str Str(result.message.payload)
+    assert-eq(payload-str, payload-text, "Should have correct payload")
+}
+
+
+test-parse-stream-empty
+meta ["test"]
+fn () {
+    // Empty bytes should return empty vector
+    messages ::aws::eventstream/parse-stream(Bytes([]))
+    assert-eq(length(messages), 0, "Should return empty vector for empty input")
+}
+
+
+test-parse-stream-single
+meta ["test"]
+fn () {
+    message-bytes build-minimal-message()
+    messages ::aws::eventstream/parse-stream(message-bytes)
+
+    assert-eq(length(messages), 1, "Should parse one message")
+}
+
+
+test-parse-stream-multiple
+meta ["test"]
+fn () {
+    // Build two messages
+    msg1 build-minimal-message()
+    msg2 build-message-with-payload("test")
+    stream-bytes concat(msg1, msg2)
+
+    messages ::aws::eventstream/parse-stream(stream-bytes)
+
+    assert-eq(length(messages), 2, "Should parse two messages")
+}
+
+
+test-is-event-check
+meta ["test"]
+fn () {
+    // Build a message with :message-type = "event"
+    message-bytes build-message-with-header(":message-type", "event")
+    result ::aws::eventstream/parse-message(message-bytes)
+
+    assert(result.ok, "Should parse successfully")
+    assert(::aws::eventstream/is-event(result.message), "Should be identified as event")
+    assert(not(::aws::eventstream/is-exception(result.message)), "Should not be exception")
+    assert(not(::aws::eventstream/is-error(result.message)), "Should not be error")
+}

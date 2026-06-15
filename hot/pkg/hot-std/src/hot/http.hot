@@ -29,6 +29,8 @@ meta {
     - `query` - Query string parameters as a Map (inbound only)
     - `body` - Parsed body (JSON auto-parsed to Map/Vec for inbound, or the body to send for outbound)
     - `body-raw` - Original request body as a raw string (inbound only, useful for signature verification)
+    - `ip` - Client IP address from proxy headers (inbound only)
+    - `auth` - Caller identity when a webhook or MCP endpoint uses required authentication
 
     **Examples**
 
@@ -53,7 +55,9 @@ type {
     headers: Map<Str, Str>?,
     query: Map?,
     body: Any?,
-    body-raw: Str?
+    body-raw: Str?,
+    ip: Str?,
+    auth: Map?
 }
 
 HttpResponse

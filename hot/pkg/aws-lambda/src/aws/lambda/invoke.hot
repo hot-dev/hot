@@ -1,0 +1,156 @@
+::aws::lambda::invoke ns
+
+// Lambda invocation operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Invoke response type
+InvokeResponse type {
+    status_code: Int?,
+    function_error: Str?,
+    log_result: Str?,
+    payload: Any,
+    executed_version: Str?
+}
+
+// Invoke a Lambda function synchronously
+invoke
+meta {
+    doc: """
+    Invoke a Lambda function synchronously.
+
+    **Example**
+
+    ```hot
+    // Invoke with no payload
+    result ::aws::lambda::invoke/invoke("my-function")
+    result.status_code  // => 200
+    result.payload      // => "Hello from Lambda!"
+
+    // Invoke with payload
+    result ::aws::lambda::invoke/invoke("my-function", {name: "Hot", test: true})
+    result.status_code  // => 200
+    result.payload      // => {message: "Hello, Hot!"}
+    ```
+    """
+}
+fn
+(function_name: Str, payload: Any, invocation_type: Str, log_type: Str): InvokeResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://lambda.${region}.amazonaws.com/2015-03-31/functions/${function_name}/invocations`
+
+    body if(is-null(payload), "", if(is-map(payload), to-json(payload), payload))
+
+    headers {
+        "Content-Type": "application/json",
+        "X-Amz-Invocation-Type": invocation_type,
+        "X-Amz-Log-Type": log_type,
+        "Host": `lambda.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "lambda", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        InvokeResponse({
+            status_code: response.status,
+            function_error: response.headers.X-Amz-Function-Error,
+            log_result: response.headers.X-Amz-Log-Result,
+            payload: response.body,
+            executed_version: response.headers.X-Amz-Executed-Version
+        }),
+        err(AwsError(response))
+    )
+},
+(function_name: Str, payload: Any, invocation_type: Str): InvokeResponse | AwsError {
+    invoke(function_name, payload, invocation_type, "None")
+},
+(function_name: Str, payload: Any): InvokeResponse | AwsError {
+    invoke(function_name, payload, "RequestResponse", "None")
+},
+(function_name: Str): InvokeResponse | AwsError {
+    invoke(function_name, null, "RequestResponse", "None")
+}
+
+// Invoke a Lambda function asynchronously (fire and forget)
+invoke-async
+meta {
+    doc: """
+    Invoke a Lambda function asynchronously (fire and forget).
+
+    The function is invoked and returns immediately without waiting for the result.
+    Returns status code 202 (Accepted) on success.
+
+    **Example**
+
+    ```hot
+    result ::aws::lambda::invoke/invoke-async("my-function", {event: "process"})
+    result.status_code  // => 202
+    ```
+    """
+}
+fn
+(function_name: Str, payload: Any): InvokeResponse | AwsError {
+    invoke(function_name, payload, "Event", "None")
+},
+(function_name: Str): InvokeResponse | AwsError {
+    invoke(function_name, null, "Event", "None")
+}
+
+// Invoke a Lambda function with logging
+invoke-with-logs
+meta {
+    doc: """
+    Invoke a Lambda function and include base64-encoded logs in the response.
+
+    **Example**
+
+    ```hot
+    result ::aws::lambda::invoke/invoke-with-logs("my-function")
+    result.status_code  // => 200
+    result.payload      // => "Hello from Lambda!"
+    result.log_result   // => base64-encoded execution logs
+    ```
+    """
+}
+fn
+(function_name: Str, payload: Any): InvokeResponse | AwsError {
+    invoke(function_name, payload, "RequestResponse", "Tail")
+},
+(function_name: Str): InvokeResponse | AwsError {
+    invoke(function_name, null, "RequestResponse", "Tail")
+}
+
+// Dry run invoke (validate without executing)
+invoke-dry-run
+meta {
+    doc: """
+    Validate a Lambda invocation without actually executing the function.
+
+    Returns status code 204 (No Content) if the function exists and permissions are valid.
+
+    **Example**
+
+    ```hot
+    result ::aws::lambda::invoke/invoke-dry-run("my-function")
+    result.status_code  // => 204
+    ```
+    """
+}
+fn
+(function_name: Str, payload: Any): InvokeResponse | AwsError {
+    invoke(function_name, payload, "DryRun", "None")
+},
+(function_name: Str): InvokeResponse | AwsError {
+    invoke(function_name, null, "DryRun", "None")
+}

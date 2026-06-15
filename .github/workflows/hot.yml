@@ -60,11 +60,10 @@ jobs:
       - name: Verify AI skill assets sync
         run: bash ./scripts/check-ai-assets-sync.sh
 
-      # `doc-snippets.sh check` runs `hot check --with-tests true`, which is a
-      # strict superset of `hot check` and additionally validates {{snippet:...}}
-      # references in docs.
-      - name: Hot check + verify doc snippet references
-        run: ./scripts/doc-snippets.sh check
+      # `hot-static-checks.sh check` runs the default project check, the package
+      # aggregate check, and validates {{snippet:...}} references in docs.
+      - name: Hot static checks
+        run: ./scripts/hot-static-checks.sh check
 
       - name: sccache stats
         run: sccache --show-stats || true

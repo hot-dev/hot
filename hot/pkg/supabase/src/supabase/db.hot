@@ -169,9 +169,11 @@ select-path fn (request: SelectRequest): Str {
 }
 
 select-headers fn (request: SelectRequest): Map {
+  prefer if(is-some(request.count), `count=${untype(request.count)}`, null)
+  accept if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null)
   read-headers(request.schema)
-    |> assoc-some("Prefer", if(is-some(request.count), `count=${untype(request.count)}`, null))
-    |> assoc-some("Accept", if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null))
+    |> assoc-some("Prefer", prefer)
+    |> assoc-some("Accept", accept)
 }
 
 select-http-response fn (request: SelectRequest): ::api/HttpResponse {
@@ -562,7 +564,9 @@ rpc-response-service fn (request: RpcRequest): ::api/HttpResponse {
 }
 
 rpc-headers fn (request: RpcRequest): Map {
+  prefer if(is-some(request.count), `count=${untype(request.count)}`, null)
+  accept if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null)
   write-headers(request.schema)
-    |> assoc-some("Prefer", if(is-some(request.count), `count=${untype(request.count)}`, null))
-    |> assoc-some("Accept", if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null))
+    |> assoc-some("Prefer", prefer)
+    |> assoc-some("Accept", accept)
 }

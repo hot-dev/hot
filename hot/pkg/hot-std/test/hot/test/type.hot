@@ -6,6 +6,12 @@ meta ["test"]
 // is-byte, is-bytes, is-namespace), type constructors (Str, Int, Bool, Byte, Bytes, Dec),
 // assert, assert-eq, and not are all core functions - no aliasing needed
 
+BinaryEnvelope type {
+    payload: Bytes,
+    marker: Byte,
+    chunks: Vec<Bytes>
+}
+
 test-type
 meta ["test"] fn () {
     // Test dual-purpose type constructors
@@ -68,4 +74,23 @@ meta ["test"] fn () {
     // Test 6: Type checking
     assert(not(is-byte("not a byte")), "Non-byte should fail is-byte check")
     assert(not(is-bytes("not bytes")), "Non-bytes should fail is-bytes check")
+}
+
+test-bytes-struct-fields-preserve-primitive-values
+meta ["test"] fn () {
+    envelope BinaryEnvelope({
+        payload: Bytes("Hello"),
+        marker: Byte(7),
+        chunks: [Bytes("He"), Bytes("llo")]
+    })
+
+    assert(is-bytes(envelope.payload), "Bytes field should stay a raw Bytes value")
+    assert-eq(5, length(envelope.payload), "Bytes field length should count bytes, not metadata map entries")
+    assert-eq("Hello", Str(envelope.payload), "Bytes field should stringify as its byte payload")
+    assert(is-byte(envelope.marker), "Byte field should stay a raw Byte value")
+    assert-eq(Byte(7), envelope.marker, "Byte field should preserve byte value")
+
+    first-chunk first(envelope.chunks)
+    assert(is-bytes(first-chunk), "Vec<Bytes> item should stay a raw Bytes value")
+    assert-eq(2, length(first-chunk), "Vec<Bytes> item length should count bytes")
 }

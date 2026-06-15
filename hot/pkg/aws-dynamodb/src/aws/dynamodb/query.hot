@@ -1,0 +1,236 @@
+::aws::dynamodb::query ns
+
+// DynamoDB query and scan operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Query response
+QueryResponse type {
+    items: Vec<Map>,
+    count: Int?,
+    scanned_count: Int?,
+    last_evaluated_key: Map?,
+    consumed_capacity: Map?
+}
+
+// Scan response
+ScanResponse type {
+    items: Vec<Map>,
+    count: Int?,
+    scanned_count: Int?,
+    last_evaluated_key: Map?,
+    consumed_capacity: Map?
+}
+
+// Query items from a DynamoDB table
+query
+meta {
+    doc: """
+    Query items from a DynamoDB table using a key condition expression.
+
+    **Example**
+
+    ```hot
+    // Query all items with a partition key
+    result ::aws::dynamodb::query/query(
+        "my-table",
+        "pk = :pk",
+        {":pk": {S: "user-123"}}
+    )
+    result.count   // => 3
+    result.items   // => [{pk: {S: "user-123"}, sk: {S: "order:1"}, ...}, ...]
+
+    // Query with sort key prefix (begins_with)
+    result ::aws::dynamodb::query/query(
+        "my-table",
+        "pk = :pk AND begins_with(sk, :prefix)",
+        {":pk": {S: "user-123"}, ":prefix": {S: "order:"}},
+        null, null, null, null, true, null
+    )
+    ```
+    """
+}
+fn
+(table_name: Str, key_condition_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map, filter_expression: Str, limit: Int, exclusive_start_key: Map, scan_index_forward: Bool, index_name: Str): QueryResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body {
+        TableName: table_name,
+        KeyConditionExpression: key_condition_expression,
+        ExpressionAttributeValues: expression_attribute_values,
+        ScanIndexForward: scan_index_forward
+    }
+
+    with-names if(is-null(expression_attribute_names), request-body,
+        {...request-body, ExpressionAttributeNames: expression_attribute_names}
+    )
+
+    with-filter if(is-null(filter_expression), with-names,
+        {...with-names, FilterExpression: filter_expression}
+    )
+
+    with-limit if(is-null(limit), with-filter,
+        {...with-filter, Limit: limit}
+    )
+
+    with-start-key if(is-null(exclusive_start_key), with-limit,
+        {...with-limit, ExclusiveStartKey: exclusive_start_key}
+    )
+
+    with-index if(is-null(index_name), with-start-key,
+        {...with-start-key, IndexName: index_name}
+    )
+
+    body to-json(with-index)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.Query",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        QueryResponse({
+            items: if(is-null(response.body.Items), [], response.body.Items),
+            count: response.body.Count,
+            scanned_count: response.body.ScannedCount,
+            last_evaluated_key: response.body.LastEvaluatedKey,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+},
+(table_name: Str, key_condition_expression: Str, expression_attribute_values: Map): QueryResponse | AwsError {
+    query(table_name, key_condition_expression, expression_attribute_values, null, null, null, null, true, null)
+},
+(table_name: Str, key_condition_expression: Str, expression_attribute_values: Map, limit: Int): QueryResponse | AwsError {
+    query(table_name, key_condition_expression, expression_attribute_values, null, null, limit, null, true, null)
+}
+
+// Query with an index
+query-index
+meta {
+    doc: """
+    Query items from a DynamoDB table using a secondary index.
+
+    **Example**
+
+    ```hot
+    result ::aws::dynamodb::query/query-index(
+        "my-table",
+        "email-index",
+        "email = :email",
+        {":email": {S: "alice@example.com"}}
+    )
+    result.items  // => [{pk: {S: "user-123"}, email: {S: "alice@example.com"}, ...}]
+    ```
+    """
+}
+fn
+(table_name: Str, index_name: Str, key_condition_expression: Str, expression_attribute_values: Map): QueryResponse | AwsError {
+    query(table_name, key_condition_expression, expression_attribute_values, null, null, null, null, true, index_name)
+},
+(table_name: Str, index_name: Str, key_condition_expression: Str, expression_attribute_values: Map, limit: Int): QueryResponse | AwsError {
+    query(table_name, key_condition_expression, expression_attribute_values, null, null, limit, null, true, index_name)
+}
+
+// Scan a DynamoDB table
+scan
+meta {
+    doc: """
+    Scan all items from a DynamoDB table.
+
+    Scans read every item in the table and optionally apply a filter expression.
+    For large tables, prefer `query` when possible.
+
+    **Example**
+
+    ```hot
+    // Scan with a filter
+    result ::aws::dynamodb::query/scan(
+        "my-table",
+        "status = :s",
+        {":s": {S: "active"}}
+    )
+    result.items  // => [{pk: {S: "..."}, status: {S: "active"}, ...}, ...]
+
+    // Scan with limit
+    result ::aws::dynamodb::query/scan("my-table", 5)
+    ```
+    """
+}
+fn
+(table_name: Str, filter_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map, limit: Int, exclusive_start_key: Map): ScanResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body {
+        TableName: table_name
+    }
+
+    with-filter if(is-null(filter_expression), request-body,
+        {...request-body,
+            FilterExpression: filter_expression,
+            ExpressionAttributeValues: expression_attribute_values}
+    )
+
+    with-names if(is-null(expression_attribute_names), with-filter,
+        {...with-filter, ExpressionAttributeNames: expression_attribute_names}
+    )
+
+    with-limit if(is-null(limit), with-names,
+        {...with-names, Limit: limit}
+    )
+
+    with-start-key if(is-null(exclusive_start_key), with-limit,
+        {...with-limit, ExclusiveStartKey: exclusive_start_key}
+    )
+
+    body to-json(with-start-key)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.Scan",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ScanResponse({
+            items: if(is-null(response.body.Items), [], response.body.Items),
+            count: response.body.Count,
+            scanned_count: response.body.ScannedCount,
+            last_evaluated_key: response.body.LastEvaluatedKey,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+},
+(table_name: Str, filter_expression: Str, expression_attribute_values: Map): ScanResponse | AwsError {
+    scan(table_name, filter_expression, expression_attribute_values, null, null, null)
+},
+(table_name: Str, limit: Int): ScanResponse | AwsError {
+    scan(table_name, null, null, null, limit, null)
+},
+(table_name: Str): ScanResponse | AwsError {
+    scan(table_name, null, null, null, null, null)
+}

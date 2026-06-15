@@ -1,0 +1,191 @@
+::aws::bedrock::models ns
+
+// Bedrock model management operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Foundation model type
+FoundationModel type {
+    model_arn: Str?,
+    model_id: Str?,
+    model_name: Str?,
+    provider_name: Str?,
+    input_modalities: Vec<Str>?,
+    output_modalities: Vec<Str>?,
+    response_streaming_supported: Bool?,
+    customizations_supported: Vec<Str>?,
+    inference_types_supported: Vec<Str>?,
+    model_lifecycle: Map?
+}
+
+// List foundation models response
+ListFoundationModelsResponse type {
+    models: Vec<FoundationModel>
+}
+
+// Get foundation model response
+GetFoundationModelResponse type {
+    model: FoundationModel?
+}
+
+// List all available foundation models
+list-foundation-models
+meta {
+    doc: """
+    List all available foundation models in Bedrock.
+
+    Optionally filter by provider, customization type, output modality, or inference type.
+
+    **Example**
+
+    ```hot
+    // List all models
+    result ::aws::bedrock::models/list-foundation-models()
+    models result.models
+    // => [{model_id: "amazon.nova-micro-v1:0", provider_name: "Amazon", ...}, ...]
+
+    // List models by provider
+    result ::aws::bedrock::models/list-foundation-models("Anthropic")
+    ```
+    """
+}
+fn
+(by_provider: Str, by_customization_type: Str, by_output_modality: Str, by_inference_type: Str): ListFoundationModelsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    base-url `https://bedrock.${region}.amazonaws.com/foundation-models`
+
+    // Build query parameters
+    params []
+
+    params-with-provider if(is-null(by_provider), params,
+        concat(params, [`byProvider=${by_provider}`])
+    )
+
+    params-with-custom if(is-null(by_customization_type), params-with-provider,
+        concat(params-with-provider, [`byCustomizationType=${by_customization_type}`])
+    )
+
+    params-with-output if(is-null(by_output_modality), params-with-custom,
+        concat(params-with-custom, [`byOutputModality=${by_output_modality}`])
+    )
+
+    params-with-inference if(is-null(by_inference_type), params-with-output,
+        concat(params-with-output, [`byInferenceType=${by_inference_type}`])
+    )
+
+    query-string if(eq(length(params-with-inference), 0), "", `?${join(params-with-inference, "&")}`)
+
+    url `${base-url}${query-string}`
+
+    headers {
+        "Host": `bedrock.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "bedrock", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        ListFoundationModelsResponse({
+            models: if(is-null(response.body.modelSummaries), [], map(response.body.modelSummaries, FoundationModel({
+                model_arn: %.modelArn,
+                model_id: %.modelId,
+                model_name: %.modelName,
+                provider_name: %.providerName,
+                input_modalities: %.inputModalities,
+                output_modalities: %.outputModalities,
+                response_streaming_supported: %.responseStreamingSupported,
+                customizations_supported: %.customizationsSupported,
+                inference_types_supported: %.inferenceTypesSupported,
+                model_lifecycle: %.modelLifecycle
+            })))
+        }),
+        err(AwsError(response))
+    )
+},
+(by_provider: Str): ListFoundationModelsResponse | AwsError {
+    list-foundation-models(by_provider, null, null, null)
+},
+(): ListFoundationModelsResponse | AwsError {
+    list-foundation-models(null, null, null, null)
+}
+
+// Get details about a specific foundation model
+get-foundation-model
+meta {
+    doc: """
+    Get details about a specific foundation model.
+
+    **Example**
+
+    ```hot
+    result ::aws::bedrock::models/get-foundation-model("amazon.nova-micro-v1:0")
+    model result.model
+    // => {model_id: "amazon.nova-micro-v1:0", model_name: "Nova Micro", ...}
+    ```
+    """
+}
+fn (model_identifier: Str): GetFoundationModelResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock.${region}.amazonaws.com/foundation-models/${model_identifier}`
+
+    headers {
+        "Host": `bedrock.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "bedrock", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        GetFoundationModelResponse({
+            model: if(is-null(response.body.modelDetails), null, FoundationModel({
+                model_arn: response.body.modelDetails.modelArn,
+                model_id: response.body.modelDetails.modelId,
+                model_name: response.body.modelDetails.modelName,
+                provider_name: response.body.modelDetails.providerName,
+                input_modalities: response.body.modelDetails.inputModalities,
+                output_modalities: response.body.modelDetails.outputModalities,
+                response_streaming_supported: response.body.modelDetails.responseStreamingSupported,
+                customizations_supported: response.body.modelDetails.customizationsSupported,
+                inference_types_supported: response.body.modelDetails.inferenceTypesSupported,
+                model_lifecycle: response.body.modelDetails.modelLifecycle
+            }))
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Common model IDs for convenience
+// Anthropic Claude models
+claude-3-opus "anthropic.claude-3-opus-20240229-v1:0"
+claude-3-sonnet "anthropic.claude-3-sonnet-20240229-v1:0"
+claude-3-haiku "anthropic.claude-3-haiku-20240307-v1:0"
+claude-3-5-sonnet "anthropic.claude-3-5-sonnet-20240620-v1:0"
+
+// Amazon Titan models
+titan-text-express "amazon.titan-text-express-v1"
+titan-text-lite "amazon.titan-text-lite-v1"
+titan-embed-text "amazon.titan-embed-text-v1"
+
+// Meta Llama models
+llama-3-8b "meta.llama3-8b-instruct-v1:0"
+llama-3-70b "meta.llama3-70b-instruct-v1:0"
+llama-2-13b "meta.llama2-13b-chat-v1"
+llama-2-70b "meta.llama2-70b-chat-v1"
+
+// Mistral models
+mistral-7b "mistral.mistral-7b-instruct-v0:2"
+mixtral-8x7b "mistral.mixtral-8x7b-instruct-v0:1"
+mistral-large "mistral.mistral-large-2402-v1:0"

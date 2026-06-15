@@ -1,0 +1,292 @@
+::aws::ses::email ns
+
+// SES Email operations using SES v2 API
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Email destination type
+Destination type {
+    to_addresses: Vec<Str>,
+    cc_addresses: Vec<Str>?,
+    bcc_addresses: Vec<Str>?
+}
+
+// Simple email body
+Body type {
+    text: Str?,
+    html: Str?
+}
+
+// Simple email message
+Message type {
+    subject: Str,
+    body: Body
+}
+
+// Email content wrapper
+EmailContent type {
+    simple: Message?,
+    raw: Str?,
+    template: TemplateContent?
+}
+
+// Template content for templated emails
+TemplateContent type {
+    template_name: Str,
+    template_data: Map
+}
+
+// Send email request
+SendEmailRequest type {
+    from_email_address: Str,
+    destination: Destination,
+    content: EmailContent,
+    reply_to_addresses: Vec<Str>?,
+    configuration_set_name: Str?
+}
+
+// Send email response
+SendEmailResponse type {
+    message_id: Str?
+}
+
+// Send a simple email
+send-email
+meta {
+    doc: """
+    Send an email via AWS SES v2 API using a full SendEmailRequest.
+
+    For simple emails, prefer the `send-simple-email` convenience function.
+
+    **Example**
+
+    ```hot
+    destination Destination({to_addresses: ["user@example.com"], cc_addresses: null, bcc_addresses: null})
+    body Body({text: "Hello!", html: "<h1>Hello!</h1>"})
+    message Message({subject: "Test Subject", body: body})
+    content EmailContent({simple: message, raw: null, template: null})
+    request SendEmailRequest({
+        from_email_address: "sender@example.com",
+        destination: destination,
+        content: content,
+        reply_to_addresses: null,
+        configuration_set_name: null
+    })
+    result ::aws::ses::email/send-email(request)
+    result.message_id  // => "010001234567890-abcdef..."
+    ```
+    """
+}
+fn (request: SendEmailRequest): SendEmailResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    url `https://email.${region}.amazonaws.com/v2/email/outbound-emails`
+
+    // Build the destination
+    cc-addrs if(is-null(request.destination.cc_addresses), [], request.destination.cc_addresses)
+    bcc-addrs if(is-null(request.destination.bcc_addresses), [], request.destination.bcc_addresses)
+
+    // Build simple content if present
+    simple-content if(is-null(request.content.simple), null, {
+        Subject: { Data: request.content.simple.subject },
+        Body: {
+            Text: if(is-null(request.content.simple.body.text), null, { Data: request.content.simple.body.text }),
+            Html: if(is-null(request.content.simple.body.html), null, { Data: request.content.simple.body.html })
+        }
+    })
+
+    reply-to if(is-null(request.reply_to_addresses), [], request.reply_to_addresses)
+
+    // Build the request body
+    body to-json({
+        FromEmailAddress: request.from_email_address,
+        Destination: {
+            ToAddresses: request.destination.to_addresses,
+            CcAddresses: cc-addrs,
+            BccAddresses: bcc-addrs
+        },
+        Content: {
+            Simple: simple-content
+        },
+        ReplyToAddresses: reply-to
+    })
+
+    headers {
+        "Content-Type": "application/json",
+        "Host": `email.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "ses", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SendEmailResponse({
+            message_id: response.body.MessageId
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Convenience function to send a simple email
+send-simple-email
+meta {
+    doc: """
+    Send a simple email with just from, to, subject, and body.
+
+    **Example**
+
+    ```hot
+    result ::aws::ses::email/send-simple-email(
+        "sender@example.com",
+        ["user@example.com"],
+        "Welcome!",
+        "Hello from Hot!",
+        "<h1>Hello from Hot!</h1>"
+    )
+    result.message_id  // => "010001234567890-abcdef..."
+
+    // Text-only email (no HTML)
+    result ::aws::ses::email/send-simple-email(
+        "sender@example.com",
+        ["user@example.com"],
+        "Alert",
+        "Something happened"
+    )
+    ```
+    """
+}
+fn
+(from: Str, to: Vec<Str>, subject: Str, body_text: Str, body_html: Str): SendEmailResponse | AwsError {
+    send-email(SendEmailRequest({
+        from_email_address: from,
+        destination: Destination({
+            to_addresses: to,
+            cc_addresses: null,
+            bcc_addresses: null
+        }),
+        content: EmailContent({
+            simple: Message({
+                subject: subject,
+                body: Body({
+                    text: body_text,
+                    html: body_html
+                })
+            }),
+            raw: null,
+            template: null
+        }),
+        reply_to_addresses: null,
+        configuration_set_name: null
+    }))
+},
+(from: Str, to: Vec<Str>, subject: Str, body_text: Str): SendEmailResponse | AwsError {
+    send-simple-email(from, to, subject, body_text, "")
+}
+
+// Send a raw email (for complex MIME messages)
+send-raw-email
+meta {
+    doc: """
+    Send a raw MIME email via AWS SES.
+
+    Use this for complex email formats like multipart messages with attachments.
+
+    **Example**
+
+    ```hot
+    raw-message "From: sender@example.com\nTo: user@example.com\nSubject: Test\n\nBody"
+    result ::aws::ses::email/send-raw-email(raw-message)
+    ```
+    """
+}
+fn (raw_message: Str): SendEmailResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    url `https://email.${region}.amazonaws.com/v2/email/outbound-emails`
+
+    body to-json({
+        Content: {
+            Raw: {
+                Data: raw_message
+            }
+        }
+    })
+
+    headers {
+        "Content-Type": "application/json",
+        "Host": `email.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "ses", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SendEmailResponse({
+            message_id: response.body.MessageId
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Send a templated email
+send-templated-email
+meta {
+    doc: """
+    Send an email using an SES template.
+
+    **Example**
+
+    ```hot
+    result ::aws::ses::email/send-templated-email(
+        "sender@example.com",
+        ["user@example.com"],
+        "WelcomeTemplate",
+        {name: "Alice", company: "Acme"}
+    )
+    result.message_id  // => "010001234567890-abcdef..."
+    ```
+    """
+}
+fn (from: Str, to: Vec<Str>, template_name: Str, template_data: Map): SendEmailResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    url `https://email.${region}.amazonaws.com/v2/email/outbound-emails`
+
+    body to-json({
+        FromEmailAddress: from,
+        Destination: {
+            ToAddresses: to
+        },
+        Content: {
+            Template: {
+                TemplateName: template_name,
+                TemplateData: to-json(template_data)
+            }
+        }
+    })
+
+    headers {
+        "Content-Type": "application/json",
+        "Host": `email.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "ses", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SendEmailResponse({
+            message_id: response.body.MessageId
+        }),
+        err(AwsError(response))
+    )
+}

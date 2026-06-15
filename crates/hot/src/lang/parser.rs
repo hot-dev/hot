@@ -270,6 +270,7 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
                 lazy: false,
@@ -292,9 +293,9 @@ impl Parser {
                         variant.to_string(),
                     )])),
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             }))
         } else {
@@ -304,9 +305,9 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             }))
         };
@@ -317,9 +318,9 @@ impl Parser {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: None,
         }));
 
@@ -482,6 +483,7 @@ impl Parser {
                         deep_set: None,
                         deep_path: None,
                         meta: ns_meta,
+                        type_annotation: None,
                         src: None,
                     };
                     let value = Value::Ref(Ref::Ns(ns_ref));
@@ -533,6 +535,7 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 };
 
@@ -694,6 +697,7 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: impl_meta,
+                    type_annotation: None,
                     src: None,
                 };
 
@@ -808,6 +812,7 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 };
                 (var, value)
@@ -836,6 +841,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         };
                         tracing::trace!(
@@ -1023,6 +1029,7 @@ impl Parser {
                 deep_set: None,
                 deep_path: None,
                 meta: var_meta,
+                type_annotation: None,
                 src: var_src,
             };
             return Ok((var, function));
@@ -1033,6 +1040,7 @@ impl Parser {
             deep_set: None,
             deep_path: None,
             meta: var_meta, // Use variable metadata if found
+            type_annotation: None,
             src: var_src,
         };
 
@@ -1185,6 +1193,7 @@ impl Parser {
         } else {
             None
         };
+        var.type_annotation = type_annotation.as_ref().map(ToString::to_string);
 
         // Check for type definition: var type ...
         if let Some(token) = self.peek()
@@ -1774,6 +1783,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         },
                         lazy, // Variadic args can now be lazy
@@ -1805,6 +1815,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         },
                         lazy, // Variadic args can now be lazy
@@ -1834,6 +1845,7 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
                 lazy,
@@ -2332,13 +2344,10 @@ impl Parser {
                                 deep_set: None,
                                 deep_path: None,
                                 meta: None,
+                                type_annotation: None,
                                 src: None,
                             };
-                            expressions.push(Value::Ref(Ref::Var(VarRef {
-                                var,
-                                data: None,
-                                src: None,
-                            })));
+                            expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
                             expressions.push(expr);
                         } else {
                             // This looks like a variable assignment: var_name followed by value
@@ -2347,13 +2356,10 @@ impl Parser {
                                 deep_set: None,
                                 deep_path: None,
                                 meta: None,
+                                type_annotation: None,
                                 src: None,
                             };
-                            expressions.push(Value::Ref(Ref::Var(VarRef {
-                                var,
-                                data: None,
-                                src: None,
-                            })));
+                            expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
 
                             // Parse the value expression
                             let value_expr = self.parse_value()?;
@@ -2372,13 +2378,10 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         };
-                        expressions.push(Value::Ref(Ref::Var(VarRef {
-                            var,
-                            data: None,
-                            src: None,
-                        })));
+                        expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
                         expressions.push(expr);
                     }
                 } else {
@@ -2391,13 +2394,10 @@ impl Parser {
                         deep_set: None,
                         deep_path: None,
                         meta: None,
+                        type_annotation: None,
                         src: None,
                     };
-                    expressions.push(Value::Ref(Ref::Var(VarRef {
-                        var,
-                        data: None,
-                        src: None,
-                    })));
+                    expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
                     expressions.push(expr);
                 }
             }
@@ -2531,6 +2531,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         },
                         lazy, // Variadic args can now be lazy
@@ -2562,6 +2563,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         },
                         lazy, // Variadic args can now be lazy
@@ -2591,6 +2593,7 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
                 lazy,
@@ -3728,9 +3731,9 @@ impl Parser {
                         deep_set: None,
                         deep_path: None,
                         meta: None,
+                        type_annotation: None,
                         src: None,
                     },
-                    data: None,
                     src: None,
                 }));
                 let stored = Val::Box(Box::new(crate::lang::ast::AstNode(var_value)));
@@ -4861,9 +4864,9 @@ impl Parser {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: Some(Source::new(
                     self.file_path.as_ref().map(|p| p.display().to_string()),
                     line,
@@ -4963,9 +4966,9 @@ impl Parser {
                 deep_set: None,
                 deep_path,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: Some(Source::new(
                 self.file_path.as_ref().map(|p| p.display().to_string()),
                 start_line,
@@ -5063,9 +5066,9 @@ impl Parser {
                 deep_set: None,
                 deep_path,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: None,
         })))
     }
@@ -5334,9 +5337,9 @@ impl Parser {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: None,
         })));
 
@@ -5493,6 +5496,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         },
                         lazy: false,
@@ -5527,6 +5531,7 @@ impl Parser {
                                 deep_set: None,
                                 deep_path: None,
                                 meta: None,
+                                type_annotation: None,
                                 src: None,
                             },
                             lazy: false,
@@ -5639,6 +5644,7 @@ impl Parser {
                             deep_set: None,
                             deep_path: None,
                             meta: None,
+                            type_annotation: None,
                             src: None,
                         },
                         lazy: false,
@@ -5673,6 +5679,7 @@ impl Parser {
                                 deep_set: None,
                                 deep_path: None,
                                 meta: None,
+                                type_annotation: None,
                                 src: None,
                             },
                             lazy: false,
@@ -5997,11 +6004,7 @@ impl Parser {
                 );
                 // In function bodies, variable assignments are treated as expressions
                 expressions.push(Value::MultipleValues(vec![
-                    Value::Ref(Ref::Var(VarRef {
-                        var,
-                        data: None,
-                        src: None,
-                    })),
+                    Value::Ref(Ref::Var(VarRef { var, src: None })),
                     value,
                 ]));
             } else {
@@ -6907,9 +6910,9 @@ pub(crate) fn replace_placeholders(value: Value) -> Value {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             }))
         }
@@ -6935,9 +6938,9 @@ pub(crate) fn replace_placeholders(value: Value) -> Value {
                     deep_set,
                     deep_path: new_deep_path,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             }))
         }
@@ -7044,6 +7047,7 @@ fn force_wrap_placeholder(value: Value) -> Value {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
                 lazy: false,
@@ -7080,6 +7084,7 @@ pub(crate) fn wrap_placeholder_arg(value: Value) -> Value {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
                 lazy: false,

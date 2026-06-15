@@ -1,0 +1,335 @@
+::aws::sns::publish ns
+
+// SNS Publish operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Publish response
+PublishResponse type {
+    message_id: Str?,
+    sequence_number: Str?
+}
+
+// Publish batch result entry
+PublishBatchResultEntry type {
+    id: Str?,
+    message_id: Str?,
+    sequence_number: Str?
+}
+
+// Publish batch failure entry
+PublishBatchFailureEntry type {
+    id: Str?,
+    code: Str?,
+    message: Str?,
+    sender_fault: Bool?
+}
+
+// Publish batch response
+PublishBatchResponse type {
+    successful: Vec<PublishBatchResultEntry>,
+    failed: Vec<PublishBatchFailureEntry>
+}
+
+// Publish a message to a topic or endpoint
+publish
+meta {
+    doc: """
+    Publish a message to an SNS topic or directly to an endpoint.
+
+    **Example**
+
+    ```hot
+    // Simple publish
+    result ::aws::sns::publish/publish(topic-arn, "Hello from Hot!")
+    result.message_id  // => "abc123-def456..."
+
+    // Publish with subject (for email subscriptions)
+    result ::aws::sns::publish/publish(topic-arn, "Message body", {subject: "Alert"})
+    ```
+    """
+}
+fn
+(topic_arn: Str, message: Str, options: Map): PublishResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {
+        Message: message
+    }
+
+    // Add topic_arn or target_arn
+    with-target cond {
+        not(is-null(topic_arn)) => { merge(request-body, { TopicArn: topic_arn }) }
+        not(is-null(options.target_arn)) => { merge(request-body, { TargetArn: options.target_arn }) }
+        not(is-null(options.phone_number)) => { merge(request-body, { PhoneNumber: options.phone_number }) }
+        => { request-body }
+    }
+
+    // Add optional fields
+    with-subject if(is-null(options.subject), with-target,
+        merge(with-target, { Subject: options.subject })
+    )
+
+    with-structure if(is-null(options.message_structure), with-subject,
+        merge(with-subject, { MessageStructure: options.message_structure })
+    )
+
+    with-attributes if(is-null(options.message_attributes), with-structure,
+        merge(with-structure, { MessageAttributes: options.message_attributes })
+    )
+
+    with-dedup-id if(is-null(options.message_deduplication_id), with-attributes,
+        merge(with-attributes, { MessageDeduplicationId: options.message_deduplication_id })
+    )
+
+    with-group-id if(is-null(options.message_group_id), with-dedup-id,
+        merge(with-dedup-id, { MessageGroupId: options.message_group_id })
+    )
+
+    body to-json(with-group-id)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.Publish",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        PublishResponse({
+            message_id: response.body.MessageId,
+            sequence_number: response.body.SequenceNumber
+        }),
+        err(AwsError(response))
+    )
+},
+(topic_arn: Str, message: Str): PublishResponse | AwsError {
+    publish(topic_arn, message, {})
+}
+
+// Publish messages in batch
+publish-batch
+meta {
+    doc: """
+    Publish multiple messages to a topic in a single request (up to 10).
+
+    Each entry should have `id` (unique) and `message` (content).
+
+    **Example**
+
+    ```hot
+    entries [
+        {id: "msg1", message: "First message"},
+        {id: "msg2", message: "Second message"},
+        {id: "msg3", message: "Third message"}
+    ]
+    result ::aws::sns::publish/publish-batch(topic-arn, entries)
+    length(result.successful)  // => 3
+    length(result.failed)      // => 0
+    ```
+    """
+}
+fn (topic_arn: Str, entries: Vec<Map>): PublishBatchResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    // Transform entries to API format
+    api-entries map(entries, (e) {
+        entry { Id: e.id, Message: e.message }
+
+        with-subject if(is-null(e.subject), entry,
+            merge(entry, { Subject: e.subject })
+        )
+
+        with-structure if(is-null(e.message_structure), with-subject,
+            merge(with-subject, { MessageStructure: e.message_structure })
+        )
+
+        with-attributes if(is-null(e.message_attributes), with-structure,
+            merge(with-structure, { MessageAttributes: e.message_attributes })
+        )
+
+        with-dedup-id if(is-null(e.message_deduplication_id), with-attributes,
+            merge(with-attributes, { MessageDeduplicationId: e.message_deduplication_id })
+        )
+
+        if(is-null(e.message_group_id), with-dedup-id,
+            merge(with-dedup-id, { MessageGroupId: e.message_group_id })
+        )
+    })
+
+    body to-json({
+        TopicArn: topic_arn,
+        PublishBatchRequestEntries: api-entries
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.PublishBatch",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        PublishBatchResponse({
+            successful: if(is-null(response.body.Successful), [], map(response.body.Successful, PublishBatchResultEntry({
+                id: %.Id,
+                message_id: %.MessageId,
+                sequence_number: %.SequenceNumber
+            }))),
+            failed: if(is-null(response.body.Failed), [], map(response.body.Failed, PublishBatchFailureEntry({
+                id: %.Id,
+                code: %.Code,
+                message: %.Message,
+                sender_fault: %.SenderFault
+            })))
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Helper to publish with message attributes
+publish-with-attributes
+meta {
+    doc: """
+    Publish a message with message attributes for subscription filtering.
+
+    Each attribute should have DataType ("String", "Number", or "Binary") and StringValue.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::publish/publish-with-attributes(topic-arn, "Order placed", {
+        event_type: {DataType: "String", StringValue: "order"},
+        priority: {DataType: "Number", StringValue: "1"}
+    })
+    result.message_id  // => "abc123..."
+    ```
+    """
+}
+fn (topic_arn: Str, message: Str, attributes: Map): PublishResponse | AwsError {
+    publish(topic_arn, message, { message_attributes: attributes })
+}
+
+// Helper to publish JSON message with protocol-specific payloads
+publish-json
+meta {
+    doc: """
+    Publish a message with protocol-specific payloads.
+
+    The message map must include a "default" key. Other keys are protocol names
+    (email, sqs, lambda, http, https) with protocol-specific content.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::publish/publish-json(topic-arn, {
+        default: "Default notification",
+        sqs: to-json({type: "notification", data: {order_id: "12345"}})
+    })
+    result.message_id  // => "abc123..."
+    ```
+    """
+}
+fn (topic_arn: Str, message: Map): PublishResponse | AwsError {
+    publish(topic_arn, to-json(message), { message_structure: "json" })
+}
+
+// Helper to send SMS directly
+send-sms
+meta {
+    doc: """
+    Send an SMS message directly to a phone number (E.164 format).
+
+    **Example**
+
+    ```hot
+    // Simple SMS
+    result ::aws::sns::publish/send-sms("+14155551234", "Your code is 123456")
+    result.message_id  // => "abc123..."
+
+    // SMS with options
+    result ::aws::sns::publish/send-sms("+14155551234", "Your code is 123456", {
+        message_type: "Transactional"
+    })
+    ```
+    """
+}
+fn
+(phone_number: Str, message: Str, options: Map): PublishResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {
+        PhoneNumber: phone_number,
+        Message: message
+    }
+
+    // Add message attributes for SMS options
+    sms-attrs {}
+
+    with-sender-id if(is-null(options.sender_id), sms-attrs,
+        merge(sms-attrs, {
+            "AWS.SNS.SMS.SenderID": {
+                DataType: "String",
+                StringValue: options.sender_id
+            }
+        })
+    )
+
+    with-type if(is-null(options.message_type), with-sender-id,
+        merge(with-sender-id, {
+            "AWS.SNS.SMS.SMSType": {
+                DataType: "String",
+                StringValue: options.message_type
+            }
+        })
+    )
+
+    with-attributes if(is-empty(with-type), request-body,
+        merge(request-body, { MessageAttributes: with-type })
+    )
+
+    body to-json(with-attributes)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.Publish",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        PublishResponse({
+            message_id: response.body.MessageId,
+            sequence_number: response.body.SequenceNumber
+        }),
+        err(AwsError(response))
+    )
+},
+(phone_number: Str, message: Str): PublishResponse | AwsError {
+    send-sms(phone_number, message, {})
+}

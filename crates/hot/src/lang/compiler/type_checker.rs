@@ -140,6 +140,11 @@ pub enum TypeExpr {
     Optional(Box<TypeExpr>),                // T?
     Union(Vec<TypeExpr>),                   // T | U
     Function(Vec<TypeExpr>, Box<TypeExpr>), // (T, U) -> V
+    Record {
+        fields: AHashMap<String, TypeExpr>,
+        open: bool,
+        type_name: Option<String>,
+    }, // statically known map/record shape
 
     // User-defined types
     Named(String),                  // Custom type name
@@ -194,6 +199,11 @@ pub struct TypeDefinition {
     /// Closed enums must be exhaustively matched (covered variants must
     /// equal the declared variant set); non-enum types skip that check.
     pub is_enum: bool,
+    /// Whether this `TypeDef` is a struct/record declaration with inline
+    /// fields (`Foo type { a: Int }`).
+    pub is_struct: bool,
+    /// Declared struct fields keyed by field name. Empty for non-struct types.
+    pub fields: AHashMap<String, TypeExpr>,
     /// Short names of the variants known to belong to this enum. For
     /// closed enums, populated from `TypeDef.variants` at registration.
     /// For open enums, also extended each time a `Source -> Enum.X` arrow
@@ -818,6 +828,12 @@ impl TypeChecker {
                 break;
             }
         }
+        // Refresh type metadata now that top-level alias variables have been
+        // inferred. Struct fields can legally use namespace-local aliases such
+        // as `Session ::ai::session/Session` followed by `session: Session`;
+        // resolving those fields before the alias pass would leave a bare short
+        // name that can collide with unrelated packages in aggregate projects.
+        self.collect_known_types(program);
         tracing::debug!(
             "TypeChecker: Discovered {} qualified variables ({} core)",
             self.qualified_variables.len(),
@@ -835,6 +851,13 @@ impl TypeChecker {
             tracing::debug!("TypeChecker: Found {} type errors", self.errors.len());
             Err(self.errors.clone())
         }
+    }
+
+    /// Best-effort expression inference for editor features. This intentionally
+    /// reuses the checker state built by `check_program` so LSP field completion
+    /// sees the same row-preserved record shapes as diagnostics.
+    pub fn infer_value_type_for_lsp(&mut self, value: &Value) -> TypeExpr {
+        self.infer_value_type(value)
     }
 
     /// Collect all type names from the program for type resolution
@@ -905,7 +928,7 @@ impl TypeChecker {
                     self.deprecated_defs.insert(qualified.clone(), note);
                 }
 
-                let inferred = self.shallow_infer_top_level_type(value, &alias_map, &ns_str);
+                let inferred = self.shallow_infer_top_level_type(var, value, &alias_map, &ns_str);
                 if !matches!(inferred, TypeExpr::Any)
                     || !self.qualified_variables.contains_key(&qualified)
                 {
@@ -928,13 +951,20 @@ impl TypeChecker {
     /// for cross-namespace lookups.
     fn shallow_infer_top_level_type(
         &self,
+        var: &Var,
         value: &Value,
         alias_map: &AHashMap<String, String>,
         ns_str: &str,
     ) -> TypeExpr {
-        match value {
+        let inferred = match value {
             Value::Val(val, type_annot) => {
                 if let Some(annotation) = type_annot {
+                    if annotation == "Map" && matches!(val, Val::Map(_)) {
+                        return self.apply_annotation_constraint_pure(
+                            self.infer_val_type(val),
+                            var.type_annotation.as_deref(),
+                        );
+                    }
                     self.parse_type_annotation_pure(annotation)
                 } else {
                     self.infer_val_type(val)
@@ -994,10 +1024,23 @@ impl TypeChecker {
                 self.lookup_qualified_ns_ref(ns_ref, alias_map)
                     .unwrap_or(TypeExpr::Any)
             }
-            Value::Ref(Ref::Var(_)) => {
-                // Same-namespace reference at top level — usually shouldn't
-                // happen for declarations, but if it does we leave it
-                // unresolved. The full inference pass will type-check usages.
+            Value::Ref(Ref::Var(var_ref)) => {
+                // Same-namespace top-level aliases (`alias original`) need to
+                // preserve known record shapes when imported from another
+                // namespace. `collect_qualified_variables` iterates to a fixed
+                // point, so chained aliases converge as earlier entries become
+                // known.
+                if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() {
+                    let target_name = var_ref.var.sym.name();
+                    if target_name != var.sym.name() {
+                        let qualified = format!("{}/{}", ns_str, target_name);
+                        return self
+                            .qualified_variables
+                            .get(&qualified)
+                            .cloned()
+                            .unwrap_or(TypeExpr::Any);
+                    }
+                }
                 TypeExpr::Any
             }
             Value::MultipleValues(values) => {
@@ -1005,15 +1048,19 @@ impl TypeChecker {
                 // [VarRef(local-self), Ref::Ns(target)]. Skip self-VarRefs and
                 // pick the first informative entry.
                 for v in values {
-                    let inferred = self.shallow_infer_top_level_type(v, alias_map, ns_str);
+                    let inferred = self.shallow_infer_top_level_type(var, v, alias_map, ns_str);
                     if !matches!(inferred, TypeExpr::Any) {
                         return inferred;
                     }
                 }
                 TypeExpr::Any
             }
+            Value::MapWithSpread { .. } => {
+                TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any))
+            }
             _ => TypeExpr::Any,
-        }
+        };
+        self.apply_annotation_constraint_pure(inferred, var.type_annotation.as_deref())
     }
 
     /// Resolve a `Ref::Ns` to a fully-qualified `::ns/var` key and look it up
@@ -1179,12 +1226,21 @@ impl TypeChecker {
         }
 
         let mut has_default = false;
+        let mut has_type_level_cover = false;
         let mut covered: AHashSet<String> = AHashSet::new();
         for arm in arms {
             let is_default =
                 arm.type_name.is_none() && arm.variant.is_none() && arm.value_literal.is_none();
             if is_default {
                 has_default = true;
+                continue;
+            }
+            if arm.variant.is_none()
+                && arm.value_literal.is_none()
+                && let Some(type_name) = &arm.type_name
+                && Self::short_type_name(type_name) == short_name
+            {
+                has_type_level_cover = true;
                 continue;
             }
             if let Some(variant) = &arm.variant {
@@ -1202,7 +1258,7 @@ impl TypeChecker {
             return;
         }
 
-        if has_default {
+        if has_default || has_type_level_cover {
             return;
         }
         let missing: Vec<String> = declared_variants
@@ -1256,6 +1312,16 @@ impl TypeChecker {
         src: Option<&Source>,
     ) {
         let is_enum = type_def.variants.is_some();
+        let is_struct = type_def.fields.is_some();
+        let mut struct_fields = AHashMap::new();
+        if let Some(fields) = &type_def.fields {
+            for field in fields {
+                struct_fields.insert(
+                    field.name.name().to_string(),
+                    self.ast_type_to_type_expr_in_namespace(&field.type_expr, ns_str),
+                );
+            }
+        }
         let mut variants = AHashSet::new();
         let mut payloads: AHashMap<String, String> = AHashMap::new();
         if let Some(vs) = &type_def.variants {
@@ -1335,40 +1401,77 @@ impl TypeChecker {
             });
         }
 
-        let entry = self.context.types.entry(short.to_string()).or_default();
+        {
+            let entry = self.context.types.entry(short.to_string()).or_default();
+            entry.is_open = entry.is_open || type_def.is_open;
+            entry.is_enum = entry.is_enum || is_enum;
+            if is_struct {
+                entry.is_struct = true;
+                entry.fields = struct_fields.clone();
+            }
+            // Remember where this type was declared so the FQN resolver can
+            // namespace-qualify bare payload references (`Triangle` in
+            // `Tri(Triangle)`) the same way the user-facing checks do.
+            // First-writer wins — re-registration during the second pass
+            // shouldn't clobber the original declaring namespace.
+            if entry.declaring_namespace.is_empty() {
+                entry.declaring_namespace = ns_str.to_string();
+            }
+
+            if alias_is_literal_union {
+                // If the previous entry came from a different namespace,
+                // treat this as a fresh registration: drop the prior literal
+                // state so members from the unrelated type don't bleed into
+                // this one's accumulator.
+                if !same_ns_existing {
+                    entry.literal_members.clear();
+                    entry.is_open = type_def.is_open;
+                    entry.declaring_namespace = ns_str.to_string();
+                }
+                entry.is_literal_union = true;
+                // Accumulate members in declaration order, deduping. This
+                // makes re-extending with an existing literal a no-op rather
+                // than an error, which matches the user's intuition (an
+                // extension that includes already-known members is harmless).
+                for lit in &lit_members {
+                    if !entry.literal_members.contains(lit) {
+                        entry.literal_members.push(lit.clone());
+                    }
+                }
+            }
+
+            if is_enum && !type_def.is_open {
+                entry.variants = variants.clone();
+                entry.variant_payloads = payloads.clone();
+            } else {
+                for v in &variants {
+                    entry.variants.insert(v.clone());
+                }
+                for (k, v) in &payloads {
+                    entry.variant_payloads.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        let qualified = format!("{}/{}", ns_str, short);
+        let entry = self.context.types.entry(qualified).or_default();
         entry.is_open = entry.is_open || type_def.is_open;
         entry.is_enum = entry.is_enum || is_enum;
-        // Remember where this type was declared so the FQN resolver can
-        // namespace-qualify bare payload references (`Triangle` in
-        // `Tri(Triangle)`) the same way the user-facing checks do.
-        // First-writer wins — re-registration during the second pass
-        // shouldn't clobber the original declaring namespace.
+        entry.is_struct = entry.is_struct || is_struct;
+        if is_struct {
+            entry.fields = struct_fields;
+        }
         if entry.declaring_namespace.is_empty() {
             entry.declaring_namespace = ns_str.to_string();
         }
-
         if alias_is_literal_union {
-            // If the previous entry came from a different namespace,
-            // treat this as a fresh registration: drop the prior literal
-            // state so members from the unrelated type don't bleed into
-            // this one's accumulator.
-            if !same_ns_existing {
-                entry.literal_members.clear();
-                entry.is_open = type_def.is_open;
-                entry.declaring_namespace = ns_str.to_string();
-            }
             entry.is_literal_union = true;
-            // Accumulate members in declaration order, deduping. This
-            // makes re-extending with an existing literal a no-op rather
-            // than an error, which matches the user's intuition (an
-            // extension that includes already-known members is harmless).
             for lit in lit_members {
                 if !entry.literal_members.contains(&lit) {
                     entry.literal_members.push(lit);
                 }
             }
         }
-
         if is_enum && !type_def.is_open {
             entry.variants = variants;
             entry.variant_payloads = payloads;
@@ -1580,6 +1683,70 @@ impl TypeChecker {
         }
     }
 
+    fn ast_type_to_type_expr_in_namespace(
+        &self,
+        expr: &crate::lang::ast::TypeExpr,
+        ns_str: &str,
+    ) -> TypeExpr {
+        use crate::lang::ast as a;
+        match expr {
+            a::TypeExpr::Simple(name) | a::TypeExpr::Named(name) => {
+                if let Some(builtin) = self.try_resolve_builtin_type(name) {
+                    return builtin;
+                }
+
+                if name.starts_with("::") {
+                    return self
+                        .try_resolve_namespaced_type(name)
+                        .unwrap_or_else(|| TypeExpr::Named(name.clone()));
+                }
+
+                let local_qualified = format!("{}/{}", ns_str, name);
+                if let Some(alias_target) = self.qualified_variables.get(&local_qualified) {
+                    return alias_target.clone();
+                }
+
+                if let Some(local_type) = self.qualified_types.get(&local_qualified) {
+                    return local_type.clone();
+                }
+
+                if let Some(core_qualified) = self.core_types.get(name)
+                    && let Some(core_type) = self.qualified_types.get(core_qualified)
+                {
+                    return core_type.clone();
+                }
+
+                TypeExpr::Named(name.clone())
+            }
+            a::TypeExpr::Generic(name, params) => match (name.as_str(), params.as_slice()) {
+                ("Vec", [inner]) => TypeExpr::Vec(Box::new(
+                    self.ast_type_to_type_expr_in_namespace(inner, ns_str),
+                )),
+                ("Map", [k, v]) => TypeExpr::Map(
+                    Box::new(self.ast_type_to_type_expr_in_namespace(k, ns_str)),
+                    Box::new(self.ast_type_to_type_expr_in_namespace(v, ns_str)),
+                ),
+                _ => TypeExpr::Generic(
+                    name.clone(),
+                    params
+                        .iter()
+                        .map(|param| self.ast_type_to_type_expr_in_namespace(param, ns_str))
+                        .collect(),
+                ),
+            },
+            a::TypeExpr::Union(variants) => TypeExpr::Union(
+                variants
+                    .iter()
+                    .map(|variant| self.ast_type_to_type_expr_in_namespace(variant, ns_str))
+                    .collect(),
+            ),
+            a::TypeExpr::Optional(inner) => TypeExpr::Optional(Box::new(
+                self.ast_type_to_type_expr_in_namespace(inner, ns_str),
+            )),
+            _ => Self::ast_type_to_type_expr(expr),
+        }
+    }
+
     /// Normalize a type name to its short form (no namespace prefix). Used
     /// for user-facing diagnostic strings; the implementation registry is
     /// keyed by FQN — see [`Self::resolve_to_fqn`].
@@ -1781,6 +1948,10 @@ impl TypeChecker {
             TypeExpr::Null => "Null",
             TypeExpr::Any => return None,
             TypeExpr::Optional(inner) => return Self::type_expr_short_name(inner),
+            TypeExpr::Record {
+                type_name: Some(name),
+                ..
+            } => name.as_str(),
             _ => return None,
         };
         Some(Self::short_type_name(name))
@@ -2031,6 +2202,12 @@ impl TypeChecker {
             // to walk so the deprecation check can suppress self-references.
             self.current_def = Some(format!("{}/{}", ns_path, var_name));
             let inferred_type = self.infer_value_type(value);
+            let inferred_type = if let Some(annotation) = &var.type_annotation {
+                let constraint = self.parse_type_annotation(annotation, var.src.as_ref());
+                self.apply_annotation_constraint(inferred_type, &constraint)
+            } else {
+                inferred_type
+            };
             self.current_def = None;
             self.context.add_variable(var_name, inferred_type);
         }
@@ -2043,6 +2220,9 @@ impl TypeChecker {
         match value {
             Value::Val(val, type_info) => {
                 if let Some(ann) = type_info {
+                    if ann == "Map" && matches!(val, Val::Map(_)) {
+                        return self.infer_val_type(val);
+                    }
                     self.parse_type_annotation(ann, None)
                 } else {
                     self.infer_val_type(val)
@@ -2074,7 +2254,12 @@ impl TypeChecker {
                         })
                         .unwrap_or(TypeExpr::Any);
                     if let Some(path) = &var_ref.var.deep_path {
-                        self.resolve_deep_path_type(&base, path)
+                        let location = var_ref
+                            .src
+                            .as_ref()
+                            .or(var_ref.var.src.as_ref())
+                            .map(|s| self.source_to_error_location(s));
+                        self.resolve_deep_path_type(&base, path, location.as_ref())
                     } else {
                         base
                     }
@@ -2181,12 +2366,9 @@ impl TypeChecker {
                     && var_ref.var.deep_set.is_none()
                 {
                     let inferred = self.infer_value_type(&values[1]);
-                    let assigned = if let Some(ann) = var_ref
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.type_annotation.as_ref())
-                    {
-                        self.parse_type_annotation(ann, None)
+                    let assigned = if let Some(ann) = var_ref.var.type_annotation.as_ref() {
+                        let constraint = self.parse_type_annotation(ann, None);
+                        self.apply_annotation_constraint(inferred, &constraint)
                     } else {
                         inferred
                     };
@@ -2203,6 +2385,9 @@ impl TypeChecker {
             }
 
             // Other value types default to Any for now
+            Value::MapWithSpread { .. } => {
+                TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any))
+            }
             _ => TypeExpr::Any,
         }
     }
@@ -2226,11 +2411,104 @@ impl TypeChecker {
                     TypeExpr::Vec(Box::new(element_type))
                 }
             }
-            Val::Map(_) => {
-                // For now, assume Map<Any, Any>
-                TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any))
-            }
+            Val::Map(_) => self.infer_record_type(val),
             Val::Box(_) => TypeExpr::Any, // Boxed values are dynamic
+        }
+    }
+
+    fn infer_record_type(&self, val: &Val) -> TypeExpr {
+        let Val::Map(map) = val else {
+            return TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any));
+        };
+
+        let mut fields = AHashMap::new();
+        for (key, value) in map.iter() {
+            let Val::Str(field_name) = key else {
+                return TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any));
+            };
+            fields.insert(field_name.to_string(), self.infer_val_type(value));
+        }
+
+        TypeExpr::Record {
+            fields,
+            open: false,
+            type_name: None,
+        }
+    }
+
+    fn apply_annotation_constraint(&self, actual: TypeExpr, constraint: &TypeExpr) -> TypeExpr {
+        if matches!(constraint, TypeExpr::Map(_, _)) {
+            return constraint.clone();
+        }
+        match &actual {
+            TypeExpr::Record { .. } if self.types_are_compatible(constraint, &actual) => {
+                self.record_with_constraint(actual, constraint)
+            }
+            TypeExpr::Any | TypeExpr::Map(_, _) => constraint.clone(),
+            _ => constraint.clone(),
+        }
+    }
+
+    fn apply_annotation_constraint_pure(
+        &self,
+        actual: TypeExpr,
+        annotation: Option<&str>,
+    ) -> TypeExpr {
+        let Some(annotation) = annotation else {
+            return actual;
+        };
+        let constraint = self.parse_type_annotation_pure(annotation);
+        if matches!(constraint, TypeExpr::Map(_, _)) {
+            return constraint;
+        }
+        match &actual {
+            TypeExpr::Record { .. } if self.types_are_compatible(&constraint, &actual) => {
+                self.record_with_constraint(actual, &constraint)
+            }
+            TypeExpr::Any | TypeExpr::Map(_, _) => constraint,
+            _ => constraint,
+        }
+    }
+
+    fn record_with_constraint(&self, actual: TypeExpr, constraint: &TypeExpr) -> TypeExpr {
+        let TypeExpr::Record {
+            fields,
+            open,
+            type_name,
+        } = actual
+        else {
+            return actual;
+        };
+
+        let constrained_name = match constraint {
+            TypeExpr::Named(name) => Some(name.clone()),
+            _ => type_name,
+        };
+
+        TypeExpr::Record {
+            fields,
+            open,
+            type_name: constrained_name,
+        }
+    }
+
+    fn named_type_definition(&self, name: &str) -> Option<&TypeDefinition> {
+        let short = Self::short_type_name(name);
+        self.context
+            .types
+            .get(name)
+            .or_else(|| self.context.types.get(&short))
+    }
+
+    pub fn known_fields_for_type(&self, base: &TypeExpr) -> Option<AHashMap<String, TypeExpr>> {
+        match base {
+            TypeExpr::Record { fields, .. } => Some(fields.clone()),
+            TypeExpr::Named(name) => self
+                .named_type_definition(name)
+                .filter(|td| td.is_struct)
+                .map(|td| td.fields.clone()),
+            TypeExpr::Optional(inner) => self.known_fields_for_type(inner),
+            _ => None,
         }
     }
 
@@ -2242,18 +2520,19 @@ impl TypeChecker {
     /// access succeeds without a false-positive type error. This is also the
     /// right answer for `Map<Any, Any>` — every key access returns `Any`.
     fn resolve_deep_path_type(
-        &self,
+        &mut self,
         base: &TypeExpr,
         path: &crate::lang::ast::DeepPath,
+        location: Option<&ErrorLocation>,
     ) -> TypeExpr {
         use crate::lang::ast::DeepPath;
         match path {
             DeepPath::Index(_) | DeepPath::DynamicIndex(_) => self.element_type(base),
-            DeepPath::Key(_) => self.value_type(base),
+            DeepPath::Key(key) => self.value_type(base, key, location),
             DeepPath::Append => base.clone(),
             DeepPath::Chain(head, tail) => {
-                let head_type = self.resolve_deep_path_type(base, head);
-                self.resolve_deep_path_type(&head_type, tail)
+                let head_type = self.resolve_deep_path_type(base, head, location);
+                self.resolve_deep_path_type(&head_type, tail, location)
             }
         }
     }
@@ -2272,18 +2551,85 @@ impl TypeChecker {
         }
     }
 
-    /// Value type for a keyed access. `Map<K, V>` → `V`, anything else →
-    /// `Any` (struct field types are not tracked yet, so we stay permissive).
-    fn value_type(&self, base: &TypeExpr) -> TypeExpr {
+    fn runtime_metadata_field_type(key: &str) -> Option<TypeExpr> {
+        match key {
+            "$type" => Some(TypeExpr::Str),
+            "$val" => Some(TypeExpr::Any),
+            _ => None,
+        }
+    }
+
+    /// Value type for a keyed access. `Map<K, V>` → `V`; closed known
+    /// records and struct types expose their declared/preserved fields.
+    fn value_type(
+        &mut self,
+        base: &TypeExpr,
+        key: &str,
+        location: Option<&ErrorLocation>,
+    ) -> TypeExpr {
+        if let Some(metadata_type) = Self::runtime_metadata_field_type(key) {
+            return metadata_type;
+        }
+
         match base {
             TypeExpr::Map(_, val) => (**val).clone(),
-            TypeExpr::Optional(inner) => self.value_type(inner),
+            TypeExpr::Record { fields, open, .. } => {
+                if let Some(field_type) = fields.get(key) {
+                    field_type.clone()
+                } else {
+                    if !open {
+                        self.add_unknown_field_warning("<record>", key, location.cloned());
+                    }
+                    TypeExpr::Any
+                }
+            }
+            TypeExpr::Named(name) => {
+                if let Some(type_def) = self.named_type_definition(name) {
+                    if type_def.is_enum && (type_def.is_open || type_def.variants.contains(key)) {
+                        return base.clone();
+                    }
+
+                    if type_def.is_struct {
+                        if let Some(field_type) = type_def.fields.get(key) {
+                            return field_type.clone();
+                        }
+                        self.add_unknown_field_warning(name, key, location.cloned());
+                    }
+                }
+                TypeExpr::Any
+            }
+            TypeExpr::Optional(inner) => {
+                let inner_type = self.value_type(inner, key, location);
+                TypeExpr::Optional(Box::new(inner_type))
+            }
             TypeExpr::Union(variants) => {
-                let resolved: Vec<_> = variants.iter().map(|v| self.value_type(v)).collect();
+                if variants
+                    .iter()
+                    .any(|v| matches!(v, TypeExpr::Any | TypeExpr::Map(_, _)))
+                {
+                    return TypeExpr::Any;
+                }
+                let resolved: Vec<_> = variants
+                    .iter()
+                    .map(|v| self.value_type(v, key, location))
+                    .collect();
                 TypeExpr::Union(resolved)
             }
             _ => TypeExpr::Any,
         }
+    }
+
+    fn add_unknown_field_warning(
+        &mut self,
+        type_name: &str,
+        field_name: &str,
+        location: Option<ErrorLocation>,
+    ) {
+        self.errors.add_warning(CompilerError::UnknownField {
+            type_name: Self::short_type_name(type_name),
+            field_name: field_name.to_string(),
+            location,
+        });
     }
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)
@@ -2361,6 +2707,50 @@ impl TypeChecker {
                 self.types_are_compatible(expected_key, actual_key)
                     && self.types_are_compatible(expected_val, actual_val)
             }
+
+            // Known records can flow to Map slots. Field key types are strings,
+            // and values are accepted when every known value fits the map's
+            // declared value type (Map<Any, Any> accepts all records).
+            (TypeExpr::Map(expected_key, expected_val), TypeExpr::Record { fields, .. }) => {
+                self.types_are_compatible(expected_key, &TypeExpr::Str)
+                    && (matches!(**expected_val, TypeExpr::Any)
+                        || fields
+                            .values()
+                            .all(|field_type| self.types_are_compatible(expected_val, field_type)))
+            }
+            (TypeExpr::Record { .. }, TypeExpr::Map(k, v))
+                if matches!(**k, TypeExpr::Any) && matches!(**v, TypeExpr::Any) =>
+            {
+                true
+            }
+
+            // Struct constraints are structural: a known record satisfies a
+            // struct when it provides every declared field with a compatible
+            // type. Extra record fields are deliberately preserved elsewhere.
+            (TypeExpr::Named(expected_name), TypeExpr::Record { fields, .. }) => {
+                if let Some(type_def) = self.named_type_definition(expected_name)
+                    && type_def.is_struct
+                {
+                    type_def.fields.iter().all(|(field_name, expected_type)| {
+                        fields.get(field_name).is_some_and(|actual_type| {
+                            self.types_are_compatible(expected_type, actual_type)
+                        })
+                    })
+                } else {
+                    false
+                }
+            }
+            (
+                TypeExpr::Record {
+                    fields: expected_fields,
+                    ..
+                },
+                TypeExpr::Record { fields, .. },
+            ) => expected_fields.iter().all(|(field_name, expected_type)| {
+                fields.get(field_name).is_some_and(|actual_type| {
+                    self.types_are_compatible(expected_type, actual_type)
+                })
+            }),
 
             // Map literal `{...}` infers as `Map<Any, Any>`. Without further
             // annotation we have no way to verify it satisfies a struct shape
@@ -2653,15 +3043,29 @@ impl TypeChecker {
                 // the constructed type instead of falling through to the
                 // generic function-signature path (which doesn't know about
                 // type constructors and would hand back `Any`).
+                let mut arg_types = Vec::new();
                 for arg in &fn_call.args {
-                    let _ = self.infer_value_type(&arg.value);
+                    arg_types.push(self.infer_value_type(&arg.value));
+                }
+                if let Some(first_arg_type) = arg_types.first()
+                    && matches!(first_arg_type, TypeExpr::Record { .. })
+                    && self.types_are_compatible(&t, first_arg_type)
+                {
+                    return self.apply_annotation_constraint(first_arg_type.clone(), &t);
                 }
                 return t;
             }
             let qualified_lookup = format!("{}/{}", self.context.current_namespace, lookup_name);
             if let Some(t) = self.qualified_types.get(&qualified_lookup).cloned() {
+                let mut arg_types = Vec::new();
                 for arg in &fn_call.args {
-                    let _ = self.infer_value_type(&arg.value);
+                    arg_types.push(self.infer_value_type(&arg.value));
+                }
+                if let Some(first_arg_type) = arg_types.first()
+                    && matches!(first_arg_type, TypeExpr::Record { .. })
+                    && self.types_are_compatible(&t, first_arg_type)
+                {
+                    return self.apply_annotation_constraint(first_arg_type.clone(), &t);
                 }
                 return t;
             }
@@ -2930,7 +3334,7 @@ impl TypeChecker {
 
             // Type-check the function body and verify it matches the expected return type
             let body_type = self.infer_value_type(&fn_def.body);
-            if !self.types_are_compatible(&body_type, &declared_return_type) {
+            if !self.types_are_compatible(&declared_return_type, &body_type) {
                 self.errors
                     .errors
                     .push(CompilerError::InvalidImplementation {
@@ -3778,6 +4182,17 @@ impl std::fmt::Display for TypeExpr {
             TypeExpr::Function(params, return_type) => {
                 let param_strs: Vec<String> = params.iter().map(|t| t.to_string()).collect();
                 write!(f, "({}) -> {}", param_strs.join(", "), return_type)
+            }
+            TypeExpr::Record { fields, open, .. } => {
+                let mut field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, field_type)| format!("{}: {}", name, field_type))
+                    .collect();
+                field_strs.sort();
+                if *open {
+                    field_strs.push("...".to_string());
+                }
+                write!(f, "{{{}}}", field_strs.join(", "))
             }
             TypeExpr::Named(name) => write!(f, "{}", name),
             TypeExpr::Generic(name, params) => {

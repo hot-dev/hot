@@ -1,0 +1,345 @@
+::aws::bedrock::converse ns
+
+// Bedrock Converse API - unified interface for all models
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Literal union for message roles
+Role type "user" | "assistant"
+
+// Literal union for stop reasons
+StopReason type "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "guardrail_intervened" | "content_filtered"
+
+// Content block type (text, image, etc.)
+ContentBlock type {
+    text: Str?,
+    image: Map?,
+    tool_use: Map?,
+    tool_result: Map?
+}
+
+// Message type for Converse API
+Message type {
+    role: Role,
+    content: Vec<ContentBlock>
+}
+
+// Tool configuration
+ToolConfig type {
+    tools: Vec<Map>,
+    tool_choice: Map?
+}
+
+// Converse response
+ConverseResponse type {
+    output: Map?,
+    stop_reason: StopReason?,
+    usage: Map?,
+    metrics: Map?
+}
+
+// Converse stream event
+ConverseStreamEvent type {
+    message_start: Map?,
+    content_block_start: Map?,
+    content_block_delta: Map?,
+    content_block_stop: Map?,
+    message_stop: Map?,
+    metadata: Map?
+}
+
+// Converse with a model using the unified Converse API
+converse
+meta {
+    doc: """
+    Use the Bedrock Converse API for a unified interface across all models.
+
+    The Converse API works with any Bedrock model (Claude, Titan, Llama, Mistral, etc.)
+    using the same message format.
+
+    **Example**
+
+    ```hot
+    // Simple text conversation
+    result ::aws::bedrock::converse/converse("us.amazon.nova-micro-v1:0", "What is 2+2?")
+    content result.output.message.content
+    text first(content).text
+    // => "4"
+
+    // With message history
+    messages [
+        {role: "user", content: [{text: "My name is Alice"}]},
+        {role: "assistant", content: [{text: "Hello Alice!"}]},
+        {role: "user", content: [{text: "What is my name?"}]}
+    ]
+    result ::aws::bedrock::converse/converse("us.amazon.nova-micro-v1:0", messages)
+
+    // Check usage metrics
+    result.usage.inputTokens   // => 15
+    result.usage.outputTokens  // => 5
+    ```
+    """
+}
+fn
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map, guardrail_config: Map): ConverseResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/converse`
+
+    request-body {
+        modelId: model_id,
+        messages: messages
+    }
+
+    with-system if(is-null(system), request-body,
+        merge(request-body, { system: system })
+    )
+
+    with-inference if(is-null(inference_config), with-system,
+        merge(with-system, { inferenceConfig: inference_config })
+    )
+
+    with-tools if(is-null(tool_config), with-inference,
+        merge(with-inference, { toolConfig: tool_config })
+    )
+
+    with-guardrail if(is-null(guardrail_config), with-tools,
+        merge(with-tools, { guardrailConfig: guardrail_config })
+    )
+
+    body-str to-json(with-guardrail)
+
+    headers {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        ConverseResponse({
+            output: response.body.output,
+            stop_reason: response.body.stopReason,
+            usage: response.body.usage,
+            metrics: response.body.metrics
+        }),
+        err(AwsError(response))
+    )
+},
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map): ConverseResponse | AwsError {
+    converse(model_id, messages, system, inference_config, null, null)
+},
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>): ConverseResponse | AwsError {
+    converse(model_id, messages, system, null, null, null)
+},
+(model_id: Str, messages: Vec<Map>): ConverseResponse | AwsError {
+    converse(model_id, messages, null, null, null, null)
+},
+// Simple text message convenience
+(model_id: Str, text: Str): ConverseResponse | AwsError {
+    converse(model_id, [
+        {role: "user", content: [{text: text}]}
+    ], null, null, null, null)
+}
+
+// Converse with streaming response
+converse-stream
+meta {
+    doc: """
+    Use the Bedrock Converse API with streaming response.
+
+    Returns the raw HTTP response with an event stream body.
+    Note: Streaming requires parsing the AWS Event Stream binary format.
+    """
+}
+fn
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map, tool_config: Map): HttpResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/converse-stream`
+
+    request-body {
+        modelId: model_id,
+        messages: messages
+    }
+
+    with-system if(is-null(system), request-body,
+        merge(request-body, { system: system })
+    )
+
+    with-inference if(is-null(inference_config), with-system,
+        merge(with-system, { inferenceConfig: inference_config })
+    )
+
+    with-tools if(is-null(tool_config), with-inference,
+        merge(with-inference, { toolConfig: tool_config })
+    )
+
+    body-str to-json(with-tools)
+
+    headers {
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.amazon.eventstream",
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        response,
+        AwsError(response)
+    )
+},
+(model_id: Str, messages: Vec<Map>, system: Vec<Map>): HttpResponse | AwsError {
+    converse-stream(model_id, messages, system, null, null)
+},
+(model_id: Str, messages: Vec<Map>): HttpResponse | AwsError {
+    converse-stream(model_id, messages, null, null, null)
+}
+
+// Helper to build a text content block
+text-content
+meta {
+    doc: """
+    Helper to create a text content block for the Converse API.
+
+    **Example**
+
+    ```hot
+    block ::aws::bedrock::converse/text-content("Hello")
+    // => {text: "Hello"}
+    ```
+    """
+}
+fn (text: Str): Map {
+    { text: text }
+}
+
+// Helper to build an image content block
+image-content
+meta {
+    doc: """
+    Helper to create an image content block for the Converse API.
+
+    **Example**
+
+    ```hot
+    block ::aws::bedrock::converse/image-content("png", base64-image-data)
+    // => {image: {format: "png", source: {bytes: "..."}}}
+    ```
+    """
+}
+fn (format: Str, source_bytes: Str): Map {
+    {
+        image: {
+            format: format,
+            source: {
+                bytes: source_bytes
+            }
+        }
+    }
+}
+
+// Helper to build a user message
+user-message
+meta {
+    doc: """
+    Helper to create a user message for the Converse API.
+
+    **Example**
+
+    ```hot
+    msg ::aws::bedrock::converse/user-message("What is the capital of France?")
+    // => Message({role: "user", content: [{text: "What is the capital of France?"}]})
+    ```
+    """
+}
+fn
+(content: Vec<Map>): Message {
+    Message({ role: "user", content: content })
+},
+(text: Str): Message {
+    Message({ role: "user", content: [{ text: text }] })
+}
+
+// Helper to build an assistant message
+assistant-message
+meta {
+    doc: """
+    Helper to create an assistant message for the Converse API.
+
+    **Example**
+
+    ```hot
+    msg ::aws::bedrock::converse/assistant-message("The capital of France is Paris.")
+    // => Message({role: "assistant", content: [{text: "The capital of France is Paris."}]})
+    ```
+    """
+}
+fn
+(content: Vec<Map>): Message {
+    Message({ role: "assistant", content: content })
+},
+(text: Str): Message {
+    Message({ role: "assistant", content: [{ text: text }] })
+}
+
+// Helper to build inference configuration
+inference-config
+meta {
+    doc: """
+    Helper to create inference configuration for the Converse API.
+
+    **Example**
+
+    ```hot
+    // Max tokens only
+    config ::aws::bedrock::converse/inference-config(100)
+    // => {maxTokens: 100}
+
+    // Max tokens with temperature
+    config ::aws::bedrock::converse/inference-config(200, 0.5)
+    // => {maxTokens: 200, temperature: 0.5}
+    ```
+    """
+}
+fn
+(max_tokens: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): Map {
+    config {
+        maxTokens: max_tokens
+    }
+
+    with-temp if(is-null(temperature), config,
+        merge(config, { temperature: temperature })
+    )
+
+    with-top-p if(is-null(top_p), with-temp,
+        merge(with-temp, { topP: top_p })
+    )
+
+    with-stop if(is-null(stop_sequences), with-top-p,
+        merge(with-top-p, { stopSequences: stop_sequences })
+    )
+
+    with-stop
+},
+(max_tokens: Int, temperature: Dec): Map {
+    inference-config(max_tokens, temperature, null, null)
+},
+(max_tokens: Int): Map {
+    inference-config(max_tokens, null, null, null)
+}

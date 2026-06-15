@@ -501,6 +501,7 @@ mod tests {
             deep_set: None,
             deep_path: None,
             meta: None,
+            type_annotation: None,
             src: None,
         }
     }
@@ -527,6 +528,7 @@ mod tests {
             meta: Some(Meta {
                 val: Val::Map(Box::new(meta_map)),
             }),
+            type_annotation: None,
             src: None,
         }
     }
@@ -548,7 +550,6 @@ mod tests {
         Value::FnCall(FnCall {
             function: Box::new(Value::Ref(Ref::Var(VarRef {
                 var: make_var(fn_name),
-                data: None,
                 src: None,
             }))),
             args: vec![],
@@ -1096,6 +1097,7 @@ mod tests {
             meta: Some(Meta {
                 val: Val::Map(Box::new(meta_map)),
             }),
+            type_annotation: None,
             src: None,
         }
     }

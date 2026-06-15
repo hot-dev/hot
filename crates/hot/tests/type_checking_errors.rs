@@ -30,6 +30,22 @@ fn compile_and_get_type_errors(source: &str) -> Vec<CompilerError> {
     }
 }
 
+/// Helper function to compile Hot code and extract non-fatal compiler warnings
+fn compile_and_get_warnings(source: &str) -> Vec<CompilerError> {
+    let mut compiler = Compiler::new();
+
+    let test_program = match parser::parse_hot(source) {
+        Ok(program) => program,
+        Err(parse_error) => {
+            panic!("Parse error in test source: {}", parse_error);
+        }
+    };
+
+    let mut comprehensive_program = build_program_with_hot_std(test_program);
+    let _ = compiler.compile_program(&mut comprehensive_program);
+    compiler.diagnostics().warnings.clone()
+}
+
 /// Build a program that includes hot-std for realistic testing
 fn build_program_with_hot_std(test_program: hot::lang::ast::Program) -> hot::lang::ast::Program {
     use hot::lang::ast::Program;
@@ -282,6 +298,27 @@ mod type_checking_tests {
     }
 
     #[test]
+    fn test_type_implementation_accepts_struct_shaped_map_return() {
+        let source = r#"
+            ::test ns
+
+            Source type { value: Int }
+            Target type { value: Int }
+
+            Source -> Target fn (s: Source): Target {
+                {value: s.value}
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Implementation returning a matching record should compile. Got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
     fn test_lazy_parameter_validation() {
         let source = r#"
             ::test ns
@@ -484,6 +521,380 @@ mod type_checking_tests {
                 CompilerError::UnresolvedType { .. }
             )),
             "Should contain unresolved type error"
+        );
+    }
+
+    #[test]
+    fn test_struct_constraint_preserves_known_extra_fields() {
+        let source = r#"
+            ::test ns
+
+            A type { a: Int }
+            B type { a: Int, b: Int }
+
+            m {a: 1, b: 2}
+            x: A m
+            y: B x
+            z x.b
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Known extra fields should be preserved through struct constraints. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Preserved known field access should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_constructor_preserves_known_extra_fields() {
+        let source = r#"
+            ::test ns
+
+            A type { a: Int }
+
+            x A({a: 1, b: 2})
+            z x.b
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Constructor should compile: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Constructor should preserve known extra field b. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_on_narrow_struct_is_warning() {
+        let source = r#"
+            ::test ns
+
+            A type { a: Int }
+
+            read-b fn (value: A): Any {
+                value.b
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Unknown field rollout should not fail compilation. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            has_error_type(&warnings, |e| matches!(
+                e,
+                CompilerError::UnknownField {
+                    type_name,
+                    field_name,
+                    ..
+                } if type_name == "A" && field_name == "b"
+            )),
+            "Expected unknown-field warning for A.b. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_runtime_metadata_fields_do_not_warn() {
+        let source = r#"
+            ::test ns
+
+            Point type { x: Int, y: Int }
+
+            p Point({x: 1, y: 2})
+            tag p.$type
+            payload p.$val
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Runtime metadata field access should compile. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Runtime metadata fields should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_enum_variant_constructor_is_not_unknown_field() {
+        let source = r#"
+            ::test ns
+
+            Status enum {
+                Pending,
+                Active,
+                Closed
+            }
+
+            active Status.Active
+            pending Status.Pending
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Enum variant constructor access should compile. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Enum variant constructors should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_enum_variant_constructor_survives_homonym_struct() {
+        let source = r#"
+            ::other ns
+
+            Status type { code: Int }
+            status Status({code: 200})
+
+            ::test ns
+
+            Status enum {
+                Pending,
+                Active,
+                Closed
+            }
+
+            active Status.Active
+            pending Status.Pending
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Enum variant access should compile despite homonym struct. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Homonym struct should not make enum variants warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_struct_field_still_warns_after_enum_homonym() {
+        let source = r#"
+            ::enum_ns ns
+
+            Status enum {
+                Active
+            }
+
+            ::struct_ns ns
+
+            Status type { code: Int }
+            status Status({code: 200})
+            value status.Active
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Unknown field rollout should not fail compilation. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            has_error_type(&warnings, |e| matches!(
+                e,
+                CompilerError::UnknownField {
+                    field_name,
+                    ..
+                } if field_name == "Active"
+            )),
+            "Expected struct Status.Active to remain an unknown field. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_explicit_map_annotation_keeps_dynamic_field_access() {
+        let source = r#"
+            ::test ns
+
+            m: Map {a: 1}
+            value m.b
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Map access should compile: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Explicit Map access should remain dynamic. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_known_fields_survive_local_var_alias() {
+        let source = r#"
+            ::test ns
+
+            A type { a: Int }
+
+            m {a: 1, b: 2}
+            alias m
+            x: A alias
+            value x.b
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Local var alias should preserve known fields. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Local var alias should not warn for preserved b. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_known_fields_survive_namespace_var_import_and_alias_resolution() {
+        let source = r#"
+            ::producer ns
+
+            A type { a: Int }
+            m {a: 1, b: 2}
+
+            ::consumer ns
+            ::p ::producer
+
+            A ::p/A
+            imported ::p/m
+            x: A imported
+            value x.b
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Namespace var import through alias should preserve known fields. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Namespace var import through alias should not warn for b. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_struct_fields_resolve_namespace_local_type_alias_before_homonym() {
+        let source = r#"
+            ::ai::session ns
+
+            Session type { id: Str }
+            Identity type { id: Str }
+
+            ::other ns
+
+            Session type { name: Str }
+
+            ::ai::message ns
+
+            Session ::ai::session/Session
+            Identity ::ai::session/Identity
+
+            Message type {
+                session: Session,
+                sender: Identity
+            }
+
+            sess Session({id: "chan-1"})
+            user Identity({id: "U1"})
+            m Message({session: sess, sender: user})
+            value m.session.id
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Namespace-local type aliases should resolve before homonym short names. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Alias-resolved field access should not warn for m.session.id. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_known_fields_survive_exported_same_namespace_alias() {
+        let source = r#"
+            ::producer ns
+
+            A type { a: Int }
+            m {a: 1, b: 2}
+            exported m
+
+            ::consumer ns
+            ::p ::producer
+
+            A ::p/A
+            imported ::p/exported
+            x: A imported
+            value x.b
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Exported same-namespace alias should preserve known fields. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Exported same-namespace alias should not warn for b. Got: {:?}",
+            warnings
         );
     }
 }

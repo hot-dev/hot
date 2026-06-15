@@ -4648,9 +4648,9 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: Some(Source {
                 file: Some("agents.hot".to_string()),
                 line: 36,
@@ -4675,9 +4675,9 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: None,
         })))));
 
@@ -4704,9 +4704,9 @@ mod tests {
                     deep_set: None,
                     deep_path: None,
                     meta: None,
+                    type_annotation: None,
                     src: None,
                 },
-                data: None,
                 src: None,
             }))
         };
@@ -4771,9 +4771,9 @@ mod tests {
                 deep_set: None,
                 deep_path: None,
                 meta: None,
+                type_annotation: None,
                 src: None,
             },
-            data: None,
             src: None,
         })))));
 

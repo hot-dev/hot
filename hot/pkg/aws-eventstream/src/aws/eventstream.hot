@@ -1,0 +1,409 @@
+::aws::eventstream ns
+meta {
+    doc: """
+    AWS Event Stream binary protocol parser.
+
+    AWS Event Stream is the binary framing protocol used by AWS streaming services
+    like Bedrock, Transcribe, and S3 Select. This module provides functions to parse
+    event stream messages from binary data.
+
+    ## Message Format
+
+    ```
+    [total_length:4][headers_length:4][prelude_crc:4][headers:*][payload:*][message_crc:4]
+    ```
+
+    ## Example
+
+    ```hot
+    ::aws::eventstream use
+
+    // Parse messages from a binary stream
+    messages parse-stream(response-bytes)
+
+    each(messages, (msg) {
+        event-type get-header(msg, ":event-type")
+        log(event-type, Str(msg.payload))
+    })
+    ```
+    """
+}
+
+// Imports
+slice ::hot::coll/slice
+length ::hot::coll/length
+concat ::hot::coll/concat
+merge ::hot::coll/merge
+get ::hot::coll/get
+assoc ::hot::coll/assoc
+to-int ::hot::bytes/to-int
+to-uint ::hot::bytes/to-uint
+crc32 ::hot::bytes/crc32
+// Note: Use Str() to convert bytes to string
+
+// ============================================================================
+// Types
+// ============================================================================
+
+Message
+meta { doc: """A parsed event stream message. `payload` holds the raw message bytes.""" }
+type {
+    headers: Map<Str, Any>,
+    payload: Bytes
+}
+
+ParseResult
+meta { doc: """Result of parsing an event stream message.""" }
+type {
+    ok: Bool,
+    message: Message?,
+    error: Str?,
+    bytes_consumed: Int
+}
+
+// Header type constants
+HEADER_TYPE_BOOL_TRUE 0
+HEADER_TYPE_BOOL_FALSE 1
+HEADER_TYPE_BYTE 2
+HEADER_TYPE_SHORT 3
+HEADER_TYPE_INT 4
+HEADER_TYPE_LONG 5
+HEADER_TYPE_BYTES 6
+HEADER_TYPE_STRING 7
+HEADER_TYPE_TIMESTAMP 8
+HEADER_TYPE_UUID 9
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+parse-message
+meta {
+    doc: """
+    Parse a single event stream message from bytes.
+
+    Returns a ParseResult with the parsed message or an error.
+
+    **Example**
+
+    ```hot
+    result parse-message(message-bytes)
+    cond {
+        result.ok => {
+            log(result.message.headers)
+            log(Str(result.message.payload))
+        }
+        => { log("Error:", result.error) }
+    }
+    ```
+    """
+}
+fn cond (data: Bytes): ParseResult {
+    // Minimum message size is 16 bytes (prelude + CRCs, no headers/payload)
+    lt(length(data), 16) => {
+        ParseResult({
+            ok: false,
+            message: null,
+            error: "Message too short: minimum 16 bytes required",
+            bytes_consumed: 0
+        })
+    }
+    => { parse-message-internal(data) }
+}
+
+
+parse-stream
+meta {
+    doc: """
+    Parse all event stream messages from a byte stream.
+
+    Returns a vector of parsed Messages. Stops parsing on first error.
+
+    **Example**
+
+    ```hot
+    messages parse-stream(stream-bytes)
+    each(messages, (msg) {
+        event-type get-header(msg, ":event-type")
+        log(event-type)
+    })
+    ```
+    """
+}
+fn (data: Bytes): Vec<Message> {
+    parse-stream-recursive(data, 0, [])
+}
+
+
+get-header
+meta {
+    doc: """
+    Get a header value from a message by name.
+
+    Returns the header value or null if not found.
+
+    **Example**
+
+    ```hot
+    message-type get-header(msg, ":message-type")
+    event-type get-header(msg, ":event-type")
+    content-type get-header(msg, ":content-type")
+    ```
+    """
+}
+fn (message: Message, name: Str): Any {
+    get(message.headers, name)
+}
+
+
+is-event
+meta {
+    doc: """Check if a message is an event (`:message-type` is "event")."""
+}
+fn (message: Message): Bool {
+    eq(get-header(message, ":message-type"), "event")
+}
+
+
+is-exception
+meta {
+    doc: """Check if a message is an exception (`:message-type` is "exception")."""
+}
+fn (message: Message): Bool {
+    eq(get-header(message, ":message-type"), "exception")
+}
+
+
+is-error
+meta {
+    doc: """Check if a message is an error (`:message-type` is "error")."""
+}
+fn (message: Message): Bool {
+    eq(get-header(message, ":message-type"), "error")
+}
+
+
+// ============================================================================
+// Internal Implementation
+// ============================================================================
+
+parse-message-internal
+meta { doc: """Internal: Parse a message assuming we have at least 16 bytes.""" }
+fn (data: Bytes): ParseResult {
+    // Parse prelude (8 bytes)
+    prelude-bytes slice(data, 0, 8)
+    total-length to-uint(slice(data, 0, 4))
+    headers-length to-uint(slice(data, 4, 8))
+    data-len length(data)
+
+    // Verify prelude CRC
+    prelude-crc-bytes slice(data, 8, 12)
+    expected-prelude-crc to-uint(prelude-crc-bytes)
+    actual-prelude-crc crc32(prelude-bytes)
+
+    // Verify message CRC (covers everything except the last 4 bytes)
+    message-without-crc slice(data, 0, sub(total-length, 4))
+    message-crc-bytes slice(data, sub(total-length, 4), total-length)
+    expected-message-crc to-uint(message-crc-bytes)
+    actual-message-crc crc32(message-without-crc)
+
+    cond {
+        // Validate lengths
+        gt(total-length, data-len) => {
+            ParseResult({
+                ok: false,
+                message: null,
+                error: `Incomplete message: need ${total-length} bytes, have ${data-len}`,
+                bytes_consumed: 0
+            })
+        }
+
+        // Check prelude CRC
+        not(eq(expected-prelude-crc, actual-prelude-crc)) => {
+            ParseResult({
+                ok: false,
+                message: null,
+                error: `Prelude CRC mismatch: expected ${expected-prelude-crc}, got ${actual-prelude-crc}`,
+                bytes_consumed: 0
+            })
+        }
+
+        // Check message CRC
+        not(eq(expected-message-crc, actual-message-crc)) => {
+            ParseResult({
+                ok: false,
+                message: null,
+                error: `Message CRC mismatch: expected ${expected-message-crc}, got ${actual-message-crc}`,
+                bytes_consumed: 0
+            })
+        }
+
+        // All validations passed - parse the message
+        => {
+            // Parse headers
+            headers-start 12
+            headers-end add(12, headers-length)
+            headers-bytes slice(data, headers-start, headers-end)
+            headers parse-headers(headers-bytes)
+
+            // Extract payload
+            payload-start headers-end
+            payload-end sub(total-length, 4)
+            payload slice(data, payload-start, payload-end)
+
+            ParseResult({
+                ok: true,
+                message: Message({
+                    headers: headers,
+                    payload: payload
+                }),
+                error: null,
+                bytes_consumed: total-length
+            })
+        }
+    }
+}
+
+
+parse-stream-recursive
+meta { doc: """Internal: Recursively parse messages from a stream.""" }
+fn cond (data: Bytes, offset: Int, messages: Vec<Message>): Vec<Message> {
+    // Not enough bytes for another message - return accumulated messages
+    lt(sub(length(data), offset), 16) => { messages }
+
+    // Try to parse next message
+    => {
+        remaining-data slice(data, offset, length(data))
+        result parse-message(remaining-data)
+
+        // If parse failed, return what we have; otherwise continue
+        cond {
+            not(result.ok) => { messages }
+            => {
+                new-messages concat(messages, [result.message])
+                new-offset add(offset, result.bytes_consumed)
+                parse-stream-recursive(data, new-offset, new-messages)
+            }
+        }
+    }
+}
+
+
+parse-headers
+meta { doc: """Internal: Parse headers from header bytes.""" }
+fn (data: Bytes): Map<Str, Any> {
+    parse-headers-recursive(data, 0, {})
+}
+
+
+parse-headers-recursive
+meta { doc: """Internal: Recursively parse headers.""" }
+fn cond (data: Bytes, offset: Int, headers: Map<Str, Any>): Map<Str, Any> {
+    // Done parsing when offset reaches or exceeds data length
+    gte(offset, length(data)) => { headers }
+
+    // Parse next header
+    => {
+        // Parse header name
+        name-length to-uint(slice(data, offset, add(offset, 1)))
+        name-start add(offset, 1)
+        name-end add(name-start, name-length)
+        name-bytes slice(data, name-start, name-end)
+        name Str(name-bytes)
+
+        // Parse header type
+        type-offset name-end
+        header-type to-uint(slice(data, type-offset, add(type-offset, 1)))
+
+        // Parse header value based on type
+        value-result parse-header-value(data, add(type-offset, 1), header-type)
+
+        // Update headers using assoc for dynamic key insertion
+        new-headers assoc(headers, name, value-result.value)
+        parse-headers-recursive(data, value-result.next_offset, new-headers)
+    }
+}
+
+
+HeaderValueResult
+meta { doc: """Internal type for header value parsing result.""" }
+type {
+    value: Any,
+    next_offset: Int
+}
+
+
+parse-header-value
+meta { doc: """Internal: Parse a header value based on its type.""" }
+fn (data: Bytes, offset: Int, header-type: Int): HeaderValueResult {
+    cond {
+        eq(header-type, HEADER_TYPE_BOOL_TRUE) => {
+            // Bool true
+            HeaderValueResult({ value: true, next_offset: offset })
+        }
+
+        eq(header-type, HEADER_TYPE_BOOL_FALSE) => {
+            // Bool false
+            HeaderValueResult({ value: false, next_offset: offset })
+        }
+
+        eq(header-type, HEADER_TYPE_BYTE) => {
+            // Byte (1 byte)
+            value to-uint(slice(data, offset, add(offset, 1)))
+            HeaderValueResult({ value: value, next_offset: add(offset, 1) })
+        }
+
+        eq(header-type, HEADER_TYPE_SHORT) => {
+            // Short (2 bytes, big-endian)
+            value to-int(slice(data, offset, add(offset, 2)))
+            HeaderValueResult({ value: value, next_offset: add(offset, 2) })
+        }
+
+        eq(header-type, HEADER_TYPE_INT) => {
+            // Int (4 bytes, big-endian)
+            value to-int(slice(data, offset, add(offset, 4)))
+            HeaderValueResult({ value: value, next_offset: add(offset, 4) })
+        }
+
+        eq(header-type, HEADER_TYPE_LONG) => {
+            // Long (8 bytes, big-endian)
+            value to-int(slice(data, offset, add(offset, 8)))
+            HeaderValueResult({ value: value, next_offset: add(offset, 8) })
+        }
+
+        eq(header-type, HEADER_TYPE_BYTES) => {
+            // Bytes (2-byte length prefix + bytes)
+            value-length to-uint(slice(data, offset, add(offset, 2)))
+            value-start add(offset, 2)
+            value-end add(value-start, value-length)
+            value slice(data, value-start, value-end)
+            HeaderValueResult({ value: value, next_offset: value-end })
+        }
+
+        eq(header-type, HEADER_TYPE_STRING) => {
+            // String (2-byte length prefix + UTF-8)
+            value-length to-uint(slice(data, offset, add(offset, 2)))
+            value-start add(offset, 2)
+            value-end add(value-start, value-length)
+            value-bytes slice(data, value-start, value-end)
+            value Str(value-bytes)
+            HeaderValueResult({ value: value, next_offset: value-end })
+        }
+
+        eq(header-type, HEADER_TYPE_TIMESTAMP) => {
+            // Timestamp (8 bytes, milliseconds since epoch)
+            value to-int(slice(data, offset, add(offset, 8)))
+            HeaderValueResult({ value: value, next_offset: add(offset, 8) })
+        }
+
+        eq(header-type, HEADER_TYPE_UUID) => {
+            // UUID (16 bytes)
+            value slice(data, offset, add(offset, 16))
+            HeaderValueResult({ value: value, next_offset: add(offset, 16) })
+        }
+        => {
+            // Unknown type, skip (shouldn't happen in valid streams)
+            HeaderValueResult({ value: null, next_offset: offset })
+        }
+    }
+}

@@ -1,0 +1,389 @@
+::aws::bedrock::invoke ns
+
+// Bedrock model invocation operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Invoke model response
+InvokeModelResponse type {
+    body: Any,
+    content_type: Str?,
+    status_code: Int?
+}
+
+// Claude-specific response
+ClaudeResponse type {
+    id: Str?,
+    type: Str?,
+    role: Str?,
+    content: Vec<Map>?,
+    model: Str?,
+    stop_reason: Str?,
+    stop_sequence: Str?,
+    usage: Map?
+}
+
+// Titan-specific response
+TitanResponse type {
+    input_text_token_count: Int?,
+    results: Vec<Map>?
+}
+
+// Invoke a Bedrock model with raw request body
+invoke-model
+meta {
+    doc: """
+    Invoke a Bedrock foundation model with a raw request body.
+
+    This is the low-level invocation API. For most use cases, prefer `converse`
+    which provides a unified interface across all models.
+
+    **Example**
+
+    ```hot
+    result ::aws::bedrock::invoke/invoke-model(
+        "amazon.titan-text-express-v1",
+        {inputText: "Hello", textGenerationConfig: {maxTokenCount: 100}},
+        "application/json",
+        "application/json"
+    )
+    result.body
+    // => {inputTextTokenCount: 1, results: [{outputText: "...", ...}]}
+    ```
+    """
+}
+fn (model_id: Str, body: Map, content_type: Str, accept: Str): InvokeModelResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/invoke`
+
+    body-str to-json(body)
+
+    headers {
+        "Content-Type": content_type,
+        "Accept": accept,
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        InvokeModelResponse({
+            body: response.body,
+            content_type: response.headers.content_type,
+            status_code: response.status
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Invoke Claude models via Bedrock
+invoke-claude
+meta {
+    doc: """
+    Invoke an Anthropic Claude model via Bedrock using the Messages API format.
+
+    **Example**
+
+    ```hot
+    // Simple prompt with default model (Claude 3 Haiku)
+    result ::aws::bedrock::invoke/invoke-claude("What is 2+2?")
+    text first(result.content).text
+    // => "4"
+
+    // With specific model and system prompt
+    result ::aws::bedrock::invoke/invoke-claude(
+        "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        [{role: "user", content: "Explain quantum computing"}],
+        1024,
+        "You are a physics teacher"
+    )
+    ```
+    """
+}
+fn
+(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): ClaudeResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/invoke`
+
+    request-body {
+        anthropic_version: "bedrock-2023-05-31",
+        messages: messages,
+        max_tokens: max_tokens
+    }
+
+    with-system if(is-null(system), request-body,
+        merge(request-body, { system: system })
+    )
+
+    with-temp if(is-null(temperature), with-system,
+        merge(with-system, { temperature: temperature })
+    )
+
+    with-top-p if(is-null(top_p), with-temp,
+        merge(with-temp, { top_p: top_p })
+    )
+
+    with-stop if(is-null(stop_sequences), with-top-p,
+        merge(with-top-p, { stop_sequences: stop_sequences })
+    )
+
+    body-str to-json(with-stop)
+
+    headers {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        ClaudeResponse({
+            id: response.body.id,
+            type: response.body.type,
+            role: response.body.role,
+            content: response.body.content,
+            model: response.body.model,
+            stop_reason: response.body.stop_reason,
+            stop_sequence: response.body.stop_sequence,
+            usage: response.body.usage
+        }),
+        err(AwsError(response))
+    )
+},
+(model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str): ClaudeResponse | AwsError {
+    invoke-claude(model_id, messages, max_tokens, system, null, null, null)
+},
+(model_id: Str, messages: Vec<Map>, max_tokens: Int): ClaudeResponse | AwsError {
+    invoke-claude(model_id, messages, max_tokens, null, null, null, null)
+},
+(model_id: Str, messages: Vec<Map>): ClaudeResponse | AwsError {
+    invoke-claude(model_id, messages, 4096, null, null, null, null)
+},
+// Simple string prompt convenience
+(prompt: Str): ClaudeResponse | AwsError {
+    invoke-claude(
+        "anthropic.claude-3-haiku-20240307-v1:0",
+        [{role: "user", content: prompt}],
+        4096,
+        null,
+        null,
+        null,
+        null
+    )
+}
+
+// Invoke Amazon Titan models
+invoke-titan
+meta {
+    doc: """
+    Invoke an Amazon Titan text model via Bedrock.
+
+    **Example**
+
+    ```hot
+    // Simple prompt with default model (Titan Text Express)
+    result ::aws::bedrock::invoke/invoke-titan("Tell me about Hot language")
+    text first(result.results).outputText
+    // => "Hot is..."
+
+    // With specific model and token limit
+    result ::aws::bedrock::invoke/invoke-titan("amazon.titan-text-lite-v1", "Hello!", 512)
+    ```
+    """
+}
+fn
+(model_id: Str, input_text: Str, max_token_count: Int, temperature: Dec, top_p: Dec, stop_sequences: Vec<Str>): TitanResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/invoke`
+
+    text-gen-config {
+        maxTokenCount: max_token_count,
+        temperature: if(is-null(temperature), 0.7, temperature),
+        topP: if(is-null(top_p), 0.9, top_p)
+    }
+
+    with-stop if(is-null(stop_sequences), text-gen-config,
+        merge(text-gen-config, { stopSequences: stop_sequences })
+    )
+
+    request-body {
+        inputText: input_text,
+        textGenerationConfig: with-stop
+    }
+
+    body-str to-json(request-body)
+
+    headers {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        TitanResponse({
+            input_text_token_count: response.body.inputTextTokenCount,
+            results: response.body.results
+        }),
+        err(AwsError(response))
+    )
+},
+(model_id: Str, input_text: Str, max_token_count: Int): TitanResponse | AwsError {
+    invoke-titan(model_id, input_text, max_token_count, null, null, null)
+},
+(model_id: Str, input_text: Str): TitanResponse | AwsError {
+    invoke-titan(model_id, input_text, 4096, null, null, null)
+},
+// Simple string prompt convenience
+(input_text: Str): TitanResponse | AwsError {
+    invoke-titan("amazon.titan-text-express-v1", input_text, 4096, null, null, null)
+}
+
+// Invoke Meta Llama models
+invoke-llama
+meta {
+    doc: """
+    Invoke a Meta Llama model via Bedrock.
+
+    **Example**
+
+    ```hot
+    // Simple prompt with default model (Llama 3 8B)
+    result ::aws::bedrock::invoke/invoke-llama("What is functional programming?")
+    result.body.generation
+    // => "Functional programming is..."
+    ```
+    """
+}
+fn
+(model_id: Str, prompt: Str, max_gen_len: Int, temperature: Dec, top_p: Dec): InvokeModelResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/invoke`
+
+    request-body {
+        prompt: prompt,
+        max_gen_len: max_gen_len,
+        temperature: if(is-null(temperature), 0.7, temperature),
+        top_p: if(is-null(top_p), 0.9, top_p)
+    }
+
+    body-str to-json(request-body)
+
+    headers {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        InvokeModelResponse({
+            body: response.body,
+            content_type: response.headers.content_type,
+            status_code: response.status
+        }),
+        err(AwsError(response))
+    )
+},
+(model_id: Str, prompt: Str, max_gen_len: Int): InvokeModelResponse | AwsError {
+    invoke-llama(model_id, prompt, max_gen_len, null, null)
+},
+(model_id: Str, prompt: Str): InvokeModelResponse | AwsError {
+    invoke-llama(model_id, prompt, 2048, null, null)
+},
+// Simple string prompt convenience with default model
+(prompt: Str): InvokeModelResponse | AwsError {
+    invoke-llama("meta.llama3-8b-instruct-v1:0", prompt, 2048, null, null)
+}
+
+// Invoke Mistral models
+invoke-mistral
+meta {
+    doc: """
+    Invoke a Mistral AI model via Bedrock.
+
+    **Example**
+
+    ```hot
+    // Simple prompt with default model (Mistral 7B)
+    result ::aws::bedrock::invoke/invoke-mistral("Write a haiku about coding")
+    result.body.outputs
+    // => [{text: "..."}]
+    ```
+    """
+}
+fn
+(model_id: Str, prompt: Str, max_tokens: Int, temperature: Dec, top_p: Dec, stop: Vec<Str>): InvokeModelResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://bedrock-runtime.${region}.amazonaws.com/model/${model_id}/invoke`
+
+    request-body {
+        prompt: prompt,
+        max_tokens: max_tokens,
+        temperature: if(is-null(temperature), 0.7, temperature),
+        top_p: if(is-null(top_p), 0.9, top_p)
+    }
+
+    with-stop if(is-null(stop), request-body,
+        merge(request-body, { stop: stop })
+    )
+
+    body-str to-json(with-stop)
+
+    headers {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Host": `bedrock-runtime.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "bedrock", credentials, headers, body-str)
+
+    response http-request("POST", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        InvokeModelResponse({
+            body: response.body,
+            content_type: response.headers.content_type,
+            status_code: response.status
+        }),
+        err(AwsError(response))
+    )
+},
+(model_id: Str, prompt: Str, max_tokens: Int): InvokeModelResponse | AwsError {
+    invoke-mistral(model_id, prompt, max_tokens, null, null, null)
+},
+(model_id: Str, prompt: Str): InvokeModelResponse | AwsError {
+    invoke-mistral(model_id, prompt, 4096, null, null, null)
+},
+// Simple string prompt convenience
+(prompt: Str): InvokeModelResponse | AwsError {
+    invoke-mistral("mistral.mistral-7b-instruct-v0:2", prompt, 4096, null, null, null)
+}

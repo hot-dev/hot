@@ -941,7 +941,6 @@ pub enum Ref {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VarRef {
     pub var: Var,
-    pub data: Option<VarData>,
     pub src: Option<Source>,
 }
 
@@ -1185,17 +1184,14 @@ pub struct Var {
     pub deep_set: Option<DeepPath>,
     pub deep_path: Option<DeepPath>,
     pub meta: Option<Meta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
     pub src: Option<Source>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
     pub val: Val,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct VarData {
-    pub type_annotation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

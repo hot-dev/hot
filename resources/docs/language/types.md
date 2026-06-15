@@ -347,9 +347,9 @@ For custom types, use `is-type`:
 
 ## The `untype` Function
 
-Internally, Hot types are represented as Maps with special `$type` and `$val` keys. Most of the time, you don't need to think about this—Hot handles it transparently.
+Typed values carry internal metadata so Hot can preserve type identity at runtime. Most of the time, you should not think about that representation—Hot handles it transparently. Use normal field access, `match`, and `is-type` instead of reading runtime metadata directly.
 
-However, when data leaves the Hot system (over the wire, to a database, etc.), you may want to strip this metadata using `untype`:
+When data leaves the Hot system (over the wire, to a database, etc.), strip this metadata using `untype`:
 
 ```hot
 // Define a type
@@ -358,10 +358,7 @@ Person type { name: Str, age: Int }
 // Create a typed value
 alice Person({name: "Alice", age: 30})
 
-// Internally, alice looks like:
-// {$type: "Person", $val: {name: "Alice", age: 30}}
-
-// Strip the type metadata
+// Strip internal type metadata
 untype(alice)  // {name: "Alice", age: 30}
 ```
 
@@ -370,8 +367,8 @@ untype(alice)  // {name: "Alice", age: 30}
 The most common use case is serializing typed data to JSON for HTTP requests:
 
 ```hot
-// Without untype, the JSON would include $type/$val metadata
-to-json(alice)  // {"$type":"Person","$val":{"name":"Alice","age":30}}
+// Without untype, the JSON includes Hot's internal type metadata
+to-json(alice)
 
 // With untype, you get clean JSON
 to-json(untype(alice))  // {"name":"Alice","age":30}
