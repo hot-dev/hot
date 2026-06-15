@@ -1,0 +1,52 @@
+::aws::sns ns
+
+// AWS SNS Package
+// Provides Simple Notification Service operations for pub/sub messaging
+
+// Re-export core AWS types
+Credentials ::aws::core/Credentials
+AwsError ::aws::core/AwsError
+
+// Re-export topic types
+Topic ::aws::sns::topics/Topic
+CreateTopicResponse ::aws::sns::topics/CreateTopicResponse
+ListTopicsResponse ::aws::sns::topics/ListTopicsResponse
+GetTopicAttributesResponse ::aws::sns::topics/GetTopicAttributesResponse
+
+// Re-export subscription types
+Subscription ::aws::sns::subscriptions/Subscription
+SubscribeResponse ::aws::sns::subscriptions/SubscribeResponse
+ListSubscriptionsResponse ::aws::sns::subscriptions/ListSubscriptionsResponse
+GetSubscriptionAttributesResponse ::aws::sns::subscriptions/GetSubscriptionAttributesResponse
+
+// Re-export publish types
+PublishResponse ::aws::sns::publish/PublishResponse
+PublishBatchResultEntry ::aws::sns::publish/PublishBatchResultEntry
+PublishBatchFailureEntry ::aws::sns::publish/PublishBatchFailureEntry
+PublishBatchResponse ::aws::sns::publish/PublishBatchResponse
+
+// Re-export topic operations
+create-topic ::aws::sns::topics/create-topic
+delete-topic ::aws::sns::topics/delete-topic
+list-topics ::aws::sns::topics/list-topics
+get-topic-attributes ::aws::sns::topics/get-topic-attributes
+set-topic-attributes ::aws::sns::topics/set-topic-attributes
+tag-resource ::aws::sns::topics/tag-resource
+untag-resource ::aws::sns::topics/untag-resource
+list-tags-for-resource ::aws::sns::topics/list-tags-for-resource
+
+// Re-export subscription operations
+subscribe ::aws::sns::subscriptions/subscribe
+unsubscribe ::aws::sns::subscriptions/unsubscribe
+confirm-subscription ::aws::sns::subscriptions/confirm-subscription
+list-subscriptions ::aws::sns::subscriptions/list-subscriptions
+list-subscriptions-by-topic ::aws::sns::subscriptions/list-subscriptions-by-topic
+get-subscription-attributes ::aws::sns::subscriptions/get-subscription-attributes
+set-subscription-attributes ::aws::sns::subscriptions/set-subscription-attributes
+
+// Re-export publish operations
+publish ::aws::sns::publish/publish
+publish-batch ::aws::sns::publish/publish-batch
+publish-with-attributes ::aws::sns::publish/publish-with-attributes
+publish-json ::aws::sns::publish/publish-json
+send-sms ::aws::sns::publish/send-sms

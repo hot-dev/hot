@@ -1,0 +1,243 @@
+::aws::bedrock::chat ns
+
+// ============================================================================
+// AWS Bedrock Chat - Convenience Functions
+// ============================================================================
+//
+// NOTE: Streaming is not currently supported for Bedrock in Hot.
+// AWS Bedrock uses a binary Event Stream format (application/vnd.amazon.eventstream)
+// which requires specialized parsing not yet implemented in Hot's HTTP layer.
+//
+// For streaming with Claude, consider using the Anthropic API directly instead
+// of Bedrock, which uses standard SSE and is fully supported.
+//
+// ============================================================================
+
+converse ::aws::bedrock::converse/converse
+user-message ::aws::bedrock::converse/user-message
+assistant-message ::aws::bedrock::converse/assistant-message
+text-content ::aws::bedrock::converse/text-content
+image-content ::aws::bedrock::converse/image-content
+inference-config ::aws::bedrock::converse/inference-config
+AwsError ::aws::core/AwsError
+
+// ============================================================================
+// Types (re-export)
+// ============================================================================
+
+ConverseResponse ::aws::bedrock::converse/ConverseResponse
+Message ::aws::bedrock::converse/Message
+ContentBlock ::aws::bedrock::converse/ContentBlock
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+chat
+meta {
+    doc: """
+    Simple chat with a Bedrock model - send a message and get a response string.
+
+    **Supported Models**
+    - `anthropic.claude-3-5-sonnet-20241022-v2:0` - Claude 3.5 Sonnet
+    - `anthropic.claude-3-haiku-20240307-v1:0` - Claude 3 Haiku (faster, cheaper)
+    - `amazon.titan-text-express-v1` - Amazon Titan
+    - `meta.llama3-8b-instruct-v1:0` - Meta Llama 3
+
+    **Example**
+    ```hot
+    response chat("anthropic.claude-3-5-sonnet-20241022-v2:0", "What is the capital of France?")
+    // Returns: "The capital of France is Paris."
+    ```
+    """
+}
+fn
+(model-id: Str, message: Str): Str | AwsError {
+    chat(model-id, message, null, null)
+},
+(model-id: Str, message: Str, system: Str): Str | AwsError {
+    chat(model-id, message, system, null)
+},
+(model-id: Str, message: Str, system: Str, max-tokens: Int): Str | AwsError {
+    messages [user-message(message)]
+
+    system-blocks cond {
+        is-null(system) => { null }
+        => { [text-content(system)] }
+    }
+
+    config cond {
+        is-null(max-tokens) => { inference-config(1024) }
+        => { inference-config(max-tokens) }
+    }
+
+    response converse(model-id, messages, system-blocks, config)
+
+    match response {
+        AwsError => { response }
+        ConverseResponse => {
+            // Extract text from response
+            output response.output
+            cond {
+                is-null(output) => { "" }
+                => {
+                    msg output.message
+                    cond {
+                        is-null(msg) => { "" }
+                        => {
+                            content msg.content
+                            cond {
+                                or(is-null(content), is-zero(length(content))) => { "" }
+                                => {
+                                    first-block content[0]
+                                    or(first-block.text, "")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Multi-turn conversation helper
+converse-multi
+meta {
+    doc: """
+    Have a multi-turn conversation with a Bedrock model.
+
+    **Example**
+    ```hot
+    history []
+
+    // First turn
+    result1 converse-multi("anthropic.claude-3-5-sonnet-20241022-v2:0", history, "Hi, my name is Alice", "You are a helpful assistant.")
+    new-history result1.history
+
+    // Second turn (remembers context)
+    result2 converse-multi("anthropic.claude-3-5-sonnet-20241022-v2:0", new-history, "What's my name?", "You are a helpful assistant.")
+    // result2.response will mention "Alice"
+    ```
+    """
+}
+fn (model-id: Str, history: Vec, message: Str, system: Str): Map {
+    // Build messages: history + new user message
+    new-user-msg user-message(message)
+    all-messages concat(history, [new-user-msg])
+
+    system-blocks cond {
+        is-null(system) => { null }
+        => { [text-content(system)] }
+    }
+
+    config inference-config(4096)
+
+    response converse(model-id, all-messages, system-blocks, config)
+
+    match response {
+        AwsError => {
+            {
+                error: response,
+                response: "",
+                history: history
+            }
+        }
+
+        ConverseResponse => {
+            // Extract response text
+            output response.output
+            response-text cond {
+                is-null(output) => { "" }
+                => {
+                    msg output.message
+                    cond {
+                        is-null(msg) => { "" }
+                        => {
+                            content msg.content
+                            cond {
+                                or(is-null(content), is-zero(length(content))) => { "" }
+                                => {
+                                    first-block content[0]
+                                    or(first-block.text, "")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Build updated history
+            assistant-msg assistant-message(response-text)
+            updated-history concat(all-messages, [assistant-msg])
+
+            {
+                response: response-text,
+                history: updated-history,
+                usage: response.usage
+            }
+        }
+    }
+}
+
+// Chat with image
+chat-with-image
+meta {
+    doc: """
+    Chat with an image attachment.
+
+    **Example**
+    ```hot
+    // Read and encode image
+    image-data ::hot::base64/encode(::hot::file/read-bytes("photo.png"))
+    response chat-with-image("anthropic.claude-3-5-sonnet-20241022-v2:0", "What's in this image?", "png", image-data)
+    ```
+    """
+}
+fn (model-id: Str, message: Str, image-format: Str, image-base64: Str): Str | AwsError {
+    chat-with-image(model-id, message, image-format, image-base64, null)
+},
+(model-id: Str, message: Str, image-format: Str, image-base64: Str, system: Str): Str | AwsError {
+    // Build content with text and image
+    content [
+        text-content(message),
+        image-content(image-format, image-base64)
+    ]
+
+    messages [{role: "user", content: content}]
+
+    system-blocks cond {
+        is-null(system) => { null }
+        => { [text-content(system)] }
+    }
+
+    config inference-config(4096)
+
+    response converse(model-id, messages, system-blocks, config)
+
+    match response {
+        AwsError => { response }
+        ConverseResponse => {
+            output response.output
+            cond {
+                is-null(output) => { "" }
+                => {
+                    msg output.message
+                    cond {
+                        is-null(msg) => { "" }
+                        => {
+                            content-blocks msg.content
+                            cond {
+                                or(is-null(content-blocks), is-zero(length(content-blocks))) => { "" }
+                                => {
+                                    first-block content-blocks[0]
+                                    or(first-block.text, "")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,234 @@
+::aws::lambda::functions ns
+
+// Lambda function management operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Lambda function configuration type
+FunctionConfiguration type {
+    function_name: Str?,
+    function_arn: Str?,
+    runtime: Str?,
+    role: Str?,
+    handler: Str?,
+    code_size: Int?,
+    description: Str?,
+    timeout: Int?,
+    memory_size: Int?,
+    last_modified: Str?,
+    code_sha256: Str?,
+    version: Str?,
+    vpc_config: Map?,
+    environment: Map?,
+    state: Str?,
+    state_reason: Str?,
+    state_reason_code: Str?,
+    architectures: Vec<Str>?
+}
+
+// List functions response
+ListFunctionsResponse type {
+    functions: Vec<FunctionConfiguration>,
+    next_marker: Str?
+}
+
+// Get function response
+GetFunctionResponse type {
+    configuration: FunctionConfiguration?,
+    code: Map?,
+    tags: Map?
+}
+
+// List Lambda functions
+list-functions
+meta {
+    doc: """
+    List all Lambda functions in the account/region.
+
+    **Example**
+
+    ```hot
+    result ::aws::lambda::functions/list-functions()
+    result.functions
+    // => [{function_name: "my-function", runtime: "nodejs20.x", ...}, ...]
+
+    // With limit
+    result ::aws::lambda::functions/list-functions(10)
+    ```
+    """
+}
+fn
+(max_items: Int, marker: Str): ListFunctionsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    query-params if(is-null(marker),
+        `?MaxItems=${max_items}`,
+        `?MaxItems=${max_items}&Marker=${marker}`
+    )
+
+    url `https://lambda.${region}.amazonaws.com/2015-03-31/functions${query-params}`
+
+    headers {
+        "Host": `lambda.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "lambda", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        ListFunctionsResponse({
+            functions: if(is-null(response.body.Functions), [], map(response.body.Functions, FunctionConfiguration({
+                function_name: %.FunctionName,
+                function_arn: %.FunctionArn,
+                runtime: %.Runtime,
+                role: %.Role,
+                handler: %.Handler,
+                code_size: %.CodeSize,
+                description: %.Description,
+                timeout: %.Timeout,
+                memory_size: %.MemorySize,
+                last_modified: %.LastModified,
+                code_sha256: %.CodeSha256,
+                version: %.Version,
+                vpc_config: %.VpcConfig,
+                environment: %.Environment,
+                state: %.State,
+                state_reason: %.StateReason,
+                state_reason_code: %.StateReasonCode,
+                architectures: %.Architectures
+            }))),
+            next_marker: response.body.NextMarker
+        }),
+        err(AwsError(response))
+    )
+},
+(max_items: Int): ListFunctionsResponse | AwsError {
+    list-functions(max_items, null)
+},
+(): ListFunctionsResponse | AwsError {
+    list-functions(50, null)
+}
+
+// Get Lambda function details
+get-function
+meta {
+    doc: """
+    Get details about a Lambda function, including code location.
+
+    **Example**
+
+    ```hot
+    result ::aws::lambda::functions/get-function("my-function")
+    result.configuration.function_name  // => "my-function"
+    result.configuration.runtime        // => "nodejs20.x"
+    result.configuration.handler        // => "index.handler"
+    ```
+    """
+}
+fn (function_name: Str): GetFunctionResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://lambda.${region}.amazonaws.com/2015-03-31/functions/${function_name}`
+
+    headers {
+        "Host": `lambda.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "lambda", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        GetFunctionResponse({
+            configuration: if(is-null(response.body.Configuration), null, FunctionConfiguration({
+                function_name: response.body.Configuration.FunctionName,
+                function_arn: response.body.Configuration.FunctionArn,
+                runtime: response.body.Configuration.Runtime,
+                role: response.body.Configuration.Role,
+                handler: response.body.Configuration.Handler,
+                code_size: response.body.Configuration.CodeSize,
+                description: response.body.Configuration.Description,
+                timeout: response.body.Configuration.Timeout,
+                memory_size: response.body.Configuration.MemorySize,
+                last_modified: response.body.Configuration.LastModified,
+                code_sha256: response.body.Configuration.CodeSha256,
+                version: response.body.Configuration.Version,
+                vpc_config: response.body.Configuration.VpcConfig,
+                environment: response.body.Configuration.Environment,
+                state: response.body.Configuration.State,
+                state_reason: response.body.Configuration.StateReason,
+                state_reason_code: response.body.Configuration.StateReasonCode,
+                architectures: response.body.Configuration.Architectures
+            })),
+            code: response.body.Code,
+            tags: response.body.Tags
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Get function configuration only
+get-function-configuration
+meta {
+    doc: """
+    Get the configuration of a Lambda function (without code location).
+
+    **Example**
+
+    ```hot
+    config ::aws::lambda::functions/get-function-configuration("my-function")
+    config.function_name  // => "my-function"
+    config.runtime        // => "nodejs20.x"
+    config.memory_size    // => 128
+    config.timeout        // => 3
+    ```
+    """
+}
+fn (function_name: Str): FunctionConfiguration | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://lambda.${region}.amazonaws.com/2015-03-31/functions/${function_name}/configuration`
+
+    headers {
+        "Host": `lambda.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "lambda", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        FunctionConfiguration({
+            function_name: response.body.FunctionName,
+            function_arn: response.body.FunctionArn,
+            runtime: response.body.Runtime,
+            role: response.body.Role,
+            handler: response.body.Handler,
+            code_size: response.body.CodeSize,
+            description: response.body.Description,
+            timeout: response.body.Timeout,
+            memory_size: response.body.MemorySize,
+            last_modified: response.body.LastModified,
+            code_sha256: response.body.CodeSha256,
+            version: response.body.Version,
+            vpc_config: response.body.VpcConfig,
+            environment: response.body.Environment,
+            state: response.body.State,
+            state_reason: response.body.StateReason,
+            state_reason_code: response.body.StateReasonCode,
+            architectures: response.body.Architectures
+        }),
+        err(AwsError(response))
+    )
+}

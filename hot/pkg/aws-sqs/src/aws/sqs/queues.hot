@@ -1,0 +1,319 @@
+::aws::sqs::queues ns
+
+// SQS Queue operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Queue attributes type
+QueueAttributes type {
+    visibility_timeout: Int?,
+    message_retention_period: Int?,
+    maximum_message_size: Int?,
+    delay_seconds: Int?,
+    receive_message_wait_time_seconds: Int?,
+    policy: Str?,
+    redrive_policy: Str?,
+    fifo_queue: Bool?,
+    content_based_deduplication: Bool?
+}
+
+// Create queue response
+CreateQueueResponse type {
+    queue_url: Str?
+}
+
+// Get queue URL response
+GetQueueUrlResponse type {
+    queue_url: Str?
+}
+
+// List queues response
+ListQueuesResponse type {
+    queue_urls: Vec<Str>
+}
+
+// Get queue attributes response
+GetQueueAttributesResponse type {
+    attributes: Map
+}
+
+// Create a new SQS queue
+create-queue
+meta {
+    doc: """
+    Create a new SQS queue.
+
+    **Example**
+
+    ```hot
+    // Standard queue
+    result ::aws::sqs::queues/create-queue("my-queue")
+    result.queue_url  // => "https://sqs.us-east-1.amazonaws.com/123456/my-queue"
+
+    // FIFO queue with attributes
+    result ::aws::sqs::queues/create-queue("my-queue.fifo", {
+        FifoQueue: "true",
+        ContentBasedDeduplication: "true"
+    })
+    ```
+    """
+}
+fn
+(queue_name: Str, attributes: Map): CreateQueueResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueName: queue_name,
+        Attributes: attributes
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.CreateQueue",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        CreateQueueResponse({
+            queue_url: response.body.QueueUrl
+        }),
+        err(AwsError(response))
+    )
+},
+(queue_name: Str): CreateQueueResponse | AwsError {
+    create-queue(queue_name, {})
+}
+
+// Delete an SQS queue
+delete-queue
+meta {
+    doc: """
+    Delete an SQS queue by its URL.
+
+    **Example**
+
+    ```hot
+    ::aws::sqs::queues/delete-queue("https://sqs.us-east-1.amazonaws.com/123456/my-queue")
+    ```
+    """
+}
+fn (queue_url: Str): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.DeleteQueue",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}
+
+// Get queue URL by name
+get-queue-url
+meta {
+    doc: """
+    Get the URL of an SQS queue by its name.
+
+    **Example**
+
+    ```hot
+    result ::aws::sqs::queues/get-queue-url("my-queue")
+    result.queue_url  // => "https://sqs.us-east-1.amazonaws.com/123456/my-queue"
+    ```
+    """
+}
+fn (queue_name: Str): GetQueueUrlResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueName: queue_name
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.GetQueueUrl",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        GetQueueUrlResponse({
+            queue_url: response.body.QueueUrl
+        }),
+        err(AwsError(response))
+    )
+}
+
+// List all queues
+list-queues
+meta {
+    doc: """
+    List all SQS queues, optionally filtered by name prefix.
+
+    **Example**
+
+    ```hot
+    // List all queues
+    result ::aws::sqs::queues/list-queues()
+    result.queue_urls
+    // => ["https://sqs.us-east-1.amazonaws.com/123456/queue-1", ...]
+
+    // Filter by prefix
+    result ::aws::sqs::queues/list-queues("my-app")
+    ```
+    """
+}
+fn
+(queue_name_prefix: Str): ListQueuesResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueNamePrefix: queue_name_prefix
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.ListQueues",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ListQueuesResponse({
+            queue_urls: if(is-null(response.body.QueueUrls), [], response.body.QueueUrls)
+        }),
+        err(AwsError(response))
+    )
+},
+(): ListQueuesResponse | AwsError {
+    list-queues("")
+}
+
+// Get queue attributes
+get-queue-attributes
+meta {
+    doc: """
+    Get attributes of an SQS queue.
+
+    **Example**
+
+    ```hot
+    result ::aws::sqs::queues/get-queue-attributes(queue-url, ["All"])
+    result.attributes.QueueArn                        // => "arn:aws:sqs:us-east-1:123456:my-queue"
+    result.attributes.ApproximateNumberOfMessages      // => "5"
+    result.attributes.VisibilityTimeout                // => "30"
+    ```
+    """
+}
+fn (queue_url: Str, attribute_names: Vec<Str>): GetQueueAttributesResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        AttributeNames: attribute_names
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.GetQueueAttributes",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        GetQueueAttributesResponse({
+            attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Set queue attributes
+set-queue-attributes
+meta {
+    doc: """
+    Set attributes of an SQS queue.
+
+    **Example**
+
+    ```hot
+    ::aws::sqs::queues/set-queue-attributes(queue-url, {
+        VisibilityTimeout: "60",
+        MessageRetentionPeriod: "86400"
+    })
+    ```
+    """
+}
+fn (queue_url: Str, attributes: Map): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        Attributes: attributes
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.SetQueueAttributes",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}

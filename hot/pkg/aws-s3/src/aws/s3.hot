@@ -1,0 +1,34 @@
+::aws::s3 ns
+
+// AWS S3 Package
+// Provides S3 object storage operations
+
+// Re-export core AWS types
+Credentials ::aws::core/Credentials
+AwsError ::aws::core/AwsError
+
+// Re-export S3 types
+S3Object ::aws::s3::objects/S3Object
+S3Bucket ::aws::s3::buckets/S3Bucket
+ListObjectsResponse ::aws::s3::objects/ListObjectsResponse
+PutObjectResponse ::aws::s3::objects/PutObjectResponse
+GetObjectResponse ::aws::s3::objects/GetObjectResponse
+CopyObjectResponse ::aws::s3::objects/CopyObjectResponse
+
+// Re-export S3 operations
+put-object ::aws::s3::objects/put-object
+get-object ::aws::s3::objects/get-object
+delete-object ::aws::s3::objects/delete-object
+list-objects ::aws::s3::objects/list-objects
+head-object ::aws::s3::objects/head-object
+copy-object ::aws::s3::objects/copy-object
+
+list-buckets ::aws::s3::buckets/list-buckets
+create-bucket ::aws::s3::buckets/create-bucket
+delete-bucket ::aws::s3::buckets/delete-bucket
+head-bucket ::aws::s3::buckets/head-bucket
+
+// Presigned URL operations
+generate-presigned-url ::aws::s3::presigned/generate-presigned-url
+generate-presigned-upload-url ::aws::s3::presigned/generate-presigned-upload-url
+generate-presigned-delete-url ::aws::s3::presigned/generate-presigned-delete-url

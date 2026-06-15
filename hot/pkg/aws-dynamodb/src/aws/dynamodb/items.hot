@@ -1,0 +1,279 @@
+::aws::dynamodb::items ns
+
+// DynamoDB item operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Put item response
+PutItemResponse type {
+    attributes: Map?,
+    consumed_capacity: Map?
+}
+
+// Get item response
+GetItemResponse type {
+    item: Map?,
+    consumed_capacity: Map?
+}
+
+// Delete item response
+DeleteItemResponse type {
+    attributes: Map?,
+    consumed_capacity: Map?
+}
+
+// Update item response
+UpdateItemResponse type {
+    attributes: Map?,
+    consumed_capacity: Map?
+}
+
+// Put an item into a DynamoDB table
+put-item
+meta {
+    doc: """
+    Put an item into a DynamoDB table. Item should use DynamoDB attribute value format.
+
+    **Example**
+
+    ```hot
+    item {
+        pk: {S: "user-123"},
+        sk: {S: "profile"},
+        name: {S: "Alice"},
+        age: {N: "30"}
+    }
+
+    result ::aws::dynamodb::items/put-item("my-table", item)
+    ```
+    """
+}
+fn
+(table_name: Str, item: Map, condition_expression: Str, expression_attribute_values: Map): PutItemResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body {
+        TableName: table_name,
+        Item: item
+    }
+
+    with-condition if(is-null(condition_expression), request-body,
+        {...request-body,
+            ConditionExpression: condition_expression,
+            ExpressionAttributeValues: expression_attribute_values}
+    )
+
+    body to-json(with-condition)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.PutItem",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        PutItemResponse({
+            attributes: response.body.Attributes,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+},
+(table_name: Str, item: Map): PutItemResponse | AwsError {
+    put-item(table_name, item, null, null)
+}
+
+// Get an item from a DynamoDB table
+get-item
+meta {
+    doc: """
+    Get an item from a DynamoDB table by its primary key.
+
+    **Example**
+
+    ```hot
+    key {pk: {S: "user-123"}, sk: {S: "profile"}}
+    result ::aws::dynamodb::items/get-item("my-table", key)
+    result.item.name.S  // => "Alice"
+    result.item.age.N   // => "30"
+    ```
+    """
+}
+fn
+(table_name: Str, key: Map, consistent_read: Bool, projection_expression: Str): GetItemResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body {
+        TableName: table_name,
+        Key: key,
+        ConsistentRead: consistent_read
+    }
+
+    with-projection if(is-null(projection_expression), request-body,
+        {...request-body, ProjectionExpression: projection_expression}
+    )
+
+    body to-json(with-projection)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.GetItem",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        GetItemResponse({
+            item: response.body.Item,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+},
+(table_name: Str, key: Map, consistent_read: Bool): GetItemResponse | AwsError {
+    get-item(table_name, key, consistent_read, null)
+},
+(table_name: Str, key: Map): GetItemResponse | AwsError {
+    get-item(table_name, key, false, null)
+}
+
+// Delete an item from a DynamoDB table
+delete-item
+meta {
+    doc: """
+    Delete an item from a DynamoDB table by its primary key.
+
+    **Example**
+
+    ```hot
+    key {pk: {S: "user-123"}, sk: {S: "profile"}}
+    ::aws::dynamodb::items/delete-item("my-table", key)
+    ```
+    """
+}
+fn
+(table_name: Str, key: Map, condition_expression: Str, expression_attribute_values: Map): DeleteItemResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body {
+        TableName: table_name,
+        Key: key
+    }
+
+    with-condition if(is-null(condition_expression), request-body,
+        {...request-body,
+            ConditionExpression: condition_expression,
+            ExpressionAttributeValues: expression_attribute_values}
+    )
+
+    body to-json(with-condition)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.DeleteItem",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        DeleteItemResponse({
+            attributes: response.body.Attributes,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+},
+(table_name: Str, key: Map): DeleteItemResponse | AwsError {
+    delete-item(table_name, key, null, null)
+}
+
+// Update an item in a DynamoDB table
+update-item
+meta {
+    doc: """
+    Update an item in a DynamoDB table using update expressions.
+
+    Returns the updated attributes (ALL_NEW).
+
+    **Example**
+
+    ```hot
+    key {pk: {S: "user-123"}, sk: {S: "profile"}}
+    result ::aws::dynamodb::items/update-item(
+        "my-table",
+        key,
+        "SET hit_count = hit_count + :inc, updated_at = :now",
+        {":inc": {N: "1"}, ":now": {S: "2026-02-16"}}
+    )
+    result.attributes.hit_count.N  // => "1"
+    ```
+    """
+}
+fn
+(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map): UpdateItemResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body {
+        TableName: table_name,
+        Key: key,
+        UpdateExpression: update_expression,
+        ExpressionAttributeValues: expression_attribute_values,
+        ReturnValues: "ALL_NEW"
+    }
+
+    with-names if(is-null(expression_attribute_names), request-body,
+        {...request-body, ExpressionAttributeNames: expression_attribute_names}
+    )
+
+    body to-json(with-names)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.UpdateItem",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        UpdateItemResponse({
+            attributes: response.body.Attributes,
+            consumed_capacity: response.body.ConsumedCapacity
+        }),
+        err(AwsError(response))
+    )
+},
+(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map): UpdateItemResponse | AwsError {
+    update-item(table_name, key, update_expression, expression_attribute_values, null)
+}

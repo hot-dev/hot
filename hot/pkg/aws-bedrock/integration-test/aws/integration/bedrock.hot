@@ -1,0 +1,115 @@
+::aws::integration::bedrock ns
+meta ["test"]
+
+// =============================================================================
+// AWS Bedrock Integration Tests
+// =============================================================================
+// These tests validate the aws-bedrock package functions.
+// Requirements:
+// - AWS credentials (aws.access-key-id, aws.secret-access-key)
+// - Bedrock model access enabled
+// - IAM permissions for Bedrock
+
+// Test model - Using Amazon Nova (no Marketplace subscription required)
+test-model "us.amazon.nova-micro-v1:0"
+
+// Foundation model ID for model info queries
+foundation-model-id "amazon.nova-micro-v1:0"
+
+// =============================================================================
+// Model Operations (::aws::bedrock::models)
+// =============================================================================
+
+// Test list-foundation-models using package function
+test-list-foundation-models
+meta ["test"]
+fn () {
+    result ::aws::bedrock::models/list-foundation-models()
+    assert(not(is-err(result)), `list-foundation-models failed: ${result}`)
+    assert(is-vec(result.models), "models should be a Vec")
+    assert(gt(length(result.models), 0), "Should have at least one model")
+}
+
+// Test get-foundation-model using package function
+test-get-foundation-model
+meta ["test"]
+fn () {
+    result ::aws::bedrock::models/get-foundation-model(foundation-model-id)
+    assert(not(is-err(result)), `get-foundation-model failed: ${result}`)
+    assert(not(is-null(result.model)), "model should not be null")
+}
+
+// =============================================================================
+// Converse API Tests (using package functions)
+// =============================================================================
+
+// Test converse API using simple text convenience
+test-converse
+meta ["test"]
+fn () {
+    result ::aws::bedrock::converse/converse(test-model, "What is 2+2? Reply with just the number.")
+
+    assert(not(is-err(result)), `converse failed: ${result}`)
+    assert(not(is-null(result.output)), "Response should have output")
+
+    // Verify we got a response with text
+    message-content result.output.message.content
+    first-content if(is-vec(message-content), first(message-content), message-content)
+    response-text if(is-null(first-content), "", if(is-null(first-content.text), "", first-content.text))
+    assert(gt(length(response-text), 0), "Response should have text content")
+}
+
+// Test usage metrics
+test-usage-metrics
+meta ["test"]
+fn () {
+    result ::aws::bedrock::converse/converse(test-model, "Say hello.")
+
+    assert(not(is-err(result)), `converse failed: ${result}`)
+    assert(not(is-null(result.usage)), "Response should have usage")
+    assert(gt(result.usage.inputTokens, 0), "Should have input tokens")
+    assert(gt(result.usage.outputTokens, 0), "Should have output tokens")
+}
+
+// Test helper functions work correctly
+test-helper-functions
+meta ["test"]
+fn () {
+    // Test text-content helper
+    text-block ::aws::bedrock::converse/text-content("Hello")
+    assert-eq("Hello", text-block.text, "text-content should create text block")
+
+    // Test inference-config helper
+    config ::aws::bedrock::converse/inference-config(100)
+    assert-eq(100, config.maxTokens, "inference-config should set maxTokens")
+
+    // Test inference-config with temperature
+    config2 ::aws::bedrock::converse/inference-config(200, 0.5)
+    assert-eq(200, config2.maxTokens, "maxTokens should be 200")
+    assert-eq(0.5, config2.temperature, "temperature should be 0.5")
+}
+
+// =============================================================================
+// Anthropic Claude Tests (requires Marketplace subscription + model access)
+// =============================================================================
+// Uncomment these tests after requesting Anthropic model access in the Bedrock console:
+// 1. Go to Amazon Bedrock Console → Model access
+// 2. Click "Manage model access"
+// 3. Check Anthropic models and submit
+// 4. Wait for "Access granted" status
+
+// anthropic-model "us.anthropic.claude-3-haiku-20240307-v1:0"
+//
+// test-anthropic-converse
+// meta ["test"]
+// fn () {
+//     result ::aws::bedrock::converse/converse(anthropic-model, "What is 2+2? Reply with just the number.")
+//
+//     assert(not(is-err(result)), `Anthropic converse failed: ${result}`)
+//     assert(not(is-null(result.output)), "Response should have output")
+//
+//     message-content result.output.message.content
+//     first-content if(is-vec(message-content), first(message-content), message-content)
+//     response-text if(is-null(first-content), "", if(is-null(first-content.text), "", first-content.text))
+//     assert(contains(response-text, "4"), `Response should contain '4', got: ${response-text}`)
+// }

@@ -1,0 +1,259 @@
+::aws::integration::dynamodb ns
+meta ["test"]
+
+// =============================================================================
+// AWS DynamoDB Integration Tests
+// =============================================================================
+// These tests validate the aws-dynamodb package functions.
+// Requirements:
+// - AWS credentials (aws.access-key-id, aws.secret-access-key)
+// - DynamoDB table "hot-integration-test" with pk (String) and sk (String) keys
+
+// Test table name
+test-table "hot-integration-test"
+
+// Generate a unique test key to avoid conflicts
+test-key-prefix fn (): Str {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    `test-${timestamp}`
+}
+
+// Helper to create DynamoDB attribute value format
+ddb-string fn (value: Str): Map { {"S": value} }
+ddb-number fn (value: Int): Map { {"N": Str(value)} }
+
+// =============================================================================
+// Table Operations (::aws::dynamodb::tables)
+// =============================================================================
+
+// Test list-tables
+test-list-tables
+meta ["test"]
+fn () {
+    result ::aws::dynamodb::tables/list-tables()
+    assert(not(is-err(result)), `list-tables failed: ${result}`)
+    assert(is-vec(result.table_names), "table_names should be a Vec")
+}
+
+// Test describe-table
+test-describe-table
+meta ["test"]
+fn () {
+    result ::aws::dynamodb::tables/describe-table(test-table)
+    assert(not(is-err(result)), `describe-table failed: ${result}`)
+    assert(not(is-null(result.table)), "table should not be null")
+    assert-eq(test-table, result.table.table_name, "table_name should match")
+}
+
+// =============================================================================
+// Item Operations (::aws::dynamodb::items)
+// =============================================================================
+
+// Test put-item and get-item
+test-put-and-get-item
+meta ["test"]
+fn () {
+    pk test-key-prefix()
+    sk "item-test"
+
+    // Create item using DynamoDB attribute value format
+    item {
+        pk: ddb-string(pk),
+        sk: ddb-string(sk),
+        data: ddb-string("Hello from Hot!"),
+        count: ddb-number(42)
+    }
+
+    // Put the item
+    put-result ::aws::dynamodb::items/put-item(test-table, item)
+    assert(not(is-err(put-result)), `put-item failed: ${put-result}`)
+
+    // Get the item back
+    key { pk: ddb-string(pk), sk: ddb-string(sk) }
+    get-result ::aws::dynamodb::items/get-item(test-table, key)
+    assert(not(is-err(get-result)), `get-item failed: ${get-result}`)
+    assert(not(is-null(get-result.item)), "item should not be null")
+    assert-eq(pk, get-result.item.pk.S, "pk should match")
+    assert-eq("Hello from Hot!", get-result.item.data.S, "data should match")
+    assert-eq("42", get-result.item.count.N, "count should match")
+
+    // Clean up
+    ::aws::dynamodb::items/delete-item(test-table, key)
+}
+
+// Test update-item
+test-update-item
+meta ["test"]
+fn () {
+    pk test-key-prefix()
+    sk "update-test"
+
+    // Create initial item
+    item {
+        pk: ddb-string(pk),
+        sk: ddb-string(sk),
+        hit_count: ddb-number(0)
+    }
+
+    put-result ::aws::dynamodb::items/put-item(test-table, item)
+    assert(not(is-err(put-result)), `put-item failed: ${put-result}`)
+
+    // Update the item
+    key { pk: ddb-string(pk), sk: ddb-string(sk) }
+    update-result ::aws::dynamodb::items/update-item(
+        test-table,
+        key,
+        "SET hit_count = hit_count + :inc, updated_at = :now",
+        {
+            ":inc": ddb-number(1),
+            ":now": ddb-string("2026-02-07")
+        }
+    )
+    assert(not(is-err(update-result)), `update-item failed: ${update-result}`)
+    assert-eq("1", update-result.attributes.hit_count.N, "hit_count should be incremented")
+    assert-eq("2026-02-07", update-result.attributes.updated_at.S, "updated_at should be set")
+
+    // Clean up
+    ::aws::dynamodb::items/delete-item(test-table, key)
+}
+
+// Test delete-item
+test-delete-item
+meta ["test"]
+fn () {
+    pk test-key-prefix()
+    sk "delete-test"
+
+    // Create item
+    item { pk: ddb-string(pk), sk: ddb-string(sk), temp: ddb-string("to delete") }
+    key { pk: ddb-string(pk), sk: ddb-string(sk) }
+
+    ::aws::dynamodb::items/put-item(test-table, item)
+
+    // Delete the item
+    delete-result ::aws::dynamodb::items/delete-item(test-table, key)
+    assert(not(is-err(delete-result)), `delete-item failed: ${delete-result}`)
+
+    // Verify deletion
+    get-result ::aws::dynamodb::items/get-item(test-table, key)
+    assert(not(is-err(get-result)), `get-item after delete failed: ${get-result}`)
+    assert(is-null(get-result.item), "item should be null after delete")
+}
+
+// =============================================================================
+// Query Operations (::aws::dynamodb::query)
+// =============================================================================
+
+// Test query
+test-query
+meta ["test"]
+fn () {
+    pk test-key-prefix()
+    sk1 "query-1"
+    sk2 "query-2"
+    sk3 "query-3"
+
+    // Create test items
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string(sk1), value: ddb-number(1)
+    })
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string(sk2), value: ddb-number(2)
+    })
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string(sk3), value: ddb-number(3)
+    })
+
+    // Query all items with this pk
+    query-result ::aws::dynamodb::query/query(
+        test-table,
+        "pk = :pk",
+        { ":pk": ddb-string(pk) }
+    )
+    assert(not(is-err(query-result)), `query failed: ${query-result}`)
+    assert-eq(3, query-result.count, "should find 3 items")
+    assert(is-vec(query-result.items), "items should be a Vec")
+
+    // Clean up
+    key1 { pk: ddb-string(pk), sk: ddb-string(sk1) }
+    key2 { pk: ddb-string(pk), sk: ddb-string(sk2) }
+    key3 { pk: ddb-string(pk), sk: ddb-string(sk3) }
+    ::aws::dynamodb::items/delete-item(test-table, key1)
+    ::aws::dynamodb::items/delete-item(test-table, key2)
+    ::aws::dynamodb::items/delete-item(test-table, key3)
+}
+
+// Test query with sk condition
+test-query-with-sk
+meta ["test"]
+fn () {
+    pk test-key-prefix()
+
+    // Create items with different sk prefixes
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string("user:1"), name: ddb-string("Alice")
+    })
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string("user:2"), name: ddb-string("Bob")
+    })
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string("order:1"), total: ddb-number(100)
+    })
+
+    // Query only user items using begins_with
+    query-result ::aws::dynamodb::query/query(
+        test-table,
+        "pk = :pk AND begins_with(sk, :prefix)",
+        { ":pk": ddb-string(pk), ":prefix": ddb-string("user:") },
+        null, null, null, null, true, null
+    )
+    assert(not(is-err(query-result)), `query with sk failed: ${query-result}`)
+    assert-eq(2, query-result.count, "should find 2 user items")
+
+    // Clean up
+    ::aws::dynamodb::items/delete-item(test-table, { pk: ddb-string(pk), sk: ddb-string("user:1") })
+    ::aws::dynamodb::items/delete-item(test-table, { pk: ddb-string(pk), sk: ddb-string("user:2") })
+    ::aws::dynamodb::items/delete-item(test-table, { pk: ddb-string(pk), sk: ddb-string("order:1") })
+}
+
+// Test scan
+test-scan
+meta ["test"]
+fn () {
+    pk test-key-prefix()
+    sk1 "scan-1"
+    sk2 "scan-2"
+
+    // Create items with a unique marker
+    marker `scan-marker-${pk}`
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string(sk1), marker: ddb-string(marker)
+    })
+    ::aws::dynamodb::items/put-item(test-table, {
+        pk: ddb-string(pk), sk: ddb-string(sk2), marker: ddb-string(marker)
+    })
+
+    // Scan with filter
+    scan-result ::aws::dynamodb::query/scan(
+        test-table,
+        "marker = :m",
+        { ":m": ddb-string(marker) }
+    )
+    assert(not(is-err(scan-result)), `scan failed: ${scan-result}`)
+    assert(gte(scan-result.count, 2), "should find at least 2 items")
+    assert(is-vec(scan-result.items), "items should be a Vec")
+
+    // Clean up
+    ::aws::dynamodb::items/delete-item(test-table, { pk: ddb-string(pk), sk: ddb-string(sk1) })
+    ::aws::dynamodb::items/delete-item(test-table, { pk: ddb-string(pk), sk: ddb-string(sk2) })
+}
+
+// Test scan with limit
+test-scan-with-limit
+meta ["test"]
+fn () {
+    // Just test that scan with limit works
+    scan-result ::aws::dynamodb::query/scan(test-table, 5)
+    assert(not(is-err(scan-result)), `scan with limit failed: ${scan-result}`)
+    assert(is-vec(scan-result.items), "items should be a Vec")
+}

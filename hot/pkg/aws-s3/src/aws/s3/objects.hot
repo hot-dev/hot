@@ -1,0 +1,426 @@
+::aws::s3::objects ns
+
+// S3 Object operations
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+s3-endpoint ::aws::core/s3-endpoint
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+is-str ::hot::type/is-str
+
+// XML parsing for S3 responses
+::xml ::hot::xml
+
+// S3 Object type
+S3Object type {
+    key: Str,
+    size: Int?,
+    last_modified: Str?,
+    etag: Str?,
+    storage_class: Str?
+}
+
+// ListObjectsV2 response type
+ListObjectsResponse type {
+    name: Str?,
+    prefix: Str?,
+    key_count: Int?,
+    max_keys: Int?,
+    is_truncated: Bool?,
+    continuation_token: Str?,
+    next_continuation_token: Str?,
+    start_after: Str?,
+    contents: Vec<S3Object>?
+}
+
+// Parse S3Object from XML element
+parse-s3-object fn (elem: Any): S3Object {
+    S3Object({
+        key: ::xml/text(::xml/child(elem, "Key")),
+        size: cond {
+            ne(::xml/child(elem, "Size"), null) => { Int(::xml/text(::xml/child(elem, "Size"))) }
+            => { null }
+        },
+        last_modified: cond {
+            ne(::xml/child(elem, "LastModified"), null) => { ::xml/text(::xml/child(elem, "LastModified")) }
+            => { null }
+        },
+        etag: cond {
+            ne(::xml/child(elem, "ETag"), null) => { ::xml/text(::xml/child(elem, "ETag")) }
+            => { null }
+        },
+        storage_class: cond {
+            ne(::xml/child(elem, "StorageClass"), null) => { ::xml/text(::xml/child(elem, "StorageClass")) }
+            => { null }
+        }
+    })
+}
+
+// Parse ListObjectsV2 XML response
+parse-list-objects-response fn (xml-str: Str): ListObjectsResponse {
+    root ::xml/from-xml(xml-str)
+    contents-elems ::xml/children(root, "Contents")
+
+    ListObjectsResponse({
+        name: cond {
+            ne(::xml/child(root, "Name"), null) => { ::xml/text(::xml/child(root, "Name")) }
+            => { null }
+        },
+        prefix: cond {
+            ne(::xml/child(root, "Prefix"), null) => { ::xml/text(::xml/child(root, "Prefix")) }
+            => { null }
+        },
+        key_count: cond {
+            ne(::xml/child(root, "KeyCount"), null) => { Int(::xml/text(::xml/child(root, "KeyCount"))) }
+            => { null }
+        },
+        max_keys: cond {
+            ne(::xml/child(root, "MaxKeys"), null) => { Int(::xml/text(::xml/child(root, "MaxKeys"))) }
+            => { null }
+        },
+        is_truncated: cond {
+            ne(::xml/child(root, "IsTruncated"), null) => { eq(::xml/text(::xml/child(root, "IsTruncated")), "true") }
+            => { null }
+        },
+        continuation_token: cond {
+            ne(::xml/child(root, "ContinuationToken"), null) => { ::xml/text(::xml/child(root, "ContinuationToken")) }
+            => { null }
+        },
+        next_continuation_token: cond {
+            ne(::xml/child(root, "NextContinuationToken"), null) => { ::xml/text(::xml/child(root, "NextContinuationToken")) }
+            => { null }
+        },
+        start_after: cond {
+            ne(::xml/child(root, "StartAfter"), null) => { ::xml/text(::xml/child(root, "StartAfter")) }
+            => { null }
+        },
+        contents: map(contents-elems, parse-s3-object)
+    })
+}
+
+// Put object response
+PutObjectResponse type {
+    etag: Str?,
+    version_id: Str?
+}
+
+// Get object response
+GetObjectResponse type {
+    body: Any,
+    content_type: Str?,
+    content_length: Int?,
+    etag: Str?,
+    last_modified: Str?
+}
+
+// Delete object response
+DeleteObjectResponse type {
+    delete_marker: Bool?,
+    version_id: Str?
+}
+
+// Head object response
+HeadObjectResponse type {
+    content_type: Str?,
+    content_length: Int?,
+    etag: Str?,
+    last_modified: Str?
+}
+
+// Put an object to S3
+put-object
+meta {
+    doc: """
+    PUT an object to S3.
+
+    **Example**
+
+    ```hot
+    // Upload text content
+    ::aws::s3::objects/put-object("my-bucket", "path/to/file.txt", "Hello!", "text/plain")
+
+    // Upload JSON
+    data to-json({name: "Alice", active: true})
+    ::aws::s3::objects/put-object("my-bucket", "data.json", data, "application/json")
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, body: Any, content_type: Str): PutObjectResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    body-str if(is-str(body), body, to-json(body))
+
+    headers {
+        "Content-Type": content_type,
+        "Host": `${bucket}.s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, body-str)
+
+    response http-request("PUT", url, signed-headers, body-str)
+
+    if(is-ok-response(response),
+        PutObjectResponse({
+            etag: response.headers.ETag,
+            version_id: null
+        }),
+        err(AwsError(response))
+    )
+},
+(bucket: Str, key: Str, body: Any): PutObjectResponse | AwsError {
+    put-object(bucket, key, body, "application/octet-stream")
+}
+
+// Get an object from S3
+get-object
+meta {
+    doc: """
+    GET an object from S3.
+
+    **Example**
+
+    ```hot
+    result ::aws::s3::objects/get-object("my-bucket", "path/to/file.txt")
+    result.body  // => "Hello!"
+    ```
+    """
+}
+fn (bucket: Str, key: Str): GetObjectResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    headers {
+        "Host": `${bucket}.s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "s3", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        GetObjectResponse({
+            body: response.body,
+            content_type: response.headers.content_type,
+            content_length: null,
+            etag: response.headers.ETag,
+            last_modified: null
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Delete an object from S3
+delete-object
+meta {
+    doc: """
+    DELETE an object from S3.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::objects/delete-object("my-bucket", "path/to/file.txt")
+    ```
+    """
+}
+fn (bucket: Str, key: Str): DeleteObjectResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    headers {
+        "Host": `${bucket}.s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("DELETE", url, region, "s3", credentials, headers, "")
+
+    response http-request("DELETE", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        DeleteObjectResponse({
+            delete_marker: null,
+            version_id: null
+        }),
+        err(AwsError(response))
+    )
+}
+
+// List objects in an S3 bucket (uses ListObjectsV2 API)
+list-objects
+meta {
+    doc: """
+    List objects in an S3 bucket using the ListObjectsV2 API.
+
+    Supports pagination via continuation_token. When is_truncated is true,
+    use next_continuation_token for the next request.
+
+    **Example**
+
+    ```hot
+    // List objects with a prefix
+    result ::aws::s3::objects/list-objects("my-bucket", "uploads/", 10)
+    result.name      // => "my-bucket"
+    result.contents  // => [{key: "uploads/file1.txt", size: 1024, ...}, ...]
+
+    // List all objects in a bucket
+    result ::aws::s3::objects/list-objects("my-bucket")
+    ```
+    """
+}
+fn
+(bucket: Str, prefix: Str, max_keys: Int, continuation_token: Str?): ListObjectsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+
+    // Build URL with optional continuation token
+    base-url `${endpoint}?list-type=2&prefix=${prefix}&max-keys=${max_keys}`
+    url if(ne(continuation_token, null),
+        `${base-url}&continuation-token=${continuation_token}`,
+        base-url
+    )
+
+    headers {
+        "Host": `${bucket}.s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("GET", url, region, "s3", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        parse-list-objects-response(response.body),
+        err(AwsError(response))
+    )
+},
+(bucket: Str, prefix: Str, max_keys: Int): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, max_keys, null)
+},
+(bucket: Str, prefix: Str): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, 1000, null)
+},
+(bucket: Str): ListObjectsResponse | AwsError {
+    list-objects(bucket, "", 1000, null)
+}
+
+// Copy object response
+CopyObjectResponse type {
+    etag: Str?,
+    last_modified: Str?
+}
+
+// Copy an object within S3
+copy-object
+meta {
+    doc: """
+    Copy an object within S3. Can copy between buckets or within the same bucket.
+
+    **Example**
+
+    ```hot
+    // Copy within the same bucket
+    ::aws::s3::objects/copy-object("my-bucket", "original.txt", "my-bucket", "backup.txt")
+
+    // Copy to a different bucket
+    ::aws::s3::objects/copy-object("source-bucket", "file.txt", "dest-bucket", "file.txt")
+    ```
+    """
+}
+fn (source_bucket: Str, source_key: Str, dest_bucket: Str, dest_key: Str): CopyObjectResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(dest_bucket, region)
+    url `${endpoint}/${dest_key}`
+
+    // x-amz-copy-source must be URL-encoded
+    copy-source `/${source_bucket}/${source_key}`
+
+    headers {
+        "Host": `${dest_bucket}.s3.${region}.amazonaws.com`,
+        "x-amz-copy-source": copy-source
+    }
+
+    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, "")
+
+    response http-request("PUT", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        cond {
+            is-str(response.body) => {
+                // Parse XML response
+                xml ::xml/from-xml(response.body)
+                CopyObjectResponse({
+                    etag: cond {
+                        ne(::xml/child(xml, "ETag"), null) => { ::xml/text(::xml/child(xml, "ETag")) }
+                        => { null }
+                    },
+                    last_modified: cond {
+                        ne(::xml/child(xml, "LastModified"), null) => { ::xml/text(::xml/child(xml, "LastModified")) }
+                        => { null }
+                    }
+                })
+            }
+            => {
+                CopyObjectResponse({
+                    etag: null,
+                    last_modified: null
+                })
+            }
+        },
+        err(AwsError(response))
+    )
+}
+
+// Head an object (get metadata without body)
+head-object
+meta {
+    doc: """
+    HEAD an object to get metadata without downloading the body.
+
+    **Example**
+
+    ```hot
+    result ::aws::s3::objects/head-object("my-bucket", "data.json")
+    result.content_type  // => "application/json"
+    result.etag          // => "\"d41d8cd98f00b204e9800998ecf8427e\""
+    ```
+    """
+}
+fn (bucket: Str, key: Str): HeadObjectResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    endpoint s3-endpoint(bucket, region)
+    url `${endpoint}/${key}`
+
+    headers {
+        "Host": `${bucket}.s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("HEAD", url, region, "s3", credentials, headers, "")
+
+    response http-request("HEAD", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        HeadObjectResponse({
+            content_type: response.headers.content_type,
+            content_length: null,
+            etag: response.headers.ETag,
+            last_modified: null
+        }),
+        err(AwsError(response))
+    )
+}

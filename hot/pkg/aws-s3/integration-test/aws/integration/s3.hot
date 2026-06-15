@@ -1,0 +1,193 @@
+::aws::integration::s3 ns
+meta ["test"]
+
+// =============================================================================
+// AWS S3 Integration Tests
+// =============================================================================
+// These tests require:
+// - AWS credentials (aws.access-key-id, aws.secret-access-key)
+// - AWS_S3_TEST_BUCKET environment variable (defaults to "hot-integration-test")
+
+// Test bucket
+test-bucket "hot-integration-test"
+
+// Generate a unique test key to avoid conflicts
+test-key-prefix fn (): Str {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    `hot-integration-test/${timestamp}`
+}
+
+// Test put and get object
+test-put-and-get-object
+meta ["test"]
+fn () {
+    key `${test-key-prefix()}/test-object.txt`
+    content "Hello from Hot integration test!"
+
+    // Put the object
+    put-result ::aws::s3::objects/put-object(test-bucket, key, content, "text/plain")
+    assert(not(is-err(put-result)), "Put should succeed")
+
+    // Get the object back
+    get-result ::aws::s3::objects/get-object(test-bucket, key)
+    assert(not(is-err(get-result)), "Get should succeed")
+    assert-eq(content, get-result.body, "Retrieved content should match")
+
+    // Clean up
+    ::aws::s3::objects/delete-object(test-bucket, key)
+}
+
+// Test list objects using ListObjectsV2
+test-list-objects
+meta ["test"]
+fn () {
+    prefix test-key-prefix()
+    key1 `${prefix}/list-test-1.txt`
+    key2 `${prefix}/list-test-2.txt`
+
+    // Create test objects using package functions
+    put1 ::aws::s3::objects/put-object(test-bucket, key1, "content1", "text/plain")
+    assert(not(is-err(put1)), "Put 1 should succeed")
+    put2 ::aws::s3::objects/put-object(test-bucket, key2, "content2", "text/plain")
+    assert(not(is-err(put2)), "Put 2 should succeed")
+
+    // List objects using package function (now with proper XML parsing)
+    list-result ::aws::s3::objects/list-objects(test-bucket, prefix, 10)
+    assert(not(is-err(list-result)), `List should succeed: ${list-result}`)
+
+    // Verify we got our objects
+    assert-eq(test-bucket, list-result.name, "Bucket name should match")
+    assert(gte(length(list-result.contents), 2), "Should have at least 2 objects")
+
+    // Clean up using package functions
+    ::aws::s3::objects/delete-object(test-bucket, key1)
+    ::aws::s3::objects/delete-object(test-bucket, key2)
+}
+
+// Test head object
+test-head-object
+meta ["test"]
+fn () {
+    key `${test-key-prefix()}/head-test.json`
+    content "{\"test\": true}"
+
+    // Put the object
+    put-result ::aws::s3::objects/put-object(test-bucket, key, content, "application/json")
+    assert(not(is-err(put-result)), "Put should succeed")
+
+    // Head the object (get metadata only)
+    head-result ::aws::s3::objects/head-object(test-bucket, key)
+    assert(not(is-err(head-result)), "Head should succeed")
+
+    // Clean up
+    ::aws::s3::objects/delete-object(test-bucket, key)
+}
+
+// Test delete object
+test-delete-object
+meta ["test"]
+fn () {
+    key `${test-key-prefix()}/delete-test.txt`
+
+    // Create object
+    put-result ::aws::s3::objects/put-object(test-bucket, key, "to be deleted", "text/plain")
+    assert(not(is-err(put-result)), "Put should succeed")
+
+    // Delete the object
+    delete-result ::aws::s3::objects/delete-object(test-bucket, key)
+    assert(not(is-err(delete-result)), "Delete should succeed")
+
+    // Verify deletion - get should fail
+    get-result ::aws::s3::objects/get-object(test-bucket, key)
+    // Should be an error (object not found)
+    assert(is-err(get-result), "Get after delete should fail")
+}
+
+// Test copy object
+test-copy-object
+meta ["test"]
+fn () {
+    prefix test-key-prefix()
+    source-key `${prefix}/copy-source.txt`
+    dest-key `${prefix}/copy-dest.txt`
+    content "Content to be copied"
+
+    // Create source object
+    put-result ::aws::s3::objects/put-object(test-bucket, source-key, content, "text/plain")
+    assert(not(is-err(put-result)), "Put source should succeed")
+
+    // Copy the object within the same bucket
+    copy-result ::aws::s3::objects/copy-object(test-bucket, source-key, test-bucket, dest-key)
+    assert(not(is-err(copy-result)), `Copy should succeed: ${copy-result}`)
+
+    // Verify the copy by reading the destination
+    get-result ::aws::s3::objects/get-object(test-bucket, dest-key)
+    assert(not(is-err(get-result)), "Get copied object should succeed")
+    assert-eq(content, get-result.body, "Copied content should match original")
+
+    // Clean up both objects
+    ::aws::s3::objects/delete-object(test-bucket, source-key)
+    ::aws::s3::objects/delete-object(test-bucket, dest-key)
+}
+
+// =============================================================================
+// Presigned URL Tests
+// =============================================================================
+
+// Test presigned URL for GET (download)
+test-presigned-url-get
+meta ["test"]
+fn () {
+    key `${test-key-prefix()}/presigned-get-test.txt`
+    content "Content accessible via presigned URL"
+
+    // Create an object
+    put-result ::aws::s3::objects/put-object(test-bucket, key, content, "text/plain")
+    assert(not(is-err(put-result)), "Put should succeed")
+
+    // Generate a presigned GET URL
+    presigned-url ::aws::s3::presigned/generate-presigned-url(test-bucket, key, 3600)
+
+    // Verify URL structure
+    assert(contains(presigned-url, "X-Amz-Algorithm=AWS4-HMAC-SHA256"), "URL should contain algorithm")
+    assert(contains(presigned-url, "X-Amz-Credential="), "URL should contain credential")
+    assert(contains(presigned-url, "X-Amz-Date="), "URL should contain date")
+    assert(contains(presigned-url, "X-Amz-Expires=3600"), "URL should contain expiration")
+    assert(contains(presigned-url, "X-Amz-SignedHeaders=host"), "URL should contain signed headers")
+    assert(contains(presigned-url, "X-Amz-Signature="), "URL should contain signature")
+
+    // Use the presigned URL to download (no auth needed)
+    response ::hot::http/get(presigned-url)
+    assert(eq(response.status, 200), `Presigned GET should succeed: status=${response.status}, body=${response.body}`)
+    assert-eq(content, response.body, "Downloaded content should match original")
+
+    // Clean up
+    ::aws::s3::objects/delete-object(test-bucket, key)
+}
+
+// Test presigned URL for PUT (upload)
+test-presigned-url-put
+meta ["test"]
+fn () {
+    key `${test-key-prefix()}/presigned-put-test.txt`
+    content "Content uploaded via presigned URL"
+
+    // Generate a presigned PUT URL
+    presigned-url ::aws::s3::presigned/generate-presigned-upload-url(test-bucket, key, 3600)
+
+    // Verify URL structure
+    assert(contains(presigned-url, "X-Amz-Algorithm=AWS4-HMAC-SHA256"), "URL should contain algorithm")
+    assert(contains(presigned-url, "X-Amz-Signature="), "URL should contain signature")
+
+    // Use the presigned URL to upload (no auth needed)
+    upload-response ::hot::http/put(presigned-url, content)
+    assert(eq(upload-response.status, 200), `Presigned PUT should succeed: status=${upload-response.status}, body=${upload-response.body}`)
+
+    // Verify the upload by reading the object with regular auth
+    get-result ::aws::s3::objects/get-object(test-bucket, key)
+    assert(not(is-err(get-result)), "Get after presigned upload should succeed")
+    assert-eq(content, get-result.body, "Uploaded content should match")
+
+    // Clean up
+    ::aws::s3::objects/delete-object(test-bucket, key)
+}

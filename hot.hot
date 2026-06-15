@@ -44,15 +44,16 @@ hot.project.hot-dev.deps {
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
 
     // AWS packages
-    // "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
-    // "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
-    // "hot.dev/aws-eventstream": { "local": "./hot/pkg/aws-eventstream" },
-    // "hot.dev/aws-dynamodb": { "local": "./hot/pkg/aws-dynamodb" },
-    // "hot.dev/aws-lambda": { "local": "./hot/pkg/aws-lambda" },
-    // "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
-    // "hot.dev/aws-secrets-manager": { "local": "./hot/pkg/aws-secrets-manager" },
-    // "hot.dev/aws-ses": { "local": "./hot/pkg/aws-ses" },
-    // "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
+    "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
+    "hot.dev/aws-eventstream": { "local": "./hot/pkg/aws-eventstream" },
+    "hot.dev/aws-dynamodb": { "local": "./hot/pkg/aws-dynamodb" },
+    "hot.dev/aws-lambda": { "local": "./hot/pkg/aws-lambda" },
+    "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
+    "hot.dev/aws-secrets-manager": { "local": "./hot/pkg/aws-secrets-manager" },
+    "hot.dev/aws-ses": { "local": "./hot/pkg/aws-ses" },
+    "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
+    "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
 
     // Discord packages
     "hot.dev/discord-core": { "local": "./hot/pkg/discord-core" },
@@ -441,6 +442,11 @@ hot.project.pkg-integration-aws-sns.test.capture false
 hot.project.pkg-integration-aws-sns.deps {
     "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
 }
+
+// AWS Event Stream unit tests (binary parser; no AWS credentials required)
+hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
+hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
+hot.project.pkg-aws-eventstream.test.capture true
 
 // Stripe Core integration tests
 hot.project.pkg-integration-stripe-core.src.paths ["./hot/pkg/stripe-core/src"]

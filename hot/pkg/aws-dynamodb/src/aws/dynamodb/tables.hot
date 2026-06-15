@@ -1,0 +1,156 @@
+::aws::dynamodb::tables ns
+
+// DynamoDB table operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// List tables response
+ListTablesResponse type {
+    table_names: Vec<Str>,
+    last_evaluated_table_name: Str?
+}
+
+// Table description
+TableDescription type {
+    table_name: Str?,
+    table_status: Str?,
+    table_arn: Str?,
+    table_id: Str?,
+    creation_date_time: Str?,
+    key_schema: Vec<Map>?,
+    attribute_definitions: Vec<Map>?,
+    provisioned_throughput: Map?,
+    billing_mode_summary: Map?,
+    item_count: Int?,
+    table_size_bytes: Int?,
+    global_secondary_indexes: Vec<Map>?,
+    local_secondary_indexes: Vec<Map>?
+}
+
+// Describe table response
+DescribeTableResponse type {
+    table: TableDescription?
+}
+
+// List all DynamoDB tables
+list-tables
+meta {
+    doc: """
+    List all DynamoDB tables in the account/region.
+
+    **Example**
+
+    ```hot
+    result ::aws::dynamodb::tables/list-tables()
+    result.table_names
+    // => ["users", "orders", "products"]
+
+    // With limit
+    result ::aws::dynamodb::tables/list-tables(10)
+    ```
+    """
+}
+fn
+(limit: Int, exclusive_start_table_name: Str): ListTablesResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    request-body if(is-null(limit), {}, { Limit: limit })
+
+    with-start if(is-null(exclusive_start_table_name), request-body,
+        {...request-body, ExclusiveStartTableName: exclusive_start_table_name}
+    )
+
+    body to-json(with-start)
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.ListTables",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ListTablesResponse({
+            table_names: if(is-null(response.body.TableNames), [], response.body.TableNames),
+            last_evaluated_table_name: response.body.LastEvaluatedTableName
+        }),
+        err(AwsError(response))
+    )
+},
+(limit: Int): ListTablesResponse | AwsError {
+    list-tables(limit, null)
+},
+(): ListTablesResponse | AwsError {
+    list-tables(100, null)
+}
+
+// Describe a DynamoDB table
+describe-table
+meta {
+    doc: """
+    Get detailed information about a DynamoDB table.
+
+    **Example**
+
+    ```hot
+    result ::aws::dynamodb::tables/describe-table("my-table")
+    result.table.table_name    // => "my-table"
+    result.table.table_status  // => "ACTIVE"
+    result.table.item_count    // => 1500
+    ```
+    """
+}
+fn (table_name: Str): DescribeTableResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    url `https://dynamodb.${region}.amazonaws.com/`
+
+    body to-json({
+        TableName: table_name
+    })
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "DynamoDB_20120810.DescribeTable",
+        "Host": `dynamodb.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        DescribeTableResponse({
+            table: if(is-null(response.body.Table), null, TableDescription({
+                table_name: response.body.Table.TableName,
+                table_status: response.body.Table.TableStatus,
+                table_arn: response.body.Table.TableArn,
+                table_id: response.body.Table.TableId,
+                creation_date_time: response.body.Table.CreationDateTime,
+                key_schema: response.body.Table.KeySchema,
+                attribute_definitions: response.body.Table.AttributeDefinitions,
+                provisioned_throughput: response.body.Table.ProvisionedThroughput,
+                billing_mode_summary: response.body.Table.BillingModeSummary,
+                item_count: response.body.Table.ItemCount,
+                table_size_bytes: response.body.Table.TableSizeBytes,
+                global_secondary_indexes: response.body.Table.GlobalSecondaryIndexes,
+                local_secondary_indexes: response.body.Table.LocalSecondaryIndexes
+            }))
+        }),
+        err(AwsError(response))
+    )
+}

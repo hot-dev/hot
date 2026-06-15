@@ -1,0 +1,190 @@
+::aws::s3::buckets ns
+
+// S3 Bucket operations
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+eq ::hot::cmp/eq
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// S3 Bucket type
+S3Bucket type {
+    name: Str,
+    creation_date: Str?
+}
+
+// List buckets response
+ListBucketsResponse type {
+    owner: Map?,
+    buckets: Vec<S3Bucket>?
+}
+
+// Create bucket response
+CreateBucketResponse type {
+    location: Str?
+}
+
+// Head bucket response (just checks existence)
+HeadBucketResponse type {
+    exists: Bool,
+    region: Str?
+}
+
+// List all buckets
+list-buckets
+meta {
+    doc: """
+    List all S3 buckets in the account.
+
+    **Example**
+
+    ```hot
+    result ::aws::s3::buckets/list-buckets()
+    result.buckets
+    // => [{name: "my-bucket", creation_date: "2024-01-01T00:00:00Z"}, ...]
+    ```
+    """
+}
+fn (): ListBucketsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    url "https://s3.amazonaws.com/"
+
+    headers {
+        "Host": "s3.amazonaws.com"
+    }
+
+    signed-headers sign-request("GET", url, region, "s3", credentials, headers, "")
+
+    response http-request("GET", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        ListBucketsResponse(response.body),
+        err(AwsError(response))
+    )
+}
+
+// Create a bucket
+create-bucket
+meta {
+    doc: """
+    Create a new S3 bucket.
+
+    **Example**
+
+    ```hot
+    result ::aws::s3::buckets/create-bucket("my-new-bucket", "us-east-1")
+    result.location  // => "http://my-new-bucket.s3.amazonaws.com/"
+
+    // Use default region from context
+    result ::aws::s3::buckets/create-bucket("my-new-bucket")
+    ```
+    """
+}
+fn
+(bucket: Str, region: Str): CreateBucketResponse | AwsError {
+    credentials get-credentials()
+    url `https://s3.${region}.amazonaws.com/${bucket}`
+
+    // Create bucket configuration for non-us-east-1 regions
+    body if(eq(region, "us-east-1"),
+        "",
+        `<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+            <LocationConstraint>${region}</LocationConstraint>
+        </CreateBucketConfiguration>`
+    )
+
+    headers {
+        "Host": `s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, body)
+
+    response http-request("PUT", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        CreateBucketResponse({
+            location: response.headers.Location
+        }),
+        err(AwsError(response))
+    )
+},
+(bucket: Str): CreateBucketResponse | AwsError {
+    create-bucket(bucket, get-region())
+}
+
+// Delete a bucket
+delete-bucket
+meta {
+    doc: """
+    Delete an S3 bucket. The bucket must be empty before it can be deleted.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::buckets/delete-bucket("my-bucket")
+    // => true
+    ```
+    """
+}
+fn (bucket: Str): Bool | AwsError {
+    region get-region()
+    credentials get-credentials()
+    url `https://s3.${region}.amazonaws.com/${bucket}`
+
+    headers {
+        "Host": `s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("DELETE", url, region, "s3", credentials, headers, "")
+
+    response http-request("DELETE", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        true,
+        AwsError(response)
+    )
+}
+
+// Head a bucket (check if exists)
+head-bucket
+meta {
+    doc: """
+    HEAD a bucket to check if it exists and get its region.
+
+    **Example**
+
+    ```hot
+    result ::aws::s3::buckets/head-bucket("my-bucket")
+    result.exists  // => true
+    ```
+    """
+}
+fn (bucket: Str): HeadBucketResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+    url `https://s3.${region}.amazonaws.com/${bucket}`
+
+    headers {
+        "Host": `s3.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("HEAD", url, region, "s3", credentials, headers, "")
+
+    response http-request("HEAD", url, signed-headers, "")
+
+    if(is-ok-response(response),
+        HeadBucketResponse({
+            exists: true,
+            region: null
+        }),
+        err(AwsError(response))
+    )
+}

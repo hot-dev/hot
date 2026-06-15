@@ -1,0 +1,359 @@
+::aws::integration::sns ns
+meta ["test"]
+
+// =============================================================================
+// AWS SNS Integration Tests
+// =============================================================================
+// These tests validate the aws-sns package functions.
+// Requirements:
+// - AWS credentials (aws.access-key-id, aws.secret-access-key)
+// - Tests will create/delete temporary topics
+
+// Test topic prefix for cleanup
+test-topic-prefix "hot-integration-test"
+
+// =============================================================================
+// Topic Operations (::aws::sns::topics)
+// =============================================================================
+
+// Test list-topics
+test-list-topics
+meta ["test"]
+fn () {
+    result ::aws::sns::topics/list-topics()
+    assert(not(is-err(result)), `list-topics failed: ${result}`)
+    assert(is-vec(result.topics), "topics should be a Vec")
+}
+
+// Test create-topic and delete-topic
+test-create-delete-topic
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    assert(not(is-err(create-result)), `create-topic failed: ${create-result}`)
+    assert(not(is-null(create-result.topic_arn)), "topic_arn should not be null")
+
+    topic-arn create-result.topic_arn
+
+    // Verify topic exists in list
+    list-result ::aws::sns::topics/list-topics()
+    assert(not(is-err(list-result)), `list-topics failed: ${list-result}`)
+
+    topic-arns map(list-result.topics, (t) { t.topic_arn })
+    found some(topic-arns, (arn) { eq(arn, topic-arn) })
+    assert(found, "Created topic should be in list")
+
+    // Delete topic
+    delete-result ::aws::sns::topics/delete-topic(topic-arn)
+    assert(not(is-err(delete-result)), `delete-topic failed: ${delete-result}`)
+}
+
+// Test create-topic with attributes
+test-create-topic-with-attributes
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-attr-${timestamp}`
+
+    // Create topic with display name
+    create-result ::aws::sns::topics/create-topic(topic-name, {
+        DisplayName: "Hot Test Topic"
+    })
+    assert(not(is-err(create-result)), `create-topic with attributes failed: ${create-result}`)
+
+    topic-arn create-result.topic_arn
+
+    // Get attributes and verify
+    attrs-result ::aws::sns::topics/get-topic-attributes(topic-arn)
+    assert(not(is-err(attrs-result)), `get-topic-attributes failed: ${attrs-result}`)
+    assert-eq("Hot Test Topic", attrs-result.attributes.DisplayName, "DisplayName should match")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test get-topic-attributes
+test-get-topic-attributes
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-attrs-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Get attributes
+    result ::aws::sns::topics/get-topic-attributes(topic-arn)
+    assert(not(is-err(result)), `get-topic-attributes failed: ${result}`)
+    assert(not(is-null(result.attributes)), "attributes should not be null")
+    assert(not(is-null(result.attributes.TopicArn)), "TopicArn should exist in attributes")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test set-topic-attributes
+test-set-topic-attributes
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-set-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Set display name
+    set-result ::aws::sns::topics/set-topic-attributes(topic-arn, "DisplayName", "Updated Name")
+    assert(not(is-err(set-result)), `set-topic-attributes failed: ${set-result}`)
+
+    // Verify change
+    attrs-result ::aws::sns::topics/get-topic-attributes(topic-arn)
+    assert-eq("Updated Name", attrs-result.attributes.DisplayName, "DisplayName should be updated")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// =============================================================================
+// Subscription Operations (::aws::sns::subscriptions)
+// =============================================================================
+
+// Test list-subscriptions
+test-list-subscriptions
+meta ["test"]
+fn () {
+    result ::aws::sns::subscriptions/list-subscriptions()
+    assert(not(is-err(result)), `list-subscriptions failed: ${result}`)
+    assert(is-vec(result.subscriptions), "subscriptions should be a Vec")
+}
+
+// Test subscribe and unsubscribe (using SQS protocol - doesn't require confirmation)
+test-subscribe-unsubscribe
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-sub-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Subscribe with a test SQS queue (using our test queue ARN)
+    // Note: This creates a pending confirmation for email, but SQS confirms immediately
+    queue-arn "arn:aws:sqs:us-east-2:241550672818:hot-integration-test"
+
+    sub-result ::aws::sns::subscriptions/subscribe(topic-arn, "sqs", queue-arn)
+    assert(not(is-err(sub-result)), `subscribe failed: ${sub-result}`)
+    assert(not(is-null(sub-result.subscription_arn)), "subscription_arn should not be null")
+
+    subscription-arn sub-result.subscription_arn
+
+    // List subscriptions by topic
+    list-result ::aws::sns::subscriptions/list-subscriptions-by-topic(topic-arn)
+    assert(not(is-err(list-result)), `list-subscriptions-by-topic failed: ${list-result}`)
+    assert(gte(length(list-result.subscriptions), 1), "Should have at least 1 subscription")
+
+    // Unsubscribe (only if we got a real ARN, not "pending confirmation")
+    if(not(eq(subscription-arn, "pending confirmation")), {
+        unsub-result ::aws::sns::subscriptions/unsubscribe(subscription-arn)
+        assert(not(is-err(unsub-result)), `unsubscribe failed: ${unsub-result}`)
+    }, null)
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test get-subscription-attributes
+test-get-subscription-attributes
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-subattr-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Subscribe with SQS
+    queue-arn "arn:aws:sqs:us-east-2:241550672818:hot-integration-test"
+    sub-result ::aws::sns::subscriptions/subscribe(topic-arn, "sqs", queue-arn)
+    subscription-arn sub-result.subscription_arn
+
+    // Get subscription attributes (only if confirmed)
+    if(not(eq(subscription-arn, "pending confirmation")), {
+        attrs-result ::aws::sns::subscriptions/get-subscription-attributes(subscription-arn)
+        assert(not(is-err(attrs-result)), `get-subscription-attributes failed: ${attrs-result}`)
+        assert(not(is-null(attrs-result.attributes)), "attributes should not be null")
+
+        // Unsubscribe
+        ::aws::sns::subscriptions/unsubscribe(subscription-arn)
+    }, null)
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// =============================================================================
+// Publish Operations (::aws::sns::publish)
+// =============================================================================
+
+// Test publish message
+test-publish
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-pub-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Publish message
+    message `Hot integration test message ${timestamp}`
+    pub-result ::aws::sns::publish/publish(topic-arn, message)
+    assert(not(is-err(pub-result)), `publish failed: ${pub-result}`)
+    assert(not(is-null(pub-result.message_id)), "message_id should not be null")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test publish with subject
+test-publish-with-subject
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-pubsubj-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Publish with subject
+    pub-result ::aws::sns::publish/publish(topic-arn, "Message body", {
+        subject: "Test Subject"
+    })
+    assert(not(is-err(pub-result)), `publish with subject failed: ${pub-result}`)
+    assert(not(is-null(pub-result.message_id)), "message_id should not be null")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test publish with message attributes
+test-publish-with-attributes
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-pubattr-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Publish with attributes
+    pub-result ::aws::sns::publish/publish-with-attributes(topic-arn, "Message with attributes", {
+        event_type: { DataType: "String", StringValue: "test" },
+        timestamp: { DataType: "Number", StringValue: Str(timestamp) }
+    })
+    assert(not(is-err(pub-result)), `publish with attributes failed: ${pub-result}`)
+    assert(not(is-null(pub-result.message_id)), "message_id should not be null")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test publish-json (protocol-specific messages)
+test-publish-json
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-pubjson-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Publish with protocol-specific payloads
+    pub-result ::aws::sns::publish/publish-json(topic-arn, {
+        default: "Default message",
+        sqs: to-json({ type: "notification", data: { test: true } })
+    })
+    assert(not(is-err(pub-result)), `publish-json failed: ${pub-result}`)
+    assert(not(is-null(pub-result.message_id)), "message_id should not be null")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// Test publish-batch
+test-publish-batch
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-batch-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Publish batch
+    entries [
+        { id: "msg1", message: `Batch message 1 - ${timestamp}` },
+        { id: "msg2", message: `Batch message 2 - ${timestamp}` },
+        { id: "msg3", message: `Batch message 3 - ${timestamp}` }
+    ]
+
+    pub-result ::aws::sns::publish/publish-batch(topic-arn, entries)
+    assert(not(is-err(pub-result)), `publish-batch failed: ${pub-result}`)
+    assert-eq(3, length(pub-result.successful), "Should have 3 successful publishes")
+    assert-eq(0, length(pub-result.failed), "Should have 0 failed publishes")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}
+
+// =============================================================================
+// Tag Operations (::aws::sns::topics)
+// =============================================================================
+
+// Test tag operations
+test-tag-operations
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    topic-name `${test-topic-prefix}-tag-${timestamp}`
+
+    // Create topic
+    create-result ::aws::sns::topics/create-topic(topic-name)
+    topic-arn create-result.topic_arn
+
+    // Add tags
+    tag-result ::aws::sns::topics/tag-resource(topic-arn, [
+        { Key: "Environment", Value: "test" },
+        { Key: "Application", Value: "hot-integration" }
+    ])
+    assert(not(is-err(tag-result)), `tag-resource failed: ${tag-result}`)
+
+    // List tags
+    list-tags-result ::aws::sns::topics/list-tags-for-resource(topic-arn)
+    assert(not(is-err(list-tags-result)), `list-tags-for-resource failed: ${list-tags-result}`)
+    assert-eq(2, length(list-tags-result.tags), "Should have 2 tags")
+
+    // Remove tags
+    untag-result ::aws::sns::topics/untag-resource(topic-arn, ["Environment", "Application"])
+    assert(not(is-err(untag-result)), `untag-resource failed: ${untag-result}`)
+
+    // Verify tags removed
+    list-tags-result2 ::aws::sns::topics/list-tags-for-resource(topic-arn)
+    assert-eq(0, length(list-tags-result2.tags), "Should have 0 tags after removal")
+
+    // Clean up
+    ::aws::sns::topics/delete-topic(topic-arn)
+}

@@ -1,0 +1,36 @@
+::aws::dynamodb ns
+
+// AWS DynamoDB Package
+// Provides DynamoDB NoSQL database operations
+
+// Re-export core AWS types
+Credentials ::aws::core/Credentials
+AwsError ::aws::core/AwsError
+
+// Re-export DynamoDB types
+PutItemResponse ::aws::dynamodb::items/PutItemResponse
+GetItemResponse ::aws::dynamodb::items/GetItemResponse
+DeleteItemResponse ::aws::dynamodb::items/DeleteItemResponse
+UpdateItemResponse ::aws::dynamodb::items/UpdateItemResponse
+QueryResponse ::aws::dynamodb::query/QueryResponse
+ScanResponse ::aws::dynamodb::query/ScanResponse
+BatchGetResponse ::aws::dynamodb::batch/BatchGetResponse
+BatchWriteResponse ::aws::dynamodb::batch/BatchWriteResponse
+
+// Re-export DynamoDB item operations
+put-item ::aws::dynamodb::items/put-item
+get-item ::aws::dynamodb::items/get-item
+delete-item ::aws::dynamodb::items/delete-item
+update-item ::aws::dynamodb::items/update-item
+
+// Re-export DynamoDB query operations
+query ::aws::dynamodb::query/query
+scan ::aws::dynamodb::query/scan
+
+// Re-export DynamoDB batch operations
+batch-get-item ::aws::dynamodb::batch/batch-get-item
+batch-write-item ::aws::dynamodb::batch/batch-write-item
+
+// Re-export DynamoDB table operations
+list-tables ::aws::dynamodb::tables/list-tables
+describe-table ::aws::dynamodb::tables/describe-table

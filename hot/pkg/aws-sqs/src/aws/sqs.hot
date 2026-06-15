@@ -1,0 +1,38 @@
+::aws::sqs ns
+
+// AWS SQS Package
+// Provides Simple Queue Service operations
+
+// Re-export core AWS types
+Credentials ::aws::core/Credentials
+AwsError ::aws::core/AwsError
+
+// Re-export SQS types
+Message ::aws::sqs::messages/Message
+SendMessageRequest ::aws::sqs::messages/SendMessageRequest
+SendMessageResponse ::aws::sqs::messages/SendMessageResponse
+ReceiveMessageResponse ::aws::sqs::messages/ReceiveMessageResponse
+DeleteMessageResponse ::aws::sqs::messages/DeleteMessageResponse
+MessageAttribute ::aws::sqs::messages/MessageAttribute
+
+QueueAttributes ::aws::sqs::queues/QueueAttributes
+CreateQueueResponse ::aws::sqs::queues/CreateQueueResponse
+GetQueueUrlResponse ::aws::sqs::queues/GetQueueUrlResponse
+ListQueuesResponse ::aws::sqs::queues/ListQueuesResponse
+
+// Re-export SQS message operations
+send-message ::aws::sqs::messages/send-message
+receive-messages ::aws::sqs::messages/receive-messages
+delete-message ::aws::sqs::messages/delete-message
+change-message-visibility ::aws::sqs::messages/change-message-visibility
+purge-queue ::aws::sqs::messages/purge-queue
+send-message-batch ::aws::sqs::messages/send-message-batch
+delete-message-batch ::aws::sqs::messages/delete-message-batch
+
+// Re-export SQS queue operations
+create-queue ::aws::sqs::queues/create-queue
+delete-queue ::aws::sqs::queues/delete-queue
+get-queue-url ::aws::sqs::queues/get-queue-url
+list-queues ::aws::sqs::queues/list-queues
+get-queue-attributes ::aws::sqs::queues/get-queue-attributes
+set-queue-attributes ::aws::sqs::queues/set-queue-attributes

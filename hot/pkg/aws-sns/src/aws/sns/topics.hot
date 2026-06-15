@@ -1,0 +1,400 @@
+::aws::sns::topics ns
+
+// SNS Topic operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Topic type
+Topic type {
+    topic_arn: Str
+}
+
+// Create topic response
+CreateTopicResponse type {
+    topic_arn: Str?
+}
+
+// List topics response
+ListTopicsResponse type {
+    topics: Vec<Topic>,
+    next_token: Str?
+}
+
+// Get topic attributes response
+GetTopicAttributesResponse type {
+    attributes: Map
+}
+
+// Create a new SNS topic
+create-topic
+meta {
+    doc: """
+    Create a new SNS topic.
+
+    Attributes can include DisplayName, Policy, DeliveryPolicy, FifoTopic, and
+    ContentBasedDeduplication.
+
+    **Example**
+
+    ```hot
+    // Simple topic
+    result ::aws::sns::topics/create-topic("my-notifications")
+    result.topic_arn  // => "arn:aws:sns:us-east-1:123456:my-notifications"
+
+    // Topic with display name
+    result ::aws::sns::topics/create-topic("alerts", {DisplayName: "My Alerts"})
+    ```
+    """
+}
+fn
+(name: Str, attributes: Map, tags: Vec<Map>): CreateTopicResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {
+        Name: name
+    }
+
+    with-attributes if(is-empty(attributes), request-body,
+        merge(request-body, { Attributes: attributes })
+    )
+
+    with-tags if(is-null(tags), with-attributes,
+        merge(with-attributes, { Tags: tags })
+    )
+
+    body to-json(with-tags)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.CreateTopic",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        CreateTopicResponse({
+            topic_arn: response.body.TopicArn
+        }),
+        err(AwsError(response))
+    )
+},
+(name: Str, attributes: Map): CreateTopicResponse | AwsError {
+    create-topic(name, attributes, null)
+},
+(name: Str): CreateTopicResponse | AwsError {
+    create-topic(name, {}, null)
+}
+
+// Delete an SNS topic
+delete-topic
+meta {
+    doc: """
+    Delete an SNS topic by its ARN.
+
+    **Example**
+
+    ```hot
+    ::aws::sns::topics/delete-topic("arn:aws:sns:us-east-1:123456:my-topic")
+    ```
+    """
+}
+fn (topic_arn: Str): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        TopicArn: topic_arn
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.DeleteTopic",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}
+
+// List all SNS topics
+list-topics
+meta {
+    doc: """
+    List all SNS topics. Supports pagination via next_token.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::topics/list-topics()
+    topic-arns map(result.topics, %.topic_arn)
+    // => ["arn:aws:sns:us-east-1:123456:topic-1", "arn:aws:sns:us-east-1:123456:topic-2"]
+    ```
+    """
+}
+fn
+(next_token: Str): ListTopicsResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    request-body {}
+
+    with-token if(is-null(next_token), request-body,
+        merge(request-body, { NextToken: next_token })
+    )
+
+    body to-json(with-token)
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.ListTopics",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ListTopicsResponse({
+            topics: if(is-null(response.body.Topics), [], map(response.body.Topics, Topic({ topic_arn: %.TopicArn }))),
+            next_token: response.body.NextToken
+        }),
+        err(AwsError(response))
+    )
+},
+(): ListTopicsResponse | AwsError {
+    list-topics(null)
+}
+
+// Get topic attributes
+get-topic-attributes
+meta {
+    doc: """
+    Get attributes of an SNS topic.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::topics/get-topic-attributes(topic-arn)
+    result.attributes.DisplayName  // => "My Alerts"
+    result.attributes.TopicArn     // => "arn:aws:sns:us-east-1:123456:my-topic"
+    ```
+    """
+}
+fn (topic_arn: Str): GetTopicAttributesResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        TopicArn: topic_arn
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.GetTopicAttributes",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        GetTopicAttributesResponse({
+            attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Set topic attributes
+set-topic-attributes
+meta {
+    doc: """
+    Set a single attribute of an SNS topic.
+
+    Common attribute names: DisplayName, Policy, DeliveryPolicy.
+
+    **Example**
+
+    ```hot
+    ::aws::sns::topics/set-topic-attributes(topic-arn, "DisplayName", "Updated Name")
+    ```
+    """
+}
+fn (topic_arn: Str, attribute_name: Str, attribute_value: Str): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        TopicArn: topic_arn,
+        AttributeName: attribute_name,
+        AttributeValue: attribute_value
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.SetTopicAttributes",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}
+
+// Tag a topic
+tag-resource
+meta {
+    doc: """
+    Add tags to an SNS topic.
+
+    **Example**
+
+    ```hot
+    ::aws::sns::topics/tag-resource(topic-arn, [
+        {Key: "Environment", Value: "production"},
+        {Key: "Application", Value: "my-app"}
+    ])
+    ```
+    """
+}
+fn (resource_arn: Str, tags: Vec<Map>): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        ResourceArn: resource_arn,
+        Tags: tags
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.TagResource",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}
+
+// Untag a topic
+untag-resource
+meta {
+    doc: """
+    Remove tags from an SNS topic by tag key names.
+
+    **Example**
+
+    ```hot
+    ::aws::sns::topics/untag-resource(topic-arn, ["Environment", "Application"])
+    ```
+    """
+}
+fn (resource_arn: Str, tag_keys: Vec<Str>): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        ResourceArn: resource_arn,
+        TagKeys: tag_keys
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.UntagResource",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { success: true },
+        AwsError(response)
+    )
+}
+
+// List tags for a topic
+list-tags-for-resource
+meta {
+    doc: """
+    List tags for an SNS topic.
+
+    **Example**
+
+    ```hot
+    result ::aws::sns::topics/list-tags-for-resource(topic-arn)
+    result.tags
+    // => [{Key: "Environment", Value: "production"}, {Key: "Application", Value: "my-app"}]
+    ```
+    """
+}
+fn (resource_arn: Str): Map | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        ResourceArn: resource_arn
+    })
+
+    url `https://sns.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSimpleNotificationService.ListTagsForResource",
+        "Host": `sns.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sns", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        { tags: if(is-null(response.body.Tags), [], response.body.Tags) },
+        AwsError(response)
+    )
+}

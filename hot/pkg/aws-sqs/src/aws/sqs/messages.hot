@@ -1,0 +1,470 @@
+::aws::sqs::messages ns
+
+// SQS Message operations
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+get-credentials ::aws::core/get-credentials
+get-region ::aws::core/get-region
+sign-request ::aws::core/sign-request
+AwsError ::aws::core/AwsError
+
+// Message attribute type
+MessageAttribute type {
+    data_type: Str,
+    string_value: Str?,
+    binary_value: Str?
+}
+
+// SQS Message type
+Message type {
+    message_id: Str,
+    receipt_handle: Str,
+    body: Str,
+    md5_of_body: Str?,
+    attributes: Map?,
+    message_attributes: Map?
+}
+
+// Send message request
+SendMessageRequest type {
+    queue_url: Str,
+    message_body: Str,
+    delay_seconds: Int?,
+    message_attributes: Map?,
+    message_group_id: Str?,
+    message_deduplication_id: Str?
+}
+
+// Send message response
+SendMessageResponse type {
+    message_id: Str?,
+    md5_of_message_body: Str?,
+    sequence_number: Str?
+}
+
+// Receive message response
+ReceiveMessageResponse type {
+    messages: Vec<Message>
+}
+
+// Delete message response
+DeleteMessageResponse type {
+    success: Bool
+}
+
+// Batch result entry
+BatchResultEntry type {
+    id: Str,
+    message_id: Str?,
+    md5_of_message_body: Str?
+}
+
+// Batch error entry
+BatchErrorEntry type {
+    id: Str,
+    sender_fault: Bool,
+    code: Str,
+    message: Str?
+}
+
+// Send message batch response
+SendMessageBatchResponse type {
+    successful: Vec<BatchResultEntry>,
+    failed: Vec<BatchErrorEntry>
+}
+
+// Delete message batch response
+DeleteMessageBatchResponse type {
+    successful: Vec<BatchResultEntry>,
+    failed: Vec<BatchErrorEntry>
+}
+
+// Extract region from queue URL
+extract-region-from-url fn (queue_url: Str): Str {
+    // Queue URL format: https://sqs.{region}.amazonaws.com/{account}/{queue}
+    // or https://{queue}.{region}.amazonaws.com
+    get-region()
+}
+
+// Send a message to an SQS queue
+send-message
+meta {
+    doc: """
+    Send a message to an SQS queue.
+
+    **Example**
+
+    ```hot
+    result ::aws::sqs::messages/send-message(queue-url, "Hello from Hot!")
+    result.message_id  // => "abc123-def456..."
+
+    // With delay
+    result ::aws::sqs::messages/send-message(queue-url, "Delayed message", 30)
+    ```
+    """
+}
+fn
+(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map): SendMessageResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    attrs if(is-null(message_attributes), {}, message_attributes)
+
+    body to-json({
+        QueueUrl: queue_url,
+        MessageBody: message_body,
+        DelaySeconds: delay_seconds,
+        MessageAttributes: attrs
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.SendMessage",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SendMessageResponse({
+            message_id: response.body.MessageId,
+            md5_of_message_body: response.body.MD5OfMessageBody,
+            sequence_number: response.body.SequenceNumber
+        }),
+        err(AwsError(response))
+    )
+},
+(queue_url: Str, message_body: Str, delay_seconds: Int): SendMessageResponse | AwsError {
+    send-message(queue_url, message_body, delay_seconds, {})
+},
+(queue_url: Str, message_body: Str): SendMessageResponse | AwsError {
+    send-message(queue_url, message_body, 0, {})
+}
+
+// Receive messages from an SQS queue
+receive-messages
+meta {
+    doc: """
+    Receive messages from an SQS queue.
+
+    **Example**
+
+    ```hot
+    // Receive up to 10 messages with 5-second long polling
+    result ::aws::sqs::messages/receive-messages(queue-url, 10, 5)
+    for-each(result.messages, (msg) {
+        msg.body            // => "Hello from Hot!"
+        msg.receipt_handle  // needed for delete-message
+    })
+
+    // Simple receive (1 message, no wait)
+    result ::aws::sqs::messages/receive-messages(queue-url)
+    ```
+    """
+}
+fn
+(queue_url: Str, max_messages: Int, wait_time_seconds: Int, visibility_timeout: Int): ReceiveMessageResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        MaxNumberOfMessages: max_messages,
+        WaitTimeSeconds: wait_time_seconds,
+        VisibilityTimeout: visibility_timeout,
+        AttributeNames: ["All"],
+        MessageAttributeNames: ["All"]
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.ReceiveMessage",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        ReceiveMessageResponse({
+            messages: if(is-null(response.body.Messages), [], map(response.body.Messages, Message({
+                message_id: %.MessageId,
+                receipt_handle: %.ReceiptHandle,
+                body: %.Body,
+                md5_of_body: %.MD5OfBody,
+                attributes: %.Attributes,
+                message_attributes: %.MessageAttributes
+            })))
+        }),
+        err(AwsError(response))
+    )
+},
+(queue_url: Str, max_messages: Int, wait_time_seconds: Int): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, max_messages, wait_time_seconds, 30)
+},
+(queue_url: Str, max_messages: Int): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, max_messages, 0, 30)
+},
+(queue_url: Str): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, 1, 0, 30)
+}
+
+// Delete a message from an SQS queue
+delete-message
+meta {
+    doc: """
+    Delete a message from an SQS queue after processing.
+
+    Use the receipt_handle from a received message to delete it.
+
+    **Example**
+
+    ```hot
+    // Receive and process messages
+    result ::aws::sqs::messages/receive-messages(queue-url, 10, 5)
+    for-each(result.messages, (msg) {
+        // Process message...
+        ::aws::sqs::messages/delete-message(queue-url, msg.receipt_handle)
+    })
+    ```
+    """
+}
+fn (queue_url: Str, receipt_handle: Str): DeleteMessageResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        ReceiptHandle: receipt_handle
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.DeleteMessage",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        DeleteMessageResponse({ success: true }),
+        err(AwsError(response))
+    )
+}
+
+// Change message visibility timeout
+change-message-visibility
+meta {
+    doc: """
+    Change the visibility timeout of a message.
+
+    Useful for extending processing time before a message becomes visible again.
+
+    **Example**
+
+    ```hot
+    // Extend visibility timeout to 60 seconds
+    ::aws::sqs::messages/change-message-visibility(queue-url, msg.receipt_handle, 60)
+    ```
+    """
+}
+fn (queue_url: Str, receipt_handle: Str, visibility_timeout: Int): DeleteMessageResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        ReceiptHandle: receipt_handle,
+        VisibilityTimeout: visibility_timeout
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.ChangeMessageVisibility",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        DeleteMessageResponse({ success: true }),
+        err(AwsError(response))
+    )
+}
+
+// Purge all messages from a queue
+purge-queue
+meta {
+    doc: """
+    Delete all messages from a queue.
+
+    Note: This can only be called once every 60 seconds.
+
+    **Example**
+
+    ```hot
+    ::aws::sqs::messages/purge-queue(queue-url)
+    ```
+    """
+}
+fn (queue_url: Str): DeleteMessageResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.PurgeQueue",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        DeleteMessageResponse({ success: true }),
+        err(AwsError(response))
+    )
+}
+
+// Send messages in batch
+send-message-batch
+meta {
+    doc: """
+    Send up to 10 messages in a single batch request.
+
+    Each entry should have Id (unique) and MessageBody.
+
+    **Example**
+
+    ```hot
+    entries [
+        {Id: "msg1", MessageBody: "First message"},
+        {Id: "msg2", MessageBody: "Second message"},
+        {Id: "msg3", MessageBody: "Third message"}
+    ]
+    result ::aws::sqs::messages/send-message-batch(queue-url, entries)
+    length(result.successful)  // => 3
+    ```
+    """
+}
+fn (queue_url: Str, entries: Vec<Map>): SendMessageBatchResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        Entries: entries
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.SendMessageBatch",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        SendMessageBatchResponse({
+            successful: if(is-null(response.body.Successful), [], map(response.body.Successful, BatchResultEntry({
+                id: %.Id,
+                message_id: %.MessageId,
+                md5_of_message_body: %.MD5OfMessageBody
+            }))),
+            failed: if(is-null(response.body.Failed), [], map(response.body.Failed, BatchErrorEntry({
+                id: %.Id,
+                sender_fault: %.SenderFault,
+                code: %.Code,
+                message: %.Message
+            })))
+        }),
+        err(AwsError(response))
+    )
+}
+
+// Delete messages in batch
+delete-message-batch
+meta {
+    doc: """
+    Delete up to 10 messages in a single batch request.
+
+    Each entry should have Id (unique) and ReceiptHandle.
+
+    **Example**
+
+    ```hot
+    result ::aws::sqs::messages/receive-messages(queue-url, 10, 5)
+    delete-entries map-indexed(result.messages, (idx, msg) {
+        {Id: Str(idx), ReceiptHandle: msg.receipt_handle}
+    })
+    ::aws::sqs::messages/delete-message-batch(queue-url, delete-entries)
+    ```
+    """
+}
+fn (queue_url: Str, entries: Vec<Map>): DeleteMessageBatchResponse | AwsError {
+    region get-region()
+    credentials get-credentials()
+
+    body to-json({
+        QueueUrl: queue_url,
+        Entries: entries
+    })
+
+    url `https://sqs.${region}.amazonaws.com/`
+
+    headers {
+        "Content-Type": "application/x-amz-json-1.0",
+        "X-Amz-Target": "AmazonSQS.DeleteMessageBatch",
+        "Host": `sqs.${region}.amazonaws.com`
+    }
+
+    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
+
+    response http-request("POST", url, signed-headers, body)
+
+    if(is-ok-response(response),
+        DeleteMessageBatchResponse({
+            successful: if(is-null(response.body.Successful), [], map(response.body.Successful, BatchResultEntry({
+                id: %.Id,
+                message_id: %.MessageId,
+                md5_of_message_body: %.MD5OfMessageBody
+            }))),
+            failed: if(is-null(response.body.Failed), [], map(response.body.Failed, BatchErrorEntry({
+                id: %.Id,
+                sender_fault: %.SenderFault,
+                code: %.Code,
+                message: %.Message
+            })))
+        }),
+        err(AwsError(response))
+    )
+}

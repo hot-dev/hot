@@ -1,0 +1,19 @@
+::aws::ses ns
+
+// AWS SES (Simple Email Service) Package
+// Provides email sending operations via AWS SES v2 API
+
+// Re-export core AWS types
+Credentials ::aws::core/Credentials
+AwsError ::aws::core/AwsError
+
+// Re-export SES types
+EmailContent ::aws::ses::email/EmailContent
+Destination ::aws::ses::email/Destination
+SendEmailRequest ::aws::ses::email/SendEmailRequest
+SendEmailResponse ::aws::ses::email/SendEmailResponse
+
+// Re-export SES operations
+send-email ::aws::ses::email/send-email
+send-raw-email ::aws::ses::email/send-raw-email
+send-templated-email ::aws::ses::email/send-templated-email

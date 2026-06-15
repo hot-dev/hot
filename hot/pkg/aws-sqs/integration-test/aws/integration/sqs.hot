@@ -1,0 +1,156 @@
+::aws::integration::sqs ns
+meta ["test"]
+
+// =============================================================================
+// AWS SQS Integration Tests
+// =============================================================================
+// These tests validate the aws-sqs package functions.
+// Requirements:
+// - AWS credentials (aws.access-key-id, aws.secret-access-key)
+// - SQS queue "hot-integration-test" in the configured region
+
+// Test queue
+test-queue-name "hot-integration-test"
+test-queue-url "https://sqs.us-east-2.amazonaws.com/241550672818/hot-integration-test"
+
+// =============================================================================
+// Queue Operations (::aws::sqs::queues)
+// =============================================================================
+
+// Test list-queues
+test-list-queues
+meta ["test"]
+fn () {
+    result ::aws::sqs::queues/list-queues()
+    assert(not(is-err(result)), `list-queues failed: ${result}`)
+    assert(is-vec(result.queue_urls), "queue_urls should be a Vec")
+}
+
+// Test list-queues with prefix
+test-list-queues-with-prefix
+meta ["test"]
+fn () {
+    result ::aws::sqs::queues/list-queues("hot")
+    assert(not(is-err(result)), `list-queues with prefix failed: ${result}`)
+    assert(is-vec(result.queue_urls), "queue_urls should be a Vec")
+}
+
+// Test get-queue-url
+test-get-queue-url
+meta ["test"]
+fn () {
+    result ::aws::sqs::queues/get-queue-url(test-queue-name)
+    assert(not(is-err(result)), `get-queue-url failed: ${result}`)
+    assert(not(is-null(result.queue_url)), "queue_url should not be null")
+    assert-eq(test-queue-url, result.queue_url, "queue URL should match expected")
+}
+
+// Test get-queue-attributes
+test-get-queue-attributes
+meta ["test"]
+fn () {
+    result ::aws::sqs::queues/get-queue-attributes(test-queue-url, ["All"])
+    assert(not(is-err(result)), `get-queue-attributes failed: ${result}`)
+    assert(not(is-null(result.attributes)), "attributes should not be null")
+    // Verify common attributes exist
+    assert(not(is-null(result.attributes.QueueArn)), "QueueArn should exist")
+}
+
+// =============================================================================
+// Message Operations (::aws::sqs::messages)
+// =============================================================================
+
+// Test send-message
+test-send-message
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    message-body `Hot test message ${timestamp}`
+
+    result ::aws::sqs::messages/send-message(test-queue-url, message-body)
+    assert(not(is-err(result)), `send-message failed: ${result}`)
+    assert(not(is-null(result.message_id)), "message_id should not be null")
+}
+
+// Test send and receive message
+test-send-receive-delete-message
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+    message-body `Hot integration test ${timestamp}`
+
+    // Send message
+    send-result ::aws::sqs::messages/send-message(test-queue-url, message-body)
+    assert(not(is-err(send-result)), `send-message failed: ${send-result}`)
+    assert(not(is-null(send-result.message_id)), "message_id should not be null")
+
+    // Receive messages
+    receive-result ::aws::sqs::messages/receive-messages(test-queue-url, 10, 5, 30)
+    assert(not(is-err(receive-result)), `receive-messages failed: ${receive-result}`)
+    assert(is-vec(receive-result.messages), "messages should be a Vec")
+
+    // Delete all received messages to clean up
+    for-each(receive-result.messages, (msg) {
+        delete-result ::aws::sqs::messages/delete-message(test-queue-url, msg.receipt_handle)
+        assert(not(is-err(delete-result)), `delete-message failed: ${delete-result}`)
+    })
+
+    // Verify we received at least one message
+    assert(gte(length(receive-result.messages), 1), "Should receive at least 1 message")
+}
+
+// Test send-message-batch using package function
+test-send-message-batch
+meta ["test"]
+fn () {
+    timestamp ::hot::time/epoch-millis(::hot::time/now())
+
+    // Use package function to send batch
+    entries [
+        { Id: "msg1", MessageBody: `Batch 1 - ${timestamp}` },
+        { Id: "msg2", MessageBody: `Batch 2 - ${timestamp}` },
+        { Id: "msg3", MessageBody: `Batch 3 - ${timestamp}` }
+    ]
+
+    result ::aws::sqs::messages/send-message-batch(test-queue-url, entries)
+    assert(not(is-err(result)), `Send batch failed: ${result}`)
+    assert-eq(3, length(result.successful), `Should have 3 successful sends, got ${length(result.successful)}`)
+
+    // Clean up - receive and delete messages using package functions
+    receive-result ::aws::sqs::messages/receive-messages(test-queue-url, 10, 5)
+
+    cond {
+        and(not(is-err(receive-result)), gt(length(receive-result.messages), 0)) => {
+            // map-indexed passes (index, element)
+            delete-entries map-indexed(receive-result.messages, (idx, msg) {
+                { Id: Str(idx), ReceiptHandle: msg.receipt_handle }
+            })
+
+            del-result ::aws::sqs::messages/delete-message-batch(test-queue-url, delete-entries)
+            assert(not(is-err(del-result)), `Delete batch failed: ${del-result}`)
+        }
+        => { null }
+    }
+}
+
+// Test receive-messages convenience overloads
+test-receive-messages-overloads
+meta ["test"]
+fn () {
+    // Send a message first
+    ::aws::sqs::messages/send-message(test-queue-url, "Test for overloads")
+
+    // Test with 2 params
+    result2 ::aws::sqs::messages/receive-messages(test-queue-url, 5)
+    assert(not(is-err(result2)), `receive-messages(url, max) failed: ${result2}`)
+
+    // Test with 3 params
+    result3 ::aws::sqs::messages/receive-messages(test-queue-url, 5, 1)
+    assert(not(is-err(result3)), `receive-messages(url, max, wait) failed: ${result3}`)
+
+    // Clean up
+    all-messages concat(result2.messages, result3.messages)
+    for-each(all-messages, (msg) {
+        ::aws::sqs::messages/delete-message(test-queue-url, msg.receipt_handle)
+    })
+}

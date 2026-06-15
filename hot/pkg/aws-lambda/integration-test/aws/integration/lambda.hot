@@ -1,0 +1,113 @@
+::aws::integration::lambda ns
+meta ["test"]
+
+// =============================================================================
+// AWS Lambda Integration Tests
+// =============================================================================
+// These tests validate the aws-lambda package functions.
+// Requirements:
+// - AWS credentials (aws.access-key-id, aws.secret-access-key)
+// - A deployed Lambda function named "hot-integration-test" that returns "Hello hot-integration-test"
+
+// Test function name
+test-function-name "hot-integration-test"
+
+// =============================================================================
+// Function Operations (::aws::lambda::functions)
+// =============================================================================
+
+// Test list-functions
+test-list-functions
+meta ["test"]
+fn () {
+    result ::aws::lambda::functions/list-functions(10)
+    assert(not(is-err(result)), `list-functions failed: ${result}`)
+    assert(is-vec(result.functions), "functions should be a Vec")
+}
+
+// Test list-functions with default params
+test-list-functions-default
+meta ["test"]
+fn () {
+    result ::aws::lambda::functions/list-functions()
+    assert(not(is-err(result)), `list-functions() failed: ${result}`)
+    assert(is-vec(result.functions), "functions should be a Vec")
+}
+
+// Test get-function
+test-get-function
+meta ["test"]
+fn () {
+    result ::aws::lambda::functions/get-function(test-function-name)
+    assert(not(is-err(result)), `get-function failed: ${result}`)
+    assert(not(is-null(result.configuration)), "configuration should not be null")
+    assert-eq(test-function-name, result.configuration.function_name, "function_name should match")
+}
+
+// Test get-function-configuration
+test-get-function-configuration
+meta ["test"]
+fn () {
+    result ::aws::lambda::functions/get-function-configuration(test-function-name)
+    assert(not(is-err(result)), `get-function-configuration failed: ${result}`)
+    assert-eq(test-function-name, result.function_name, "function_name should match")
+    assert(not(is-null(result.runtime)), "runtime should not be null")
+    assert(not(is-null(result.handler)), "handler should not be null")
+}
+
+// =============================================================================
+// Invocation Operations (::aws::lambda::invoke)
+// =============================================================================
+
+// Test invoke synchronously
+test-invoke-function
+meta ["test"]
+fn () {
+    result ::aws::lambda::invoke/invoke(test-function-name)
+    assert(not(is-err(result)), `invoke failed: ${result}`)
+    assert-eq(200, result.status_code, "status_code should be 200")
+    assert-eq("Hello hot-integration-test", result.payload, `Unexpected payload: ${result.payload}`)
+}
+
+// Test invoke with payload
+test-invoke-with-payload
+meta ["test"]
+fn () {
+    payload { name: "Hot", test: true }
+    result ::aws::lambda::invoke/invoke(test-function-name, payload)
+    assert(not(is-err(result)), `invoke with payload failed: ${result}`)
+    assert-eq(200, result.status_code, "status_code should be 200")
+    // The function ignores payload but still returns its message
+    assert-eq("Hello hot-integration-test", result.payload, `Unexpected payload: ${result.payload}`)
+}
+
+// Test invoke-dry-run
+test-invoke-dry-run
+meta ["test"]
+fn () {
+    result ::aws::lambda::invoke/invoke-dry-run(test-function-name)
+    assert(not(is-err(result)), `invoke-dry-run failed: ${result}`)
+    // DryRun returns 204 No Content
+    assert-eq(204, result.status_code, "status_code should be 204 for dry run")
+}
+
+// Test invoke-with-logs
+test-invoke-with-logs
+meta ["test"]
+fn () {
+    result ::aws::lambda::invoke/invoke-with-logs(test-function-name)
+    assert(not(is-err(result)), `invoke-with-logs failed: ${result}`)
+    assert-eq(200, result.status_code, "status_code should be 200")
+    assert-eq("Hello hot-integration-test", result.payload, `Unexpected payload: ${result.payload}`)
+    // log_result contains base64-encoded logs (may be null if no console output)
+}
+
+// Test invoke-async
+test-invoke-async
+meta ["test"]
+fn () {
+    result ::aws::lambda::invoke/invoke-async(test-function-name, { async: true })
+    assert(not(is-err(result)), `invoke-async failed: ${result}`)
+    // Async invocation returns 202 Accepted
+    assert-eq(202, result.status_code, "status_code should be 202 for async")
+}
