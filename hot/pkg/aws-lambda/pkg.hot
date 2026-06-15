@@ -2,7 +2,7 @@
 
 hot.pkg.aws-lambda {
   name: "hot.dev/aws-lambda",
-  version: "1.1.0",
+  version: "1.2.0",
   hot-min-version: "1.2.0",
   description: "AWS Lambda API bindings for serverless function invocation and management.",
   author: "Hot Dev",
@@ -11,7 +11,7 @@ hot.pkg.aws-lambda {
   tags: ["cloud"],
   deps: {
     "hot.dev/hot-std": {},
-    "hot.dev/aws-core": "1.1.0"
+    "hot.dev/aws-core": "1.2.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
