@@ -828,6 +828,12 @@ impl TypeChecker {
                 break;
             }
         }
+        // Refresh type metadata now that top-level alias variables have been
+        // inferred. Struct fields can legally use namespace-local aliases such
+        // as `Session ::ai::session/Session` followed by `session: Session`;
+        // resolving those fields before the alias pass would leave a bare short
+        // name that can collide with unrelated packages in aggregate projects.
+        self.collect_known_types(program);
         tracing::debug!(
             "TypeChecker: Discovered {} qualified variables ({} core)",
             self.qualified_variables.len(),
@@ -1312,7 +1318,7 @@ impl TypeChecker {
             for field in fields {
                 struct_fields.insert(
                     field.name.name().to_string(),
-                    Self::ast_type_to_type_expr(&field.type_expr),
+                    self.ast_type_to_type_expr_in_namespace(&field.type_expr, ns_str),
                 );
             }
         }
@@ -1674,6 +1680,70 @@ impl TypeChecker {
                 a::LiteralType::Bool(b) => LiteralType::Bool(*b),
                 a::LiteralType::Null => LiteralType::Null,
             }),
+        }
+    }
+
+    fn ast_type_to_type_expr_in_namespace(
+        &self,
+        expr: &crate::lang::ast::TypeExpr,
+        ns_str: &str,
+    ) -> TypeExpr {
+        use crate::lang::ast as a;
+        match expr {
+            a::TypeExpr::Simple(name) | a::TypeExpr::Named(name) => {
+                if let Some(builtin) = self.try_resolve_builtin_type(name) {
+                    return builtin;
+                }
+
+                if name.starts_with("::") {
+                    return self
+                        .try_resolve_namespaced_type(name)
+                        .unwrap_or_else(|| TypeExpr::Named(name.clone()));
+                }
+
+                let local_qualified = format!("{}/{}", ns_str, name);
+                if let Some(alias_target) = self.qualified_variables.get(&local_qualified) {
+                    return alias_target.clone();
+                }
+
+                if let Some(local_type) = self.qualified_types.get(&local_qualified) {
+                    return local_type.clone();
+                }
+
+                if let Some(core_qualified) = self.core_types.get(name)
+                    && let Some(core_type) = self.qualified_types.get(core_qualified)
+                {
+                    return core_type.clone();
+                }
+
+                TypeExpr::Named(name.clone())
+            }
+            a::TypeExpr::Generic(name, params) => match (name.as_str(), params.as_slice()) {
+                ("Vec", [inner]) => TypeExpr::Vec(Box::new(
+                    self.ast_type_to_type_expr_in_namespace(inner, ns_str),
+                )),
+                ("Map", [k, v]) => TypeExpr::Map(
+                    Box::new(self.ast_type_to_type_expr_in_namespace(k, ns_str)),
+                    Box::new(self.ast_type_to_type_expr_in_namespace(v, ns_str)),
+                ),
+                _ => TypeExpr::Generic(
+                    name.clone(),
+                    params
+                        .iter()
+                        .map(|param| self.ast_type_to_type_expr_in_namespace(param, ns_str))
+                        .collect(),
+                ),
+            },
+            a::TypeExpr::Union(variants) => TypeExpr::Union(
+                variants
+                    .iter()
+                    .map(|variant| self.ast_type_to_type_expr_in_namespace(variant, ns_str))
+                    .collect(),
+            ),
+            a::TypeExpr::Optional(inner) => TypeExpr::Optional(Box::new(
+                self.ast_type_to_type_expr_in_namespace(inner, ns_str),
+            )),
+            _ => Self::ast_type_to_type_expr(expr),
         }
     }
 

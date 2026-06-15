@@ -4462,11 +4462,14 @@ impl VirtualMachine {
     }
 
     fn normalized_builtin_type_name(type_name: &str) -> Option<&'static str> {
-        let short_name = type_name
-            .trim_end_matches('?')
-            .rsplit('/')
-            .next()
-            .unwrap_or(type_name);
+        let normalized = type_name.trim_end_matches('?');
+        let short_name = if let Some(hot_type_name) = normalized.strip_prefix("::hot::type/") {
+            hot_type_name
+        } else if normalized.contains('/') {
+            return None;
+        } else {
+            normalized
+        };
 
         match short_name {
             "Any" => Some("Any"),

@@ -823,6 +823,49 @@ mod type_checking_tests {
     }
 
     #[test]
+    fn test_struct_fields_resolve_namespace_local_type_alias_before_homonym() {
+        let source = r#"
+            ::ai::session ns
+
+            Session type { id: Str }
+            Identity type { id: Str }
+
+            ::other ns
+
+            Session type { name: Str }
+
+            ::ai::message ns
+
+            Session ::ai::session/Session
+            Identity ::ai::session/Identity
+
+            Message type {
+                session: Session,
+                sender: Identity
+            }
+
+            sess Session({id: "chan-1"})
+            user Identity({id: "U1"})
+            m Message({session: sess, sender: user})
+            value m.session.id
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Namespace-local type aliases should resolve before homonym short names. Got: {:?}",
+            errors
+        );
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Alias-resolved field access should not warn for m.session.id. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
     fn test_known_fields_survive_exported_same_namespace_alias() {
         let source = r#"
             ::producer ns
