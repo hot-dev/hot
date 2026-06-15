@@ -29,33 +29,65 @@ hot.project.hot-dev.resources.paths [
 hot.project.hot-dev.skills.codegen.enabled true
 hot.project.hot-dev.skills.codegen.paths ["./hot/src/team-agent/resources", "./hot/src/personal-agent/resources"]
 hot.project.hot-dev.deps {
-    // AI types package
+    // App/demo dependencies used by ./hot/src. Broader package coverage lives
+    // in hot-pkg-all and focused package test projects below.
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
-
-    // AI packages — enabled because hot/src/team-agent/agent.hot
-    // depends on ::anthropic::messages and ::openai::chat for live LLM
-    // dispatch. Keep these enabled (not commented) so hot-dev compiles
-    // the demo agent.
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
-    "hot.dev/openai":    { "local": "./hot/pkg/openai" },
-    "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
-    "hot.dev/xai": { "local": "./hot/pkg/xai" },
-    "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" },
+    "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
+    "hot.dev/slack": { "local": "./hot/pkg/slack" },
+    "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
+    "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
+    "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
 
-    // AWS packages
+    // Optional package families intentionally omitted from hot-dev:
+    // gemini, xai, qwen, AWS, Discord modules, email, Stripe, Twilio,
+    // Supabase, and unused box-tool packages. See hot-pkg-all for static
+    // package inventory checks.
+}
+
+// =============================================================================
+// Package Aggregate Static Check
+// =============================================================================
+// CI uses this project to type-check all package sources and hermetic package
+// unit tests without making the default hot-dev project depend on every
+// optional package. Live integration tests stay in focused pkg-integration
+// projects and scripts.
+hot.project.hot-pkg-all.src.paths ["./hot/pkg/hot-std/src"]
+hot.project.hot-pkg-all.test.paths [
+    "./hot/pkg/anthropic/test",
+    "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/ffmpeg/test",
+    "./hot/pkg/hot-ai/test",
+    "./hot/pkg/hot-ai-agent/test",
+    "./hot/pkg/hot-std/test",
+    "./hot/pkg/imagemagick/test",
+    "./hot/pkg/libreoffice/test",
+    "./hot/pkg/mcp/test",
+    "./hot/pkg/openai/test",
+    "./hot/pkg/pandoc/test",
+    "./hot/pkg/playwright/test",
+    "./hot/pkg/sox/test",
+    "./hot/pkg/supabase/test",
+    "./hot/pkg/supabase-admin/test",
+    "./hot/pkg/tesseract/test",
+    "./hot/pkg/whisper/test"
+]
+hot.project.hot-pkg-all.test.capture true
+hot.project.hot-pkg-all.deps {
+    "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
     "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
-    "hot.dev/aws-eventstream": { "local": "./hot/pkg/aws-eventstream" },
     "hot.dev/aws-dynamodb": { "local": "./hot/pkg/aws-dynamodb" },
+    "hot.dev/aws-eventstream": { "local": "./hot/pkg/aws-eventstream" },
     "hot.dev/aws-lambda": { "local": "./hot/pkg/aws-lambda" },
     "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
     "hot.dev/aws-secrets-manager": { "local": "./hot/pkg/aws-secrets-manager" },
     "hot.dev/aws-ses": { "local": "./hot/pkg/aws-ses" },
     "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
-
-    // Discord packages
+    "hot.dev/discord": { "local": "./hot/pkg/discord" },
     "hot.dev/discord-core": { "local": "./hot/pkg/discord-core" },
     "hot.dev/discord-guilds": { "local": "./hot/pkg/discord-guilds" },
     "hot.dev/discord-interactions": { "local": "./hot/pkg/discord-interactions" },
@@ -65,19 +97,24 @@ hot.project.hot-dev.deps {
     "hot.dev/discord-users": { "local": "./hot/pkg/discord-users" },
     "hot.dev/discord-voice": { "local": "./hot/pkg/discord-voice" },
     "hot.dev/discord-webhooks": { "local": "./hot/pkg/discord-webhooks" },
-
-    // Email packages
+    "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
+    "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
+    "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
+    "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
+    "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
+    "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" },
+    "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
+    "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
     "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
+    "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
-
-    // Slack packages
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
-
-    // Communication packages
-    "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
-
-    // Stripe packages
+    "hot.dev/sox": { "local": "./hot/pkg/sox" },
+    "hot.dev/stripe": { "local": "./hot/pkg/stripe" },
     "hot.dev/stripe-billing": { "local": "./hot/pkg/stripe-billing" },
     "hot.dev/stripe-checkout": { "local": "./hot/pkg/stripe-checkout" },
     "hot.dev/stripe-climate": { "local": "./hot/pkg/stripe-climate" },
@@ -98,22 +135,14 @@ hot.project.hot-dev.deps {
     "hot.dev/stripe-terminal": { "local": "./hot/pkg/stripe-terminal" },
     "hot.dev/stripe-treasury": { "local": "./hot/pkg/stripe-treasury" },
     "hot.dev/stripe-webhooks": { "local": "./hot/pkg/stripe-webhooks" },
-
-    // Twilio package
-    "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
-
-    // Backend-as-a-Service
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
-
-    // Box tool packages (container-based CLI tools)
-    "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
-    "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
-    "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
-    "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
-    "hot.dev/sox": { "local": "./hot/pkg/sox" },
-    "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
+    "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
+    "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
     "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
-    "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" }
+    "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
+    "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
+    "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
+    "hot.dev/xai": { "local": "./hot/pkg/xai" }
 }
 
 hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
