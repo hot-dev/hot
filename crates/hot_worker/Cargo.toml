@@ -25,6 +25,7 @@ fd-lock = { workspace = true }
 zstd = { workspace = true }
 parking_lot = { workspace = true }
 
-# ONNX Runtime (used by fastembed) has no pre-built binaries for Windows ARM64
-[target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
+# ONNX Runtime (used by fastembed) has no prebuilt binaries for Windows ARM64
+# or macOS Intel when using the downloaded-binaries backend.
+[target.'cfg(not(any(all(target_os = "windows", target_arch = "aarch64"), all(target_os = "macos", target_arch = "x86_64"))))'.dependencies]
 hot = { workspace = true, features = ["local-embeddings"] }
