@@ -520,7 +520,7 @@ fn sort_dependencies(deps: &mut [DependencyInfo]) {
 }
 
 // Re-export from shared module for template use
-use hot::pkg::docs_html::{NavItem, TocSection};
+use hot::pkg::docs_html::{FlatNavItem, NavItem, TocSection};
 
 #[derive(Template)]
 #[template(path = "docs_namespace.html")]
@@ -530,8 +530,8 @@ struct DocsNamespaceTemplate<'a> {
     project_name: &'a str,
     // Content is pre-rendered HTML from docs_html module
     content: String,
-    // Navigation
-    nav: Vec<NavItem>,
+    // Navigation (flattened to a depth-clamped list for the sidebar)
+    nav_flat: Vec<FlatNavItem>,
     toc: Vec<TocSection>,
     current_path: &'a str,
     // Prev/Next
@@ -729,7 +729,11 @@ async fn pkg_index_handler_internal(
         ),
         project_name: &project_name,
         content,
-        nav,
+        nav_flat: hot::pkg::docs_html::flatten_pkg_nav(
+            &nav,
+            "",
+            hot::pkg::docs_html::PACKAGE_NAV_MAX_INDENT,
+        ),
         toc,
         current_path: &current_path,
         prev_page: None,
@@ -897,7 +901,11 @@ async fn dependency_file_handler_internal(
         ),
         project_name: &project_name,
         content,
-        nav,
+        nav_flat: hot::pkg::docs_html::flatten_pkg_nav(
+            &nav,
+            "",
+            hot::pkg::docs_html::PACKAGE_NAV_MAX_INDENT,
+        ),
         toc,
         current_path: &current_path,
         prev_page: None,
@@ -1102,7 +1110,11 @@ async fn namespace_detail_handler_internal(
         ),
         project_name: &project_name,
         content,
-        nav,
+        nav_flat: hot::pkg::docs_html::flatten_pkg_nav(
+            &nav,
+            "",
+            hot::pkg::docs_html::PACKAGE_NAV_MAX_INDENT,
+        ),
         toc,
         current_path: &current_path,
         prev_page,
@@ -1165,32 +1177,32 @@ fn build_pkg_nav(
         nav_items
     };
 
-    // Rewrite all paths to use the correct URL scheme
+    // Rewrite all paths (at every depth) to use the correct URL scheme.
+    fn rewrite_paths(
+        item: &mut NavItem,
+        project_name: &str,
+        dep_name: &str,
+        dep_name_prefix: &str,
+    ) {
+        if let Some(ref path) = item.path {
+            if let Some(ns_path) = path.strip_prefix(dep_name_prefix) {
+                item.path = Some(format!(
+                    "/docs/{}/pkg/{}/{}",
+                    project_name, dep_name, ns_path
+                ));
+            } else if path == dep_name {
+                item.path = Some(format!("/docs/{}/pkg/{}", project_name, dep_name));
+            }
+        }
+        for child in &mut item.children {
+            rewrite_paths(child, project_name, dep_name, dep_name_prefix);
+        }
+    }
+
     items_to_process
         .into_iter()
         .map(|mut item| {
-            // Rewrite paths for this level (namespace groups have path: None, so this only affects direct namespace items)
-            if let Some(ref path) = item.path {
-                if let Some(ns_path) = path.strip_prefix(&dep_name_prefix) {
-                    item.path = Some(format!(
-                        "/docs/{}/pkg/{}/{}",
-                        project_name, dep_name, ns_path
-                    ));
-                } else if path == dep_name {
-                    item.path = Some(format!("/docs/{}/pkg/{}", project_name, dep_name));
-                }
-            }
-            // Rewrite paths for children (the actual namespace links inside groups)
-            for child in &mut item.children {
-                if let Some(ref path) = child.path
-                    && let Some(ns_path) = path.strip_prefix(&dep_name_prefix)
-                {
-                    child.path = Some(format!(
-                        "/docs/{}/pkg/{}/{}",
-                        project_name, dep_name, ns_path
-                    ));
-                }
-            }
+            rewrite_paths(&mut item, project_name, dep_name, &dep_name_prefix);
             item
         })
         .collect()

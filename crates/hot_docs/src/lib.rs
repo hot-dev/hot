@@ -149,8 +149,8 @@ async fn render_docs_page(state: Arc<DocsState>, path: &str) -> Html<String> {
         Err(error) => return Html(error_page(&state.config, "Page not found", &error)),
     };
 
-    let (prev, next) = get_prev_next(&nav, &page.path);
-    let breadcrumb = find_nav_path(&nav, &page.path);
+    let (prev, next) = hot::pkg::docs_html::get_prev_next(&nav, &page.path);
+    let breadcrumb = hot::pkg::docs_html::find_nav_path(&nav, &page.path);
 
     let body = format!(
         r#"
@@ -264,6 +264,12 @@ async fn pkg_docs_route_handler(
         Err(error) => return Html(error_page(&state.config, "Package not found", &error)),
     };
 
+    let collapse_title = format!("{DEFAULT_ORG}/{pkg_name}");
+    let current_path = if module_path.is_empty() {
+        collapse_title.clone()
+    } else {
+        format!("{collapse_title}/{module_path}")
+    };
     let body = format!(
         r#"
         <div class="docs-shell">
@@ -275,7 +281,7 @@ async fn pkg_docs_route_handler(
             </aside>
         </div>
         "#,
-        render_nav(&page.nav, "/pkg", &module_path),
+        render_pkg_nav(&page.nav, "/pkg", &current_path, &collapse_title),
         page.html,
         escape_html(&page.current_version),
         render_toc(&page.toc),
@@ -1294,48 +1300,40 @@ fn render_pkg_readme(config: &DocsConfig, pkg_name: &str) -> Result<String, Stri
     Ok(markdown_to_html_with_toc(&markdown).0)
 }
 
-fn get_prev_next(nav: &[NavItem], current_path: &str) -> (Option<NavItem>, Option<NavItem>) {
-    let mut flat = Vec::new();
-    flatten_nav(nav, &mut flat);
-    let index = flat
-        .iter()
-        .position(|item| item.path.as_deref() == Some(current_path));
-    if let Some(index) = index {
-        (
-            index.checked_sub(1).and_then(|i| flat.get(i)).cloned(),
-            flat.get(index + 1).cloned(),
-        )
-    } else {
-        (None, None)
+/// Render package namespace navigation as a depth-clamped flat list.
+///
+/// Mirrors the package sidebar in hot_web: every namespace is shown regardless
+/// of nesting depth, but indentation stops growing after three levels.
+fn render_pkg_nav(nav: &[NavItem], base: &str, current_path: &str, collapse_title: &str) -> String {
+    let flat = hot::pkg::docs_html::flatten_pkg_nav(
+        nav,
+        collapse_title,
+        hot::pkg::docs_html::PACKAGE_NAV_MAX_INDENT,
+    );
+    let mut html = String::from(r#"<ul class="nav-flat">"#);
+    for item in &flat {
+        let pad = f32::from(item.indent) * 0.75;
+        let active = item.path.as_deref() == Some(current_path);
+        let row = if let Some(path) = &item.path {
+            format!(
+                r#"<a class="{}" style="padding-left: calc(0.5rem + {pad}rem)" href="{}/{}">{}</a>"#,
+                if active { "active" } else { "" },
+                base,
+                escape_attr(path),
+                escape_html(&item.title)
+            )
+        } else {
+            format!(
+                r#"<span style="padding-left: calc(0.5rem + {pad}rem)">{}</span>"#,
+                escape_html(&item.title)
+            )
+        };
+        html.push_str("<li>");
+        html.push_str(&row);
+        html.push_str("</li>");
     }
-}
-
-fn flatten_nav(items: &[NavItem], flat: &mut Vec<NavItem>) {
-    for item in items {
-        if item.path.is_some() {
-            flat.push(item.clone());
-        }
-        flatten_nav(&item.children, flat);
-    }
-}
-
-fn find_nav_path(nav: &[NavItem], current_path: &str) -> Vec<String> {
-    fn find(items: &[NavItem], current_path: &str, path: &mut Vec<String>) -> bool {
-        for item in items {
-            path.push(item.title.clone());
-            if item.path.as_deref() == Some(current_path)
-                || find(&item.children, current_path, path)
-            {
-                return true;
-            }
-            path.pop();
-        }
-        false
-    }
-
-    let mut path = Vec::new();
-    find(nav, current_path, &mut path);
-    path
+    html.push_str("</ul>");
+    html
 }
 
 fn render_nav(nav: &[NavItem], base: &str, current_path: &str) -> String {

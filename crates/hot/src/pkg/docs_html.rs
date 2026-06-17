@@ -16,6 +16,55 @@ pub struct NavItem {
     pub children: Vec<NavItem>,
 }
 
+/// A navigation entry flattened to a single list with a clamped indent level.
+///
+/// Sidebars render namespaces as a tree, but neither Askama templates nor the
+/// nested-`<ul>` renderers cap how deep the indentation grows. Flattening to a
+/// list lets every namespace render (no matter how deeply nested) while capping
+/// the visual indentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlatNavItem {
+    pub title: String,
+    pub path: Option<String>,
+    pub indent: u8,
+}
+
+/// Maximum visual indentation level for package namespace sidebars.
+pub const PACKAGE_NAV_MAX_INDENT: u8 = 3;
+
+/// Flatten a package nav tree into a depth-clamped list for the sidebar.
+///
+/// `collapse_title` mirrors the sidebars' behavior of collapsing the package
+/// root (whose title matches the package) so its namespaces render at the top
+/// level. `max_indent` caps how far entries are indented; deeper descendants
+/// still render, just without additional indentation.
+pub fn flatten_pkg_nav(nav: &[NavItem], collapse_title: &str, max_indent: u8) -> Vec<FlatNavItem> {
+    fn push(item: &NavItem, depth: u8, max_indent: u8, out: &mut Vec<FlatNavItem>) {
+        out.push(FlatNavItem {
+            title: item.title.clone(),
+            path: item.path.clone(),
+            indent: depth.min(max_indent),
+        });
+        for child in &item.children {
+            push(child, depth.saturating_add(1), max_indent, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    for item in nav {
+        let collapse_root = !collapse_title.is_empty()
+            && (item.title == collapse_title || item.path.as_deref() == Some(collapse_title));
+        if !collapse_root {
+            push(item, 0, max_indent, &mut out);
+        } else {
+            for child in &item.children {
+                push(child, 0, max_indent, &mut out);
+            }
+        }
+    }
+    out
+}
+
 /// A table of contents item
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TocItem {
@@ -1221,6 +1270,35 @@ pub fn get_prev_next(nav: &[NavItem], current_path: &str) -> (Option<NavItem>, O
     }
 }
 
+/// Find the current nav item and its ancestor titles (for breadcrumbs/highlighting).
+///
+/// Returns the chain of titles from the root down to the item whose `path`
+/// matches `target_path`, or an empty vec if no item matches.
+pub fn find_nav_path(nav: &[NavItem], target_path: &str) -> Vec<String> {
+    fn find_recursive(items: &[NavItem], target: &str, path: &mut Vec<String>) -> bool {
+        for item in items {
+            if let Some(ref item_path) = item.path
+                && item_path == target
+            {
+                path.push(item.title.clone());
+                return true;
+            }
+            if !item.children.is_empty() {
+                path.push(item.title.clone());
+                if find_recursive(&item.children, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        false
+    }
+
+    let mut path = Vec::new();
+    find_recursive(nav, target_path, &mut path);
+    path
+}
+
 /// Convert markdown to HTML with code block language annotations and heading IDs
 pub fn markdown_to_html(markdown: &str) -> String {
     let mut options = Options::empty();
@@ -1376,6 +1454,92 @@ mod tests {
     use crate::pkg::docs::{
         BoxRequirementDoc, CtxRequirements, DocFunction, DocNamespace, DocType, DocValue, PkgMeta,
     };
+
+    #[test]
+    fn flatten_pkg_nav_clamps_indent_but_keeps_deep_entries() {
+        let nav = vec![NavItem {
+            title: "anthropic".to_string(),
+            path: Some("hot.dev/anthropic".to_string()),
+            children: vec![NavItem {
+                title: "::anthropic".to_string(),
+                path: Some("hot.dev/anthropic/::anthropic".to_string()),
+                children: vec![NavItem {
+                    title: "::api".to_string(),
+                    path: Some("hot.dev/anthropic/::anthropic::api".to_string()),
+                    children: vec![NavItem {
+                        title: "::v1".to_string(),
+                        path: Some("hot.dev/anthropic/::anthropic::api::v1".to_string()),
+                        children: vec![NavItem {
+                            title: "::beta".to_string(),
+                            path: Some("hot.dev/anthropic/::anthropic::api::v1::beta".to_string()),
+                            children: vec![NavItem {
+                                title: "::messages".to_string(),
+                                path: Some(
+                                    "hot.dev/anthropic/::anthropic::api::v1::beta::messages"
+                                        .to_string(),
+                                ),
+                                children: vec![],
+                            }],
+                        }],
+                    }],
+                }],
+            }],
+        }];
+
+        let flat = flatten_pkg_nav(&nav, "anthropic", PACKAGE_NAV_MAX_INDENT);
+
+        // Package root collapsed; every descendant still present.
+        let titles: Vec<&str> = flat.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["::anthropic", "::api", "::v1", "::beta", "::messages"]
+        );
+
+        // Indentation increases through the configured max indent, then clamps.
+        let indents: Vec<u8> = flat.iter().map(|item| item.indent).collect();
+        assert_eq!(indents, vec![0, 1, 2, 3, 3]);
+    }
+
+    #[test]
+    fn flatten_pkg_nav_keeps_root_when_title_differs() {
+        let nav = vec![NavItem {
+            title: "Documentation".to_string(),
+            path: None,
+            children: vec![NavItem {
+                title: "Guide".to_string(),
+                path: Some("guide".to_string()),
+                children: vec![],
+            }],
+        }];
+
+        let flat = flatten_pkg_nav(&nav, "anthropic", PACKAGE_NAV_MAX_INDENT);
+        let rows: Vec<(&str, u8)> = flat
+            .iter()
+            .map(|item| (item.title.as_str(), item.indent))
+            .collect();
+        assert_eq!(rows, vec![("Documentation", 0), ("Guide", 1)]);
+    }
+
+    #[test]
+    fn flatten_pkg_nav_collapses_root_by_path() {
+        let nav = vec![NavItem {
+            title: "hot.dev/anthropic".to_string(),
+            path: Some("hot.dev/anthropic".to_string()),
+            children: vec![NavItem {
+                title: "::anthropic".to_string(),
+                path: Some("hot.dev/anthropic/::anthropic".to_string()),
+                children: vec![],
+            }],
+        }];
+
+        let flat = flatten_pkg_nav(&nav, "hot.dev/anthropic", PACKAGE_NAV_MAX_INDENT);
+
+        let rows: Vec<(&str, u8)> = flat
+            .iter()
+            .map(|item| (item.title.as_str(), item.indent))
+            .collect();
+        assert_eq!(rows, vec![("::anthropic", 0)]);
+    }
 
     #[test]
     fn bare_hot_signature_fence_infers_hot_language() {
