@@ -16,73 +16,53 @@ This package provides a pure Hot implementation for parsing AWS Event Stream mes
 ### Parsing a Single Message
 
 ```hot
-::aws::eventstream use
+::eventstream ::aws::eventstream
 
 // Parse a complete event stream message from bytes
-result parse-message(message-bytes)
+result ::eventstream/parse-message(message-bytes)
 
 // Check for errors
-if(is-error(result)) {
-    log("Parse error:", result.error)
-} {
-    message result.message
-    log("Headers:", message.headers)
-    log("Payload:", message.payload)
+cond {
+    result.ok => {
+        message result.message
+        print(`Headers: ${message.headers}`)
+        print(`Payload: ${message.payload}`)
+    }
+    => {
+        print(`Parse error: ${result.error}`)
+    }
 }
 ```
 
 ### Parsing a Stream of Messages
 
 ```hot
-::aws::eventstream use
+::eventstream ::aws::eventstream
 
 // Parse multiple messages from a byte stream
-messages parse-stream(stream-bytes)
+messages ::eventstream/parse-stream(stream-bytes)
 
-// Each message has headers and payload
-each(messages, (msg) {
-    // Common headers: :message-type, :event-type, :content-type
-    message-type get(msg.headers, ":message-type")
-
-    match message-type {
-        "event" => {
-            event-type get(msg.headers, ":event-type")
-            // Handle event based on type
-        },
-        "exception" => {
-            // Handle exception
-        },
-        "error" => {
-            // Handle error
-        }
-    }
-})
+// Each message has headers and payload.
+first-message first(messages)
+message-type ::eventstream/get-header(first-message, ":message-type")
+event-type ::eventstream/get-header(first-message, ":event-type")
 ```
 
 ### Bedrock Streaming Example
 
 ```hot
-::aws::eventstream use
-::hot::json use
+::eventstream ::aws::eventstream
 
 // After receiving binary stream from Bedrock ConverseStream
-events parse-stream(response-bytes)
+events ::eventstream/parse-stream(response-bytes)
+first-event first(events)
+event-type ::eventstream/get-header(first-event, ":event-type")
 
-each(events, (event) {
-    event-type get(event.headers, ":event-type")
-
-    match event-type {
-        "contentBlockDelta" => {
-            data parse(to-str(event.payload))
-            delta get(data, "delta")
-            text get(delta, "text")
-            log(text)
-        },
-        "messageStop" => {
-            log("Stream complete")
-        }
-    }
-})
+// Bedrock event payloads are JSON bytes.
+data from-json(Str(first-event.payload))
+delta get(data, "delta")
+text get(delta, "text")
+print(text)
 ```
 
 ## Event Stream Format

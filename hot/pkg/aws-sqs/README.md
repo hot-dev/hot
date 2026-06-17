@@ -5,16 +5,16 @@ AWS SQS API bindings for message queue operations.
 ## Usage
 
 ```hot
-::aws::sqs ns
+::sqs ::aws::sqs
 
 // Send a message
-response send-message("my-queue-url", "Hello, world!")
+response ::sqs/send-message("my-queue-url", "Hello, world!")
 
 // Receive messages
-messages receive-messages("my-queue-url", 10)
+messages ::sqs/receive-messages("my-queue-url", 10)
 
 // Delete a message after processing
-delete-message("my-queue-url", receipt_handle)
+::sqs/delete-message("my-queue-url", receipt-handle)
 ```
 
 ## Required IAM Permissions

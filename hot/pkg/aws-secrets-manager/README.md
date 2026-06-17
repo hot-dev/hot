@@ -5,19 +5,19 @@ AWS Secrets Manager API bindings for secure secret storage and retrieval.
 ## Usage
 
 ```hot
-::aws::secrets-manager ns
+::secrets ::aws::secrets-manager
 
 // Get a secret value
-secret get-secret-value("my-secret-name")
+secret ::secrets/get-secret-value("my-secret-name")
 
 // Create a new secret
-create-secret("my-new-secret", "secret-value")
+::secrets/create-secret("my-new-secret", "secret-value")
 
 // Update a secret
-put-secret-value("my-secret", "new-value")
+::secrets/put-secret-value("my-secret", "new-value")
 
 // List secrets
-secrets list-secrets()
+secrets ::secrets/list-secrets()
 ```
 
 ## Required IAM Permissions

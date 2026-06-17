@@ -46,7 +46,10 @@ meta {
 
     **Example**
     ```hot
-    response chat("anthropic.claude-3-5-sonnet-20241022-v2:0", "What is the capital of France?")
+    response ::aws::bedrock::chat/chat(
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "What is the capital of France?"
+    )
     // Returns: "The capital of France is Paris."
     ```
     """
@@ -112,11 +115,21 @@ meta {
     history []
 
     // First turn
-    result1 converse-multi("anthropic.claude-3-5-sonnet-20241022-v2:0", history, "Hi, my name is Alice", "You are a helpful assistant.")
+    result1 ::aws::bedrock::chat/converse-multi(
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        history,
+        "Hi, my name is Alice",
+        "You are a helpful assistant."
+    )
     new-history result1.history
 
     // Second turn (remembers context)
-    result2 converse-multi("anthropic.claude-3-5-sonnet-20241022-v2:0", new-history, "What's my name?", "You are a helpful assistant.")
+    result2 ::aws::bedrock::chat/converse-multi(
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        new-history,
+        "What's my name?",
+        "You are a helpful assistant."
+    )
     // result2.response will mention "Alice"
     ```
     """
@@ -188,9 +201,14 @@ meta {
 
     **Example**
     ```hot
-    // Read and encode image
-    image-data ::hot::base64/encode(::hot::file/read-bytes("photo.png"))
-    response chat-with-image("anthropic.claude-3-5-sonnet-20241022-v2:0", "What's in this image?", "png", image-data)
+    // Use a base64-encoded image payload.
+    image-data "iVBORw0KGgoAAAANSUhEUgAA"
+    response ::aws::bedrock::chat/chat-with-image(
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "What's in this image?",
+        "png",
+        image-data
+    )
     ```
     """
 }

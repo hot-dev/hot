@@ -33,7 +33,7 @@ meta {
     **Example**
 
     ```hot
-    request-items batch-get-keys("my-table", [
+    request-items ::aws::dynamodb::batch/batch-get-keys("my-table", [
         {pk: {S: "user-1"}, sk: {S: "profile"}},
         {pk: {S: "user-2"}, sk: {S: "profile"}}
     ])
@@ -82,14 +82,14 @@ meta {
 
     ```hot
     // Batch put items
-    request-items batch-put-items("my-table", [
+    request-items ::aws::dynamodb::batch/batch-put-items("my-table", [
         {pk: {S: "user-1"}, sk: {S: "profile"}, name: {S: "Alice"}},
         {pk: {S: "user-2"}, sk: {S: "profile"}, name: {S: "Bob"}}
     ])
     result ::aws::dynamodb::batch/batch-write-item(request-items)
 
     // Batch delete items
-    request-items batch-delete-keys("my-table", [
+    request-items ::aws::dynamodb::batch/batch-delete-keys("my-table", [
         {pk: {S: "user-1"}, sk: {S: "profile"}},
         {pk: {S: "user-2"}, sk: {S: "profile"}}
     ])

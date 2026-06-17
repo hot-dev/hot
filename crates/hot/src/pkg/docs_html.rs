@@ -489,6 +489,15 @@ fn generate_type_registry_json(registry: &TypeRegistry) -> String {
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
+fn render_alias_badge(html: &mut String, alias_of: &Option<String>) {
+    if let Some(target) = alias_of {
+        html.push_str(&format!(
+            " <span class=\"meta-badge alias-badge\" title=\"Re-exported from {}\">re-export</span>",
+            html_escape(target)
+        ));
+    }
+}
+
 /// Generate HTML content for a namespace page
 pub fn generate_namespace_html(ns: &DocNamespace, pkg_name: &str) -> String {
     generate_namespace_html_with_registry(ns, pkg_name, &AHashMap::new(), None, "/pkg")
@@ -544,6 +553,14 @@ pub fn generate_namespace_html_with_registry(
         ns.namespace
     ));
     html.push_str("</p>\n\n");
+
+    html.push_str(&format!(
+        "<h1><code>{}</code> <span class=\"meta-badge namespace-decl-badge\">namespace</span></h1>\n",
+        html_escape(&ns.namespace)
+    ));
+    if let Some(doc) = &ns.doc {
+        html.push_str(&render_doc(doc));
+    }
 
     // Context Vars section
     if let Some(ctx) = &ns.ctx {
@@ -625,20 +642,8 @@ pub fn generate_namespace_html_with_registry(
                     html_escape(&title)
                 ));
             }
-            if let Some(target) = &func.alias_of {
-                html.push_str(&format!(
-                    " <span class=\"meta-badge alias-badge\" title=\"Alias of {}\">alias</span>",
-                    html_escape(target)
-                ));
-            }
+            render_alias_badge(&mut html, &func.alias_of);
             html.push_str("</h3>\n");
-
-            if let Some(target) = &func.alias_of {
-                html.push_str(&format!(
-                    "<p class=\"alias-of\">Alias of <code>{}</code></p>\n",
-                    html_escape(target)
-                ));
-            }
 
             if !func.signatures.is_empty() {
                 html.push_str("<pre class=\"fn-signature\"><code class=\"language-hot\">");
@@ -771,6 +776,7 @@ pub fn generate_namespace_html_with_registry(
             if typ.is_core {
                 html.push_str(" <span class=\"core-badge\">core</span>");
             }
+            render_alias_badge(&mut html, &typ.alias_of);
             html.push_str("</h3>\n");
 
             if !typ.constructors.is_empty() {
@@ -1171,4 +1177,52 @@ fn slugify(text: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pkg::docs::{DocFunction, DocNamespace};
+
+    #[test]
+    fn namespace_doc_renders_before_functions() {
+        let ns = DocNamespace {
+            name: "hot/alert".to_string(),
+            namespace: "::hot::alert".to_string(),
+            doc: Some("Alerting helpers for Hot.".to_string()),
+            no_doc: false,
+            functions: vec![DocFunction {
+                name: "send-alert".to_string(),
+                doc: None,
+                is_core: false,
+                signatures: Vec::new(),
+                ctx: None,
+                box_req: None,
+                schedule: None,
+                on_event: None,
+                webhook: None,
+                mcp: None,
+                sends: Vec::new(),
+                alias_of: None,
+            }],
+            types: Vec::new(),
+            ctx: None,
+            box_req: None,
+        };
+
+        let html = generate_namespace_html(&ns, "hot.dev/hot-std");
+        let namespace_pos = html
+            .find("<h1><code>::hot::alert</code>")
+            .expect("namespace declaration heading should render");
+        let doc_pos = html
+            .find("Alerting helpers for Hot.")
+            .expect("namespace doc should render");
+        let functions_pos = html
+            .find("<h2>Functions</h2>")
+            .expect("functions should render");
+
+        assert!(namespace_pos < doc_pos);
+        assert!(doc_pos < functions_pos);
+        assert!(html.contains("namespace-decl-badge\">namespace</span>"));
+    }
 }

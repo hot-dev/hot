@@ -7,7 +7,7 @@ AWS Simple Notification Service (SNS) bindings for Hot, providing pub/sub messag
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/aws-sns": "1.1.0"
+"hot.dev/aws-sns": "1.2.0"
 ```
 
 ## Features
@@ -51,15 +51,15 @@ Optional context variables:
 
 ```hot
 // Simple topic
-response ::sns/create-topic("my-topic")
+response ::aws::sns/create-topic("my-topic")
 
 // With attributes
-response ::sns/create-topic("my-topic", {
+response ::aws::sns/create-topic("my-topic", {
     DisplayName: "My Notifications"
 })
 
 // FIFO topic
-response ::sns/create-topic("my-topic.fifo", {
+response ::aws::sns/create-topic("my-topic.fifo", {
     FifoTopic: "true",
     ContentBasedDeduplication: "true"
 })
@@ -68,27 +68,27 @@ response ::sns/create-topic("my-topic.fifo", {
 ### List Topics
 
 ```hot
-response ::sns/list-topics()
+response ::aws::sns/list-topics()
 topics response.topics  // Vec<Topic>
 
 // With pagination
-response ::sns/list-topics(next-token)
+response ::aws::sns/list-topics(next-token)
 ```
 
 ### Delete a Topic
 
 ```hot
-::sns/delete-topic(topic-arn)
+::aws::sns/delete-topic(topic-arn)
 ```
 
 ### Get/Set Topic Attributes
 
 ```hot
 // Get attributes
-attrs ::sns/get-topic-attributes(topic-arn)
+attrs ::aws::sns/get-topic-attributes(topic-arn)
 
 // Set a single attribute
-::sns/set-topic-attributes(topic-arn, "DisplayName", "New Name")
+::aws::sns/set-topic-attributes(topic-arn, "DisplayName", "New Name")
 ```
 
 ## Subscriptions
@@ -97,19 +97,19 @@ attrs ::sns/get-topic-attributes(topic-arn)
 
 ```hot
 // Email subscription
-::sns/subscribe(topic-arn, "email", "user@example.com")
+::aws::sns/subscribe(topic-arn, "email", "user@example.com")
 
 // SQS subscription
-::sns/subscribe(topic-arn, "sqs", queue-arn)
+::aws::sns/subscribe(topic-arn, "sqs", queue-arn)
 
 // Lambda subscription
-::sns/subscribe(topic-arn, "lambda", function-arn)
+::aws::sns/subscribe(topic-arn, "lambda", function-arn)
 
 // HTTP/HTTPS endpoint
-::sns/subscribe(topic-arn, "https", "https://example.com/webhook")
+::aws::sns/subscribe(topic-arn, "https", "https://example.com/webhook")
 
 // With filter policy
-::sns/subscribe(topic-arn, "sqs", queue-arn, {
+::aws::sns/subscribe(topic-arn, "sqs", queue-arn, {
     FilterPolicy: to-json({ event_type: ["order_placed", "order_shipped"] }),
     RawMessageDelivery: "true"
 })
@@ -119,22 +119,22 @@ attrs ::sns/get-topic-attributes(topic-arn)
 
 ```hot
 // All subscriptions
-subs ::sns/list-subscriptions()
+subs ::aws::sns/list-subscriptions()
 
 // For a specific topic
-subs ::sns/list-subscriptions-by-topic(topic-arn)
+subs ::aws::sns/list-subscriptions-by-topic(topic-arn)
 ```
 
 ### Unsubscribe
 
 ```hot
-::sns/unsubscribe(subscription-arn)
+::aws::sns/unsubscribe(subscription-arn)
 ```
 
 ### Confirm Subscription (for HTTP/HTTPS)
 
 ```hot
-::sns/confirm-subscription(topic-arn, confirmation-token)
+::aws::sns/confirm-subscription(topic-arn, confirmation-token)
 ```
 
 ## Publishing Messages
@@ -142,14 +142,14 @@ subs ::sns/list-subscriptions-by-topic(topic-arn)
 ### Simple Publish
 
 ```hot
-response ::sns/publish(topic-arn, "Hello, World!")
+response ::aws::sns/publish(topic-arn, "Hello, World!")
 message-id response.message_id
 ```
 
 ### Publish with Subject (for email)
 
 ```hot
-::sns/publish(topic-arn, "Message body", {
+::aws::sns/publish(topic-arn, "Message body", {
     subject: "Important Notification"
 })
 ```
@@ -157,7 +157,7 @@ message-id response.message_id
 ### Publish with Message Attributes
 
 ```hot
-::sns/publish-with-attributes(topic-arn, "Order shipped", {
+::aws::sns/publish-with-attributes(topic-arn, "Order shipped", {
     event_type: { DataType: "String", StringValue: "order_shipped" },
     order_id: { DataType: "String", StringValue: "12345" }
 })
@@ -166,28 +166,38 @@ message-id response.message_id
 ### Publish Protocol-Specific Messages
 
 ```hot
-::sns/publish-json(topic-arn, {
+::aws::sns/publish-json(topic-arn, {
     default: "Default message",
     email: "Email-formatted message",
-    sqs: to-json({ type: "notification", data: {...} }),
-    lambda: to-json({ action: "process", payload: {...} })
+    sqs: to-json({
+        type: "notification",
+        data: {order_id: "12345"},
+    }),
+    lambda: to-json({
+        action: "process",
+        payload: {order_id: "12345"},
+    })
 })
 ```
 
 ### Batch Publish
 
 ```hot
-::sns/publish-batch(topic-arn, [
+::aws::sns/publish-batch(topic-arn, [
     { id: "1", message: "First message" },
     { id: "2", message: "Second message" },
-    { id: "3", message: "Third message", subject: "With subject" }
+    {
+        id: "3",
+        message: "Third message",
+        subject: "With subject",
+    }
 ])
 ```
 
 ### FIFO Topic Publishing
 
 ```hot
-::sns/publish(topic-arn, "Ordered message", {
+::aws::sns/publish(topic-arn, "Ordered message", {
     message_group_id: "order-123",
     message_deduplication_id: "unique-id-1"
 })
@@ -197,10 +207,10 @@ message-id response.message_id
 
 ```hot
 // Simple SMS
-::sns/send-sms("+14155551234", "Your verification code is 123456")
+::aws::sns/send-sms("+14155551234", "Your verification code is 123456")
 
 // With options
-::sns/send-sms("+14155551234", "Alert!", {
+::aws::sns/send-sms("+14155551234", "Alert!", {
     message_type: "Transactional",
     sender_id: "MyApp"
 })
@@ -210,16 +220,16 @@ message-id response.message_id
 
 ```hot
 // Add tags
-::sns/tag-resource(topic-arn, [
+::aws::sns/tag-resource(topic-arn, [
     { Key: "Environment", Value: "production" },
     { Key: "Team", Value: "notifications" }
 ])
 
 // List tags
-tags ::sns/list-tags-for-resource(topic-arn)
+tags ::aws::sns/list-tags-for-resource(topic-arn)
 
 // Remove tags
-::sns/untag-resource(topic-arn, ["Environment", "Team"])
+::aws::sns/untag-resource(topic-arn, ["Environment", "Team"])
 ```
 
 ## Error Handling
@@ -227,7 +237,7 @@ tags ::sns/list-tags-for-resource(topic-arn)
 All functions return a union type of the success response or `AwsError`:
 
 ```hot
-result ::sns/publish(topic-arn, message)
+result ::aws::sns/publish(topic-arn, message)
 
 cond {
     is-ok(result) => {

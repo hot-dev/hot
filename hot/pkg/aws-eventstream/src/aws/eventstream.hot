@@ -16,14 +16,14 @@ meta {
     ## Example
 
     ```hot
-    ::aws::eventstream use
+    ::eventstream ::aws::eventstream
 
     // Parse messages from a binary stream
-    messages parse-stream(response-bytes)
+    messages ::eventstream/parse-stream(response-bytes)
 
-    each(messages, (msg) {
-        event-type get-header(msg, ":event-type")
-        log(event-type, Str(msg.payload))
+    for-each(messages, (msg) {
+        event-type ::eventstream/get-header(msg, ":event-type")
+        print(`${event-type}: ${Str(msg.payload)}`)
     })
     ```
     """
@@ -87,13 +87,13 @@ meta {
     **Example**
 
     ```hot
-    result parse-message(message-bytes)
+    result ::aws::eventstream/parse-message(message-bytes)
     cond {
         result.ok => {
-            log(result.message.headers)
-            log(Str(result.message.payload))
+            print(result.message.headers)
+            print(Str(result.message.payload))
         }
-        => { log("Error:", result.error) }
+        => { print(`Error: ${result.error}`) }
     }
     ```
     """
@@ -122,10 +122,10 @@ meta {
     **Example**
 
     ```hot
-    messages parse-stream(stream-bytes)
-    each(messages, (msg) {
-        event-type get-header(msg, ":event-type")
-        log(event-type)
+    messages ::aws::eventstream/parse-stream(stream-bytes)
+    for-each(messages, (msg) {
+        event-type ::aws::eventstream/get-header(msg, ":event-type")
+        print(event-type)
     })
     ```
     """
@@ -145,9 +145,9 @@ meta {
     **Example**
 
     ```hot
-    message-type get-header(msg, ":message-type")
-    event-type get-header(msg, ":event-type")
-    content-type get-header(msg, ":content-type")
+    message-type ::aws::eventstream/get-header(msg, ":message-type")
+    event-type ::aws::eventstream/get-header(msg, ":event-type")
+    content-type ::aws::eventstream/get-header(msg, ":content-type")
     ```
     """
 }

@@ -5,16 +5,16 @@ AWS Lambda API bindings for serverless function invocation and management.
 ## Usage
 
 ```hot
-::aws::lambda ns
+::lambda ::aws::lambda
 
 // Invoke a Lambda function
-response invoke("my-function", {key: "value"})
+response ::lambda/invoke("my-function", {key: "value"})
 
 // Invoke asynchronously (fire and forget)
-response invoke-async("my-function", {key: "value"})
+response ::lambda/invoke-async("my-function", {key: "value"})
 
 // List functions
-functions list-functions()
+functions ::lambda/list-functions()
 ```
 
 ## Required IAM Permissions

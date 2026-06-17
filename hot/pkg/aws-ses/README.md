@@ -5,10 +5,10 @@ AWS SES API bindings for sending transactional and marketing emails.
 ## Usage
 
 ```hot
-::aws::ses::email ns
+::email ::aws::ses::email
 
 // Send a simple email
-send-simple-email(
+::email/send-simple-email(
     "sender@example.com",
     ["recipient@example.com"],
     "Subject",

@@ -5,19 +5,19 @@ AWS DynamoDB API bindings for NoSQL database operations.
 ## Usage
 
 ```hot
-::aws::dynamodb ns
+::dynamodb ::aws::dynamodb
 
 // Put an item
-put-item("my-table", {id: {S: "123"}, name: {S: "Alice"}})
+::dynamodb/put-item("my-table", {id: {S: "123"}, name: {S: "Alice"}})
 
 // Get an item
-item get-item("my-table", {id: {S: "123"}})
+item ::dynamodb/get-item("my-table", {id: {S: "123"}})
 
 // Query items
-results query("my-table", "id = :id", {":id": {S: "123"}})
+results ::dynamodb/query("my-table", "id = :id", {":id": {S: "123"}})
 
 // Scan table
-all-items scan("my-table")
+all-items ::dynamodb/scan("my-table")
 ```
 
 ## Required IAM Permissions
