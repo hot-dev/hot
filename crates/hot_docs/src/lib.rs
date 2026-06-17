@@ -1302,8 +1302,8 @@ fn render_pkg_readme(config: &DocsConfig, pkg_name: &str) -> Result<String, Stri
 
 /// Render package namespace navigation as a depth-clamped flat list.
 ///
-/// Mirrors the package sidebar in hot_web: every namespace is shown regardless
-/// of nesting depth, but indentation stops growing after three levels.
+/// Every namespace is shown regardless of nesting depth,
+/// but indentation stops growing after three levels.
 fn render_pkg_nav(nav: &[NavItem], base: &str, current_path: &str, collapse_title: &str) -> String {
     let flat = hot::pkg::docs_html::flatten_pkg_nav(
         nav,
