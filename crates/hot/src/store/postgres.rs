@@ -43,15 +43,13 @@ impl PgStore {
         let value: serde_json::Value = row.try_get("value").map_err(|e| e.to_string())?;
         let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
 
-        let embedding_raw: Option<Vec<u8>> = row
-            .try_get::<Option<Vec<u8>>, _>("embedding_raw")
+        let embedding_text: Option<String> = row
+            .try_get::<Option<String>, _>("embedding_text")
             .unwrap_or(None);
-        let embedding = embedding_raw.map(|bytes| {
-            bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        });
+        let embedding = embedding_text
+            .as_deref()
+            .map(Self::parse_pgvector_text)
+            .transpose()?;
 
         let created_at: chrono::DateTime<Utc> =
             row.try_get("created_at").unwrap_or_else(|_| Utc::now());
@@ -91,6 +89,27 @@ impl PgStore {
     fn embedding_to_pgvector_literal(embedding: &[f32]) -> String {
         let inner: Vec<String> = embedding.iter().map(|f| f.to_string()).collect();
         format!("[{}]", inner.join(","))
+    }
+
+    fn parse_pgvector_text(raw: &str) -> Result<Vec<f32>, String> {
+        let inner = raw
+            .trim()
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .ok_or_else(|| format!("Invalid pgvector text literal: {raw}"))?;
+
+        if inner.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        inner
+            .split(',')
+            .map(|part| {
+                part.trim()
+                    .parse::<f32>()
+                    .map_err(|e| format!("Invalid pgvector element '{part}': {e}"))
+            })
+            .collect()
     }
 
     fn quote_ident(identifier: &str) -> String {
@@ -280,7 +299,7 @@ impl Store for PgStore {
         let pg = self.pg_pool()?;
 
         let row = sqlx::query(
-            "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at
+            "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND key = $4",
         )
@@ -307,7 +326,7 @@ impl Store for PgStore {
 
         let row = sqlx::query(
             "SELECT key, seq,
-                    CASE WHEN embedding IS NULL THEN NULL ELSE (length(embedding::bytea) / 4)::bigint END AS embedding_dimensions,
+                    CASE WHEN embedding IS NULL THEN NULL ELSE vector_dims(embedding)::bigint END AS embedding_dimensions,
                     created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND key = $4",
@@ -406,7 +425,7 @@ impl Store for PgStore {
         let pg = self.pg_pool()?;
 
         let row = sqlx::query(
-            "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at
+            "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3
              ORDER BY seq ASC LIMIT 1",
@@ -428,7 +447,7 @@ impl Store for PgStore {
         let pg = self.pg_pool()?;
 
         let row = sqlx::query(
-            "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at
+            "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3
              ORDER BY seq DESC LIMIT 1",
@@ -456,7 +475,7 @@ impl Store for PgStore {
         let offset = options.offset.unwrap_or(0) as i64;
 
         let rows = sqlx::query(
-            "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at
+            "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3
              ORDER BY seq LIMIT $4 OFFSET $5",
@@ -484,7 +503,7 @@ impl Store for PgStore {
 
         let rows = sqlx::query(
             "SELECT key, seq,
-                    CASE WHEN embedding IS NULL THEN NULL ELSE (length(embedding::bytea) / 4)::bigint END AS embedding_dimensions,
+                    CASE WHEN embedding IS NULL THEN NULL ELSE vector_dims(embedding)::bigint END AS embedding_dimensions,
                     created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3
@@ -584,7 +603,7 @@ impl Store for PgStore {
                 let vec_literal = Self::embedding_to_pgvector_literal(&qe);
 
                 let rows = sqlx::query(
-                    "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at,
+                    "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
                             1 - (embedding <=> $5::vector) as score
                      FROM store_map_entry
                      WHERE org_id = $1 AND env_id = $2 AND store_name = $3
@@ -617,7 +636,7 @@ impl Store for PgStore {
                 let qt = query_text.ok_or("Keyword search requires query text")?;
 
                 let rows = sqlx::query(
-                    "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at,
+                    "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
                             similarity(text_content, $5) as score
                      FROM store_map_entry
                      WHERE org_id = $1 AND env_id = $2 AND store_name = $3
@@ -650,7 +669,7 @@ impl Store for PgStore {
                 if let Some(qe) = &query_embedding {
                     let vec_literal = Self::embedding_to_pgvector_literal(qe);
                     let sem_rows = sqlx::query(
-                        "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at,
+                        "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
                                 1 - (embedding <=> $5::vector) as score
                          FROM store_map_entry
                          WHERE org_id = $1 AND env_id = $2 AND store_name = $3
@@ -680,7 +699,7 @@ impl Store for PgStore {
 
                 if let Some(qt) = query_text {
                     let kw_rows = sqlx::query(
-                        "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at,
+                        "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
                                 similarity(text_content, $5) as score
                          FROM store_map_entry
                          WHERE org_id = $1 AND env_id = $2 AND store_name = $3
@@ -752,7 +771,7 @@ impl Store for PgStore {
         }
 
         let rows = sqlx::query(
-            "SELECT key, value, seq, embedding::bytea as embedding_raw, created_at, updated_at
+            "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
              FROM store_map_entry
              WHERE org_id = $1 AND env_id = $2 AND store_name = $3
              ORDER BY seq",
@@ -894,5 +913,38 @@ impl Store for PgStore {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pgvector_text_literal() {
+        assert_eq!(
+            PgStore::parse_pgvector_text("[1,2.5,-3]").unwrap(),
+            vec![1.0, 2.5, -3.0]
+        );
+        assert_eq!(
+            PgStore::parse_pgvector_text("[ ]").unwrap(),
+            Vec::<f32>::new()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_pgvector_text_literal() {
+        assert!(PgStore::parse_pgvector_text("1,2,3").is_err());
+        assert!(PgStore::parse_pgvector_text("[1,nope]").is_err());
+    }
+
+    #[test]
+    fn postgres_store_queries_do_not_cast_vector_to_bytea() {
+        let source = include_str!("postgres.rs");
+
+        assert!(!source.contains(concat!("embedding::", "bytea")));
+        assert!(!source.contains(concat!("embedding_", "raw")));
+        assert!(source.contains("embedding::text as embedding_text"));
+        assert!(source.contains("vector_dims(embedding)::bigint"));
     }
 }
