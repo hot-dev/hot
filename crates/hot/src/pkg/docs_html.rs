@@ -177,6 +177,38 @@ pub fn parse_namespace(namespace: &str) -> (String, String) {
     }
 }
 
+#[derive(Default)]
+struct NavNamespaceNode {
+    title: String,
+    path: Option<String>,
+    children: BTreeMap<String, NavNamespaceNode>,
+}
+
+impl NavNamespaceNode {
+    fn into_nav_item(self) -> NavItem {
+        NavItem {
+            title: self.title,
+            path: self.path,
+            children: self
+                .children
+                .into_values()
+                .map(NavNamespaceNode::into_nav_item)
+                .collect(),
+        }
+    }
+
+    fn into_nav_items(self) -> Vec<NavItem> {
+        self.children
+            .into_values()
+            .map(NavNamespaceNode::into_nav_item)
+            .collect()
+    }
+}
+
+fn namespace_parts(namespace: &str) -> Vec<&str> {
+    namespace.split("::").filter(|s| !s.is_empty()).collect()
+}
+
 /// Generate navigation structure for package docs
 ///
 /// The `base_path_prefix` is prepended to all paths:
@@ -196,44 +228,32 @@ pub fn generate_pkg_nav_with_prefix(
     docs: &PkgDocs,
     base_path_prefix: &str,
 ) -> Vec<NavItem> {
-    // Group namespaces by namespace prefix
-    let mut groups: BTreeMap<String, Vec<&DocNamespace>> = BTreeMap::new();
+    let mut root = NavNamespaceNode::default();
     for ns in &docs.namespaces {
-        let (prefix, _) = parse_namespace(&ns.namespace);
-        groups.entry(prefix).or_default().push(ns);
-    }
-
-    // Build navigation with namespace hierarchy
-    let mut namespace_children: Vec<NavItem> = Vec::new();
-
-    for (prefix, namespaces) in groups {
-        let ns_items: Vec<NavItem> = namespaces
-            .iter()
-            .map(|ns| {
-                let (_, ns_display) = parse_namespace(&ns.namespace);
-                NavItem {
-                    title: ns_display,
-                    path: Some(format!("{}/{}", base_path_prefix, ns.name)),
-                    children: Vec::new(),
-                }
-            })
-            .collect();
-
-        if prefix.is_empty() {
-            namespace_children.extend(ns_items);
-        } else {
-            namespace_children.push(NavItem {
-                title: prefix,
-                path: None,
-                children: ns_items,
-            });
+        let parts = namespace_parts(&ns.namespace);
+        if parts.is_empty() {
+            continue;
         }
+
+        let mut node = &mut root;
+        for part in &parts {
+            node = node
+                .children
+                .entry((*part).to_string())
+                .or_insert_with(|| NavNamespaceNode {
+                    title: format!("::{}", part),
+                    path: None,
+                    children: BTreeMap::new(),
+                });
+        }
+
+        node.path = Some(format!("{}/{}", base_path_prefix, ns.name));
     }
 
     vec![NavItem {
         title: docs.meta.name.clone(),
         path: Some(base_path_prefix.to_string()),
-        children: namespace_children,
+        children: root.into_nav_items(),
     }]
 }
 
@@ -489,12 +509,68 @@ fn generate_type_registry_json(registry: &TypeRegistry) -> String {
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn render_alias_badge(html: &mut String, alias_of: &Option<String>) {
+/// Build links for documented vars that aliases can point to.
+pub fn build_alias_target_index(
+    docs: &PkgDocs,
+    pkg_name: &str,
+    base_url: &str,
+) -> AHashMap<String, String> {
+    let mut index = AHashMap::new();
+    extend_alias_target_index(&mut index, docs, pkg_name, base_url);
+    index
+}
+
+/// Add documented vars from a package to an existing alias target link index.
+pub fn extend_alias_target_index(
+    index: &mut AHashMap<String, String>,
+    docs: &PkgDocs,
+    pkg_name: &str,
+    base_url: &str,
+) {
+    for ns in &docs.namespaces {
+        let ns_url = format!("{}/{}/{}", base_url, pkg_name, ns.name);
+        for func in &ns.functions {
+            index.insert(
+                format!("{}/{}", ns.namespace, func.name),
+                format!("{}#{}", ns_url, func.name),
+            );
+        }
+        for typ in &ns.types {
+            index.insert(
+                format!("{}/{}", ns.namespace, typ.name),
+                format!("{}#{}", ns_url, typ.name),
+            );
+        }
+        for value in &ns.values {
+            index.insert(
+                format!("{}/{}", ns.namespace, value.name),
+                format!("{}#{}", ns_url, value.name),
+            );
+        }
+    }
+}
+
+fn render_alias_badge(
+    html: &mut String,
+    alias_of: &Option<String>,
+    alias_target_index: &AHashMap<String, String>,
+) {
     if let Some(target) = alias_of {
-        html.push_str(&format!(
-            " <span class=\"meta-badge alias-badge\" title=\"Re-exported from {}\">re-export</span>",
-            html_escape(target)
-        ));
+        let title = format!("Alias of {}", target);
+        if let Some(href) = alias_target_index.get(target) {
+            html.push_str(&format!(
+                " <span class=\"meta-badge alias-badge\">alias</span> <span class=\"alias-target\"><span class=\"alias-target-label\">of</span> <a href=\"{}\" title=\"{}\"><code>{}</code></a></span>",
+                html_escape(href),
+                html_escape(&title),
+                html_escape(target)
+            ));
+        } else {
+            html.push_str(&format!(
+                " <span class=\"meta-badge alias-badge\">alias</span> <span class=\"alias-target\"><span class=\"alias-target-label\">of</span> <code title=\"{}\">{}</code></span>",
+                html_escape(&title),
+                html_escape(target)
+            ));
+        }
     }
 }
 
@@ -511,6 +587,25 @@ pub fn generate_namespace_html_with_registry(
     pkg_type_index: &AHashMap<String, String>,
     cross_pkg_registry: Option<&AHashMap<String, String>>,
     base_url: &str,
+) -> String {
+    generate_namespace_html_with_registry_and_aliases(
+        ns,
+        pkg_name,
+        pkg_type_index,
+        cross_pkg_registry,
+        base_url,
+        &AHashMap::new(),
+    )
+}
+
+/// Generate HTML content for a namespace page with type and alias link support.
+pub fn generate_namespace_html_with_registry_and_aliases(
+    ns: &DocNamespace,
+    pkg_name: &str,
+    pkg_type_index: &AHashMap<String, String>,
+    cross_pkg_registry: Option<&AHashMap<String, String>>,
+    base_url: &str,
+    alias_target_index: &AHashMap<String, String>,
 ) -> String {
     let mut html = String::new();
 
@@ -554,10 +649,6 @@ pub fn generate_namespace_html_with_registry(
     ));
     html.push_str("</p>\n\n");
 
-    html.push_str(&format!(
-        "<h1><code>{}</code> <span class=\"meta-badge namespace-decl-badge\">namespace</span></h1>\n",
-        html_escape(&ns.namespace)
-    ));
     if let Some(doc) = &ns.doc {
         html.push_str(&render_doc(doc));
     }
@@ -572,6 +663,39 @@ pub fn generate_namespace_html_with_registry(
     if let Some(box_req) = &ns.box_req {
         html.push_str("<h2 id=\"container-requirements\">Container Requirements</h2>\n");
         html.push_str(&render_box_requirements(box_req));
+    }
+
+    // Values section (top-level literals/constants)
+    if !ns.values.is_empty() {
+        html.push_str("<h2>Values</h2>\n");
+
+        let mut all_values: Vec<_> = ns.values.iter().collect();
+        all_values.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for value in all_values {
+            html.push_str(&format!(
+                "<h3 id=\"{}\"><code>{}</code>",
+                value.name,
+                html_escape(&value.name)
+            ));
+            render_alias_badge(&mut html, &value.alias_of, alias_target_index);
+            html.push_str("</h3>\n");
+            html.push_str("<pre><code class=\"language-hot\">");
+            html.push_str(&html_escape(&value.name));
+            if let Some(type_annotation) = &value.type_annotation {
+                html.push_str(": ");
+                html.push_str(&html_escape(type_annotation));
+            }
+            html.push(' ');
+            html.push_str(&html_escape(&value.value));
+            html.push_str("</code></pre>\n");
+
+            if let Some(doc) = &value.doc {
+                html.push_str(&render_doc(doc));
+            }
+
+            html.push('\n');
+        }
     }
 
     // Functions section (listed before types — functions are the primary API)
@@ -642,7 +766,7 @@ pub fn generate_namespace_html_with_registry(
                     html_escape(&title)
                 ));
             }
-            render_alias_badge(&mut html, &func.alias_of);
+            render_alias_badge(&mut html, &func.alias_of, alias_target_index);
             html.push_str("</h3>\n");
 
             if !func.signatures.is_empty() {
@@ -776,7 +900,7 @@ pub fn generate_namespace_html_with_registry(
             if typ.is_core {
                 html.push_str(" <span class=\"core-badge\">core</span>");
             }
-            render_alias_badge(&mut html, &typ.alias_of);
+            render_alias_badge(&mut html, &typ.alias_of, alias_target_index);
             html.push_str("</h3>\n");
 
             if !typ.constructors.is_empty() {
@@ -874,6 +998,27 @@ pub fn build_namespace_toc(ns: &DocNamespace) -> Vec<TocSection> {
                 indent: 0,
                 badges: vec![],
             }],
+        });
+    }
+
+    if !ns.values.is_empty() {
+        let mut values: Vec<_> = ns.values.iter().collect();
+        values.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let items: Vec<TocItem> = values
+            .iter()
+            .map(|value| TocItem {
+                name: value.name.clone(),
+                anchor: value.name.clone(),
+                is_core: false,
+                indent: 0,
+                badges: vec![],
+            })
+            .collect();
+
+        toc.push(TocSection {
+            title: "Values".to_string(),
+            items,
         });
     }
 
@@ -1015,12 +1160,14 @@ pub fn render_pkg_page(
                 )
             })?;
 
-        let html = generate_namespace_html_with_registry(
+        let alias_target_index = build_alias_target_index(pkg_docs, pkg_name, base_url);
+        let html = generate_namespace_html_with_registry_and_aliases(
             namespace,
             pkg_name,
             &pkg_docs.type_index,
             cross_pkg_registry,
             base_url,
+            &alias_target_index,
         );
         let (_, ns_name) = parse_namespace(&namespace.namespace);
         let title = format!(
@@ -1124,6 +1271,12 @@ pub fn markdown_to_html(markdown: &str) -> String {
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
 
+                let code_lang = code_lang
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+
                 if code_lang == "result" {
                     html_output.push_str(&format!(
                         "<div class=\"result-block\"><pre><code class=\"language-plaintext\">{}</code></pre></div>\n",
@@ -1131,7 +1284,11 @@ pub fn markdown_to_html(markdown: &str) -> String {
                     ));
                 } else {
                     let lang_class = if code_lang.is_empty() {
-                        "language-plaintext".to_string()
+                        if looks_like_hot_code_block(&code_content) {
+                            "language-hot".to_string()
+                        } else {
+                            "language-plaintext".to_string()
+                        }
                     } else {
                         format!("language-{}", code_lang)
                     };
@@ -1158,6 +1315,40 @@ pub fn markdown_to_html(markdown: &str) -> String {
     html_output
 }
 
+fn looks_like_hot_code_block(code: &str) -> bool {
+    let lines: Vec<&str> = code
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .collect();
+
+    if lines.is_empty() {
+        return false;
+    }
+
+    let first = lines[0];
+
+    if first.starts_with("::")
+        || first.contains(" fn ")
+        || first.contains(" type ")
+        || first.contains(" enum ")
+        || first.contains(" -> ")
+    {
+        return true;
+    }
+
+    if first.starts_with('(') && first.contains(':') {
+        return true;
+    }
+
+    first.ends_with('(')
+        && lines.iter().take(8).any(|line| line.contains(':'))
+        && lines
+            .iter()
+            .take(12)
+            .any(|line| line.starts_with("):") || line.starts_with(") ->"))
+}
+
 /// HTML escape for code content
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -1182,10 +1373,44 @@ fn slugify(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pkg::docs::{DocFunction, DocNamespace};
+    use crate::pkg::docs::{
+        BoxRequirementDoc, CtxRequirements, DocFunction, DocNamespace, DocType, DocValue, PkgMeta,
+    };
 
     #[test]
-    fn namespace_doc_renders_before_functions() {
+    fn bare_hot_signature_fence_infers_hot_language() {
+        let html = markdown_to_html(
+            r#"
+```
+chat-with-tools(
+    model: Str,
+    messages: Vec<::ai::chat/Message>,
+    system: Str?,
+    tools: Vec<::ai::tool/Tool>?
+): ::ai::chat/ChatReply
+```
+"#,
+        );
+
+        assert!(html.contains(r#"class="language-hot""#));
+    }
+
+    #[test]
+    fn bare_non_hot_fence_stays_plaintext() {
+        let html = markdown_to_html(
+            r#"
+```
+[total_length:4][headers_length:4][prelude_crc:4][headers:*]
+```
+"#,
+        );
+
+        assert!(html.contains(r#"class="language-plaintext""#));
+        assert!(!html.contains(r#"class="language-hot""#));
+    }
+
+    #[test]
+    fn namespace_doc_renders_after_breadcrumb_before_functions() {
         let ns = DocNamespace {
             name: "hot/alert".to_string(),
             namespace: "::hot::alert".to_string(),
@@ -1206,14 +1431,15 @@ mod tests {
                 alias_of: None,
             }],
             types: Vec::new(),
+            values: Vec::new(),
             ctx: None,
             box_req: None,
         };
 
         let html = generate_namespace_html(&ns, "hot.dev/hot-std");
-        let namespace_pos = html
-            .find("<h1><code>::hot::alert</code>")
-            .expect("namespace declaration heading should render");
+        let breadcrumb_pos = html
+            .find("<span class=\"ns-current\">::hot::alert</span>")
+            .expect("breadcrumb namespace should render");
         let doc_pos = html
             .find("Alerting helpers for Hot.")
             .expect("namespace doc should render");
@@ -1221,8 +1447,261 @@ mod tests {
             .find("<h2>Functions</h2>")
             .expect("functions should render");
 
-        assert!(namespace_pos < doc_pos);
+        assert!(breadcrumb_pos < doc_pos);
         assert!(doc_pos < functions_pos);
-        assert!(html.contains("namespace-decl-badge\">namespace</span>"));
+        assert!(!html.contains("<h1><code>::hot::alert</code>"));
+        assert!(!html.contains("namespace-decl-badge\">namespace</span>"));
+    }
+
+    #[test]
+    fn namespace_values_render_before_functions() {
+        let ns = DocNamespace {
+            name: "anthropic".to_string(),
+            namespace: "::anthropic".to_string(),
+            doc: None,
+            no_doc: false,
+            values: vec![DocValue {
+                name: "BASE_URL".to_string(),
+                doc: Some("Anthropic API base URL.".to_string()),
+                value: "\"https://api.anthropic.com\"".to_string(),
+                type_annotation: None,
+                alias_of: None,
+            }],
+            functions: vec![DocFunction {
+                name: "request".to_string(),
+                doc: None,
+                is_core: false,
+                signatures: Vec::new(),
+                ctx: None,
+                box_req: None,
+                schedule: None,
+                on_event: None,
+                webhook: None,
+                mcp: None,
+                sends: Vec::new(),
+                alias_of: None,
+            }],
+            types: Vec::new(),
+            ctx: None,
+            box_req: None,
+        };
+
+        let html = generate_namespace_html(&ns, "hot.dev/anthropic");
+        let values_pos = html.find("<h2>Values</h2>").expect("values should render");
+        let base_url_pos = html.find("BASE_URL").expect("value should render");
+        let functions_pos = html
+            .find("<h2>Functions</h2>")
+            .expect("functions should render");
+
+        assert!(values_pos < base_url_pos);
+        assert!(base_url_pos < functions_pos);
+        assert!(html.contains("BASE_URL &quot;https://api.anthropic.com&quot;"));
+        assert!(html.contains("Anthropic API base URL."));
+    }
+
+    #[test]
+    fn namespace_toc_includes_all_rendered_sections_in_order() {
+        let ns = DocNamespace {
+            name: "demo".to_string(),
+            namespace: "::demo".to_string(),
+            doc: None,
+            no_doc: false,
+            values: vec![DocValue {
+                name: "DEFAULT_TIMEOUT".to_string(),
+                doc: None,
+                value: "30".to_string(),
+                type_annotation: Some("Int".to_string()),
+                alias_of: None,
+            }],
+            functions: vec![DocFunction {
+                name: "run".to_string(),
+                doc: None,
+                is_core: false,
+                signatures: Vec::new(),
+                ctx: None,
+                box_req: None,
+                schedule: None,
+                on_event: None,
+                webhook: None,
+                mcp: None,
+                sends: Vec::new(),
+                alias_of: None,
+            }],
+            types: vec![DocType {
+                name: "Config".to_string(),
+                doc: None,
+                is_core: false,
+                fields: Vec::new(),
+                constructors: Vec::new(),
+                type_alias: None,
+                alias_of: None,
+            }],
+            ctx: Some(CtxRequirements {
+                req: vec!["api.key".to_string()],
+                opt: Vec::new(),
+            }),
+            box_req: Some(BoxRequirementDoc {
+                min_size: Some("small".to_string()),
+                network: false,
+            }),
+        };
+
+        let toc = build_namespace_toc(&ns);
+        let sections: Vec<_> = toc.iter().map(|section| section.title.as_str()).collect();
+
+        assert_eq!(
+            sections,
+            vec![
+                "Context Vars",
+                "Container Requirements",
+                "Values",
+                "Functions",
+                "Types"
+            ]
+        );
+        assert_eq!(toc[2].items[0].name, "DEFAULT_TIMEOUT");
+        assert_eq!(toc[3].items[0].name, "run");
+        assert_eq!(toc[4].items[0].name, "Config");
+    }
+
+    #[test]
+    fn alias_badge_uses_alias_label_and_links_to_target() {
+        let docs = PkgDocs {
+            meta: PkgMeta {
+                name: "hot.dev/demo".to_string(),
+                ..PkgMeta::default()
+            },
+            readme: None,
+            license: None,
+            namespaces: vec![
+                DocNamespace {
+                    name: "lib".to_string(),
+                    namespace: "::lib".to_string(),
+                    doc: None,
+                    no_doc: false,
+                    functions: vec![DocFunction {
+                        name: "target".to_string(),
+                        doc: Some("Target docs.".to_string()),
+                        is_core: false,
+                        signatures: Vec::new(),
+                        ctx: None,
+                        box_req: None,
+                        schedule: None,
+                        on_event: None,
+                        webhook: None,
+                        mcp: None,
+                        sends: Vec::new(),
+                        alias_of: None,
+                    }],
+                    types: Vec::new(),
+                    values: Vec::new(),
+                    ctx: None,
+                    box_req: None,
+                },
+                DocNamespace {
+                    name: "facade".to_string(),
+                    namespace: "::facade".to_string(),
+                    doc: None,
+                    no_doc: false,
+                    functions: vec![DocFunction {
+                        name: "target".to_string(),
+                        doc: Some("Target docs.".to_string()),
+                        is_core: false,
+                        signatures: Vec::new(),
+                        ctx: None,
+                        box_req: None,
+                        schedule: None,
+                        on_event: None,
+                        webhook: None,
+                        mcp: None,
+                        sends: Vec::new(),
+                        alias_of: Some("::lib/target".to_string()),
+                    }],
+                    types: Vec::new(),
+                    values: Vec::new(),
+                    ctx: None,
+                    box_req: None,
+                },
+            ],
+            type_index: Default::default(),
+        };
+        let alias_target_index = build_alias_target_index(&docs, "hot.dev/demo", "/pkg");
+        let type_index = AHashMap::new();
+        let html = generate_namespace_html_with_registry_and_aliases(
+            &docs.namespaces[1],
+            "hot.dev/demo",
+            &type_index,
+            None,
+            "/pkg",
+            &alias_target_index,
+        );
+
+        assert!(html.contains("href=\"/pkg/hot.dev/demo/lib#target\""));
+        assert!(html.contains("title=\"Alias of ::lib/target\""));
+        assert!(html.contains("alias-badge\">alias</span>"));
+        assert!(html.contains("<code>::lib/target</code>"));
+        assert!(!html.contains("re-export"));
+    }
+
+    #[test]
+    fn package_nav_nests_namespaces_as_tree() {
+        let docs = PkgDocs {
+            meta: PkgMeta {
+                name: "hot.dev/anthropic".to_string(),
+                ..PkgMeta::default()
+            },
+            readme: None,
+            license: None,
+            namespaces: vec![
+                DocNamespace {
+                    name: "anthropic".to_string(),
+                    namespace: "::anthropic".to_string(),
+                    doc: None,
+                    no_doc: false,
+                    functions: Vec::new(),
+                    types: Vec::new(),
+                    values: Vec::new(),
+                    ctx: None,
+                    box_req: None,
+                },
+                DocNamespace {
+                    name: "anthropic/api".to_string(),
+                    namespace: "::anthropic::api".to_string(),
+                    doc: None,
+                    no_doc: false,
+                    functions: Vec::new(),
+                    types: Vec::new(),
+                    values: Vec::new(),
+                    ctx: None,
+                    box_req: None,
+                },
+                DocNamespace {
+                    name: "anthropic/batches".to_string(),
+                    namespace: "::anthropic::batches".to_string(),
+                    doc: None,
+                    no_doc: false,
+                    functions: Vec::new(),
+                    types: Vec::new(),
+                    values: Vec::new(),
+                    ctx: None,
+                    box_req: None,
+                },
+            ],
+            type_index: Default::default(),
+        };
+
+        let nav = generate_pkg_nav_with_prefix("hot.dev/anthropic", &docs, "hot.dev/anthropic");
+        assert_eq!(nav.len(), 1);
+        assert_eq!(nav[0].children.len(), 1);
+
+        let anthropic = &nav[0].children[0];
+        assert_eq!(anthropic.title, "::anthropic");
+        assert_eq!(
+            anthropic.path.as_deref(),
+            Some("hot.dev/anthropic/anthropic")
+        );
+        assert_eq!(anthropic.children.len(), 2);
+        assert_eq!(anthropic.children[0].title, "::api");
+        assert_eq!(anthropic.children[1].title, "::batches");
     }
 }

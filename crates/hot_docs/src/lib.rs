@@ -796,12 +796,54 @@ fn render_code_block(lang: &str, code: &str) -> String {
         );
     }
 
-    let lang = if lang.is_empty() { "plaintext" } else { lang };
+    let lang = if lang.is_empty() {
+        if looks_like_hot_code_block(code) {
+            "hot"
+        } else {
+            "plaintext"
+        }
+    } else {
+        lang
+    };
     format!(
         r#"<pre><code class="language-{}">{}</code></pre>"#,
         escape_attr(lang),
         escape_html(code)
     )
+}
+
+fn looks_like_hot_code_block(code: &str) -> bool {
+    let lines: Vec<&str> = code
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .collect();
+
+    if lines.is_empty() {
+        return false;
+    }
+
+    let first = lines[0];
+
+    if first.starts_with("::")
+        || first.contains(" fn ")
+        || first.contains(" type ")
+        || first.contains(" enum ")
+        || first.contains(" -> ")
+    {
+        return true;
+    }
+
+    if first.starts_with('(') && first.contains(':') {
+        return true;
+    }
+
+    first.ends_with('(')
+        && lines.iter().take(8).any(|line| line.contains(':'))
+        && lines
+            .iter()
+            .take(12)
+            .any(|line| line.starts_with("):") || line.starts_with(") ->"))
 }
 
 fn extract_title(markdown: &str) -> Option<String> {
@@ -873,12 +915,8 @@ fn ensure_pkg_docs_generated(config: &DocsConfig) {
     let packages_to_generate = package_names
         .iter()
         .filter(|pkg_name| {
-            force_rebuild
-                || !config
-                    .pkg_docs_dir
-                    .join(pkg_name.as_str())
-                    .join("versions.json")
-                    .exists()
+            let pkg_path = config.pkg_source_dir.join(pkg_name.as_str());
+            force_rebuild || package_docs_cache_stale(config, pkg_name, &pkg_path)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -922,6 +960,43 @@ fn ensure_pkg_docs_generated(config: &DocsConfig) {
             Err(error) => tracing::warn!("Failed to generate docs for {pkg_name}: {error}"),
         }
     }
+}
+
+fn package_docs_cache_stale(config: &DocsConfig, pkg_name: &str, pkg_path: &Path) -> bool {
+    let versions_path = config.pkg_docs_dir.join(pkg_name).join("versions.json");
+    if !versions_path.exists() {
+        return true;
+    }
+
+    let source_version = match docs::load_pkg_docs(pkg_path) {
+        Ok(pkg_docs) => pkg_docs.meta.version,
+        Err(error) => {
+            tracing::warn!("Failed to inspect source package docs for {pkg_name}: {error}");
+            return false;
+        }
+    };
+
+    if source_version.is_empty() {
+        return false;
+    }
+
+    let versions_index = match docs::load_versions_index(&versions_path) {
+        Ok(index) => index,
+        Err(error) => {
+            tracing::warn!("Failed to inspect cached package versions for {pkg_name}: {error}");
+            return true;
+        }
+    };
+
+    let docs_path = config
+        .pkg_docs_dir
+        .join(pkg_name)
+        .join(&source_version)
+        .join("docs.json");
+
+    versions_index.latest != source_version
+        || !versions_index.versions.contains(&source_version)
+        || !docs_path.exists()
 }
 
 fn source_package_names(config: &DocsConfig) -> Vec<String> {
@@ -1115,14 +1190,51 @@ fn load_cached_pkg_docs_versioned(
     Ok((pkg_docs, version.clone(), vec![version]))
 }
 
+fn package_route_name(full_pkg_name: &str) -> String {
+    full_pkg_name
+        .strip_prefix(&format!("{DEFAULT_ORG}/"))
+        .unwrap_or(full_pkg_name)
+        .to_string()
+}
+
+fn load_alias_target_docs(
+    config: &DocsConfig,
+    current_pkg_name: &str,
+    docs: &PkgDocs,
+) -> Vec<(String, PkgDocs)> {
+    let mut pkg_names = vec!["hot-std".to_string()];
+    for dep in &docs.meta.deps {
+        pkg_names.push(package_route_name(&dep.name));
+    }
+    pkg_names.sort();
+    pkg_names.dedup();
+
+    pkg_names
+        .into_iter()
+        .filter(|pkg_name| pkg_name != current_pkg_name)
+        .filter_map(|pkg_name| {
+            load_cached_pkg_docs_versioned(config, &pkg_name, None)
+                .ok()
+                .map(|(pkg_docs, _, _)| (format!("{DEFAULT_ORG}/{pkg_name}"), pkg_docs))
+        })
+        .collect()
+}
+
 fn load_pkg_page(
     config: &DocsConfig,
     pkg_name: &str,
     requested_version: Option<&str>,
     module_path: &str,
 ) -> Result<VersionedPkgPage, String> {
-    let (pkg_docs, current_version, _versions) =
+    let (mut pkg_docs, current_version, _versions) =
         load_cached_pkg_docs_versioned(config, pkg_name, requested_version)?;
+    let alias_target_docs = load_alias_target_docs(config, pkg_name, &pkg_docs);
+    let target_namespaces = alias_target_docs
+        .iter()
+        .flat_map(|(_, docs)| docs.namespaces.iter().cloned())
+        .collect::<Vec<_>>();
+    docs::hydrate_doc_aliases_from_targets(&mut pkg_docs.namespaces, &target_namespaces);
+
     let full_path = format!("{DEFAULT_ORG}/{pkg_name}");
     let nav = hot::pkg::docs_html::generate_pkg_nav_with_prefix(pkg_name, &pkg_docs, &full_path);
 
@@ -1147,19 +1259,30 @@ fn load_pkg_page(
         .iter()
         .find(|namespace| namespace.name == module_path || namespace.namespace == module_path)
         .ok_or_else(|| format!("Namespace '{module_path}' not found in package '{pkg_name}'"))?;
-    let html = hot::pkg::docs_html::generate_namespace_html_with_registry(
+    let mut alias_target_index =
+        hot::pkg::docs_html::build_alias_target_index(&pkg_docs, &full_path, "/pkg");
+    for (target_pkg_name, target_docs) in &alias_target_docs {
+        hot::pkg::docs_html::extend_alias_target_index(
+            &mut alias_target_index,
+            target_docs,
+            target_pkg_name,
+            "/pkg",
+        );
+    }
+    let html = hot::pkg::docs_html::generate_namespace_html_with_registry_and_aliases(
         namespace,
         &full_path,
         &pkg_docs.type_index,
         None,
         "/pkg",
+        &alias_target_index,
     );
     let title = format!("{} - {}", namespace.namespace, pkg_docs.meta.name);
     Ok(VersionedPkgPage {
         title,
         html,
         nav,
-        toc: Vec::new(),
+        toc: hot::pkg::docs_html::build_namespace_toc(namespace),
         current_version,
     })
 }
@@ -1453,6 +1576,96 @@ mod tests {
         let (html, _) = markdown_to_html_with_toc("# Demo\n\n```hot\nmain fn () { null }\n```");
         assert!(html.contains(r#"class="language-hot""#));
         assert!(html.contains("main fn"));
+    }
+
+    #[test]
+    fn infers_hot_for_bare_signature_blocks() {
+        let (html, _) = markdown_to_html_with_toc(
+            r#"
+```
+chat-with-tools(
+    model: Str,
+    messages: Vec<::ai::chat/Message>,
+    system: Str?,
+    tools: Vec<::ai::tool/Tool>?
+): ::ai::chat/ChatReply
+```
+"#,
+        );
+
+        assert!(html.contains(r#"class="language-hot""#));
+    }
+
+    #[test]
+    fn keeps_bare_protocol_blocks_plaintext() {
+        let (html, _) = markdown_to_html_with_toc(
+            r#"
+```
+[total_length:4][headers_length:4][prelude_crc:4][headers:*]
+```
+"#,
+        );
+
+        assert!(html.contains(r#"class="language-plaintext""#));
+        assert!(!html.contains(r#"class="language-hot""#));
+    }
+
+    #[test]
+    fn detects_stale_cached_package_docs_when_source_version_changes() {
+        let test_id = format!(
+            "hot-docs-cache-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(test_id);
+        let pkg_source_dir = root.join("src-pkgs");
+        let pkg_docs_dir = root.join("pkg-docs");
+        let pkg_dir = pkg_source_dir.join("demo");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::create_dir_all(pkg_docs_dir.join("demo").join("1.2.0")).unwrap();
+        fs::write(
+            pkg_dir.join("pkg.hot"),
+            r#"
+::hot::pkg ns
+
+hot.pkg.demo {
+  name: "hot.dev/demo",
+  version: "1.2.2",
+  hot-min-version: "1.0.0",
+  description: "Demo package",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: [],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            pkg_docs_dir.join("demo").join("versions.json"),
+            r#"{"latest":"1.2.0","versions":["1.2.0"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            pkg_docs_dir.join("demo").join("1.2.0").join("docs.json"),
+            "{}",
+        )
+        .unwrap();
+
+        let config = DocsConfig {
+            pkg_source_dir,
+            pkg_docs_dir,
+            ..DocsConfig::from_resources()
+        };
+
+        assert!(package_docs_cache_stale(&config, "demo", &pkg_dir));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use crate::lang::ast::{Meta, NsPath, Ref, TypeDef, Value};
 use crate::lang::parser::parse_hot_file;
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -122,7 +122,7 @@ pub struct DocFunction {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sends: Vec<String>,
     /// Set when this entry is a var alias to another function — covers
-    /// both plain re-exports (`re-exported ::lib/utility`) and the
+    /// both plain aliases (`utility-alias ::lib/utility`) and the
     /// wrapper-pattern (`tg-record-voice meta {...} ::tg-adapter/record-voice`).
     /// Holds the fully-qualified name the alias points at so the
     /// renderer can link out to the underlying implementation. `None`
@@ -158,7 +158,7 @@ pub struct DocType {
     /// For literal union types like `"user" | "assistant"`, the type expression as a string
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_alias: Option<String>,
-    /// Set when this type is documented through a public re-export.
+    /// Set when this type is documented through a public alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias_of: Option<String>,
 }
@@ -170,6 +170,18 @@ pub struct TypeField {
     pub type_annotation: Option<String>,
 }
 
+/// A documented top-level value/constant from a Hot source file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocValue {
+    pub name: String,
+    pub doc: Option<String>,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias_of: Option<String>,
+}
+
 /// A documented namespace
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocNamespace {
@@ -179,6 +191,8 @@ pub struct DocNamespace {
     pub no_doc: bool,        // If true, exclude from documentation
     pub functions: Vec<DocFunction>,
     pub types: Vec<DocType>,
+    #[serde(default)]
+    pub values: Vec<DocValue>,
     /// Context variable requirements for this namespace
     #[serde(default)]
     pub ctx: Option<CtxRequirements>,
@@ -609,8 +623,27 @@ fn build_type_index(namespaces: &[DocNamespace]) -> AHashMap<String, String> {
 }
 
 fn normalize_doc_aliases(namespaces: &mut [DocNamespace]) {
+    normalize_doc_aliases_with_targets(namespaces, &[]);
+}
+
+/// Hydrate aliases in `namespaces` using additional documented namespaces as
+/// possible targets. This is used by docs surfaces that can see dependency docs,
+/// so package facade aliases can show the target's docs/signatures/meta even
+/// when the target lives in another package.
+pub fn hydrate_doc_aliases_from_targets(
+    namespaces: &mut [DocNamespace],
+    target_namespaces: &[DocNamespace],
+) {
+    normalize_doc_aliases_with_targets(namespaces, target_namespaces);
+}
+
+fn normalize_doc_aliases_with_targets(
+    namespaces: &mut [DocNamespace],
+    target_namespaces: &[DocNamespace],
+) {
     let mut functions = AHashMap::new();
     let mut types = AHashMap::new();
+    let mut values = AHashMap::new();
 
     for ns in namespaces.iter() {
         for func in &ns.functions {
@@ -619,11 +652,40 @@ fn normalize_doc_aliases(namespaces: &mut [DocNamespace]) {
         for typ in &ns.types {
             types.insert(qualified_doc_name(&ns.namespace, &typ.name), typ.clone());
         }
+        for value in &ns.values {
+            values.insert(
+                qualified_doc_name(&ns.namespace, &value.name),
+                value.clone(),
+            );
+        }
+    }
+    for ns in target_namespaces {
+        for func in &ns.functions {
+            let key = qualified_doc_name(&ns.namespace, &func.name);
+            if !functions.contains_key(&key) {
+                functions.insert(key, func.clone());
+            }
+        }
+        for typ in &ns.types {
+            let key = qualified_doc_name(&ns.namespace, &typ.name);
+            if !types.contains_key(&key) {
+                types.insert(key, typ.clone());
+            }
+        }
+        for value in &ns.values {
+            let key = qualified_doc_name(&ns.namespace, &value.name);
+            if !values.contains_key(&key) {
+                values.insert(key, value.clone());
+            }
+        }
     }
 
     for ns in namespaces.iter_mut() {
+        let namespace = ns.namespace.clone();
+        let has_real_doc_definitions = doc_namespace_has_real_definitions(ns);
         let mut retained_functions = Vec::new();
         let mut moved_types = Vec::new();
+        let mut moved_values = Vec::new();
 
         for mut func in std::mem::take(&mut ns.functions) {
             if is_namespace_declaration_doc_function(&func) {
@@ -631,8 +693,17 @@ fn normalize_doc_aliases(namespaces: &mut [DocNamespace]) {
             }
 
             if let Some(alias_of) = func.alias_of.clone() {
+                if !doc_alias_visible_for_context(&namespace, has_real_doc_definitions, &alias_of) {
+                    continue;
+                }
+
                 if let Some(target_type) = types.get(&alias_of) {
                     moved_types.push(doc_type_from_function_alias(&func, target_type));
+                    continue;
+                }
+
+                if let Some(target_value) = values.get(&alias_of) {
+                    moved_values.push(doc_value_from_function_alias(&func, target_value));
                     continue;
                 }
 
@@ -649,12 +720,39 @@ fn normalize_doc_aliases(namespaces: &mut [DocNamespace]) {
 
         ns.functions = retained_functions;
         ns.types.extend(moved_types);
+        ns.values.extend(moved_values);
+
+        ns.types.retain(|typ| {
+            typ.alias_of
+                .as_ref()
+                .map(|alias_of| {
+                    doc_alias_visible_for_context(&namespace, has_real_doc_definitions, alias_of)
+                })
+                .unwrap_or(true)
+        });
+        ns.values.retain(|value| {
+            value
+                .alias_of
+                .as_ref()
+                .map(|alias_of| {
+                    doc_alias_visible_for_context(&namespace, has_real_doc_definitions, alias_of)
+                })
+                .unwrap_or(true)
+        });
 
         for typ in &mut ns.types {
             if let Some(alias_of) = typ.alias_of.clone()
                 && let Some(target_type) = types.get(&alias_of)
             {
                 hydrate_type_alias(typ, target_type);
+            }
+        }
+
+        for value in &mut ns.values {
+            if let Some(alias_of) = value.alias_of.clone()
+                && let Some(target_value) = values.get(&alias_of)
+            {
+                hydrate_value_alias(value, target_value);
             }
         }
     }
@@ -678,6 +776,333 @@ fn is_namespace_declaration_doc_function(func: &DocFunction) -> bool {
             .as_deref()
             .map(|target| target.ends_with('/'))
             .unwrap_or(false)
+}
+
+fn namespace_has_real_definitions(ns: &crate::lang::ast::Namespace) -> bool {
+    ns.scope
+        .vars
+        .iter()
+        .any(|(_, value)| !is_namespace_declaration_value(value) && !matches!(value, Value::Ref(_)))
+}
+
+fn doc_namespace_has_real_definitions(ns: &DocNamespace) -> bool {
+    ns.functions
+        .iter()
+        .any(|func| func.alias_of.is_none() && !is_namespace_declaration_doc_function(func))
+        || ns.types.iter().any(|typ| typ.alias_of.is_none())
+        || ns.values.iter().any(|value| value.alias_of.is_none())
+}
+
+fn doc_alias_visible_for_context(
+    namespace: &str,
+    has_real_definitions: bool,
+    alias_of: &str,
+) -> bool {
+    !has_real_definitions || alias_points_into_namespace_surface(alias_of, namespace)
+}
+
+fn alias_points_into_namespace_surface(alias_of: &str, namespace: &str) -> bool {
+    let Some((target_namespace, _)) = alias_of.rsplit_once('/') else {
+        return false;
+    };
+
+    target_namespace == namespace
+        || target_namespace
+            .strip_prefix(namespace)
+            .map(|rest| rest.starts_with("::"))
+            .unwrap_or(false)
+}
+
+fn internally_used_aliases(ns: &crate::lang::ast::Namespace) -> AHashSet<String> {
+    let alias_names: AHashSet<String> = ns
+        .scope
+        .vars
+        .iter()
+        .filter_map(|(var, value)| {
+            if matches!(value, Value::Ref(_)) && !is_namespace_declaration_value(value) {
+                Some(var.sym.name().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let current_namespace = ns.path.to_string();
+    alias_names
+        .iter()
+        .filter(|alias_name| {
+            ns.scope.vars.iter().any(|(var, value)| {
+                var.sym.name() != alias_name.as_str()
+                    && value_references_alias(value, alias_name, &current_namespace)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn value_references_alias(value: &Value, alias_name: &str, current_namespace: &str) -> bool {
+    match value {
+        Value::Val(val, type_info) => {
+            type_info
+                .as_deref()
+                .map(|typ| type_text_references_alias(typ, alias_name))
+                .unwrap_or(false)
+                || val_references_alias(val, alias_name, current_namespace)
+        }
+        Value::Ref(reference) => ref_references_alias(reference, alias_name, current_namespace),
+        Value::FnCall(call) => {
+            value_references_alias(&call.function, alias_name, current_namespace)
+                || call
+                    .args
+                    .iter()
+                    .any(|arg| value_references_alias(&arg.value, alias_name, current_namespace))
+        }
+        Value::Flow(flow) => flow
+            .expressions
+            .iter()
+            .any(|expr| value_references_alias(expr, alias_name, current_namespace)),
+        Value::Fn(fn_defs) => fn_defs
+            .iter()
+            .any(|fn_def| fn_def_references_alias(fn_def, alias_name, current_namespace)),
+        Value::TypeDef(type_def) => {
+            type_def_references_alias(type_def, alias_name, current_namespace)
+        }
+        Value::TypeImplementation(implementation) => {
+            type_text_references_alias(&implementation.source_type, alias_name)
+                || type_text_references_alias(&implementation.target_type, alias_name)
+                || value_references_alias(
+                    &implementation.implementation,
+                    alias_name,
+                    current_namespace,
+                )
+        }
+        Value::Unbound(unbound) => unbound.name == alias_name,
+        Value::Cond(_, condition, flow) => {
+            value_references_alias(condition, alias_name, current_namespace)
+                || flow
+                    .expressions
+                    .iter()
+                    .any(|expr| value_references_alias(expr, alias_name, current_namespace))
+        }
+        Value::CondDefault(flow) => flow
+            .expressions
+            .iter()
+            .any(|expr| value_references_alias(expr, alias_name, current_namespace)),
+        Value::TemplateLiteral(template) => template.parts.iter().any(|part| match part {
+            crate::lang::ast::TemplatePart::Text(_) => false,
+            crate::lang::ast::TemplatePart::Expression(expr) => {
+                value_references_alias(expr, alias_name, current_namespace)
+            }
+        }),
+        Value::Raw(inner) | Value::Do(inner) => {
+            value_references_alias(inner, alias_name, current_namespace)
+        }
+        Value::VariadicExpansion(name) => name == alias_name,
+        Value::MultipleValues(values) => {
+            let values_to_check: &[Value] =
+                if values.len() == 2 && matches!(values.first(), Some(Value::Ref(Ref::Var(_)))) {
+                    &values[1..]
+                } else {
+                    values
+                };
+            values_to_check
+                .iter()
+                .any(|value| value_references_alias(value, alias_name, current_namespace))
+        }
+        Value::Lambda(lambda) => {
+            fn_args_reference_alias(&lambda.args, alias_name)
+                || value_references_alias(&lambda.body, alias_name, current_namespace)
+        }
+        Value::Match(match_expr) => {
+            value_references_alias(&match_expr.value, alias_name, current_namespace)
+                || match_expr
+                    .arms
+                    .iter()
+                    .any(|arm| match_arm_references_alias(arm, alias_name, current_namespace))
+        }
+        Value::MatchArm(arm) => match_arm_references_alias(arm, alias_name, current_namespace),
+        Value::MapWithSpread {
+            base_entries,
+            spread_entries,
+        } => {
+            base_entries.iter().any(|(key, value)| {
+                val_references_alias(key, alias_name, current_namespace)
+                    || val_references_alias(value, alias_name, current_namespace)
+            }) || spread_entries
+                .iter()
+                .any(|(_, value)| value_references_alias(value, alias_name, current_namespace))
+        }
+        Value::Placeholder(_) => false,
+    }
+}
+
+fn ref_references_alias(reference: &Ref, alias_name: &str, current_namespace: &str) -> bool {
+    match reference {
+        Ref::Var(var_ref) => {
+            var_ref.var.sym.name() == alias_name
+                || var_deep_path_references_alias(&var_ref.var, alias_name)
+        }
+        Ref::Ns(ns_ref) => {
+            ns_ref.ns.to_string() == current_namespace
+                && ns_ref.function_name.as_deref() == Some(alias_name)
+        }
+    }
+}
+
+fn fn_def_references_alias(
+    fn_def: &crate::lang::ast::FnDef,
+    alias_name: &str,
+    current_namespace: &str,
+) -> bool {
+    fn_args_reference_alias(&fn_def.args, alias_name)
+        || fn_def
+            .return_type
+            .as_deref()
+            .map(|typ| type_text_references_alias(typ, alias_name))
+            .unwrap_or(false)
+        || value_references_alias(&fn_def.body, alias_name, current_namespace)
+}
+
+fn fn_args_reference_alias(args: &crate::lang::ast::FnArgs, alias_name: &str) -> bool {
+    args.args.iter().any(|arg| {
+        arg.type_annotation
+            .as_deref()
+            .map(|typ| type_text_references_alias(typ, alias_name))
+            .unwrap_or(false)
+    })
+}
+
+fn type_def_references_alias(
+    type_def: &TypeDef,
+    alias_name: &str,
+    current_namespace: &str,
+) -> bool {
+    type_def
+        .fields
+        .as_ref()
+        .map(|fields| {
+            fields.iter().any(|field| {
+                type_text_references_alias(&field.type_annotation, alias_name)
+                    || type_text_references_alias(&field.type_expr.to_string(), alias_name)
+            })
+        })
+        .unwrap_or(false)
+        || type_def
+            .type_alias
+            .as_ref()
+            .map(|type_expr| type_text_references_alias(&type_expr.to_string(), alias_name))
+            .unwrap_or(false)
+        || type_def
+            .variants
+            .as_ref()
+            .map(|variants| {
+                variants.iter().any(|variant| {
+                    variant
+                        .type_ref
+                        .as_deref()
+                        .map(|typ| type_text_references_alias(typ, alias_name))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+        || type_def
+            .constructor_functions
+            .as_ref()
+            .map(|constructors| {
+                constructors
+                    .iter()
+                    .any(|fn_def| fn_def_references_alias(fn_def, alias_name, current_namespace))
+            })
+            .unwrap_or(false)
+        || type_def
+            .implementations
+            .as_ref()
+            .map(|implementations| {
+                implementations.iter().any(|implementation| {
+                    type_text_references_alias(&implementation.source_type, alias_name)
+                        || type_text_references_alias(&implementation.target_type, alias_name)
+                        || value_references_alias(
+                            &implementation.implementation,
+                            alias_name,
+                            current_namespace,
+                        )
+                })
+            })
+            .unwrap_or(false)
+}
+
+fn match_arm_references_alias(
+    arm: &crate::lang::ast::MatchArm,
+    alias_name: &str,
+    current_namespace: &str,
+) -> bool {
+    arm.type_name
+        .as_deref()
+        .map(|typ| type_text_references_alias(typ, alias_name))
+        .unwrap_or(false)
+        || arm
+            .value_literal
+            .as_ref()
+            .map(|value| value_references_alias(value, alias_name, current_namespace))
+            .unwrap_or(false)
+        || value_references_alias(&arm.body, alias_name, current_namespace)
+}
+
+fn val_references_alias(val: &Val, alias_name: &str, current_namespace: &str) -> bool {
+    match val {
+        Val::Vec(values) => values
+            .iter()
+            .any(|value| val_references_alias(value, alias_name, current_namespace)),
+        Val::Map(map) => map.iter().any(|(key, value)| {
+            val_references_alias(key, alias_name, current_namespace)
+                || val_references_alias(value, alias_name, current_namespace)
+        }),
+        Val::Box(boxed) => boxed
+            .as_any()
+            .downcast_ref::<crate::lang::ast::AstNode>()
+            .map(|ast_node| value_references_alias(&ast_node.0, alias_name, current_namespace))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn var_deep_path_references_alias(var: &crate::lang::ast::Var, alias_name: &str) -> bool {
+    var.deep_path
+        .as_ref()
+        .map(|path| deep_path_references_alias(path, alias_name))
+        .unwrap_or(false)
+        || var
+            .deep_set
+            .as_ref()
+            .map(|path| deep_path_references_alias(path, alias_name))
+            .unwrap_or(false)
+}
+
+fn deep_path_references_alias(path: &crate::lang::ast::DeepPath, alias_name: &str) -> bool {
+    match path {
+        crate::lang::ast::DeepPath::DynamicIndex(name) => name == alias_name,
+        crate::lang::ast::DeepPath::Chain(left, right) => {
+            deep_path_references_alias(left, alias_name)
+                || deep_path_references_alias(right, alias_name)
+        }
+        _ => false,
+    }
+}
+
+fn type_text_references_alias(type_text: &str, alias_name: &str) -> bool {
+    type_text.match_indices(alias_name).any(|(idx, _)| {
+        let before = type_text[..idx].chars().next_back();
+        let after = type_text[idx + alias_name.len()..].chars().next();
+
+        !is_type_identifier_char(before)
+            && !matches!(before, Some('/') | Some(':'))
+            && !is_type_identifier_char(after)
+    })
+}
+
+fn is_type_identifier_char(ch: Option<char>) -> bool {
+    ch.map(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        .unwrap_or(false)
 }
 
 fn doc_type_from_function_alias(alias: &DocFunction, target: &DocType) -> DocType {
@@ -704,6 +1129,18 @@ fn doc_type_from_unresolved_function_alias(alias: &DocFunction) -> DocType {
         type_alias: None,
         alias_of: alias.alias_of.clone(),
     }
+}
+
+fn doc_value_from_function_alias(alias: &DocFunction, target: &DocValue) -> DocValue {
+    let mut value = DocValue {
+        name: alias.name.clone(),
+        doc: alias.doc.clone(),
+        value: String::new(),
+        type_annotation: None,
+        alias_of: alias.alias_of.clone(),
+    };
+    hydrate_value_alias(&mut value, target);
+    value
 }
 
 fn hydrate_function_alias(alias: &mut DocFunction, target: &DocFunction) {
@@ -750,6 +1187,18 @@ fn hydrate_type_alias(alias: &mut DocType, target: &DocType) {
     }
     if alias.type_alias.is_none() {
         alias.type_alias = target.type_alias.clone();
+    }
+}
+
+fn hydrate_value_alias(alias: &mut DocValue, target: &DocValue) {
+    if alias.doc.is_none() {
+        alias.doc = target.doc.clone();
+    }
+    if alias.value.is_empty() {
+        alias.value = target.value.clone();
+    }
+    if alias.type_annotation.is_none() {
+        alias.type_annotation = target.type_annotation.clone();
     }
 }
 
@@ -1132,12 +1581,14 @@ fn discover_namespaces(src_path: &Path) -> Result<Vec<DocNamespace>, String> {
             Ok(ns) => {
                 if ns.no_doc {
                     tracing::info!("Skipping namespace {} (no-doc: true)", ns.namespace);
-                } else if !ns.functions.is_empty() || !ns.types.is_empty() {
+                } else if !ns.functions.is_empty() || !ns.types.is_empty() || !ns.values.is_empty()
+                {
                     tracing::info!(
-                        "Found namespace {} with {} functions, {} types",
+                        "Found namespace {} with {} functions, {} types, {} values",
                         ns.namespace,
                         ns.functions.len(),
-                        ns.types.len()
+                        ns.types.len(),
+                        ns.values.len()
                     );
                     namespaces.push(ns.clone());
                 } else {
@@ -1169,6 +1620,7 @@ fn parse_namespace_from_text(path: &Path) -> Result<DocNamespace, String> {
     let mut namespace_doc = None;
     let mut functions = Vec::new();
     let mut types = Vec::new();
+    let values = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
@@ -1235,6 +1687,7 @@ fn parse_namespace_from_text(path: &Path) -> Result<DocNamespace, String> {
         no_doc: false, // Text parser doesn't support no-doc; use AST parser
         functions,
         types,
+        values,
         ctx: None,     // Text parser doesn't support ctx; use AST parser
         box_req: None, // Text parser doesn't support box; use AST parser
     })
@@ -1265,10 +1718,13 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
 
     let mut functions = Vec::new();
     let mut types = Vec::new();
+    let mut values = Vec::new();
 
     // Build a single resolver up front so all type strings get the same
     // alias/var-import treatment.
     let resolver = TypeResolver::from_namespace(ns);
+    let internal_aliases = internally_used_aliases(ns);
+    let has_real_definitions = namespace_has_real_definitions(ns);
 
     // Iterate over all vars in the namespace
     for (var, value) in &ns.scope.vars {
@@ -1284,7 +1740,26 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
             continue;
         }
 
+        if let Value::Ref(ref_value) = value {
+            let alias_of = format_ref_target(ref_value, &namespace);
+            if internal_aliases.contains(&var_name)
+                || (has_real_definitions
+                    && !alias_points_into_namespace_surface(&alias_of, &namespace))
+            {
+                continue;
+            }
+        }
+
         match value {
+            Value::Val(val, type_info) => {
+                values.push(DocValue {
+                    name: var_name,
+                    doc: extract_doc_from_meta(var_meta),
+                    value: val.format_hot(0),
+                    type_annotation: type_info.clone(),
+                    alias_of: None,
+                });
+            }
             Value::TypeDef(type_def) => {
                 types.push(doc_type_from_type_def(
                     var_name, type_def, var_meta, &resolver, None,
@@ -1345,8 +1820,8 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
             Value::Ref(ref_value) => {
                 // Var aliases are a first-class language feature, not
                 // just a wrapper-pattern affordance. Surface them in
-                // package docs so plain re-exports
-                // (`re-exported ::lib/utility`) and meta-bearing
+                // package docs so plain aliases
+                // (`utility-alias ::lib/utility`) and meta-bearing
                 // wrappers (`tg-record-voice meta {...} ::tg/record-voice`)
                 // both appear with the alias's name as a documented
                 // entity that links out to the target.
@@ -1387,6 +1862,17 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
                         &resolver,
                         Some(alias_of),
                     ));
+                    continue;
+                }
+
+                if let Some((_, Value::Val(val, type_info))) = target_entry {
+                    values.push(DocValue {
+                        name: var_name,
+                        doc,
+                        value: val.format_hot(0),
+                        type_annotation: type_info.clone(),
+                        alias_of: Some(alias_of),
+                    });
                     continue;
                 }
 
@@ -1470,6 +1956,7 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
         no_doc: namespace_no_doc,
         functions,
         types,
+        values,
         ctx: namespace_ctx,
         box_req: namespace_box_req,
     })
@@ -2903,16 +3390,157 @@ mod tests {
     }
 
     #[test]
+    fn top_level_literals_appear_as_doc_values() {
+        let source = r#"
+::anthropic ns
+
+BASE_URL meta { doc: "Anthropic API base URL." } "https://api.anthropic.com"
+"#;
+        let ns = parse_doc_namespace(source);
+        let value = ns
+            .values
+            .iter()
+            .find(|value| value.name == "BASE_URL")
+            .expect("top-level literal should appear in docs values");
+
+        assert_eq!(value.value, "\"https://api.anthropic.com\"");
+        assert_eq!(value.doc.as_deref(), Some("Anthropic API base URL."));
+    }
+
+    #[test]
+    fn value_alias_appears_in_values_not_functions() {
+        let source = r#"
+::facade ns
+
+BASE_URL ::impl/BASE_URL
+
+::impl ns
+
+BASE_URL meta { doc: "Implementation API base URL." } "https://api.example.com"
+"#;
+        let ns = parse_doc_namespace(source);
+        assert!(ns.functions.iter().all(|func| func.name != "BASE_URL"));
+
+        let value = ns
+            .values
+            .iter()
+            .find(|value| value.name == "BASE_URL")
+            .expect("value alias should appear in docs values");
+
+        assert_eq!(value.alias_of.as_deref(), Some("::impl/BASE_URL"));
+        assert_eq!(value.value, "\"https://api.example.com\"");
+        assert_eq!(value.doc.as_deref(), Some("Implementation API base URL."));
+    }
+
+    #[test]
+    fn implementation_aliases_are_hidden_when_namespace_has_real_defs() {
+        let source = r#"
+::anthropic::api ns
+
+http-request ::hot::http/request
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+request meta { doc: "Anthropic request wrapper." }
+fn (method: Str, url: Str): HttpResponse {
+    http-request(HttpResponse({method, url}))
+}
+"#;
+        let mut namespaces = vec![parse_doc_namespace(source)];
+        normalize_doc_aliases(&mut namespaces);
+        let ns = namespaces
+            .first()
+            .expect("normalized namespace should be present");
+
+        assert!(
+            ns.functions.iter().all(|func| func.name != "http-request"),
+            "local function aliases should be hidden from implementation namespaces"
+        );
+        assert!(
+            ns.types.iter().all(|typ| typ.name != "HttpResponse"),
+            "local type aliases should be hidden from implementation namespaces"
+        );
+        assert!(
+            ns.functions
+                .iter()
+                .all(|func| func.name != "is-ok-response"),
+            "unused external aliases should be hidden from implementation namespaces"
+        );
+        let request = ns
+            .functions
+            .iter()
+            .find(|func| func.name == "request")
+            .expect("real wrapper function should remain documented");
+        assert_eq!(request.doc.as_deref(), Some("Anthropic request wrapper."));
+    }
+
+    #[test]
+    fn unused_aliases_remain_documented_in_mixed_namespaces() {
+        let source = r#"
+::facade ns
+
+public-helper ::facade::impl/helper
+
+real meta { doc: "Real function." } fn (): Str { "ok" }
+
+::facade::impl ns
+
+helper meta { doc: "Target helper." } fn (name: Str): Str { name }
+"#;
+        let mut namespaces = vec![parse_doc_namespace(source)];
+        normalize_doc_aliases(&mut namespaces);
+        let ns = namespaces
+            .first()
+            .expect("normalized namespace should be present");
+
+        let alias = ns
+            .functions
+            .iter()
+            .find(|func| func.name == "public-helper")
+            .expect("unused alias should remain documented");
+        assert_eq!(alias.alias_of.as_deref(), Some("::facade::impl/helper"));
+        assert_eq!(alias.doc.as_deref(), Some("Target helper."));
+        assert_eq!(alias.signatures.len(), 1);
+        assert!(
+            ns.functions.iter().any(|func| func.name == "real"),
+            "real functions should remain documented alongside unused aliases"
+        );
+    }
+
+    #[test]
+    fn discovery_keeps_value_only_namespaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("anthropic.hot"),
+            r#"
+::anthropic ns
+
+BASE_URL "https://api.anthropic.com"
+"#,
+        )
+        .expect("write source");
+
+        let namespaces = discover_namespaces(dir.path()).expect("discover namespaces");
+        let ns = namespaces
+            .iter()
+            .find(|ns| ns.namespace == "::anthropic")
+            .expect("value-only namespace should be documented");
+
+        assert_eq!(ns.values.len(), 1);
+        assert_eq!(ns.values[0].name, "BASE_URL");
+    }
+
+    #[test]
     fn plain_var_alias_appears_in_docs_with_alias_of_link() {
-        // No `meta` on the alias — just `re-exported ::lib::pkg/utility`.
-        // This is the general var-alias case (re-export / shorthand)
+        // No `meta` on the alias — just `utility-alias ::lib::pkg/utility`.
+        // This is the general var-alias case (alias / shorthand)
         // and should produce a `DocFunction` with `alias_of` set.
         // Note: alias-bearing namespace comes first because
         // `parse_namespace_from_ast` returns the first one found.
         let source = r#"
 ::user::wrapper ns
 
-re-exported ::lib::pkg/utility
+utility-alias ::lib::pkg/utility
 
 ::lib::pkg ns
 utility meta { doc: "library utility" } fn (n: Int): Int { n }
@@ -2921,10 +3549,10 @@ utility meta { doc: "library utility" } fn (n: Int): Int { n }
         let func = ns
             .functions
             .iter()
-            .find(|f| f.name == "re-exported")
+            .find(|f| f.name == "utility-alias")
             .expect("plain alias should appear in docs");
         assert_eq!(func.alias_of.as_deref(), Some("::lib::pkg/utility"));
-        // Plain re-export inherits the target's doc string so users
+        // Plain alias inherits the target's doc string so users
         // see what the function does without bouncing.
         assert_eq!(func.doc.as_deref(), Some("library utility"));
         // And the target's signature.
@@ -3019,14 +3647,14 @@ Response meta { doc: "response type" } type {
 
         assert!(
             ns.functions.iter().all(|f| f.name != "Response"),
-            "type re-export should not appear in functions"
+            "type alias should not appear in functions"
         );
 
         let typ = ns
             .types
             .iter()
             .find(|t| t.name == "Response")
-            .expect("type re-export should appear in types");
+            .expect("type alias should appear in types");
         assert_eq!(typ.alias_of.as_deref(), Some("::lib::pkg/Response"));
         assert_eq!(typ.doc.as_deref(), Some("response type"));
         assert_eq!(typ.fields.len(), 1);
@@ -3034,7 +3662,7 @@ Response meta { doc: "response type" } type {
     }
 
     #[test]
-    fn normalize_doc_aliases_hydrates_cross_namespace_re_exports() {
+    fn normalize_doc_aliases_hydrates_cross_namespace_aliases() {
         let mut namespaces = vec![
             DocNamespace {
                 name: "aws/lambda".to_string(),
@@ -3094,6 +3722,7 @@ Response meta { doc: "response type" } type {
                     type_alias: None,
                     alias_of: Some("::aws::lambda::invoke/InvokeResponse".to_string()),
                 }],
+                values: Vec::new(),
                 ctx: None,
                 box_req: None,
             },
@@ -3136,6 +3765,7 @@ Response meta { doc: "response type" } type {
                     type_alias: None,
                     alias_of: None,
                 }],
+                values: Vec::new(),
                 ctx: None,
                 box_req: None,
             },
@@ -3157,7 +3787,7 @@ Response meta { doc: "response type" } type {
             .functions
             .iter()
             .find(|f| f.name == "invoke")
-            .expect("function re-export should stay in functions");
+            .expect("function alias should stay in functions");
         assert_eq!(func.doc.as_deref(), Some("Invoke a Lambda."));
         assert_eq!(func.signatures.len(), 1);
 
@@ -3165,7 +3795,7 @@ Response meta { doc: "response type" } type {
             .types
             .iter()
             .find(|t| t.name == "InvokeResponse")
-            .expect("type re-export should stay in types");
+            .expect("type alias should stay in types");
         assert_eq!(typ.doc.as_deref(), Some("Invoke response."));
         assert_eq!(typ.fields.len(), 1);
 

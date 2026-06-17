@@ -2,7 +2,7 @@
 
 hot.pkg.aws-lambda {
   name: "hot.dev/aws-lambda",
-  version: "1.2.0",
+  version: "1.2.1",
   hot-min-version: "1.2.0",
   description: "AWS Lambda API bindings for serverless function invocation and management.",
   author: "Hot Dev",

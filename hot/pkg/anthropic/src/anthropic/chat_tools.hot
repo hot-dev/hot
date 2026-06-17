@@ -3,7 +3,7 @@ meta {
     doc: """
     Anthropic adapter that satisfies the `::ai::chat/run-loop` contract:
 
-    ```
+    ```hot
     chat-with-tools(
         model: Str,
         messages: Vec<::ai::chat/Message>,
@@ -240,7 +240,7 @@ meta {
     Compatible with the `count-tokens-fn` slot on
     `::ai::chat/ChatOptions`:
 
-    ```
+    ```hot
     (messages: Vec<Message>, model: Str): Int
     ```
 

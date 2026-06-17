@@ -219,6 +219,18 @@ main {
   font-size: 1.25rem;
 }
 
+.docs-content .alias-target {
+  font-size: 0.875rem;
+  font-weight: 500;
+  letter-spacing: normal;
+}
+
+.docs-content .alias-target-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 .docs-content h4 {
   margin: 1.5rem 0 0.5rem;
   font-size: 1.125rem;

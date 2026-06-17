@@ -1048,13 +1048,27 @@ async fn namespace_detail_handler_internal(
         (id.clone(), format!("/docs/{}/pkg", project_name))
     };
 
+    let alias_target_index = if is_project_ns {
+        AHashMap::new()
+    } else {
+        let id = pkg_id.as_ref().unwrap_or(&project_name);
+        cached_docs
+            .dependency_docs
+            .get(id)
+            .map(|pkg_docs| {
+                docs_html::build_alias_target_index(pkg_docs, &render_pkg_name, &base_url)
+            })
+            .unwrap_or_default()
+    };
+
     // Generate HTML content using the shared module with correct base_url
-    let content = docs_html::generate_namespace_html_with_registry(
+    let content = docs_html::generate_namespace_html_with_registry_and_aliases(
         namespace,
         &render_pkg_name,
         &AHashMap::new(), // type_index - not used in hot_app currently
         None,             // cross_pkg_registry - not used in hot_app currently
         &base_url,
+        &alias_target_index,
     );
 
     // Build navigation and TOC using shared module
