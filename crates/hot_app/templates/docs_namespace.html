@@ -157,6 +157,17 @@
 .dark .docs-content .sends-badge { background: rgb(49 46 129 / 0.4); color: rgb(165 180 252); }
 .docs-content .ns-meta-pills { margin-left: 0.5rem; }
 .docs-content .ns-meta-pills .meta-badge { margin-left: 0.25rem; }
+.docs-content .alias-target {
+  font-size: 0.875rem;
+  font-weight: 500;
+  letter-spacing: normal;
+}
+.docs-content .alias-target-label {
+  color: rgb(107 114 128);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.dark .docs-content .alias-target-label { color: rgb(156 163 175); }
 .docs-content .meta-details {
   background: rgb(249 250 251);
   border: 1px solid rgb(229 231 235);
@@ -643,30 +654,21 @@ html.dark .docs-content pre.deps-code-block {
                 Project Namespaces
                 {% endif %}
             </h3>
-            <nav class="space-y-1">
-                {% for item in nav %}
+            <nav class="space-y-1 border-l border-gray-200 dark:border-gray-700">
+                {% for item in nav_flat %}
                 {% if item.path.is_some() %}
                 {% let item_path = item.path.as_ref().unwrap() %}
                 <a href="{{ item_path }}"
-                   class="flex items-center px-3 py-2 text-sm rounded-md transition-all duration-200
-                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 dark:text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium{% else %}text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-[#222]/50{% endif %}">
+                   style="padding-left: calc(0.5rem + {{ item.indent }} * 0.75rem)"
+                   class="flex items-center pr-2 py-1 text-sm rounded-r-md transition-all duration-200
+                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500 -ml-px{% else %}text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-[#222]/50{% endif %}">
                     {{ item.title }}
                 </a>
                 {% else %}
-                <div class="px-3 py-2 text-sm font-medium text-gray-500 dark:text-gray-400 mt-4">
+                <div style="padding-left: calc(0.5rem + {{ item.indent }} * 0.75rem)" class="pr-2 py-1 text-sm font-medium text-gray-500 dark:text-gray-400">
                     {{ item.title }}
                 </div>
                 {% endif %}
-                {% for child in item.children %}
-                {% if child.path.is_some() %}
-                {% let child_path = child.path.as_ref().unwrap() %}
-                <a href="{{ child_path }}"
-                   class="flex items-center pl-6 pr-3 py-1.5 text-sm rounded-md transition-all duration-200
-                          {% if current_path == child_path.as_str() %}text-red-600 dark:text-red-400 dark:text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500{% else %}text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-[#222]/50 border-l border-gray-200 dark:border-gray-700{% endif %}">
-                    {{ child.title }}
-                </a>
-                {% endif %}
-                {% endfor %}
                 {% endfor %}
             </nav>
         </div>

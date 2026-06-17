@@ -5,19 +5,19 @@ AWS Bedrock API bindings for foundation model inference (Claude, Titan, Llama, M
 ## Usage
 
 ```hot
-::aws::bedrock ns
+::bedrock ::aws::bedrock
 
 // Converse API (unified multi-model interface)
 // Use cross-region inference profile format: us.<provider>.<model>
-response converse("us.anthropic.claude-3-haiku-20240307-v1:0", [
-  {role: "user", content: [{text: "Explain quantum computing"}]}
+response ::bedrock/converse("us.anthropic.claude-3-haiku-20240307-v1:0", [
+    {role: "user", content: [{text: "Explain quantum computing"}]}
 ])
 
 // List available foundation models
-models list-foundation-models()
+models ::bedrock/list-foundation-models()
 
 // Get model details
-model get-foundation-model("anthropic.claude-3-haiku-20240307-v1:0")
+model ::bedrock/get-foundation-model("anthropic.claude-3-haiku-20240307-v1:0")
 ```
 
 ## Supported Models

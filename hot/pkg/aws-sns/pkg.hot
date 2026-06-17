@@ -2,7 +2,7 @@
 
 hot.pkg.aws-sns {
   name: "hot.dev/aws-sns",
-  version: "1.2.0",
+  version: "1.2.1",
   hot-min-version: "1.2.0",
   description: "AWS SNS API bindings for pub/sub messaging and notifications.",
   author: "Hot Dev",

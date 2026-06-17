@@ -605,6 +605,9 @@
   .-ml-1 {
     margin-left: calc(var(--spacing) * -1);
   }
+  .-ml-px {
+    margin-left: -1px;
+  }
   .ml-0\.5 {
     margin-left: calc(var(--spacing) * 0.5);
   }
@@ -1876,9 +1879,6 @@
   }
   .pl-5 {
     padding-left: calc(var(--spacing) * 5);
-  }
-  .pl-6 {
-    padding-left: calc(var(--spacing) * 6);
   }
   .pl-8 {
     padding-left: calc(var(--spacing) * 8);
@@ -4502,11 +4502,6 @@
   .dark\:text-red-500 {
     &:where(.dark, .dark *) {
       color: var(--color-red-500);
-    }
-  }
-  .dark\:text-red-600 {
-    &:where(.dark, .dark *) {
-      color: var(--color-red-600);
     }
   }
   .dark\:text-white {

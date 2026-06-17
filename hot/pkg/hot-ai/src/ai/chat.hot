@@ -813,7 +813,7 @@ meta {
 
     Contract matches the `count-tokens-fn` slot:
 
-    ```
+    ```hot
     (messages: Vec<Message>, model: Str): Int
     ```
     """
@@ -846,7 +846,7 @@ meta {
     - `chat-stream-fn` — streaming counterpart used by
       `run-loop-stream`. Contract:
 
-      ```
+      ```hot
       (model: Str, messages: Vec<Message>, system: Str?,
        tools: Vec<Tool>?, on-delta: Fn) -> ChatReply
       ```
@@ -994,7 +994,7 @@ meta {
 
     `opts.chat-fn` must match the tools-aware contract:
 
-    ```
+    ```hot
     (model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?) -> ChatReply
     ```
 
@@ -1303,7 +1303,7 @@ meta {
 
     `opts.chat-stream-fn` must match the streaming contract:
 
-    ```
+    ```hot
     (model: Str, messages: Vec<Message>, system: Str?,
      tools: Vec<Tool>?, on-delta: Fn) -> ChatReply
     ```
