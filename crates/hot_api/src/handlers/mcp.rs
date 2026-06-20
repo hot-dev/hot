@@ -32,7 +32,7 @@ use hot::val::Val;
 use crate::access_log::OptionalAccessId;
 use crate::auth::{AuthContext, authenticate_token};
 use crate::domain_resolver::ResolvedDomain;
-use crate::rate_limit::{self, PublicRateLimitMode, RateLimitExceeded};
+use crate::rate_limit::{self, PublicRateLimitMode};
 use axum::http::HeaderMap;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -45,19 +45,6 @@ use uuid::Uuid;
 
 use crate::ApiStateData;
 use crate::models::ApiErrorResponse;
-
-fn mcp_rate_limit_error(exceeded: RateLimitExceeded) -> (StatusCode, Json<ApiErrorResponse>) {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(ApiErrorResponse::new(
-            "rate_limit_exceeded",
-            format!(
-                "{} Retry after {} seconds.",
-                exceeded.message, exceeded.retry_after_secs
-            ),
-        )),
-    )
-}
 
 // ============================================================================
 // MCP Protocol Types
@@ -809,14 +796,16 @@ async fn mcp_handler_inner(
         "tools/list" => {
             let auth = try_authenticate(db, headers).await?;
             let ctx = source.resolve(db, auth).await?;
-            rate_limit::check_org_rate_limit(
+            if let Err(exceeded) = rate_limit::check_org_rate_limit(
                 db,
                 &ctx.org.org_id,
                 PublicRateLimitMode::from_conf(conf),
                 "mcp-tools-list",
             )
             .await
-            .map_err(mcp_rate_limit_error)?;
+            {
+                return Ok(rate_limit::rate_limit_response(exceeded));
+            }
             handle_tools_list(db, &ctx, request.id)
                 .await
                 .map(|r| r.into_response())
@@ -824,14 +813,16 @@ async fn mcp_handler_inner(
         "tools/call" => {
             let auth = try_authenticate(db, headers).await?;
             let ctx = source.resolve(db, auth).await?;
-            rate_limit::check_org_rate_limit(
+            if let Err(exceeded) = rate_limit::check_org_rate_limit(
                 db,
                 &ctx.org.org_id,
                 PublicRateLimitMode::from_conf(conf),
                 "mcp-tools-call",
             )
             .await
-            .map_err(mcp_rate_limit_error)?;
+            {
+                return Ok(rate_limit::rate_limit_response(exceeded));
+            }
 
             let pubsub = match stream_pubsub.as_ref() {
                 Some(p) => p,
@@ -1063,9 +1054,12 @@ async fn handle_tools_call_streaming(
     }
 
     let inflight_guard =
-        rate_limit::check_public_org_inflight(db, conf, &ctx.org.org_id, "mcp-tools-call")
+        match rate_limit::check_public_org_inflight(db, conf, &ctx.org.org_id, "mcp-tools-call")
             .await
-            .map_err(mcp_rate_limit_error)?;
+        {
+            Ok(guard) => guard,
+            Err(exceeded) => return Ok(rate_limit::rate_limit_response(exceeded)),
+        };
 
     // Construct the Hot function name from ns/var
     let function_name = format!("{}/{}", tool.ns, tool.var);
