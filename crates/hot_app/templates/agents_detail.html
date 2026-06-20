@@ -20,7 +20,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.5L10.5 19l3 2.5" />
                         <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
                     </svg>
-                    <h1 class="text-xl font-bold text-gray-900 dark:text-white">{{ agent.display_name }}</h1>
+                    <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white">{{ agent.display_name }}</h1>
                 </div>
                 <div class="text-xs text-gray-500 dark:text-gray-400 font-mono mb-2">{{ agent.namespace_qualified_name }}</div>
                 {% if !agent.description.is_empty() %}

@@ -26,7 +26,7 @@
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ page_context.css_url }}">
 </head>
 <body class="flex flex-col min-h-screen bg-gray-50 dark:bg-gray-900 grid-bg">
@@ -61,7 +61,7 @@
 
             <!-- Sign In Button -->
             <div class="flex items-center">
-                <a href="/signin" class="bg-hot-red-500 hover:bg-hot-red-600 text-white text-sm sm:text-base font-medium py-1.5 sm:py-2 px-3 sm:px-4 rounded-md transition-colors duration-200">
+                <a href="/signin" class="bg-hot-red-700 hover:bg-hot-red-800 text-white text-sm sm:text-base font-medium py-1.5 sm:py-2 px-3 sm:px-4 rounded-md transition-colors duration-200 focus-ring">
                     Sign In
                 </a>
             </div>
@@ -89,33 +89,5 @@
         }
     </style>
 
-    <script>
-        // Theme toggle functionality
-        document.addEventListener('DOMContentLoaded', () => {
-            const isDark = document.documentElement.classList.contains('dark');
-            const themeToggle = document.getElementById('theme-toggle');
-
-            // Set initial theme toggle state
-            themeToggle.checked = isDark;
-
-            // Handle theme toggle changes
-            themeToggle.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    document.documentElement.classList.add('dark');
-                    localStorage.setItem('theme', 'dark');
-                } else {
-                    document.documentElement.classList.remove('dark');
-                    localStorage.setItem('theme', 'light');
-                }
-                // Dispatch theme change event after DOM update
-                setTimeout(() => {
-                    const isDark = document.documentElement.classList.contains('dark');
-                    window.dispatchEvent(new CustomEvent('themeChanged', {
-                        detail: { isDark }
-                    }));
-                }, 0);
-            });
-        });
-    </script>
 </body>
 </html>

@@ -8,15 +8,15 @@
   --font-sans: 'Fira Sans', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Fira Code', ui-monospace, monospace;
 
-  /* Hot Red Palette - centered around #fe6565 for better contrast and pop */
+  /* Hot Red Palette - centered around #fe6565 for brand accents */
   --color-hot-red-50: #fff1f1;    /* Very light red for backgrounds */
   --color-hot-red-100: #ffe1e1;   /* Light red for hover backgrounds */
   --color-hot-red-200: #ffc7c7;   /* Lighter red */
   --color-hot-red-300: #ff9d9d;   /* Light-medium red */
-  --color-hot-red-500: #ff7676;   /* Medium red */
-  --color-hot-red-500: #fe6565;   /* Primary brand red - high contrast */
+  --color-hot-red-400: #ff7676;   /* Medium red */
+  --color-hot-red-500: #fe6565;   /* Primary brand red */
   --color-hot-red-600: #f54545;   /* Darker red for hover */
-  --color-hot-red-700: #e02b2b;   /* Dark red */
+  --color-hot-red-700: #e02b2b;   /* Dark red for white text */
   --color-hot-red-800: #c01f1f;   /* Very dark red */
   --color-hot-red-900: #9a1616;   /* Deepest red */
   --color-hot-orange-500: #f98704;
@@ -35,7 +35,7 @@
 
 /* Custom styles that extend Tailwind */
 html {
-  font-size: 98%;
+  font-size: 100%;
 }
 
 /* Keep source code textual: Fira Code turns operators like `|>` into ligatures. */
@@ -50,10 +50,38 @@ pre,
 }
 
 :root {
-  --hot-red: #ce262d;
-  --hot-red-hover: #e95712;
+  --hot-red: var(--color-hot-red-500);
+  --hot-red-hover: var(--color-hot-red-600);
   --hot-orange: #f98704;
   --hot-orange-hover: #ea7c04;
+}
+
+.focus-ring {
+  outline: none;
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid var(--color-hot-red-500);
+  outline-offset: 2px;
+}
+
+.bg-hot-red-500.text-white {
+  background-color: var(--color-hot-red-700);
+}
+
+.bg-hot-red-500.text-white:hover {
+  background-color: var(--color-hot-red-800);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Simplified glass effect using Tailwind utilities */
@@ -367,7 +395,7 @@ pre,
   transition: box-shadow 0.15s, opacity 0.15s, border-color 0.15s;
   box-sizing: border-box;
   user-select: none;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   overflow: hidden;
 }
 
@@ -522,7 +550,7 @@ pre,
 }
 
 .ag-tip-dim { opacity: 0.6; }
-.ag-tip-mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.6875rem; }
+.ag-tip-mono { font-family: var(--font-mono); font-size: 0.6875rem; }
 
 /* ===================================================================
    Agent Graph — Dark mode

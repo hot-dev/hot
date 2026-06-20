@@ -181,9 +181,11 @@
     --color-hot-red-50: #fff1f1;
     --color-hot-red-200: #ffc7c7;
     --color-hot-red-300: #ff9d9d;
+    --color-hot-red-400: #ff7676;
     --color-hot-red-500: #fe6565;
     --color-hot-red-600: #f54545;
     --color-hot-red-700: #e02b2b;
+    --color-hot-red-800: #c01f1f;
     --color-hot-red-900: #9a1616;
   }
 }
@@ -1556,6 +1558,9 @@
   .bg-hot-red-600 {
     background-color: var(--color-hot-red-600);
   }
+  .bg-hot-red-700 {
+    background-color: var(--color-hot-red-700);
+  }
   .bg-indigo-50 {
     background-color: var(--color-indigo-50);
   }
@@ -2624,6 +2629,13 @@
     &:hover {
       @media (hover: hover) {
         background-color: var(--color-hot-red-700);
+      }
+    }
+  }
+  .hover\:bg-hot-red-800 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--color-hot-red-800);
       }
     }
   }
@@ -4413,6 +4425,11 @@
       color: var(--color-hot-red-200);
     }
   }
+  .dark\:text-hot-red-400 {
+    &:where(.dark, .dark *) {
+      color: var(--color-hot-red-400);
+    }
+  }
   .dark\:text-indigo-300 {
     &:where(.dark, .dark *) {
       color: var(--color-indigo-300);
@@ -5037,17 +5054,38 @@
   }
 }
 html {
-  font-size: 98%;
+  font-size: 100%;
 }
 .font-mono, code, kbd, samp, pre, [class*="language-"] {
   font-variant-ligatures: none;
   font-feature-settings: "liga" 0, "calt" 0;
 }
 :root {
-  --hot-red: #ce262d;
-  --hot-red-hover: #e95712;
+  --hot-red: var(--color-hot-red-500);
+  --hot-red-hover: var(--color-hot-red-600);
   --hot-orange: #f98704;
   --hot-orange-hover: #ea7c04;
+}
+.focus-ring {
+  outline: none;
+}
+.focus-ring:focus-visible {
+  outline: 2px solid var(--color-hot-red-500);
+  outline-offset: 2px;
+}
+.bg-hot-red-500.text-white {
+  background-color: var(--color-hot-red-700);
+}
+.bg-hot-red-500.text-white:hover {
+  background-color: var(--color-hot-red-800);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 .glass {
   backdrop-filter: blur(10px);
@@ -5291,7 +5329,7 @@ html {
   transition: box-shadow 0.15s, opacity 0.15s, border-color 0.15s;
   box-sizing: border-box;
   user-select: none;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   overflow: hidden;
 }
 .ag-node:hover {
@@ -5422,7 +5460,7 @@ html {
   opacity: 0.6;
 }
 .ag-tip-mono {
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--font-mono);
   font-size: 0.6875rem;
 }
 .dark .ag-node {
