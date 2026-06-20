@@ -496,10 +496,9 @@ pub async fn stream_metrics_handler(
                 {project_join_run}
                 WHERE r.env_id = ? AND r.run_type_id != 7 {project_clause_run} {time_clause_run}"#,
             );
-            let mut run_qb =
-                sqlx::query_as(sqlx::AssertSqlSafe(run_query.as_str())).bind(env_id.to_string());
+            let mut run_qb = sqlx::query_as(sqlx::AssertSqlSafe(run_query.as_str())).bind(env_id);
             if let Some(ref pid) = project_id {
-                run_qb = run_qb.bind(pid.to_string());
+                run_qb = run_qb.bind(pid);
             }
             let (total_runs, running_count, succeeded_count, failed_count, cancelled_count): (
                 i64,
@@ -524,7 +523,7 @@ pub async fn stream_metrics_handler(
             );
             let (total_events, handled_events): (i64, i64) =
                 sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str()))
-                    .bind(env_id.to_string())
+                    .bind(env_id)
                     .fetch_one(sqlite_pool)
                     .await
                     .unwrap_or_else(|e| {
@@ -537,7 +536,7 @@ pub async fn stream_metrics_handler(
                 time_clause_stream
             );
             let total_streams: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str()))
-                .bind(env_id.to_string())
+                .bind(env_id)
                 .fetch_one(sqlite_pool)
                 .await
                 .unwrap_or_else(|e| {
@@ -562,10 +561,9 @@ pub async fn stream_metrics_handler(
                 {project_join_task}
                 WHERE t.env_id = ? {project_clause_task} {time_clause_task}"#,
             );
-            let mut task_qb =
-                sqlx::query_as(sqlx::AssertSqlSafe(task_query.as_str())).bind(env_id.to_string());
+            let mut task_qb = sqlx::query_as(sqlx::AssertSqlSafe(task_query.as_str())).bind(env_id);
             if let Some(ref pid) = project_id {
-                task_qb = task_qb.bind(pid.to_string());
+                task_qb = task_qb.bind(pid);
             }
             let (total_tasks, tasks_running, tasks_completed, tasks_failed, total_cus): (
                 i64,
