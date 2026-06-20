@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -99,15 +100,10 @@ pub async fn keys_list_handler(
     breadcrumbs.push(templates::BreadcrumbItem::current("API Keys".to_string()));
 
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     const KEYS_PER_PAGE: i64 = 10;
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * KEYS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, KEYS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get API keys for current environment
     let (api_keys, total_keys) = if let Some(env) = &session.current_env {
@@ -132,17 +128,12 @@ pub async fn keys_list_handler(
     };
 
     // Calculate pagination info
-    let total_pages = if total_keys > 0 {
-        (total_keys + KEYS_PER_PAGE - 1) / KEYS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_keys, &page);
+    let total_pages = pagination.total_pages;
+    let has_next_page = pagination.has_next_page;
+    let has_prev_page = pagination.has_prev_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     let template = templates::ApiKeysList {
         title: "API Keys",

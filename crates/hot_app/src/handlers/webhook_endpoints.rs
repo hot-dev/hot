@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -93,13 +94,10 @@ pub async fn webhook_service_detail_handler(
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     const ITEMS_PER_PAGE: i64 = 20;
-    let offset = (current_page_num - 1) * ITEMS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, ITEMS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Build base URL from session org/env
     let org_slug = session
@@ -175,15 +173,12 @@ pub async fn webhook_service_detail_handler(
         (Vec::new(), 0)
     };
 
-    let total_pages = if total_endpoints > 0 {
-        (total_endpoints + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_endpoints, &page);
+    let total_pages = pagination.total_pages;
+    let has_next_page = pagination.has_next_page;
+    let has_prev_page = pagination.has_prev_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     let template = templates::WebhookServiceDetail {
         title: &format!("Webhook Service: {}", service),

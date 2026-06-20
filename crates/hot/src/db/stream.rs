@@ -4,6 +4,8 @@ use sqlx::FromRow;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::search::IdSearch;
+
 #[derive(Error, Debug)]
 pub enum StreamError {
     #[error("Database error: {0}")]
@@ -39,6 +41,8 @@ pub struct StreamSummary {
     pub total_runs: i64,
     pub total_events: i64,
     pub last_activity_at: DateTime<Utc>,
+    pub latest_event_type: Option<String>,
+    pub latest_run_fn: Option<String>,
 }
 
 impl StreamSummary {
@@ -275,9 +279,23 @@ impl StreamSummary {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let streams = sqlx::query_as::<_, StreamSummary>(
                     r#"
+                    WITH page_streams AS (
                         SELECT
-                        s.stream_id,
-                        s.env_id,
+                            s.stream_id,
+                            s.env_id,
+                            s.started_at,
+                            s.total_runs,
+                            s.total_events,
+                            s.last_activity_at,
+                            s.created_at
+                        FROM stream s
+                        WHERE s.env_id = $1
+                        ORDER BY s.created_at DESC
+                        LIMIT $2 OFFSET $3
+                    )
+                        SELECT
+                        ps.stream_id,
+                        ps.env_id,
                         COALESCE(
                             jsonb_agg(DISTINCT p.project_id) FILTER (WHERE p.project_id IS NOT NULL),
                             '[]'::jsonb
@@ -286,18 +304,35 @@ impl StreamSummary {
                             jsonb_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL),
                             '[]'::jsonb
                         ) as project_names,
-                        s.started_at as start_time,
-                        s.total_runs::bigint,
-                        s.total_events::bigint,
-                        s.last_activity_at
-                    FROM stream s
-                    LEFT JOIN run r ON s.stream_id = r.stream_id
+                        ps.started_at as start_time,
+                        ps.total_runs::bigint,
+                        ps.total_events::bigint,
+                        ps.last_activity_at,
+                        (
+                            SELECT e.event_type
+                            FROM event e
+                            WHERE e.stream_id = ps.stream_id AND e.env_id = ps.env_id
+                            ORDER BY e.created_at DESC
+                            LIMIT 1
+                        ) as latest_event_type,
+                        (
+                            SELECT COALESCE(
+                                e.event_data->>'fn',
+                                (SELECT c.function_name FROM call c WHERE c.run_id = latest_run.run_id AND c.parent_call_id IS NULL LIMIT 1),
+                                (SELECT t.function_name FROM task t WHERE t.run_id = latest_run.run_id LIMIT 1)
+                            )
+                            FROM run latest_run
+                            LEFT JOIN event e ON latest_run.event_id = e.event_id
+                            WHERE latest_run.stream_id = ps.stream_id AND latest_run.env_id = ps.env_id
+                            ORDER BY latest_run.start_time DESC
+                            LIMIT 1
+                        ) as latest_run_fn
+                    FROM page_streams ps
+                    LEFT JOIN run r ON ps.stream_id = r.stream_id
                     LEFT JOIN build b ON r.build_id = b.build_id
                     LEFT JOIN project p ON b.project_id = p.project_id
-                    WHERE s.env_id = $1
-                    GROUP BY s.stream_id, s.env_id, s.started_at, s.last_activity_at, s.total_runs, s.total_events, s.created_at
-                    ORDER BY s.created_at DESC
-                    LIMIT $2 OFFSET $3
+                    GROUP BY ps.stream_id, ps.env_id, ps.started_at, ps.last_activity_at, ps.total_runs, ps.total_events, ps.created_at
+                    ORDER BY ps.created_at DESC
                     "#,
                 )
                 .bind(env_id)
@@ -310,9 +345,23 @@ impl StreamSummary {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let streams = sqlx::query_as::<_, StreamSummary>(
                     r#"
+                    WITH page_streams AS (
                         SELECT
-                        s.stream_id,
-                        s.env_id,
+                            s.stream_id,
+                            s.env_id,
+                            s.started_at,
+                            s.total_runs,
+                            s.total_events,
+                            s.last_activity_at,
+                            s.created_at
+                        FROM stream s
+                        WHERE s.env_id = ?
+                        ORDER BY s.created_at DESC
+                        LIMIT ? OFFSET ?
+                    )
+                        SELECT
+                        ps.stream_id,
+                        ps.env_id,
                         COALESCE(
                             json_group_array(DISTINCT LOWER(HEX(p.project_id))),
                             '[]'
@@ -321,18 +370,35 @@ impl StreamSummary {
                             json_group_array(DISTINCT p.name),
                             '[]'
                         ) as project_names,
-                        s.started_at as start_time,
-                        CAST(s.total_runs AS INTEGER) as total_runs,
-                        CAST(s.total_events AS INTEGER) as total_events,
-                        s.last_activity_at
-                    FROM stream s
-                    LEFT JOIN run r ON s.stream_id = r.stream_id
+                        ps.started_at as start_time,
+                        CAST(ps.total_runs AS INTEGER) as total_runs,
+                        CAST(ps.total_events AS INTEGER) as total_events,
+                        ps.last_activity_at,
+                        (
+                            SELECT e.event_type
+                            FROM event e
+                            WHERE e.stream_id = ps.stream_id AND e.env_id = ps.env_id
+                            ORDER BY e.created_at DESC
+                            LIMIT 1
+                        ) as latest_event_type,
+                        (
+                            SELECT COALESCE(
+                                json_extract(e.event_data, '$.fn'),
+                                (SELECT c.function_name FROM call c WHERE c.run_id = latest_run.run_id AND c.parent_call_id IS NULL LIMIT 1),
+                                (SELECT t.function_name FROM task t WHERE t.run_id = latest_run.run_id LIMIT 1)
+                            )
+                            FROM run latest_run
+                            LEFT JOIN event e ON latest_run.event_id = e.event_id
+                            WHERE latest_run.stream_id = ps.stream_id AND latest_run.env_id = ps.env_id
+                            ORDER BY latest_run.start_time DESC
+                            LIMIT 1
+                        ) as latest_run_fn
+                    FROM page_streams ps
+                    LEFT JOIN run r ON ps.stream_id = r.stream_id
                     LEFT JOIN build b ON r.build_id = b.build_id
                     LEFT JOIN project p ON b.project_id = p.project_id
-                    WHERE s.env_id = ?
-                    GROUP BY s.stream_id, s.env_id, s.started_at, s.last_activity_at, s.total_runs, s.total_events
-                    ORDER BY s.created_at DESC
-                    LIMIT ? OFFSET ?
+                    GROUP BY ps.stream_id, ps.env_id, ps.started_at, ps.last_activity_at, ps.total_runs, ps.total_events, ps.created_at
+                    ORDER BY ps.created_at DESC
                     "#,
                 )
                 .bind(env_id)
@@ -368,7 +434,26 @@ impl StreamSummary {
                         s.started_at as start_time,
                         s.total_runs::bigint,
                         s.total_events::bigint,
-                        s.last_activity_at
+                        s.last_activity_at,
+                        (
+                            SELECT e.event_type
+                            FROM event e
+                            WHERE e.stream_id = s.stream_id AND e.env_id = s.env_id
+                            ORDER BY e.created_at DESC
+                            LIMIT 1
+                        ) as latest_event_type,
+                        (
+                            SELECT COALESCE(
+                                e.event_data->>'fn',
+                                (SELECT c.function_name FROM call c WHERE c.run_id = latest_run.run_id AND c.parent_call_id IS NULL LIMIT 1),
+                                (SELECT t.function_name FROM task t WHERE t.run_id = latest_run.run_id LIMIT 1)
+                            )
+                            FROM run latest_run
+                            LEFT JOIN event e ON latest_run.event_id = e.event_id
+                            WHERE latest_run.stream_id = s.stream_id AND latest_run.env_id = s.env_id
+                            ORDER BY latest_run.start_time DESC
+                            LIMIT 1
+                        ) as latest_run_fn
                     FROM stream s
                     LEFT JOIN run r ON s.stream_id = r.stream_id
                     LEFT JOIN build b ON r.build_id = b.build_id
@@ -403,7 +488,26 @@ impl StreamSummary {
                         s.started_at as start_time,
                         CAST(s.total_runs AS INTEGER) as total_runs,
                         CAST(s.total_events AS INTEGER) as total_events,
-                        s.last_activity_at
+                        s.last_activity_at,
+                        (
+                            SELECT e.event_type
+                            FROM event e
+                            WHERE e.stream_id = s.stream_id AND e.env_id = s.env_id
+                            ORDER BY e.created_at DESC
+                            LIMIT 1
+                        ) as latest_event_type,
+                        (
+                            SELECT COALESCE(
+                                json_extract(e.event_data, '$.fn'),
+                                (SELECT c.function_name FROM call c WHERE c.run_id = latest_run.run_id AND c.parent_call_id IS NULL LIMIT 1),
+                                (SELECT t.function_name FROM task t WHERE t.run_id = latest_run.run_id LIMIT 1)
+                            )
+                            FROM run latest_run
+                            LEFT JOIN event e ON latest_run.event_id = e.event_id
+                            WHERE latest_run.stream_id = s.stream_id AND latest_run.env_id = s.env_id
+                            ORDER BY latest_run.start_time DESC
+                            LIMIT 1
+                        ) as latest_run_fn
                     FROM stream s
                     LEFT JOIN run r ON s.stream_id = r.stream_id
                     LEFT JOIN build b ON r.build_id = b.build_id
@@ -439,6 +543,7 @@ impl StreamSummary {
     pub async fn get_streams_by_env_filtered(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
+        project_id: Option<&Uuid>,
         time_range_cutoff: Option<chrono::DateTime<chrono::Utc>>,
         search_term: Option<&str>,
         limit: Option<i64>,
@@ -451,72 +556,60 @@ impl StreamSummary {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let mut query = String::from(
                     r#"
-                    SELECT
-                        s.stream_id,
-                        s.env_id,
-                        COALESCE(
-                            jsonb_agg(DISTINCT p.project_id) FILTER (WHERE p.project_id IS NOT NULL),
-                            '[]'::jsonb
-                        ) as project_ids,
-                        COALESCE(
-                            jsonb_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL),
-                            '[]'::jsonb
-                        ) as project_names,
-                        s.started_at as start_time,
-                        s.total_runs::bigint,
-                        s.total_events::bigint,
-                        s.last_activity_at
-                    FROM stream s
-                    LEFT JOIN run r ON s.stream_id = r.stream_id
-                    LEFT JOIN build b ON r.build_id = b.build_id
-                    LEFT JOIN project p ON b.project_id = p.project_id
-                    WHERE s.env_id = $1
+                    WITH page_streams AS (
+                        SELECT
+                            s.stream_id,
+                            s.env_id,
+                            s.started_at,
+                            s.total_runs,
+                            s.total_events,
+                            s.last_activity_at,
+                            s.created_at
+                        FROM stream s
+                        WHERE s.env_id = $1
                     "#,
                 );
 
                 let mut param_count = 1;
 
-                // project_id filter removed
+                if project_id.is_some() {
+                    param_count += 1;
+                    query.push_str(&format!(
+                        r#"
+                        AND EXISTS (
+                            SELECT 1
+                            FROM run project_run
+                            JOIN build project_build ON project_run.build_id = project_build.build_id
+                            WHERE project_run.stream_id = s.stream_id
+                              AND project_run.env_id = s.env_id
+                              AND project_build.project_id = ${}
+                        )
+                        "#,
+                        param_count
+                    ));
+                }
 
                 if time_range_cutoff.is_some() {
                     param_count += 1;
                     query.push_str(&format!(" AND s.created_at >= ${}", param_count));
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     let base = param_count + 1;
                     query.push_str(&format!(" AND s.stream_id = ${}", base));
                     param_count += 1;
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix
                     let base = param_count + 1;
                     query.push_str(&format!(" AND CAST(s.stream_id AS TEXT) ILIKE ${}", base));
                     param_count += 1;
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     // General text search on stream_id
                     let base = param_count + 1;
                     query.push_str(&format!(" AND CAST(s.stream_id AS TEXT) ILIKE ${}", base));
@@ -529,56 +622,77 @@ impl StreamSummary {
                 let offset_param = param_count;
 
                 query.push_str(&format!(
-                    " GROUP BY s.stream_id, s.env_id, s.started_at, s.last_activity_at, s.total_runs, s.total_events, s.created_at ORDER BY s.created_at DESC LIMIT ${} OFFSET ${}",
+                    " ORDER BY s.created_at DESC LIMIT ${} OFFSET ${}) ",
                     limit_param, offset_param
                 ));
 
-                // Prepare search - UUID exact match or pattern matching
-                let search_uuid_pg = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id_pg = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
-                let search_pattern = search_term.map(|term| format!("%{}%", term));
+                query.push_str(
+                    r#"
+                    SELECT
+                        ps.stream_id,
+                        ps.env_id,
+                        COALESCE(
+                            jsonb_agg(DISTINCT p.project_id) FILTER (WHERE p.project_id IS NOT NULL),
+                            '[]'::jsonb
+                        ) as project_ids,
+                        COALESCE(
+                            jsonb_agg(DISTINCT p.name) FILTER (WHERE p.name IS NOT NULL),
+                            '[]'::jsonb
+                        ) as project_names,
+                        ps.started_at as start_time,
+                        ps.total_runs::bigint,
+                        ps.total_events::bigint,
+                        ps.last_activity_at,
+                        (
+                            SELECT e.event_type
+                            FROM event e
+                            WHERE e.stream_id = ps.stream_id AND e.env_id = ps.env_id
+                            ORDER BY e.created_at DESC
+                            LIMIT 1
+                        ) as latest_event_type,
+                        (
+                            SELECT COALESCE(
+                                e.event_data->>'fn',
+                                (SELECT c.function_name FROM call c WHERE c.run_id = latest_run.run_id AND c.parent_call_id IS NULL LIMIT 1),
+                                (SELECT t.function_name FROM task t WHERE t.run_id = latest_run.run_id LIMIT 1)
+                            )
+                            FROM run latest_run
+                            LEFT JOIN event e ON latest_run.event_id = e.event_id
+                            WHERE latest_run.stream_id = ps.stream_id AND latest_run.env_id = ps.env_id
+                            ORDER BY latest_run.start_time DESC
+                            LIMIT 1
+                        ) as latest_run_fn
+                    FROM page_streams ps
+                    LEFT JOIN run r ON ps.stream_id = r.stream_id
+                    LEFT JOIN build b ON r.build_id = b.build_id
+                    LEFT JOIN project p ON b.project_id = p.project_id
+                    GROUP BY ps.stream_id, ps.env_id, ps.started_at, ps.last_activity_at, ps.total_runs, ps.total_events, ps.created_at
+                    ORDER BY ps.created_at DESC
+                    "#,
+                );
 
                 let mut db_query =
                     sqlx::query_as::<_, StreamSummary>(sqlx::AssertSqlSafe(query.as_str()))
                         .bind(env_id);
 
-                // project_id filter removed
+                if let Some(project_id) = project_id {
+                    db_query = db_query.bind(project_id);
+                }
 
                 if let Some(cutoff) = time_range_cutoff {
                     db_query = db_query.bind(cutoff);
                 }
 
-                if let Some(uuid) = search_uuid_pg {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     db_query = db_query.bind(uuid); // stream_id exact match
-                } else if is_short_id_pg {
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        db_query = db_query.bind(suffix_pattern); // stream_id suffix match
-                    }
-                } else if let Some(ref pattern) = search_pattern {
-                    db_query = db_query.bind(pattern); // stream_id text search
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    db_query = db_query.bind(suffix_pattern); // stream_id suffix match
+                } else if let Some(search) = &id_search {
+                    db_query = db_query.bind(search.text_pattern()); // stream_id text search
                 }
 
                 let streams = db_query.bind(limit).bind(offset).fetch_all(pg_pool).await?;
@@ -588,9 +702,62 @@ impl StreamSummary {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let mut query = String::from(
                     r#"
+                    WITH page_streams AS (
+                        SELECT
+                            s.stream_id,
+                            s.env_id,
+                            s.started_at,
+                            s.total_runs,
+                            s.total_events,
+                            s.last_activity_at,
+                            s.created_at
+                        FROM stream s
+                        WHERE s.env_id = ?
+                    "#,
+                );
+
+                if project_id.is_some() {
+                    query.push_str(
+                        r#"
+                        AND EXISTS (
+                            SELECT 1
+                            FROM run project_run
+                            JOIN build project_build ON project_run.build_id = project_build.build_id
+                            WHERE project_run.stream_id = s.stream_id
+                              AND project_run.env_id = s.env_id
+                              AND project_build.project_id = ?
+                        )
+                        "#,
+                    );
+                }
+
+                if time_range_cutoff.is_some() {
+                    query.push_str(" AND s.created_at >= ?");
+                }
+
+                let id_search = IdSearch::parse(search_term);
+
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
+                    query.push_str(" AND s.stream_id = ?");
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
+                    // Short ID detected (12 hex chars): pattern match on UUID suffix
+                    query.push_str(" AND LOWER(HEX(s.stream_id)) LIKE ?");
+                } else if id_search.is_some() {
+                    // General text search on stream_id
+                    query.push_str(" AND LOWER(HEX(s.stream_id)) LIKE ?");
+                }
+
+                query.push_str(" ORDER BY s.created_at DESC LIMIT ? OFFSET ?) ");
+
+                query.push_str(
+                    r#"
                     SELECT
-                        s.stream_id,
-                        s.env_id,
+                        ps.stream_id,
+                        ps.env_id,
                         COALESCE(
                             json_group_array(DISTINCT LOWER(HEX(p.project_id))),
                             '[]'
@@ -599,106 +766,60 @@ impl StreamSummary {
                             json_group_array(DISTINCT p.name),
                             '[]'
                         ) as project_names,
-                        s.started_at as start_time,
-                        CAST(s.total_runs AS INTEGER) as total_runs,
-                        CAST(s.total_events AS INTEGER) as total_events,
-                        s.last_activity_at
-                    FROM stream s
-                    LEFT JOIN run r ON s.stream_id = r.stream_id
+                        ps.started_at as start_time,
+                        CAST(ps.total_runs AS INTEGER) as total_runs,
+                        CAST(ps.total_events AS INTEGER) as total_events,
+                        ps.last_activity_at,
+                        (
+                            SELECT e.event_type
+                            FROM event e
+                            WHERE e.stream_id = ps.stream_id AND e.env_id = ps.env_id
+                            ORDER BY e.created_at DESC
+                            LIMIT 1
+                        ) as latest_event_type,
+                        (
+                            SELECT COALESCE(
+                                json_extract(e.event_data, '$.fn'),
+                                (SELECT c.function_name FROM call c WHERE c.run_id = latest_run.run_id AND c.parent_call_id IS NULL LIMIT 1),
+                                (SELECT t.function_name FROM task t WHERE t.run_id = latest_run.run_id LIMIT 1)
+                            )
+                            FROM run latest_run
+                            LEFT JOIN event e ON latest_run.event_id = e.event_id
+                            WHERE latest_run.stream_id = ps.stream_id AND latest_run.env_id = ps.env_id
+                            ORDER BY latest_run.start_time DESC
+                            LIMIT 1
+                        ) as latest_run_fn
+                    FROM page_streams ps
+                    LEFT JOIN run r ON ps.stream_id = r.stream_id
                     LEFT JOIN build b ON r.build_id = b.build_id
                     LEFT JOIN project p ON b.project_id = p.project_id
-                    WHERE s.env_id = ?
+                    GROUP BY ps.stream_id, ps.env_id, ps.started_at, ps.last_activity_at, ps.total_runs, ps.total_events, ps.created_at
+                    ORDER BY ps.created_at DESC
                     "#,
                 );
-
-                // project_id filter removed
-
-                if time_range_cutoff.is_some() {
-                    query.push_str(" AND s.created_at >= ?");
-                }
-
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
-                    query.push_str(" AND s.stream_id = ?");
-                } else if is_short_id {
-                    // Short ID detected (12 hex chars): pattern match on UUID suffix
-                    query.push_str(" AND CAST(s.stream_id AS TEXT) LIKE ?");
-                } else if search_term.is_some() {
-                    // General text search on stream_id
-                    query.push_str(" AND CAST(s.stream_id AS TEXT) LIKE ?");
-                }
-
-                query.push_str(" GROUP BY s.stream_id, s.env_id, s.started_at, s.last_activity_at, s.total_runs, s.total_events ORDER BY s.created_at DESC LIMIT ? OFFSET ?");
-
-                // Prepare search - UUID exact match or pattern matching
-                let search_uuid_sqlite = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id_sqlite = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
-                let search_pattern = search_term.map(|term| format!("%{}%", term));
 
                 let mut db_query =
                     sqlx::query_as::<_, StreamSummary>(sqlx::AssertSqlSafe(query.as_str()))
                         .bind(env_id);
 
-                // project_id filter removed
+                if let Some(project_id) = project_id {
+                    db_query = db_query.bind(project_id);
+                }
 
                 if let Some(cutoff) = time_range_cutoff {
                     db_query = db_query.bind(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
                 }
 
-                if let Some(uuid) = search_uuid_sqlite {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     db_query = db_query.bind(uuid); // stream_id exact match
-                } else if is_short_id_sqlite {
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        db_query = db_query.bind(suffix_pattern); // stream_id suffix match
-                    }
-                } else if let Some(ref pattern) = search_pattern {
-                    db_query = db_query.bind(pattern); // stream_id text search
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    db_query = db_query.bind(suffix_pattern); // stream_id suffix match
+                } else if let Some(search) = &id_search {
+                    db_query = db_query.bind(search.text_pattern()); // stream_id text search
                 }
 
                 let streams = db_query
@@ -718,6 +839,7 @@ impl StreamSummary {
     pub async fn get_count_by_env_filtered(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
+        project_id: Option<&Uuid>,
         time_range_cutoff: Option<chrono::DateTime<chrono::Utc>>,
         search_term: Option<&str>,
     ) -> Result<i64, StreamError> {
@@ -733,41 +855,72 @@ impl StreamSummary {
 
                 let mut param_count = 1;
 
-                // project_id filter removed
+                if project_id.is_some() {
+                    param_count += 1;
+                    query.push_str(&format!(
+                        r#"
+                        AND EXISTS (
+                            SELECT 1
+                            FROM run project_run
+                            JOIN build project_build ON project_run.build_id = project_build.build_id
+                            WHERE project_run.stream_id = s.stream_id
+                              AND project_run.env_id = s.env_id
+                              AND project_build.project_id = ${}
+                        )
+                        "#,
+                        param_count
+                    ));
+                }
 
                 if time_range_cutoff.is_some() {
                     param_count += 1;
                     query.push_str(&format!(" AND s.created_at >= ${}", param_count));
                 }
 
-                if search_term.is_some() {
-                    let base = param_count + 1;
-                    query.push_str(&format!(" AND CAST(s.stream_id AS TEXT) ILIKE ${}", base));
+                let id_search = IdSearch::parse(search_term);
+
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
+                    param_count += 1;
+                    query.push_str(&format!(" AND s.stream_id = ${}", param_count));
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
+                    param_count += 1;
+                    query.push_str(&format!(
+                        " AND CAST(s.stream_id AS TEXT) ILIKE ${}",
+                        param_count
+                    ));
+                } else if id_search.is_some() {
+                    param_count += 1;
+                    query.push_str(&format!(
+                        " AND CAST(s.stream_id AS TEXT) ILIKE ${}",
+                        param_count
+                    ));
                 }
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Prepare search pattern - use suffix pattern for short IDs
-                let search_pattern = if is_short_id {
-                    search_term.map(|term| format!("%{}", term))
-                } else {
-                    search_term.map(|term| format!("%{}%", term))
-                };
 
                 let mut db_query =
                     sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
-                // project_id filter removed
+                if let Some(project_id) = project_id {
+                    db_query = db_query.bind(project_id);
+                }
 
                 if let Some(cutoff) = time_range_cutoff {
                     db_query = db_query.bind(cutoff);
                 }
 
-                if let Some(pattern) = &search_pattern {
-                    db_query = db_query.bind(pattern); // stream_id
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
+                    db_query = db_query.bind(uuid); // stream_id exact match
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    db_query = db_query.bind(suffix_pattern); // stream_id suffix match
+                } else if let Some(search) = &id_search {
+                    db_query = db_query.bind(search.text_pattern()); // stream_id text search
                 }
 
                 let count = db_query.fetch_one(pg_pool).await?;
@@ -782,44 +935,177 @@ impl StreamSummary {
                     "#,
                 );
 
-                // project_id filter removed
+                if project_id.is_some() {
+                    query.push_str(
+                        r#"
+                        AND EXISTS (
+                            SELECT 1
+                            FROM run project_run
+                            JOIN build project_build ON project_run.build_id = project_build.build_id
+                            WHERE project_run.stream_id = s.stream_id
+                              AND project_run.env_id = s.env_id
+                              AND project_build.project_id = ?
+                        )
+                        "#,
+                    );
+                }
 
                 if time_range_cutoff.is_some() {
                     query.push_str(" AND s.created_at >= ?");
                 }
 
-                if search_term.is_some() {
-                    query.push_str(" AND CAST(s.stream_id AS TEXT) LIKE ?");
+                let id_search = IdSearch::parse(search_term);
+
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
+                    query.push_str(" AND s.stream_id = ?");
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
+                    query.push_str(" AND LOWER(HEX(s.stream_id)) LIKE ?");
+                } else if id_search.is_some() {
+                    query.push_str(" AND LOWER(HEX(s.stream_id)) LIKE ?");
                 }
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Prepare search pattern - use suffix pattern for short IDs
-                let search_pattern = if is_short_id {
-                    search_term.map(|term| format!("%{}", term))
-                } else {
-                    search_term.map(|term| format!("%{}%", term))
-                };
 
                 let mut db_query =
                     sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
-                // project_id filter removed
+                if let Some(project_id) = project_id {
+                    db_query = db_query.bind(project_id);
+                }
 
                 if let Some(cutoff) = time_range_cutoff {
                     db_query = db_query.bind(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
                 }
 
-                if let Some(pattern) = &search_pattern {
-                    db_query = db_query.bind(pattern); // stream_id
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
+                    db_query = db_query.bind(uuid); // stream_id exact match
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    db_query = db_query.bind(suffix_pattern); // stream_id suffix match
+                } else if let Some(search) = &id_search {
+                    db_query = db_query.bind(search.text_pattern()); // stream_id text search
                 }
 
                 let count = db_query.fetch_one(sqlite_pool).await?;
                 Ok(count)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // UUIDs are stored as blobs in SQLite, so the search path must compare
+    // against LOWER(HEX(stream_id)) rather than CAST(stream_id AS TEXT).
+    // These tests guard that regression for full, hyphenless, and short ids.
+    const STREAM_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const SHORT_ID: &str = "446655440000"; // last 12 hyphenless hex chars
+
+    async fn seed_stream() -> (crate::db::DatabasePool, Uuid, Uuid) {
+        let db = crate::db::test_db().await;
+        let env_id = Uuid::now_v7();
+        let stream_id = Uuid::parse_str(STREAM_UUID).unwrap();
+        Stream::create_or_get_stream(&db, stream_id, env_id)
+            .await
+            .unwrap();
+        (db, env_id, stream_id)
+    }
+
+    #[tokio::test]
+    async fn search_by_short_id_matches_blob_uuid() {
+        let (db, env_id, stream_id) = seed_stream().await;
+
+        let results = StreamSummary::get_streams_by_env_filtered(
+            &db,
+            &env_id,
+            None,
+            None,
+            Some(SHORT_ID),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stream_id, stream_id);
+    }
+
+    #[tokio::test]
+    async fn count_by_short_id_matches_blob_uuid() {
+        let (db, env_id, _) = seed_stream().await;
+
+        let count =
+            StreamSummary::get_count_by_env_filtered(&db, &env_id, None, None, Some(SHORT_ID))
+                .await
+                .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn search_by_full_uuid_matches() {
+        let (db, env_id, stream_id) = seed_stream().await;
+
+        let results = StreamSummary::get_streams_by_env_filtered(
+            &db,
+            &env_id,
+            None,
+            None,
+            Some(STREAM_UUID),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stream_id, stream_id);
+    }
+
+    #[tokio::test]
+    async fn search_by_hyphenless_uuid_matches() {
+        let (db, env_id, stream_id) = seed_stream().await;
+
+        let results = StreamSummary::get_streams_by_env_filtered(
+            &db,
+            &env_id,
+            None,
+            None,
+            Some("550e8400e29b41d4a716446655440000"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stream_id, stream_id);
+    }
+
+    #[tokio::test]
+    async fn search_by_nonmatching_short_id_returns_empty() {
+        let (db, env_id, _) = seed_stream().await;
+
+        let results = StreamSummary::get_streams_by_env_filtered(
+            &db,
+            &env_id,
+            None,
+            None,
+            Some("ffffffffffff"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(results.is_empty());
     }
 }

@@ -5,6 +5,8 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
+
 #[derive(Error, Debug)]
 pub enum TaskError {
     #[error("Database error: {0}")]
@@ -916,29 +918,11 @@ impl Task {
                     param_count += 1;
                 }
 
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     let b = param_count;
                     where_clauses.push(format!(
                         "(t.task_id = ${} OR t.stream_id = ${} OR t.function_name ILIKE ${} OR t.task_type ILIKE ${} \
@@ -946,7 +930,9 @@ impl Task {
                         b, b + 1, b + 2, b + 3, b + 4, b + 5
                     ));
                     param_count += 6;
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     let b = param_count;
                     where_clauses.push(format!(
                         "(CAST(t.task_id AS TEXT) ILIKE ${} OR CAST(t.stream_id AS TEXT) ILIKE ${} OR t.function_name ILIKE ${} OR t.task_type ILIKE ${} \
@@ -954,7 +940,7 @@ impl Task {
                         b, b + 1, b + 2, b + 3, b + 4, b + 5
                     ));
                     param_count += 6;
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     let b = param_count;
                     where_clauses.push(format!(
                         "(t.function_name ILIKE ${} OR t.task_type ILIKE ${} \
@@ -970,10 +956,7 @@ impl Task {
                 if let Some(statuses) = statuses
                     && !statuses.is_empty()
                 {
-                    let placeholders = (param_count..param_count + statuses.len())
-                        .map(|i| format!("${}", i))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let placeholders = pg_placeholders(param_count, statuses.len());
                     param_count += statuses.len();
                     where_clauses.push(format!("ts.name IN ({})", placeholders));
                 }
@@ -981,10 +964,7 @@ impl Task {
                 if let Some(task_types) = task_types
                     && !task_types.is_empty()
                 {
-                    let placeholders = (param_count..param_count + task_types.len())
-                        .map(|i| format!("${}", i))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let placeholders = pg_placeholders(param_count, task_types.len());
                     param_count += task_types.len();
                     where_clauses.push(format!("t.task_type IN ({})", placeholders));
                 }
@@ -1007,36 +987,29 @@ impl Task {
                     q = q.bind(cutoff);
                 }
 
-                let search_pattern = search_term.map(|t| format!("%{}%", t));
-                let short_id_pattern = search_term.map(|t| format!("%{}", t));
-
-                if let Some(uuid) = search_uuid {
-                    q = q.bind(uuid);
-                    q = q.bind(uuid);
-                    if let Some(ref p) = search_pattern {
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                    }
-                } else if is_short_id {
-                    if let Some(ref p) = short_id_pattern {
-                        q = q.bind(p);
-                        q = q.bind(p);
-                    }
-                    if let Some(ref p) = search_pattern {
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                    }
-                } else if search_term.is_some()
-                    && let Some(ref p) = search_pattern
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
                 {
-                    q = q.bind(p);
-                    q = q.bind(p);
-                    q = q.bind(p);
-                    q = q.bind(p);
+                    q = q.bind(uuid);
+                    q = q.bind(uuid);
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    q = q.bind(suffix_pattern);
+                    q = q.bind(suffix_pattern);
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                } else if let Some(search) = &id_search {
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
                 }
 
                 if let Some(statuses) = statuses {
@@ -1056,78 +1029,63 @@ impl Task {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let mut where_clauses = vec!["t.env_id = ?".to_string()];
-                let mut binds: Vec<String> = vec![env_id.to_string()];
+                let mut binds: Vec<String> = Vec::new();
 
                 if let Some(cutoff) = time_range_cutoff {
                     where_clauses.push("t.created_at >= ?".to_string());
                     binds.push(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
                 }
 
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     where_clauses.push(format!(
-                        "(t.task_id = ? OR t.stream_id = ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
+                        "(LOWER(HEX(t.task_id)) = ? OR LOWER(HEX(t.stream_id)) = ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
                          OR {TASK_ORIGIN_FN_EXPR_SQLITE} LIKE ? OR CAST(t.args AS TEXT) LIKE ?)"
                     ));
-                    let uuid_str = uuid.to_string();
-                    let pattern = format!("%{}%", search_term.unwrap_or(""));
+                    let uuid_str = uuid.simple().to_string();
                     binds.extend([
                         uuid_str.clone(),
                         uuid_str,
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern,
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
                     ]);
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && let Some(suffix) = search.suffix_pattern()
+                {
                     where_clauses.push(format!(
-                        "(t.task_id LIKE ? OR t.stream_id LIKE ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
+                        "(LOWER(HEX(t.task_id)) LIKE ? OR LOWER(HEX(t.stream_id)) LIKE ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
                          OR {TASK_ORIGIN_FN_EXPR_SQLITE} LIKE ? OR CAST(t.args AS TEXT) LIKE ?)"
                     ));
-                    let suffix = format!("%{}", search_term.unwrap_or(""));
-                    let pattern = format!("%{}%", search_term.unwrap_or(""));
                     binds.extend([
-                        suffix.clone(),
-                        suffix,
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern,
+                        suffix.to_string(),
+                        suffix.to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
                     ]);
-                } else if let Some(term) = search_term {
+                } else if let Some(search) = &id_search {
                     where_clauses.push(format!(
                         "(t.function_name LIKE ? OR t.task_type LIKE ? \
                          OR {TASK_ORIGIN_FN_EXPR_SQLITE} LIKE ? OR CAST(t.args AS TEXT) LIKE ?)"
                     ));
-                    let pattern = format!("%{}%", term);
-                    binds.extend([pattern.clone(), pattern.clone(), pattern.clone(), pattern]);
+                    binds.extend([
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                    ]);
                 }
 
                 if let Some(statuses) = statuses
                     && !statuses.is_empty()
                 {
-                    let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+                    let placeholders = sqlite_placeholders(statuses.len());
                     where_clauses.push(format!("ts.name IN ({})", placeholders));
                     for s in statuses {
                         binds.push(s.to_string());
@@ -1137,11 +1095,7 @@ impl Task {
                 if let Some(task_types) = task_types
                     && !task_types.is_empty()
                 {
-                    let placeholders = task_types
-                        .iter()
-                        .map(|_| "?")
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let placeholders = sqlite_placeholders(task_types.len());
                     where_clauses.push(format!("t.task_type IN ({})", placeholders));
                     for tt in task_types {
                         binds.push(tt.to_string());
@@ -1157,7 +1111,8 @@ impl Task {
                     where_clause
                 );
 
-                let mut q = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(query.as_str()));
+                let mut q =
+                    sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
                 for b in &binds {
                     q = q.bind(b);
                 }
@@ -1190,29 +1145,11 @@ impl Task {
                     param_count += 1;
                 }
 
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     let b = param_count;
                     where_clauses.push(format!(
                         "(t.task_id = ${} OR t.stream_id = ${} OR t.function_name ILIKE ${} OR t.task_type ILIKE ${} \
@@ -1220,7 +1157,9 @@ impl Task {
                         b, b + 1, b + 2, b + 3, b + 4, b + 5
                     ));
                     param_count += 6;
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     let b = param_count;
                     where_clauses.push(format!(
                         "(CAST(t.task_id AS TEXT) ILIKE ${} OR CAST(t.stream_id AS TEXT) ILIKE ${} OR t.function_name ILIKE ${} OR t.task_type ILIKE ${} \
@@ -1228,7 +1167,7 @@ impl Task {
                         b, b + 1, b + 2, b + 3, b + 4, b + 5
                     ));
                     param_count += 6;
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     let b = param_count;
                     where_clauses.push(format!(
                         "(t.function_name ILIKE ${} OR t.task_type ILIKE ${} \
@@ -1244,10 +1183,7 @@ impl Task {
                 if let Some(statuses) = statuses
                     && !statuses.is_empty()
                 {
-                    let placeholders = (param_count..param_count + statuses.len())
-                        .map(|i| format!("${}", i))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let placeholders = pg_placeholders(param_count, statuses.len());
                     param_count += statuses.len();
                     where_clauses.push(format!("ts.name IN ({})", placeholders));
                 }
@@ -1255,16 +1191,12 @@ impl Task {
                 if let Some(task_types) = task_types
                     && !task_types.is_empty()
                 {
-                    let placeholders = (param_count..param_count + task_types.len())
-                        .map(|i| format!("${}", i))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let _ = param_count + task_types.len();
+                    let placeholders = pg_placeholders(param_count, task_types.len());
                     where_clauses.push(format!("t.task_type IN ({})", placeholders));
                 }
 
                 let where_clause = where_clauses.join(" AND ");
-                let origin_join = if search_term.is_some() {
+                let origin_join = if id_search.is_some() {
                     TASK_ORIGIN_JOIN
                 } else {
                     ""
@@ -1284,36 +1216,29 @@ impl Task {
                     q = q.bind(cutoff);
                 }
 
-                let search_pattern = search_term.map(|t| format!("%{}%", t));
-                let short_id_pattern = search_term.map(|t| format!("%{}", t));
-
-                if let Some(uuid) = search_uuid {
-                    q = q.bind(uuid);
-                    q = q.bind(uuid);
-                    if let Some(ref p) = search_pattern {
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                    }
-                } else if is_short_id {
-                    if let Some(ref p) = short_id_pattern {
-                        q = q.bind(p);
-                        q = q.bind(p);
-                    }
-                    if let Some(ref p) = search_pattern {
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                        q = q.bind(p);
-                    }
-                } else if search_term.is_some()
-                    && let Some(ref p) = search_pattern
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
                 {
-                    q = q.bind(p);
-                    q = q.bind(p);
-                    q = q.bind(p);
-                    q = q.bind(p);
+                    q = q.bind(uuid);
+                    q = q.bind(uuid);
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    q = q.bind(suffix_pattern);
+                    q = q.bind(suffix_pattern);
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                } else if let Some(search) = &id_search {
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
+                    q = q.bind(search.text_pattern());
                 }
 
                 if let Some(statuses) = statuses {
@@ -1332,78 +1257,63 @@ impl Task {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let mut where_clauses = vec!["t.env_id = ?".to_string()];
-                let mut binds: Vec<String> = vec![env_id.to_string()];
+                let mut binds: Vec<String> = Vec::new();
 
                 if let Some(cutoff) = time_range_cutoff {
                     where_clauses.push("t.created_at >= ?".to_string());
                     binds.push(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
                 }
 
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     where_clauses.push(format!(
-                        "(t.task_id = ? OR t.stream_id = ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
+                        "(LOWER(HEX(t.task_id)) = ? OR LOWER(HEX(t.stream_id)) = ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
                          OR {TASK_ORIGIN_FN_EXPR_SQLITE} LIKE ? OR CAST(t.args AS TEXT) LIKE ?)"
                     ));
-                    let uuid_str = uuid.to_string();
-                    let pattern = format!("%{}%", search_term.unwrap_or(""));
+                    let uuid_str = uuid.simple().to_string();
                     binds.extend([
                         uuid_str.clone(),
                         uuid_str,
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern,
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
                     ]);
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && let Some(suffix) = search.suffix_pattern()
+                {
                     where_clauses.push(format!(
-                        "(t.task_id LIKE ? OR t.stream_id LIKE ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
+                        "(LOWER(HEX(t.task_id)) LIKE ? OR LOWER(HEX(t.stream_id)) LIKE ? OR t.function_name LIKE ? OR t.task_type LIKE ? \
                          OR {TASK_ORIGIN_FN_EXPR_SQLITE} LIKE ? OR CAST(t.args AS TEXT) LIKE ?)"
                     ));
-                    let suffix = format!("%{}", search_term.unwrap_or(""));
-                    let pattern = format!("%{}%", search_term.unwrap_or(""));
                     binds.extend([
-                        suffix.clone(),
-                        suffix,
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern.clone(),
-                        pattern,
+                        suffix.to_string(),
+                        suffix.to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
                     ]);
-                } else if let Some(term) = search_term {
+                } else if let Some(search) = &id_search {
                     where_clauses.push(format!(
                         "(t.function_name LIKE ? OR t.task_type LIKE ? \
                          OR {TASK_ORIGIN_FN_EXPR_SQLITE} LIKE ? OR CAST(t.args AS TEXT) LIKE ?)"
                     ));
-                    let pattern = format!("%{}%", term);
-                    binds.extend([pattern.clone(), pattern.clone(), pattern.clone(), pattern]);
+                    binds.extend([
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                        search.text_pattern().to_string(),
+                    ]);
                 }
 
                 if let Some(statuses) = statuses
                     && !statuses.is_empty()
                 {
-                    let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+                    let placeholders = sqlite_placeholders(statuses.len());
                     where_clauses.push(format!("ts.name IN ({})", placeholders));
                     for s in statuses {
                         binds.push(s.to_string());
@@ -1413,11 +1323,7 @@ impl Task {
                 if let Some(task_types) = task_types
                     && !task_types.is_empty()
                 {
-                    let placeholders = task_types
-                        .iter()
-                        .map(|_| "?")
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let placeholders = sqlite_placeholders(task_types.len());
                     where_clauses.push(format!("t.task_type IN ({})", placeholders));
                     for tt in task_types {
                         binds.push(tt.to_string());
@@ -1425,7 +1331,7 @@ impl Task {
                 }
 
                 let where_clause = where_clauses.join(" AND ");
-                let origin_join = if search_term.is_some() {
+                let origin_join = if id_search.is_some() {
                     TASK_ORIGIN_JOIN
                 } else {
                     ""
@@ -1438,7 +1344,8 @@ impl Task {
                     where_clause
                 );
 
-                let mut q = sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(query.as_str()));
+                let mut q =
+                    sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
                 for b in &binds {
                     q = q.bind(b);
                 }

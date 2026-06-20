@@ -2394,6 +2394,8 @@ pub struct StreamListItem {
     pub start_time_raw: chrono::DateTime<chrono::Utc>, // Raw for calculations
     pub last_activity_at_raw: chrono::DateTime<chrono::Utc>, // Raw for calculations
     pub duration_ms: i64,         // Pre-calculated duration in ms
+    pub latest_event_type: Option<String>,
+    pub latest_run_fn: Option<String>,
 }
 
 impl StreamListItem {
@@ -2432,6 +2434,8 @@ impl StreamListItem {
             start_time_raw: stream.start_time,
             last_activity_at_raw: stream.last_activity_at,
             duration_ms,
+            latest_event_type: stream.latest_event_type.clone(),
+            latest_run_fn: stream.latest_run_fn.clone(),
         }
     }
 
@@ -2456,6 +2460,10 @@ impl StreamListItem {
             }
             None => "N/A".to_string(),
         }
+    }
+
+    pub fn has_context(&self) -> bool {
+        self.latest_event_type.is_some() || self.latest_run_fn.is_some()
     }
 }
 

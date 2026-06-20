@@ -6,6 +6,7 @@
 //! exposed.
 
 use crate::auth::{AppState, Session};
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -150,12 +151,9 @@ pub async fn store_detail_handler(
         .unwrap_or_default();
     let is_searching = !search_query.is_empty();
 
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(1);
-    let offset = (current_page_num - 1) * ENTRIES_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, ENTRIES_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     let query_embedding = if is_searching && info.embedding_model.is_some() {
         match hot::store::embedding::embedding_provider_from_config(&state.conf) {
@@ -237,11 +235,8 @@ pub async fn store_detail_handler(
         }
     };
 
-    let total_pages = if total_entries > 0 {
-        (total_entries + ENTRIES_PER_PAGE - 1) / ENTRIES_PER_PAGE
-    } else {
-        1
-    };
+    let pagination = list_query::PaginationWindow::new(total_entries, &page);
+    let total_pages = pagination.total_pages;
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
@@ -250,10 +245,10 @@ pub async fn store_detail_handler(
     ));
     breadcrumbs.push(templates::BreadcrumbItem::current(store_name.clone()));
 
-    let has_prev_page = current_page_num > 1;
-    let has_next_page = current_page_num < total_pages;
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let has_prev_page = pagination.has_prev_page;
+    let has_next_page = pagination.has_next_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     let deleted_flash = params.get("deleted").map(|s| s == "1").unwrap_or(false);
     let pagination_search_suffix = if is_searching {

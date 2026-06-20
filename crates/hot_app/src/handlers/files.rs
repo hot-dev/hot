@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -8,7 +9,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hot::db::DatabasePool;
-use hot::time_range::parse_time_range_cutoff;
 use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -24,36 +24,9 @@ pub async fn files_list_handler(
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Files".to_string()));
 
-    // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
-    // Parse time range filter
-    let time_range_param = params.get("time_range");
-    let selected_time_range: String = time_range_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "all".to_string());
-
-    // Parse search filter
-    let search_param = params.get("search");
-    let search_query: String = search_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(String::new);
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * FILES_PER_PAGE;
-
-    let time_range_cutoff =
-        parse_time_range_cutoff(time_range_param.map(|s| s.as_str()), chrono::Utc::now());
-
-    // Convert search query to Option<&str>
-    let search_term = if !search_query.is_empty() {
-        Some(search_query.as_str())
-    } else {
-        None
-    };
+    let page = list_query::PageParams::parse(&params, FILES_PER_PAGE);
+    let query_filters = list_query::SearchAndTimeRange::parse(&params, chrono::Utc::now());
+    let search_term = query_filters.search_term();
 
     // Get files for current environment
     let (files, total_files) = if let Some(env) = &session.current_env {
@@ -61,9 +34,9 @@ pub async fn files_list_handler(
             &db,
             env.env_id,
             search_term,
-            time_range_cutoff,
+            query_filters.time_range_cutoff,
             Some(FILES_PER_PAGE),
-            Some(offset),
+            Some(page.offset),
         )
         .await
         .unwrap_or_else(|e| {
@@ -71,31 +44,24 @@ pub async fn files_list_handler(
             Vec::new()
         });
 
-        let total =
-            hot::db::file::get_files_count_by_env(&db, env.env_id, search_term, time_range_cutoff)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to get files count by env {}: {}", env.env_id, e);
-                    0
-                });
+        let total = hot::db::file::get_files_count_by_env(
+            &db,
+            env.env_id,
+            search_term,
+            query_filters.time_range_cutoff,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to get files count by env {}: {}", env.env_id, e);
+            0
+        });
 
         (files, total)
     } else {
         (Vec::new(), 0)
     };
 
-    // Calculate pagination info
-    let total_pages = if total_files > 0 {
-        (total_files + FILES_PER_PAGE - 1) / FILES_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_files, &page);
 
     // Convert FileRecords to FileDisplay
     let files_display: Vec<templates::FileDisplay> = files
@@ -117,15 +83,15 @@ pub async fn files_list_handler(
             breadcrumbs,
         ),
         files: files_display,
-        current_page_num,
-        total_pages,
-        start_page,
-        end_page,
-        has_next_page,
-        has_prev_page,
+        current_page_num: page.current_page_num,
+        total_pages: pagination.total_pages,
+        start_page: pagination.start_page,
+        end_page: pagination.end_page,
+        has_next_page: pagination.has_next_page,
+        has_prev_page: pagination.has_prev_page,
         total_files,
-        selected_time_range,
-        search_query,
+        selected_time_range: query_filters.selected_time_range,
+        search_query: query_filters.search_query,
     };
 
     Html(template.render().unwrap()).into_response()

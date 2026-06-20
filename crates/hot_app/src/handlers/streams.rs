@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::handlers::stream_graph;
 use crate::templates;
 use ahash::AHashMap;
@@ -7,7 +8,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use hot::db::{DatabasePool, Event, Run, StreamSummary, Task};
-use hot::time_range::parse_time_range_cutoff;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,55 +29,21 @@ pub async fn streams_list_handler(
         }
     };
 
-    // Pagination parameters
-    let page = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-    let page_size = STREAMS_PER_PAGE;
-    let offset = (page - 1) * page_size;
-
-    // Parse filter parameters
-    let project_param = params.get("project");
-    let selected_project: String = project_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(String::new);
-
-    let time_range_param = params.get("time_range");
-    let selected_time_range: String = time_range_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "all".to_string());
-
-    let search_param = params.get("search");
-    let search_query: String = search_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(String::new);
-
-    // Convert project ID to UUID if specified
-    let _selected_project_uuid = if !selected_project.is_empty() {
-        Uuid::parse_str(&selected_project).ok()
-    } else {
-        None
-    };
-
-    let time_range_cutoff =
-        parse_time_range_cutoff(time_range_param.map(|s| s.as_str()), chrono::Utc::now());
-
-    // Convert search query to Option<&str>
-    let search_term = if !search_query.is_empty() {
-        Some(search_query.as_str())
-    } else {
-        None
-    };
+    let page = list_query::PageParams::parse(&params, STREAMS_PER_PAGE);
+    let query_filters = list_query::SearchAndTimeRange::parse(&params, chrono::Utc::now());
+    let (selected_project, selected_project_uuid) =
+        list_query::optional_uuid_param(&params, "project");
+    let search_term = query_filters.search_term();
 
     // Fetch streams with filters
     let streams = StreamSummary::get_streams_by_env_filtered(
         &db,
         &env_id,
-        time_range_cutoff,
+        selected_project_uuid.as_ref(),
+        query_filters.time_range_cutoff,
         search_term,
-        Some(page_size),
-        Some(offset),
+        Some(STREAMS_PER_PAGE),
+        Some(page.offset),
     )
     .await
     .unwrap_or_else(|e| {
@@ -86,27 +52,20 @@ pub async fn streams_list_handler(
     });
 
     // Get total count for pagination with filters
-    let total_streams =
-        StreamSummary::get_count_by_env_filtered(&db, &env_id, time_range_cutoff, search_term)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to get stream count for env_id {}: {}", env_id, e);
-                0
-            });
+    let total_streams = StreamSummary::get_count_by_env_filtered(
+        &db,
+        &env_id,
+        selected_project_uuid.as_ref(),
+        query_filters.time_range_cutoff,
+        search_term,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("Failed to get stream count for env_id {}: {}", env_id, e);
+        0
+    });
 
-    // Pagination logic
-    let total_pages = if total_streams > 0 {
-        (total_streams + page_size - 1) / page_size
-    } else {
-        1
-    };
-    let current_page_num = page;
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_streams, &page);
 
     // Get active projects for the filter dropdown
     let projects: Vec<_> = hot::db::Project::get_projects_by_env(&db, &env_id, None, None)
@@ -138,11 +97,11 @@ pub async fn streams_list_handler(
     if is_htmx_request {
         let template = templates::StreamsTableContent {
             streams: streams_display,
-            current_page_num,
-            start_page,
-            end_page,
-            has_next_page,
-            has_prev_page,
+            current_page_num: page.current_page_num,
+            start_page: pagination.start_page,
+            end_page: pagination.end_page,
+            has_next_page: pagination.has_next_page,
+            has_prev_page: pagination.has_prev_page,
             total_streams,
         };
         Html(template.render().unwrap()).into_response()
@@ -155,16 +114,16 @@ pub async fn streams_list_handler(
                 breadcrumbs,
             ),
             streams: streams_display,
-            current_page_num,
-            total_pages,
-            start_page,
-            end_page,
-            has_next_page,
-            has_prev_page,
+            current_page_num: page.current_page_num,
+            total_pages: pagination.total_pages,
+            start_page: pagination.start_page,
+            end_page: pagination.end_page,
+            has_next_page: pagination.has_next_page,
+            has_prev_page: pagination.has_prev_page,
             total_streams,
             selected_project,
-            selected_time_range,
-            search_query,
+            selected_time_range: query_filters.selected_time_range,
+            search_query: query_filters.search_query,
             projects,
         };
         Html(template.render().unwrap()).into_response()
@@ -185,13 +144,7 @@ pub async fn stream_detail_handler(
         }
     };
 
-    // Parse query parameters
-    let page = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-    let page_size = STREAMS_PER_PAGE;
-    let offset = (page - 1) * page_size;
+    let page = list_query::PageParams::parse(&params, STREAMS_PER_PAGE);
 
     // Get stream summary
     let stream_raw = match StreamSummary::get_stream(&db, &stream_id).await {
@@ -218,17 +171,23 @@ pub async fn stream_detail_handler(
     tracing::debug!(
         "Fetching runs for stream_id: {} (page: {}, page_size: {}, offset: {})",
         stream_id,
-        page,
-        page_size,
-        offset
+        page.current_page_num,
+        page.page_size,
+        page.offset
     );
 
-    let runs = Run::get_runs_by_stream(&db, &stream_id, &env_id, Some(page_size), Some(offset))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to fetch runs for stream {}: {}", stream_id, e);
-            Vec::new()
-        });
+    let runs = Run::get_runs_by_stream(
+        &db,
+        &stream_id,
+        &env_id,
+        Some(page.page_size),
+        Some(page.offset),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("Failed to fetch runs for stream {}: {}", stream_id, e);
+        Vec::new()
+    });
 
     tracing::debug!("Found {} runs for stream_id: {}", runs.len(), stream_id);
 
@@ -245,13 +204,18 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Get events for this stream
-    let events_raw =
-        Event::get_events_by_stream(&db, &stream_id, &env_id, Some(page_size), Some(offset))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to fetch events for stream {}: {}", stream_id, e);
-                Vec::new()
-            });
+    let events_raw = Event::get_events_by_stream(
+        &db,
+        &stream_id,
+        &env_id,
+        Some(page.page_size),
+        Some(page.offset),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("Failed to fetch events for stream {}: {}", stream_id, e);
+        Vec::new()
+    });
 
     tracing::debug!(
         "Found {} events for stream_id: {}",
@@ -272,7 +236,7 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Get tasks for this stream
-    let tasks_raw = Task::get_by_stream(&db, &stream_id, &env_id, Some(page_size))
+    let tasks_raw = Task::get_by_stream(&db, &stream_id, &env_id, Some(page.page_size))
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch tasks for stream {}: {}", stream_id, e);
@@ -304,14 +268,7 @@ pub async fn stream_detail_handler(
         total_runs
     );
 
-    // Pagination logic
-    let total_pages = (total_runs + page_size - 1) / page_size;
-    let current_page_num = page;
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_runs, &page);
 
     // Build stream graph using unified function (no focus)
     let graph_data = stream_graph::build_stream_graph(
@@ -348,12 +305,12 @@ pub async fn stream_detail_handler(
         tasks,
         graph_data,
         graph_data_json,
-        current_page_num,
-        total_pages,
-        start_page,
-        end_page,
-        has_next_page,
-        has_prev_page,
+        current_page_num: page.current_page_num,
+        total_pages: pagination.total_pages,
+        start_page: pagination.start_page,
+        end_page: pagination.end_page,
+        has_next_page: pagination.has_next_page,
+        has_prev_page: pagination.has_prev_page,
     };
 
     Html(template.render().unwrap()).into_response()

@@ -1,4 +1,5 @@
 use crate::auth::{AppState, Session};
+use crate::handlers::list_query;
 use crate::handlers::stream_graph;
 use crate::templates;
 use ahash::{AHashMap, AHashSet};
@@ -9,7 +10,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect};
 use hot::db::{DatabasePool, Run, Task};
 use hot::queue::Queue;
-use hot::time_range::parse_time_range_cutoff;
 use serde_json::json;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -27,94 +27,18 @@ pub async fn runs_list_handler(
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Runs".to_string()));
 
-    // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
-    // Parse filter parameters
-    let statuses_param = params.get("statuses").map(|s| s.as_str());
-    let run_types_param = params.get("run_types").map(|s| s.as_str());
-    let time_range_param = params.get("time_range").map(|s| s.as_str());
-    let project_param = params.get("project").map(|s| s.as_str());
-    let search_param = params.get("search");
-
-    // Default filters (all options selected if no filters specified)
-    let selected_statuses: Vec<String> = if let Some(statuses_str) = statuses_param {
-        if statuses_str.is_empty() {
-            vec![
-                "running".to_string(),
-                "succeeded".to_string(),
-                "failed".to_string(),
-                "cancelled".to_string(),
-            ]
-        } else {
-            statuses_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        }
-    } else {
-        vec![
-            "running".to_string(),
-            "succeeded".to_string(),
-            "failed".to_string(),
-            "cancelled".to_string(),
-        ]
-    };
-
-    let selected_run_types: Vec<String> = if let Some(run_types_str) = run_types_param {
-        if run_types_str.is_empty() {
-            vec![
-                "call".to_string(),
-                "event".to_string(),
-                "schedule".to_string(),
-                "run".to_string(),
-                "eval".to_string(),
-                "repl".to_string(),
-            ]
-        } else {
-            run_types_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        }
-    } else {
-        vec![
-            "call".to_string(),
-            "event".to_string(),
-            "schedule".to_string(),
-            "run".to_string(),
-            "eval".to_string(),
-            "repl".to_string(),
-        ]
-    };
-
-    let selected_time_range = if let Some(time_range_str) = time_range_param {
-        if time_range_str == "all" {
-            "all".to_string()
-        } else {
-            time_range_str.to_string()
-        }
-    } else {
-        "all".to_string() // Default to "all time"
-    };
-
-    // Parse project filter
-    let selected_project: Option<String> = project_param.map(|s| s.to_string());
-    let selected_project_uuid: Option<Uuid> = selected_project.as_ref().and_then(|s| {
-        if s.is_empty() {
-            None
-        } else {
-            Uuid::parse_str(s).ok()
-        }
-    });
-
     const RUNS_PER_PAGE: i64 = 10;
+    const ALL_RUN_STATUSES: &[&str] = &["running", "succeeded", "failed", "cancelled"];
+    const ALL_RUN_TYPES: &[&str] = &["call", "event", "schedule", "run", "eval", "repl"];
 
-    // Calculate offset
-    let offset = (current_page_num - 1) * RUNS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, RUNS_PER_PAGE);
+    let query_filters = list_query::SearchAndTimeRange::parse(&params, chrono::Utc::now());
+    let selected_statuses =
+        list_query::selected_csv_or_default(&params, "statuses", ALL_RUN_STATUSES);
+    let selected_run_types =
+        list_query::selected_csv_or_default(&params, "run_types", ALL_RUN_TYPES);
+    let (selected_project, selected_project_uuid) =
+        list_query::optional_uuid_param(&params, "project");
 
     // Get env ID for filtering runs (use current env)
     let env_id = session.current_env_id();
@@ -125,24 +49,9 @@ pub async fn runs_list_handler(
         session.current_org_id()
     );
 
-    // Prepare filter arrays for database queries
-    let status_filter: Option<Vec<&str>> = if selected_statuses.len() == 4 {
-        None // All statuses selected, no need to filter
-    } else {
-        Some(selected_statuses.iter().map(|s| s.as_str()).collect())
-    };
-
-    let run_type_filter: Option<Vec<&str>> = if selected_run_types.len() == 6 {
-        None // All run types selected, no need to filter
-    } else {
-        Some(selected_run_types.iter().map(|s| s.as_str()).collect())
-    };
-
-    let time_range_cutoff = parse_time_range_cutoff(time_range_param, chrono::Utc::now());
-
-    // Convert search parameter to Option<&str>
-    let search_filter: Option<&str> =
-        search_param.and_then(|s| if s.is_empty() { None } else { Some(s.as_str()) });
+    let status_filter = list_query::filter_unless_all(&selected_statuses, ALL_RUN_STATUSES.len());
+    let run_type_filter = list_query::filter_unless_all(&selected_run_types, ALL_RUN_TYPES.len());
+    let search_filter = query_filters.search_term();
 
     // Get filtered runs and total count for current environment
     let (runs_data, total_runs) = if let Some(env_id) = env_id {
@@ -151,11 +60,11 @@ pub async fn runs_list_handler(
             &env_id,
             status_filter.as_deref(),
             run_type_filter.as_deref(),
-            time_range_cutoff,
+            query_filters.time_range_cutoff,
             selected_project_uuid.as_ref(),
             search_filter,
             Some(RUNS_PER_PAGE),
-            Some(offset),
+            Some(page.offset),
         )
         .await
         .unwrap_or_else(|e| {
@@ -168,7 +77,7 @@ pub async fn runs_list_handler(
             &env_id,
             status_filter.as_deref(),
             run_type_filter.as_deref(),
-            time_range_cutoff,
+            query_filters.time_range_cutoff,
             selected_project_uuid.as_ref(),
             search_filter,
         )
@@ -215,28 +124,17 @@ pub async fn runs_list_handler(
         Vec::new()
     };
 
-    // Calculate pagination info
-    let total_pages = if total_runs > 0 {
-        (total_runs + RUNS_PER_PAGE - 1) / RUNS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_runs, &page);
 
     // Return partial template for HTMX requests, full template otherwise
     if is_htmx_request {
         let template = templates::RunsTableContent {
             runs,
-            current_page_num,
-            start_page,
-            end_page,
-            has_next_page,
-            has_prev_page,
+            current_page_num: page.current_page_num,
+            start_page: pagination.start_page,
+            end_page: pagination.end_page,
+            has_next_page: pagination.has_next_page,
+            has_prev_page: pagination.has_prev_page,
             total_runs,
         };
         Html(template.render().unwrap()).into_response()
@@ -249,18 +147,18 @@ pub async fn runs_list_handler(
                 breadcrumbs,
             ),
             runs,
-            current_page_num,
-            total_pages,
-            start_page,
-            end_page,
-            has_next_page,
-            has_prev_page,
+            current_page_num: page.current_page_num,
+            total_pages: pagination.total_pages,
+            start_page: pagination.start_page,
+            end_page: pagination.end_page,
+            has_next_page: pagination.has_next_page,
+            has_prev_page: pagination.has_prev_page,
             total_runs,
             selected_statuses,
             selected_run_types,
-            selected_time_range,
-            selected_project: selected_project.unwrap_or_default(),
-            search_query: search_param.map(|s| s.to_string()).unwrap_or_default(),
+            selected_time_range: query_filters.selected_time_range,
+            selected_project,
+            search_query: query_filters.search_query,
             projects,
         };
         Html(template.render().unwrap()).into_response()

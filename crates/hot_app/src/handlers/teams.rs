@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -59,15 +60,10 @@ pub async fn teams_list_handler(
     breadcrumbs.push(templates::BreadcrumbItem::current("Teams".to_string()));
 
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     const TEAMS_PER_PAGE: i64 = 10;
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * TEAMS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, TEAMS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get teams for current organization
     let (teams, total_teams) = if let Some(org) = &session.current_org {
@@ -92,17 +88,12 @@ pub async fn teams_list_handler(
     };
 
     // Calculate pagination info
-    let total_pages = if total_teams > 0 {
-        (total_teams + TEAMS_PER_PAGE - 1) / TEAMS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_teams, &page);
+    let total_pages = pagination.total_pages;
+    let has_next_page = pagination.has_next_page;
+    let has_prev_page = pagination.has_prev_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     let template = templates::TeamsList {
         title: "Teams",
@@ -244,15 +235,10 @@ pub async fn team_users_list_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     const USERS_PER_PAGE: i64 = 10;
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * USERS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, USERS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get team details
     match hot::db::Team::get_team(&db, &team_id).await {
@@ -275,17 +261,12 @@ pub async fn team_users_list_handler(
             };
 
             // Calculate pagination info
-            let total_pages = if total_team_users > 0 {
-                (total_team_users + USERS_PER_PAGE - 1) / USERS_PER_PAGE
-            } else {
-                1
-            };
-            let has_next_page = current_page_num < total_pages;
-            let has_prev_page = current_page_num > 1;
-
-            // Calculate pagination window
-            let start_page = std::cmp::max(1, current_page_num - 2);
-            let end_page = std::cmp::min(total_pages, current_page_num + 2);
+            let pagination = list_query::PaginationWindow::new(total_team_users, &page);
+            let total_pages = pagination.total_pages;
+            let has_next_page = pagination.has_next_page;
+            let has_prev_page = pagination.has_prev_page;
+            let start_page = pagination.start_page;
+            let end_page = pagination.end_page;
 
             let can_manage = can_manage_team_users(&db, &session, &team_id).await;
 

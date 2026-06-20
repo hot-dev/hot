@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -21,18 +22,15 @@ pub async fn schedules_list_handler(
     ));
 
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     let search_query = params
         .get("search")
         .map(|s| s.to_string())
         .unwrap_or_default();
 
     const ITEMS_PER_PAGE: i64 = 20;
-    let offset = (current_page_num - 1) * ITEMS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, ITEMS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get env ID for filtering
     let env_id = session.current_env_id();
@@ -89,15 +87,12 @@ pub async fn schedules_list_handler(
     };
 
     // Calculate pagination info
-    let total_pages = if total_schedules > 0 {
-        (total_schedules + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_schedules, &page);
+    let total_pages = pagination.total_pages;
+    let has_next_page = pagination.has_next_page;
+    let has_prev_page = pagination.has_prev_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     let (org_active_schedules, org_active_schedule_limit) =
         if let Some(org) = session.current_org.as_ref() {
@@ -160,13 +155,10 @@ pub async fn schedule_detail_handler(
     };
 
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     const ITEMS_PER_PAGE: i64 = 50;
-    let offset = (current_page_num - 1) * ITEMS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, ITEMS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get schedule details
     match Schedule::get_schedule(&db, &schedule_id).await {
@@ -202,15 +194,12 @@ pub async fn schedule_detail_handler(
                 .unwrap_or(0);
 
             // Calculate pagination info
-            let total_pages = if total_logs > 0 {
-                (total_logs + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE
-            } else {
-                1
-            };
-            let has_next_page = current_page_num < total_pages;
-            let has_prev_page = current_page_num > 1;
-            let start_page = std::cmp::max(1, current_page_num - 2);
-            let end_page = std::cmp::min(total_pages, current_page_num + 2);
+            let pagination = list_query::PaginationWindow::new(total_logs, &page);
+            let total_pages = pagination.total_pages;
+            let has_next_page = pagination.has_next_page;
+            let has_prev_page = pagination.has_prev_page;
+            let start_page = pagination.start_page;
+            let end_page = pagination.end_page;
 
             // Build breadcrumbs
             let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
@@ -298,18 +287,15 @@ pub async fn event_handlers_list_handler(
     ));
 
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     let search_query = params
         .get("search")
         .map(|s| s.to_string())
         .unwrap_or_default();
 
     const ITEMS_PER_PAGE: i64 = 20;
-    let offset = (current_page_num - 1) * ITEMS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, ITEMS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get env ID for filtering
     let env_id = session.current_env_id();
@@ -360,15 +346,12 @@ pub async fn event_handlers_list_handler(
     };
 
     // Calculate pagination info
-    let total_pages = if total_handlers > 0 {
-        (total_handlers + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_handlers, &page);
+    let total_pages = pagination.total_pages;
+    let has_next_page = pagination.has_next_page;
+    let has_prev_page = pagination.has_prev_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     let template = templates::EventHandlersList {
         title: "Event Handlers",
