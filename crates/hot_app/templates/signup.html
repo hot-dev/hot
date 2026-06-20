@@ -1,8 +1,8 @@
 {% extends "public_layout.html" %}
 
 {% block content %}
-<div class="flex justify-center items-center mt-10">
-    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
+<div class="accent-aura flex justify-center items-center mt-10">
+    <div class="relative z-10 glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
         <div class="mb-8 text-center">
             <h1 class="text-xl font-bold flex items-center justify-center">
                 {% if plan != "" %}
@@ -79,7 +79,7 @@
                         </svg>
                     </div>
                     <input type="password" id="password" name="password" class="font-mono w-full pl-10 pr-10 py-2 bg-white/50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 backdrop-blur-sm" placeholder="••••••••" required minlength="8" />
-                    <button type="button" id="toggle_password" aria-label="Show password" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 focus:outline-none">
+                    <button type="button" id="toggle_password" aria-label="Show password" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 focus-ring">
                         <svg id="password_eye" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                             <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
                             <path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd" />
@@ -93,7 +93,7 @@
                 <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">At least 8 characters</p>
             </div>
 
-            <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50">
+            <button type="submit" class="w-full bg-hot-red-700 hover:bg-hot-red-800 text-white py-2 px-4 rounded-md focus-ring">
                 {% if plan == "hot-free" %}
                 {% if page_context.is_hot_cloud %}Create account & verify card{% else %}Create account{% endif %}
                 {% elif plan != "" %}
@@ -138,7 +138,7 @@
 
         <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-800 text-center">
             <p class="text-sm text-gray-600 dark:text-gray-400">
-                Already have an account? <a href="/signin?{% if invite_code != "" %}invite_code={{ invite_code }}&{% endif %}{% if plan != "" %}plan={{ plan }}&{% endif %}{% if billing != "" %}billing={{ billing }}{% endif %}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Sign in</a>
+                Already have an account? <a href="/signin?{% if invite_code != "" %}invite_code={{ invite_code }}&{% endif %}{% if plan != "" %}plan={{ plan }}&{% endif %}{% if billing != "" %}billing={{ billing }}{% endif %}" class="link">Sign in</a>
             </p>
         </div>
     </div>

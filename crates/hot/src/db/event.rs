@@ -4,6 +4,8 @@ use sqlx::FromRow;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::search::IdSearch;
+
 #[derive(Error, Debug)]
 pub enum EventError {
     #[error("Database error: {0}")]
@@ -220,31 +222,11 @@ impl Event {
                     query.push_str(&format!(" AND created_at >= ${}", param_count));
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     // UUID detected: exact match on UUID fields + pattern match on text fields
                     let base = param_count + 1;
                     query.push_str(&format!(
@@ -252,7 +234,9 @@ impl Event {
                         base, base+1, base+2, base+3
                     ));
                     param_count += 4;
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix + text fields
                     let base = param_count + 1;
                     query.push_str(&format!(
@@ -260,7 +244,7 @@ impl Event {
                         base, base+1, base+2, base+3
                     ));
                     param_count += 4;
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     // Pattern matching for non-UUID searches
                     let base = param_count + 1;
                     query.push_str(&format!(
@@ -281,33 +265,6 @@ impl Event {
                     limit_param, offset_param
                 ));
 
-                // Prepare search - UUID exact match + pattern matching for user data
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                let search_pattern = search_term.map(|t| format!("%{}%", t));
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
                 let handled_value = handled_filter;
 
                 let mut db_query =
@@ -323,34 +280,31 @@ impl Event {
                     db_query = db_query.bind(cutoff);
                 }
 
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     // Bind UUID for exact matching on UUID fields
                     db_query = db_query
                         .bind(uuid) // event_id
                         .bind(uuid); // stream_id
                     // Also bind pattern for searching UUID string in text fields
-                    if let Some(ref pattern) = search_pattern {
-                        db_query = db_query
-                            .bind(pattern) // event_type
-                            .bind(pattern); // event_data
-                    }
-                } else if is_short_id {
+                    db_query = db_query
+                        .bind(search.text_pattern()) // event_type
+                        .bind(search.text_pattern()); // event_data
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
                     // Bind short ID suffix pattern for UUID fields + regular pattern for text fields
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        db_query = db_query
-                            .bind(suffix_pattern) // event_id suffix
-                            .bind(suffix_pattern); // stream_id suffix
-                    }
-                    if let Some(ref pattern) = search_pattern {
-                        db_query = db_query
-                            .bind(pattern) // event_type
-                            .bind(pattern); // event_data
-                    }
-                } else if let Some(ref pattern) = search_pattern {
+                    db_query = db_query
+                        .bind(suffix_pattern) // event_id suffix
+                        .bind(suffix_pattern) // stream_id suffix
+                        .bind(search.text_pattern()) // event_type
+                        .bind(search.text_pattern()); // event_data
+                } else if let Some(search) = &id_search {
                     // Bind pattern for text search
                     db_query = db_query
-                        .bind(pattern) // event_type
-                        .bind(pattern); // event_data
+                        .bind(search.text_pattern()) // event_type
+                        .bind(search.text_pattern()); // event_data
                 }
 
                 let events = db_query.bind(limit).bind(offset).fetch_all(pg_pool).await?;
@@ -376,70 +330,25 @@ impl Event {
                     query.push_str(" AND created_at >= ?");
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     // UUID detected: exact match on UUID fields + pattern match on text fields
                     query.push_str(" AND (event_id = ? OR stream_id = ? OR event_type LIKE ? OR CAST(event_data AS TEXT) LIKE ?)");
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix + text fields
-                    query.push_str(" AND (CAST(event_id AS TEXT) LIKE ? OR CAST(stream_id AS TEXT) LIKE ? OR event_type LIKE ? OR CAST(event_data AS TEXT) LIKE ?)");
-                } else if search_term.is_some() {
+                    query.push_str(" AND (LOWER(HEX(event_id)) LIKE ? OR LOWER(HEX(stream_id)) LIKE ? OR event_type LIKE ? OR CAST(event_data AS TEXT) LIKE ?)");
+                } else if id_search.is_some() {
                     // Pattern matching for non-UUID searches
                     query.push_str(" AND (event_type LIKE ? OR CAST(event_data AS TEXT) LIKE ?)");
                 }
 
                 query.push_str(" ORDER BY event_time DESC LIMIT ? OFFSET ?");
 
-                // Prepare search - UUID exact match + pattern matching for user data
-                let search_uuid_sqlite = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id_sqlite = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                let search_pattern = search_term.map(|t| format!("%{}%", t));
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
                 let handled_value = handled_filter;
 
                 let mut db_query =
@@ -456,34 +365,31 @@ impl Event {
                     db_query = db_query.bind(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
                 }
 
-                if let Some(uuid) = search_uuid_sqlite {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     // Bind UUID for exact matching on UUID fields
                     db_query = db_query
                         .bind(uuid) // event_id
                         .bind(uuid); // stream_id
                     // Also bind pattern for searching UUID string in text fields
-                    if let Some(ref pattern) = search_pattern {
-                        db_query = db_query
-                            .bind(pattern) // event_type
-                            .bind(pattern); // event_data
-                    }
-                } else if is_short_id_sqlite {
+                    db_query = db_query
+                        .bind(search.text_pattern()) // event_type
+                        .bind(search.text_pattern()); // event_data
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
                     // Bind short ID suffix pattern for UUID fields + regular pattern for text fields
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        db_query = db_query
-                            .bind(suffix_pattern) // event_id suffix
-                            .bind(suffix_pattern); // stream_id suffix
-                    }
-                    if let Some(ref pattern) = search_pattern {
-                        db_query = db_query
-                            .bind(pattern) // event_type
-                            .bind(pattern); // event_data
-                    }
-                } else if let Some(ref pattern) = search_pattern {
+                    db_query = db_query
+                        .bind(suffix_pattern) // event_id suffix
+                        .bind(suffix_pattern) // stream_id suffix
+                        .bind(search.text_pattern()) // event_type
+                        .bind(search.text_pattern()); // event_data
+                } else if let Some(search) = &id_search {
                     // Bind pattern for text search
                     db_query = db_query
-                        .bind(pattern) // event_type
-                        .bind(pattern); // event_data
+                        .bind(search.text_pattern()) // event_type
+                        .bind(search.text_pattern()); // event_data
                 }
 
                 let events = db_query
@@ -531,26 +437,38 @@ impl Event {
                     query.push_str(&format!(" AND created_at >= ${}", param_count));
                 }
 
-                if search_term.is_some() {
+                let id_search = IdSearch::parse(search_term);
+
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
+                    let base = param_count + 1;
+                    query.push_str(&format!(
+                        " AND (event_id = ${} OR stream_id = ${} OR event_type ILIKE ${})",
+                        base,
+                        base + 1,
+                        base + 2
+                    ));
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     let base = param_count + 1;
                     query.push_str(&format!(
                         " AND (CAST(event_id AS TEXT) ILIKE ${} OR CAST(stream_id AS TEXT) ILIKE ${} OR event_type ILIKE ${})",
-                        base, base+1, base+2
+                        base,
+                        base + 1,
+                        base + 2
+                    ));
+                } else if id_search.is_some() {
+                    let base = param_count + 1;
+                    query.push_str(&format!(
+                        " AND (CAST(event_id AS TEXT) ILIKE ${} OR CAST(stream_id AS TEXT) ILIKE ${} OR event_type ILIKE ${})",
+                        base,
+                        base + 1,
+                        base + 2
                     ));
                 }
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Prepare search pattern - use suffix pattern for UUID fields when short ID
-                let uuid_pattern = if is_short_id {
-                    search_term.map(|term| format!("%{}", term))
-                } else {
-                    search_term.map(|term| format!("%{}%", term))
-                };
-                let text_pattern = search_term.map(|term| format!("%{}%", term));
                 let handled_value = handled_filter;
 
                 let mut db_query =
@@ -566,15 +484,25 @@ impl Event {
                     db_query = db_query.bind(cutoff);
                 }
 
-                if search_term.is_some() {
-                    if let Some(ref pattern) = uuid_pattern {
-                        db_query = db_query
-                            .bind(pattern) // event_id
-                            .bind(pattern); // stream_id
-                    }
-                    if let Some(ref pattern) = text_pattern {
-                        db_query = db_query.bind(pattern); // event_type
-                    }
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
+                    db_query = db_query
+                        .bind(uuid) // event_id
+                        .bind(uuid) // stream_id
+                        .bind(search.text_pattern()); // event_type
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    db_query = db_query
+                        .bind(suffix_pattern) // event_id suffix
+                        .bind(suffix_pattern) // stream_id suffix
+                        .bind(search.text_pattern()); // event_type
+                } else if let Some(search) = &id_search {
+                    db_query = db_query
+                        .bind(search.text_pattern()) // event_id
+                        .bind(search.text_pattern()) // stream_id
+                        .bind(search.text_pattern()); // event_type
                 }
 
                 let count = db_query.fetch_one(pg_pool).await?;
@@ -599,22 +527,20 @@ impl Event {
                     query.push_str(" AND created_at >= ?");
                 }
 
-                if search_term.is_some() {
-                    query.push_str(" AND (CAST(event_id AS TEXT) LIKE ? OR CAST(stream_id AS TEXT) LIKE ? OR event_type LIKE ?)");
+                let id_search = IdSearch::parse(search_term);
+
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
+                    query.push_str(" AND (event_id = ? OR stream_id = ? OR event_type LIKE ?)");
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
+                    query.push_str(" AND (LOWER(HEX(event_id)) LIKE ? OR LOWER(HEX(stream_id)) LIKE ? OR event_type LIKE ?)");
+                } else if id_search.is_some() {
+                    query.push_str(" AND (LOWER(HEX(event_id)) LIKE ? OR LOWER(HEX(stream_id)) LIKE ? OR event_type LIKE ?)");
                 }
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Prepare search pattern - use suffix pattern for UUID fields when short ID
-                let uuid_pattern = if is_short_id {
-                    search_term.map(|term| format!("%{}", term))
-                } else {
-                    search_term.map(|term| format!("%{}%", term))
-                };
-                let text_pattern = search_term.map(|term| format!("%{}%", term));
                 let handled_value = handled_filter;
 
                 let mut db_query =
@@ -631,15 +557,25 @@ impl Event {
                     db_query = db_query.bind(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
                 }
 
-                if search_term.is_some() {
-                    if let Some(ref pattern) = uuid_pattern {
-                        db_query = db_query
-                            .bind(pattern) // event_id
-                            .bind(pattern); // stream_id
-                    }
-                    if let Some(ref pattern) = text_pattern {
-                        db_query = db_query.bind(pattern); // event_type
-                    }
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
+                    db_query = db_query
+                        .bind(uuid) // event_id
+                        .bind(uuid) // stream_id
+                        .bind(search.text_pattern()); // event_type
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
+                    db_query = db_query
+                        .bind(suffix_pattern) // event_id suffix
+                        .bind(suffix_pattern) // stream_id suffix
+                        .bind(search.text_pattern()); // event_type
+                } else if let Some(search) = &id_search {
+                    db_query = db_query
+                        .bind(search.text_pattern()) // event_id
+                        .bind(search.text_pattern()) // stream_id
+                        .bind(search.text_pattern()); // event_type
                 }
 
                 let count = db_query.fetch_one(sqlite_pool).await?;

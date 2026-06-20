@@ -278,20 +278,23 @@ pub struct RateLimitExceeded {
     pub message: String,
 }
 
+pub fn rate_limit_error_body(exceeded: RateLimitExceeded) -> ApiErrorResponse {
+    ApiErrorResponse::new(
+        "rate_limit_exceeded",
+        format!(
+            "{} Retry after {} seconds.",
+            exceeded.message, exceeded.retry_after_secs
+        ),
+    )
+    .with_retry_after(exceeded.retry_after_secs)
+}
+
 pub fn rate_limit_response(exceeded: RateLimitExceeded) -> Response {
+    let retry_after_secs = exceeded.retry_after_secs;
     (
         StatusCode::TOO_MANY_REQUESTS,
-        [("Retry-After", exceeded.retry_after_secs.to_string())],
-        axum::Json(
-            ApiErrorResponse::new(
-                "rate_limit_exceeded",
-                format!(
-                    "{} Retry after {} seconds.",
-                    exceeded.message, exceeded.retry_after_secs
-                ),
-            )
-            .with_retry_after(exceeded.retry_after_secs),
-        ),
+        [("Retry-After", retry_after_secs.to_string())],
+        axum::Json(rate_limit_error_body(exceeded)),
     )
         .into_response()
 }
@@ -509,6 +512,18 @@ mod tests {
         // After TTL expires, entry should be stale
         std::thread::sleep(Duration::from_millis(60));
         assert!(cache.get(&org_id).is_none());
+    }
+
+    #[test]
+    fn rate_limit_error_body_includes_retry_after() {
+        let body = rate_limit_error_body(RateLimitExceeded {
+            retry_after_secs: 3,
+            message: "Rate limit exceeded".to_string(),
+        });
+
+        assert_eq!(body.error.code, "rate_limit_exceeded");
+        assert_eq!(body.error.retry_after, Some(3));
+        assert!(body.error.message.contains("Retry after 3 seconds."));
     }
 
     #[test]

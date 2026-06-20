@@ -48,7 +48,7 @@
                     <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
                         <td class="px-4 lg:px-6 py-4 whitespace-nowrap">
                             <div class="text-sm font-medium text-gray-900 dark:text-white">
-                                <a href="/@{{ org.slug }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all">
+                                <a href="/@{{ org.slug }}" class="link transition-all">
                                     {{ org.name }}
                                 </a>
                                 {% if org.is_individual() %}
@@ -68,11 +68,11 @@
                         </td>
                         <td class="px-4 lg:px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
                             <div class="flex items-center justify-end space-x-2">
-                                <a href="/@{{ org.slug }}" class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300">
+                                <a href="/@{{ org.slug }}" class="link">
                                     View
                                 </a>
                                 <span class="text-gray-300 dark:text-gray-600">|</span>
-                                <a href="/@{{ org.slug }}/edit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+                                <a href="/@{{ org.slug }}/edit" class="link">
                                     Edit
                                 </a>
                             </div>
@@ -145,7 +145,7 @@
             <div class="flex items-start justify-between mb-3">
                 <div class="flex-1 min-w-0">
                     <h3 class="text-sm font-semibold text-gray-900 dark:text-white mb-1">
-                        <a href="/@{{ org.slug }}" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+                        <a href="/@{{ org.slug }}" class="link">
                             {{ org.name }}
                         </a>
                         {% if org.is_individual() %}
@@ -155,11 +155,11 @@
                     <p class="text-xs text-gray-500 dark:text-gray-400 font-mono">@{{ org.slug }}</p>
                 </div>
                 <div class="flex items-center space-x-2 ml-2">
-                    <a href="/@{{ org.slug }}" class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300 text-xs font-medium">
+                    <a href="/@{{ org.slug }}" class="link text-xs font-medium">
                         View
                     </a>
                     <span class="text-gray-300 dark:text-gray-600">|</span>
-                    <a href="/@{{ org.slug }}/edit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 text-xs font-medium">
+                    <a href="/@{{ org.slug }}/edit" class="link text-xs font-medium">
                         Edit
                     </a>
                 </div>

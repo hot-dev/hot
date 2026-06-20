@@ -17,6 +17,7 @@ pub mod files;
 pub mod hierarchy;
 pub mod invites;
 pub mod keys;
+pub mod list_query;
 pub mod mcp_tools;
 pub mod oauth;
 pub mod orgs;

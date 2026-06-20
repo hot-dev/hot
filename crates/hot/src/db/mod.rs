@@ -136,6 +136,7 @@ pub mod run;
 pub mod schedule;
 pub mod schedule_log;
 pub mod scheduler_state;
+pub(crate) mod search;
 pub mod service_key;
 pub mod session;
 pub mod stream;

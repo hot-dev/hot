@@ -13,14 +13,14 @@
         <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
                 <div class="flex items-center gap-2 mb-1">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-indigo-500 dark:text-indigo-400 flex-shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-purple-500 dark:text-purple-400 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.5L10.5 19l3 2.5" />
                         <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
                     </svg>
-                    <h1 class="text-xl font-bold text-gray-900 dark:text-white">{{ agent.display_name }}</h1>
+                    <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white">{{ agent.display_name }}</h1>
                 </div>
                 <div class="text-xs text-gray-500 dark:text-gray-400 font-mono mb-2">{{ agent.namespace_qualified_name }}</div>
                 {% if !agent.description.is_empty() %}
@@ -28,7 +28,7 @@
                 {% endif %}
                 {% if agent.source_file.is_some() %}
                 <button type="button"
-                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mt-1 text-left"
+                        class="text-xs link hover:underline font-mono mt-1 text-left"
                         data-source-build-id="{{ agent.build_id }}"
                         data-source-file="{{ agent.source_file.as_deref().unwrap_or("") }}"
                         {% if let Some(line) = agent.source_line %}data-source-line="{{ line }}"{% endif %}
@@ -40,7 +40,7 @@
             </div>
             <div class="flex flex-wrap gap-1.5 flex-shrink-0">
                 {% for tag in agent.tags %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300">{{ tag }}</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300">{{ tag }}</span>
                 {% endfor %}
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ agent.project_name }}</span>
             </div>
@@ -83,22 +83,22 @@
         <div class="border-b border-gray-200 dark:border-gray-700 px-4 flex items-center justify-between">
             <nav class="-mb-px flex gap-6" aria-label="Tabs">
                 <a href="?tab=graph"
-                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z"/></svg>
                     Graph
                 </a>
                 <a href="?tab=handlers"
-                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "handlers" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "handlers" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     <span class="relative inline-flex w-4 h-4 flex-shrink-0" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"/></svg><svg viewBox="0 0 24 24" fill="currentColor" class="w-[0.55rem] h-[0.55rem] absolute -bottom-0.5 -right-0.5 bg-white dark:bg-gray-900"><path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd"/></svg></span>
                     Handlers <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ handlers.len() }}</span>
                 </a>
                 <a href="?tab=runs"
-                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "runs" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "runs" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/></svg>
                     Runs <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ runs_total }}</span>
                 </a>
                 <a href="?tab=streams"
-                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "streams" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "streams" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>
                     Streams
                 </a>
@@ -171,7 +171,7 @@
                                 </template>
                                 <template x-if="inspectorData.node.source_file">
                                     <button type="button"
-                                            class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                            class="text-xs link hover:underline font-mono mb-1 truncate max-w-full text-left"
                                             :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
                                             @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
                                             x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
@@ -211,7 +211,7 @@
                                         <template x-for="s in inspectorData.sends" :key="s.node.id">
                                             <div class="mb-1">
                                                 <button @click="selectNode(s.node.id)"
-                                                        class="block w-full text-left px-2 py-1 rounded text-sm text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 font-mono text-xs transition-colors"
+                                                        class="block w-full text-left px-2 py-1 rounded text-sm text-purple-700 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/40 font-mono text-xs transition-colors"
                                                         x-text="s.node.name"></button>
                                                 <template x-if="s.edge.doc">
                                                     <div class="text-xs text-gray-400 dark:text-gray-500 italic pl-2 mt-0.5" x-text="s.edge.doc"></div>
@@ -275,7 +275,7 @@
                                 </template>
                                 <template x-if="inspectorData.node.source_file">
                                     <button type="button"
-                                            class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                            class="text-xs link hover:underline font-mono mb-1 truncate max-w-full text-left"
                                             :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
                                             @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
                                             x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
@@ -426,7 +426,7 @@
                     {% for run in runs %}
                     <tr class="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
                         onclick="window.location='/runs/{{ run.run_id }}'">
-                        <td class="py-2.5 px-4 font-mono text-xs text-indigo-600 dark:text-indigo-400">{{ run.run_id.to_string()[..12] }}</td>
+                        <td class="py-2.5 px-4 font-mono text-xs text-purple-600 dark:text-purple-400">{{ run.run_id.to_string()[..12] }}</td>
                         <td class="py-2.5 px-4">
                             <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
                                 {% if run.status == "succeeded" %}bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300
@@ -485,7 +485,7 @@
                     {% for s in streams %}
                     <tr class="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
                         onclick="window.location='/streams/{{ s.stream_id }}'">
-                        <td class="py-2.5 px-4 font-mono text-xs text-indigo-600 dark:text-indigo-400">{{ s.stream_id }}</td>
+                        <td class="py-2.5 px-4 font-mono text-xs text-purple-600 dark:text-purple-400">{{ s.stream_id }}</td>
                         <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400">{{ s.total_runs|commafy }}</td>
                         <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400">{{ s.total_events|commafy }}</td>
                         <td class="py-2.5 px-4 text-gray-600 dark:text-gray-400 text-xs">{{ s.start_time }}</td>

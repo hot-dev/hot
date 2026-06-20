@@ -1,4 +1,5 @@
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::handlers::stream_graph;
 use crate::templates;
 use ahash::{AHashMap, AHashSet};
@@ -8,7 +9,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect};
 use hot::db::DatabasePool;
-use hot::time_range::parse_time_range_cutoff;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -27,109 +27,42 @@ pub async fn events_list_handler(
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Events".to_string()));
 
-    // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
+    let page = list_query::PageParams::parse(&params, EVENTS_PER_PAGE);
+    let query_filters = list_query::SearchAndTimeRange::parse(&params, chrono::Utc::now());
     let inspect_mode = params.get("inspect").map(|v| v == "1").unwrap_or(false);
 
     // Parse handled filter: "all" (default), "handled", "unhandled"
-    let handled_param = params.get("handled");
-    let selected_handled: String = handled_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "all".to_string());
-
-    // Parse time range filter
-    let time_range_param = params.get("time_range");
-    let selected_time_range: String = time_range_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "all".to_string());
-
-    // Parse search filter
-    let search_param = params.get("search");
-    let search_query: String = search_param
-        .map(|s| s.to_string())
-        .unwrap_or_else(String::new);
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * EVENTS_PER_PAGE;
-
-    let time_range_cutoff =
-        parse_time_range_cutoff(time_range_param.map(|s| s.as_str()), chrono::Utc::now());
-
-    // Convert search query to Option<&str>
-    let search_term = if !search_query.is_empty() {
-        Some(search_query.as_str())
-    } else {
-        None
+    let selected_handled = list_query::selected_value(&params, "handled", "all");
+    let handled_filter = match selected_handled.as_str() {
+        "handled" => Some(true),
+        "unhandled" => Some(false),
+        _ => None,
     };
+    let search_term = query_filters.search_term();
 
     // Get events for current environment
     let (events, total_events) = if let Some(env) = &session.current_env {
-        // Filter events based on handled status
-        let events = match selected_handled.as_str() {
-            "handled" => hot::db::Event::get_events_by_env_filtered(
-                &db,
-                &env.env_id,
-                Some(true),
-                time_range_cutoff,
-                search_term,
-                Some(EVENTS_PER_PAGE),
-                Some(offset),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to get handled events by env {}: {}", env.env_id, e);
-                Vec::new()
-            }),
-            "unhandled" => hot::db::Event::get_events_by_env_filtered(
-                &db,
-                &env.env_id,
-                Some(false),
-                time_range_cutoff,
-                search_term,
-                Some(EVENTS_PER_PAGE),
-                Some(offset),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(
-                    "Failed to get unhandled events by env {}: {}",
-                    env.env_id,
-                    e
-                );
-                Vec::new()
-            }),
-            _ => {
-                // "all" or any other value - use filtered method with no handled filter
-                hot::db::Event::get_events_by_env_filtered(
-                    &db,
-                    &env.env_id,
-                    None,
-                    time_range_cutoff,
-                    search_term,
-                    Some(EVENTS_PER_PAGE),
-                    Some(offset),
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to get events by env {}: {}", env.env_id, e);
-                    Vec::new()
-                })
-            }
-        };
+        let events = hot::db::Event::get_events_by_env_filtered(
+            &db,
+            &env.env_id,
+            handled_filter,
+            query_filters.time_range_cutoff,
+            search_term,
+            Some(EVENTS_PER_PAGE),
+            Some(page.offset),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to get filtered events by env {}: {}", env.env_id, e);
+            Vec::new()
+        });
 
         // Get total count based on filter
         let total = hot::db::Event::get_filtered_count_by_env(
             &db,
             &env.env_id,
-            match selected_handled.as_str() {
-                "handled" => Some(true),
-                "unhandled" => Some(false),
-                _ => None,
-            },
-            time_range_cutoff,
+            handled_filter,
+            query_filters.time_range_cutoff,
             search_term,
         )
         .await
@@ -147,14 +80,7 @@ pub async fn events_list_handler(
         (Vec::new(), 0)
     };
 
-    // Calculate pagination info
-    let total_pages = (total_events + EVENTS_PER_PAGE - 1) / EVENTS_PER_PAGE;
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_events, &page);
 
     // Convert events to display format with timezone-aware formatting
     let events_display: Vec<templates::EventListItem> = events
@@ -172,11 +98,11 @@ pub async fn events_list_handler(
     if is_htmx_request {
         let template = templates::EventsTableContent {
             events: events_display,
-            current_page_num,
-            start_page,
-            end_page,
-            has_next_page,
-            has_prev_page,
+            current_page_num: page.current_page_num,
+            start_page: pagination.start_page,
+            end_page: pagination.end_page,
+            has_next_page: pagination.has_next_page,
+            has_prev_page: pagination.has_prev_page,
             total_events,
         };
         Html(template.render().unwrap()).into_response()
@@ -189,17 +115,17 @@ pub async fn events_list_handler(
                 breadcrumbs,
             ),
             events: events_display,
-            current_page_num,
-            total_pages,
-            start_page,
-            end_page,
-            has_next_page,
-            has_prev_page,
+            current_page_num: page.current_page_num,
+            total_pages: pagination.total_pages,
+            start_page: pagination.start_page,
+            end_page: pagination.end_page,
+            has_next_page: pagination.has_next_page,
+            has_prev_page: pagination.has_prev_page,
             total_events,
             inspect_mode,
             selected_handled,
-            selected_time_range,
-            search_query,
+            selected_time_range: query_filters.selected_time_range,
+            search_query: query_filters.search_query,
         };
         Html(template.render().unwrap()).into_response()
     }
@@ -219,14 +145,7 @@ pub async fn events_detail_handler(
         }
     };
 
-    // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * EVENTS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, EVENTS_PER_PAGE);
 
     // Get event details
     match hot::db::Event::get_event(&db, &event_id).await {
@@ -240,7 +159,7 @@ pub async fn events_detail_handler(
                 &db,
                 &event_id,
                 Some(EVENTS_PER_PAGE),
-                Some(offset),
+                Some(page.offset),
             )
             .await
             .unwrap_or_else(|e| {
@@ -268,14 +187,7 @@ pub async fn events_detail_handler(
                     0
                 });
 
-            // Calculate pagination info
-            let total_pages = (total_count + EVENTS_PER_PAGE - 1) / EVENTS_PER_PAGE;
-            let has_next_page = current_page_num < total_pages;
-            let has_prev_page = current_page_num > 1;
-
-            // Calculate pagination window
-            let start_page = std::cmp::max(1, current_page_num - 2);
-            let end_page = std::cmp::min(total_pages, current_page_num + 2);
+            let pagination = list_query::PaginationWindow::new(total_count, &page);
 
             // Build breadcrumbs: <org> (<env>) / Events / <event_id>
             let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
@@ -367,12 +279,12 @@ pub async fn events_detail_handler(
                 ),
                 event_runs,
                 stream_graphs,
-                current_page_num,
-                total_pages,
-                start_page,
-                end_page,
-                has_next_page,
-                has_prev_page,
+                current_page_num: page.current_page_num,
+                total_pages: pagination.total_pages,
+                start_page: pagination.start_page,
+                end_page: pagination.end_page,
+                has_next_page: pagination.has_next_page,
+                has_prev_page: pagination.has_prev_page,
                 access_info,
             };
 
@@ -411,18 +323,11 @@ pub async fn event_detail_table_handler(
         }
     }
 
-    // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * EVENTS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, EVENTS_PER_PAGE);
 
     // Get event runs
     let event_runs_raw =
-        hot::db::Event::get_runs_by_event(&db, &event_id, Some(EVENTS_PER_PAGE), Some(offset))
+        hot::db::Event::get_runs_by_event(&db, &event_id, Some(EVENTS_PER_PAGE), Some(page.offset))
             .await
             .unwrap_or_else(|e| {
                 tracing::error!("Failed to get runs by event {} for table: {}", event_id, e);
@@ -453,24 +358,17 @@ pub async fn event_detail_table_handler(
             0
         });
 
-    // Calculate pagination info
-    let total_pages = (total_count + EVENTS_PER_PAGE - 1) / EVENTS_PER_PAGE;
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_count, &page);
 
     let table_template = templates::EventDetailTable {
         event_id,
         event_runs,
-        current_page_num,
-        total_pages,
-        start_page,
-        end_page,
-        has_next_page,
-        has_prev_page,
+        current_page_num: page.current_page_num,
+        total_pages: pagination.total_pages,
+        start_page: pagination.start_page,
+        end_page: pagination.end_page,
+        has_next_page: pagination.has_next_page,
+        has_prev_page: pagination.has_prev_page,
     };
 
     Html(table_template.render().unwrap()).into_response()

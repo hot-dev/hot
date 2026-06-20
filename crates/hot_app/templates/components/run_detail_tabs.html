@@ -1045,7 +1045,7 @@
     display: inline-block;
     padding: 1px 4px;
     margin-right: 2px;
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: 10px;
     background: rgba(243, 244, 246, 1);
     border-radius: 3px;
@@ -2685,12 +2685,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
                     <td class="px-4 py-3 text-xs font-medium text-gray-900 dark:text-white">
                         <div class="inline-flex items-center gap-2">
-                            <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-blue-600 dark:text-gray-500 dark:hover:text-blue-400 transition-colors" title="Download">
+                            <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-hot-red-600 dark:text-gray-500 dark:hover:text-hot-red-400 transition-colors" title="Download">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                                 </svg>
                             </a>
-                            <a href="/files/${file.file_id}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono">${this.escapeHtml(file.path)}</a>
+                            <a href="/files/${file.file_id}" class="link transition-all font-mono">${this.escapeHtml(file.path)}</a>
                         </div>
                     </td>
                     <td class="px-4 py-3 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">

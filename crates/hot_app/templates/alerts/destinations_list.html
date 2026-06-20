@@ -93,7 +93,7 @@
                 <p class="text-sm text-blue-800 dark:text-blue-200">
                     <span class="font-medium">Alert delivery requires the Pro plan.</span>
                     Alerts are matched and recorded locally; delivery to destinations (email, Slack, PagerDuty, webhooks) is available on Hot Cloud's <span class="font-medium">Pro</span> plan or above.
-                    <a href="{{ page_context.pricing_url }}" target="_blank" class="underline hover:text-blue-600 dark:hover:text-blue-300">Learn more</a>
+                    <a href="{{ page_context.pricing_url }}" target="_blank" class="underline hover:text-hot-red-600 dark:hover:text-hot-red-300">Learn more</a>
                 </p>
             </div>
         </div>
@@ -193,7 +193,7 @@
                                 </form>
                                 {% endif %}
                                 {% if is_admin %}
-                                <a href="/settings/alerts/destinations/{{ dest.alert_destination_id }}/edit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+                                <a href="/settings/alerts/destinations/{{ dest.alert_destination_id }}/edit" class="link">
                                     Edit
                                 </a>
                                 {% endif %}

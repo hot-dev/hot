@@ -1,6 +1,7 @@
 use crate::auth::Session;
 use crate::billing_provider::{BillingCheckoutRequest, billing_provider};
 use crate::email::{AppEmailEnqueuer, AppEmailSender};
+use crate::handlers::list_query;
 use crate::templates;
 use ahash::AHashMap;
 use askama::Template;
@@ -606,15 +607,10 @@ pub async fn org_users_list_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Parse query parameters
-    let current_page_num = params
-        .get("p")
-        .and_then(|p| p.parse::<i64>().ok())
-        .unwrap_or(1);
-
     const USERS_PER_PAGE: i64 = 10;
-
-    // Calculate offset
-    let offset = (current_page_num - 1) * USERS_PER_PAGE;
+    let page = list_query::PageParams::parse(&params, USERS_PER_PAGE);
+    let current_page_num = page.current_page_num;
+    let offset = page.offset;
 
     // Get the organization
     let org = match hot::db::org::Org::get_org_by_slug(&db, &org_slug).await {
@@ -665,17 +661,12 @@ pub async fn org_users_list_handler(
     };
 
     // Calculate pagination info
-    let total_pages = if total_users > 0 {
-        (total_users + USERS_PER_PAGE - 1) / USERS_PER_PAGE
-    } else {
-        1
-    };
-    let has_next_page = current_page_num < total_pages;
-    let has_prev_page = current_page_num > 1;
-
-    // Calculate pagination window
-    let start_page = std::cmp::max(1, current_page_num - 2);
-    let end_page = std::cmp::min(total_pages, current_page_num + 2);
+    let pagination = list_query::PaginationWindow::new(total_users, &page);
+    let total_pages = pagination.total_pages;
+    let has_next_page = pagination.has_next_page;
+    let has_prev_page = pagination.has_prev_page;
+    let start_page = pagination.start_page;
+    let end_page = pagination.end_page;
 
     // Get pending invites
     let pending_invites =

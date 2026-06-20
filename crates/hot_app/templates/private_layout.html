@@ -66,9 +66,6 @@
     <script src="{{ page_context.asset("js/prism-markdown.js") }}" defer></script>
     <script src="{{ page_context.asset("js/prism-hot.js") }}" defer></script>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300..700&family=Fira+Sans:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ page_context.css_url }}">
     <link rel="stylesheet" href="{{ page_context.asset("css/prism-hot-theme.css") }}" media="print" onload="this.media='all'">
     <noscript><link rel="stylesheet" href="{{ page_context.asset("css/prism-hot-theme.css") }}"></noscript>
@@ -79,7 +76,7 @@
     <header class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 text-gray-800 dark:text-white py-1 px-6 flex justify-between items-center z-20 flex-shrink-0 border-b border-gray-200 dark:border-gray-800" style="backdrop-filter: blur(10px);">
         <div class="flex items-center transition-all duration-300 ease-in-out" id="header-left-section" style="width: 240px;">
             <!-- Sidebar toggle button — ml-[-6px] aligns with nav icons (px-4 + 2px border) -->
-            <button id="sidebar-toggle-button" aria-label="Toggle sidebar" class="ml-[-6px] mr-2 text-gray-800 dark:text-white focus:outline-none hover:text-red-600 dark:hover:text-red-400 transition-colors flex-shrink-0">
+            <button id="sidebar-toggle-button" aria-label="Toggle sidebar" class="ml-[-6px] mr-2 text-gray-800 dark:text-white focus-ring hover:text-red-600 dark:hover:text-red-400 transition-colors flex-shrink-0">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
@@ -122,7 +119,7 @@
 
             <!-- User Menu Dropdown -->
             <div class="relative" x-data="{ open: false }">
-                <button @click="open = !open" aria-label="User menu" class="flex items-center space-x-2 focus:outline-none">
+                <button @click="open = !open" aria-label="User menu" class="flex items-center space-x-2 focus-ring rounded">
                     <div class="w-7 h-7 rounded-full bg-hot-red-500 flex items-center justify-center text-white">
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5" aria-hidden="true">
                             <!-- Hot flame head with inner cutout -->
@@ -390,7 +387,7 @@
                 <!-- Organization Selector -->
                 {% if page_context.user_orgs.len() > 0 %}
                 <div class="relative inline-flex items-center" x-data="{ open: false }">
-                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1">
+                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_org %}{% when Some with (org) %}{{ org.name }}{% when None %}Select Org{% endmatch %}</span>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
                             <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
@@ -399,7 +396,7 @@
                     <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for org in page_context.user_orgs %}
                         <form action="/switch-org/{{ org.org_id }}" method="post">
-                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-500 text-white hover:bg-hot-red-600 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <div class="min-w-0">
                                         <span class="truncate block">{{ org.name }}{% if org.is_individual() %} <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>{% endif %}</span>
@@ -433,7 +430,7 @@
                 {% if page_context.show_env_selector %}
                 <span class="text-lg text-gray-400 dark:text-gray-500 mx-1">/</span>
                 <div class="relative inline-flex items-center" x-data="{ open: false }">
-                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1">
+                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_env %}{% when Some with (env) %}{{ env.name }}{% when None %}Select Env{% endmatch %}</span>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
                             <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
@@ -442,7 +439,7 @@
                     <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for env in page_context.current_org_envs %}
                         <form action="/envs/{{ env.env_id }}/switch" method="post">
-                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-500 text-white hover:bg-hot-red-600 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 focus-ring {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <span class="truncate">{{ env.name }}</span>
                                     {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}
@@ -475,7 +472,7 @@
                 {% for item in page_context.breadcrumbs %}
                     {% match item.link %}
                         {% when Some with (link) %}
-                            <a href="{{ link }}" class="text-lg font-semibold text-gray-700 hover:text-blue-600 dark:text-gray-300 dark:hover:text-blue-400 transition-colors duration-200 px-1 truncate">
+                            <a href="{{ link }}" class="text-lg font-semibold text-gray-700 hover:text-hot-red-600 dark:text-gray-300 dark:hover:text-hot-red-400 transition-colors duration-200 px-1 truncate">
                                 {{ item.text }}
                             </a>
                         {% when None %}
@@ -496,7 +493,7 @@
                 {% block sse_status %}{% endblock %}
                 <!-- Docs Link (page-specific, links to hot.dev docs) -->
                 {% if let Some(docs_url) = page_context.docs_url() %}
-                <a href="{{ docs_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-blue-500 dark:text-gray-500 dark:hover:text-blue-400 transition-colors duration-200" title="Documentation">
+                <a href="{{ docs_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-hot-red-500 dark:text-gray-500 dark:hover:text-hot-red-400 transition-colors duration-200" title="Documentation">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
                     </svg>
@@ -531,12 +528,12 @@
 
         /* UUID Display Styles */
         .uuid-container {
-            font-family: 'Fira Code', monospace;
+            font-family: var(--font-mono);
         }
 
         .uuid-display {
             position: relative;
-            font-family: 'Fira Code', monospace;
+            font-family: var(--font-mono);
             letter-spacing: 0.02em;
         }
 

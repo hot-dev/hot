@@ -5,6 +5,8 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
+
 #[derive(Error, Debug)]
 pub enum RunError {
     #[error("Database error: {0}")]
@@ -752,33 +754,11 @@ impl Run {
                     param_count += 1;
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    // Try to parse as UUID (with or without dashes)
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        // Try adding dashes if it's a 32-char hex string
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     // UUID detected: exact match on UUID fields + pattern match on text fields
                     // This allows finding UUIDs in user data (results, event_data, etc.)
                     let base = param_count;
@@ -787,7 +767,9 @@ impl Run {
                         base, base+1, base+2, base+3, base+4, base+5
                     ));
                     param_count += 6;
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix + text fields
                     let base = param_count;
                     where_clauses.push(format!(
@@ -795,7 +777,7 @@ impl Run {
                         base, base+1, base+2, base+3, base+4, base+5, base+6, base+7
                     ));
                     param_count += 8;
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     // Pattern matching for non-UUID searches
                     let base = param_count;
                     where_clauses.push(format!(
@@ -808,10 +790,7 @@ impl Run {
                 // Add status filter
                 let status_filter = if let Some(statuses) = statuses {
                     if !statuses.is_empty() {
-                        let placeholders = (param_count..param_count + statuses.len())
-                            .map(|i| format!("${}", i))
-                            .collect::<Vec<String>>()
-                            .join(", ");
+                        let placeholders = pg_placeholders(param_count, statuses.len());
                         param_count += statuses.len();
                         Some(format!("rs.status IN ({})", placeholders))
                     } else {
@@ -828,10 +807,7 @@ impl Run {
                 // Add run type filter
                 let run_type_filter = if let Some(run_types) = run_types {
                     if !run_types.is_empty() {
-                        let placeholders = (param_count..param_count + run_types.len())
-                            .map(|i| format!("${}", i))
-                            .collect::<Vec<String>>()
-                            .join(", ");
+                        let placeholders = pg_placeholders(param_count, run_types.len());
                         param_count += run_types.len();
                         Some(format!("rt.run_type IN ({})", placeholders))
                     } else {
@@ -867,66 +843,35 @@ impl Run {
                     q = q.bind(cutoff);
                 }
 
-                // Bind search term - UUID exact match + pattern matching for user data
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Create pattern outside the if block to extend lifetime
-                let search_pattern = search_term.map(|term| format!("%{}%", term));
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
-
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     // Bind UUID for exact matching on UUID fields
                     q = q.bind(uuid); // run_id
                     q = q.bind(uuid); // stream_id
                     // Also bind pattern for searching UUID string in text fields
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                        q = q.bind(pattern); // function name
-                        q = q.bind(pattern); // result (may contain UUIDs)
-                    }
-                } else if is_short_id {
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                    q = q.bind(search.text_pattern()); // function name
+                    q = q.bind(search.text_pattern()); // result (may contain UUIDs)
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
                     // Bind short ID suffix pattern for UUID fields + regular pattern for text fields
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        q = q.bind(suffix_pattern); // run_id suffix
-                        q = q.bind(suffix_pattern); // stream_id suffix
-                        q = q.bind(suffix_pattern); // event_id suffix
-                        q = q.bind(suffix_pattern); // origin_run_id suffix
-                    }
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                        q = q.bind(pattern); // function name
-                        q = q.bind(pattern); // result
-                    }
-                } else if let Some(ref pattern) = search_pattern {
+                    q = q.bind(suffix_pattern); // run_id suffix
+                    q = q.bind(suffix_pattern); // stream_id suffix
+                    q = q.bind(suffix_pattern); // event_id suffix
+                    q = q.bind(suffix_pattern); // origin_run_id suffix
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                    q = q.bind(search.text_pattern()); // function name
+                    q = q.bind(search.text_pattern()); // result
+                } else if let Some(search) = &id_search {
                     // Bind for ILIKE pattern matching
-                    q = q.bind(pattern); // project name
-                    q = q.bind(pattern); // run_type
-                    q = q.bind(pattern); // function name
-                    q = q.bind(pattern); // result
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                    q = q.bind(search.text_pattern()); // function name
+                    q = q.bind(search.text_pattern()); // result
                 }
 
                 // Bind status parameters
@@ -966,44 +911,24 @@ impl Run {
                     where_clauses.push("r.start_time >= ?".to_string());
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    // Try to parse as UUID (with or without dashes)
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        // Try adding dashes if it's a 32-char hex string
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     // UUID detected: exact match on UUID fields + pattern match on text fields
                     where_clauses.push(
                         "(r.run_id = ? OR r.stream_id = ? OR p.name LIKE ? OR rt.run_type LIKE ? OR COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1)) LIKE ? OR CAST(r.result AS TEXT) LIKE ?)".to_string()
                     );
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix + text fields
                     where_clauses.push(
-                        "(CAST(r.run_id AS TEXT) LIKE ? OR CAST(r.stream_id AS TEXT) LIKE ? OR CAST(r.event_id AS TEXT) LIKE ? OR CAST(r.origin_run_id AS TEXT) LIKE ? OR p.name LIKE ? OR rt.run_type LIKE ? OR COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1)) LIKE ? OR CAST(r.result AS TEXT) LIKE ?)"
+                        "(LOWER(HEX(r.run_id)) LIKE ? OR LOWER(HEX(r.stream_id)) LIKE ? OR LOWER(HEX(r.event_id)) LIKE ? OR LOWER(HEX(r.origin_run_id)) LIKE ? OR p.name LIKE ? OR rt.run_type LIKE ? OR COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1)) LIKE ? OR CAST(r.result AS TEXT) LIKE ?)"
                             .to_string(),
                     );
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     // Pattern matching for non-UUID searches
                     where_clauses.push(
                         "(p.name LIKE ? OR rt.run_type LIKE ? OR COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1)) LIKE ? OR CAST(r.result AS TEXT) LIKE ?)"
@@ -1014,10 +939,7 @@ impl Run {
                 // Add status filter
                 let status_filter = if let Some(statuses) = statuses {
                     if !statuses.is_empty() {
-                        let placeholders = (0..statuses.len())
-                            .map(|_| "?")
-                            .collect::<Vec<&str>>()
-                            .join(", ");
+                        let placeholders = sqlite_placeholders(statuses.len());
                         Some(format!("rs.status IN ({})", placeholders))
                     } else {
                         None
@@ -1033,10 +955,7 @@ impl Run {
                 // Add run type filter
                 let run_type_filter = if let Some(run_types) = run_types {
                     if !run_types.is_empty() {
-                        let placeholders = (0..run_types.len())
-                            .map(|_| "?")
-                            .collect::<Vec<&str>>()
-                            .join(", ");
+                        let placeholders = sqlite_placeholders(run_types.len());
                         Some(format!("rt.run_type IN ({})", placeholders))
                     } else {
                         None
@@ -1069,66 +988,35 @@ impl Run {
                     q = q.bind(c);
                 }
 
-                // Bind search term - UUID exact match + pattern matching for user data
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Create pattern outside the if block to extend lifetime
-                let search_pattern = search_term.map(|term| format!("%{}%", term));
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
-
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     // Bind UUID for exact matching on UUID fields
                     q = q.bind(uuid); // run_id
                     q = q.bind(uuid); // stream_id
                     // Also bind pattern for searching UUID string in text fields
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                        q = q.bind(pattern); // function name
-                        q = q.bind(pattern); // result (may contain UUIDs)
-                    }
-                } else if is_short_id {
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                    q = q.bind(search.text_pattern()); // function name
+                    q = q.bind(search.text_pattern()); // result (may contain UUIDs)
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
                     // Bind short ID suffix pattern for UUID fields + regular pattern for text fields
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        q = q.bind(suffix_pattern); // run_id suffix
-                        q = q.bind(suffix_pattern); // stream_id suffix
-                        q = q.bind(suffix_pattern); // event_id suffix
-                        q = q.bind(suffix_pattern); // origin_run_id suffix
-                    }
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                        q = q.bind(pattern); // function name
-                        q = q.bind(pattern); // result
-                    }
-                } else if let Some(ref pattern) = search_pattern {
+                    q = q.bind(suffix_pattern); // run_id suffix
+                    q = q.bind(suffix_pattern); // stream_id suffix
+                    q = q.bind(suffix_pattern); // event_id suffix
+                    q = q.bind(suffix_pattern); // origin_run_id suffix
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                    q = q.bind(search.text_pattern()); // function name
+                    q = q.bind(search.text_pattern()); // result
+                } else if let Some(search) = &id_search {
                     // Bind for LIKE pattern matching
-                    q = q.bind(pattern); // project name
-                    q = q.bind(pattern); // run_type
-                    q = q.bind(pattern); // function name
-                    q = q.bind(pattern); // result
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                    q = q.bind(search.text_pattern()); // function name
+                    q = q.bind(search.text_pattern()); // result
                 }
 
                 // Bind status parameters
@@ -1187,38 +1075,20 @@ impl Run {
                     param_count += 1;
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     // UUID detected: exact match on UUID fields + pattern match on text fields
                     where_clauses.push(format!(
                         "(r.run_id = ${} OR r.stream_id = ${} OR p.name ILIKE ${} OR rt.run_type ILIKE ${})",
                         param_count, param_count + 1, param_count + 2, param_count + 3
                     ));
                     param_count += 4;
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix + text fields
                     let base = param_count;
                     where_clauses.push(format!(
@@ -1226,7 +1096,7 @@ impl Run {
                         base, base + 1, base + 2, base + 3
                     ));
                     param_count += 4;
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     // Pattern matching for non-UUID searches
                     let base = param_count;
                     where_clauses.push(format!(
@@ -1240,10 +1110,7 @@ impl Run {
                 // Add status filter
                 let status_filter = if let Some(statuses) = statuses {
                     if !statuses.is_empty() {
-                        let placeholders = (param_count..param_count + statuses.len())
-                            .map(|i| format!("${}", i))
-                            .collect::<Vec<String>>()
-                            .join(", ");
+                        let placeholders = pg_placeholders(param_count, statuses.len());
                         param_count += statuses.len();
                         Some(format!("rs.status IN ({})", placeholders))
                     } else {
@@ -1260,10 +1127,7 @@ impl Run {
                 // Add run type filter
                 let run_type_filter = if let Some(run_types) = run_types {
                     if !run_types.is_empty() {
-                        let placeholders = (param_count..param_count + run_types.len())
-                            .map(|i| format!("${}", i))
-                            .collect::<Vec<String>>()
-                            .join(", ");
+                        let placeholders = pg_placeholders(param_count, run_types.len());
                         Some(format!("rt.run_type IN ({})", placeholders))
                     } else {
                         None
@@ -1296,58 +1160,27 @@ impl Run {
                     q = q.bind(cutoff);
                 }
 
-                // Bind search term - UUID exact match + pattern matching
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Create pattern outside the if block to extend lifetime
-                let search_pattern = search_term.map(|term| format!("%{}%", term));
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
-
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     // Bind UUID for exact matching on UUID fields
                     q = q.bind(uuid); // run_id
                     q = q.bind(uuid); // stream_id
                     // Also bind pattern for searching UUID string in text fields
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                    }
-                } else if is_short_id {
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
                     // Bind short ID suffix pattern for UUID fields + regular pattern for text fields
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        q = q.bind(suffix_pattern); // run_id suffix
-                        q = q.bind(suffix_pattern); // stream_id suffix
-                    }
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                    }
-                } else if let Some(ref pattern) = search_pattern {
+                    q = q.bind(suffix_pattern); // run_id suffix
+                    q = q.bind(suffix_pattern); // stream_id suffix
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                } else if let Some(search) = &id_search {
                     // Bind for ILIKE pattern matching
-                    q = q.bind(pattern); // project name
-                    q = q.bind(pattern); // run_type
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
                 }
 
                 // Bind status parameters
@@ -1382,43 +1215,25 @@ impl Run {
                     where_clauses.push("r.start_time >= ?".to_string());
                 }
 
-                // Add search filter with UUID optimization
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let id_search = IdSearch::parse(search_term);
 
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                if search_uuid.is_some() {
+                if let Some(search) = &id_search
+                    && search.uuid().is_some()
+                {
                     // UUID detected: exact match on UUID fields + pattern match on text fields
                     where_clauses.push(
                         "(r.run_id = ? OR r.stream_id = ? OR p.name LIKE ? OR rt.run_type LIKE ?)"
                             .to_string(),
                     );
-                } else if is_short_id {
+                } else if let Some(search) = &id_search
+                    && search.is_short_id()
+                {
                     // Short ID detected (12 hex chars): pattern match on UUID suffix + text fields
                     where_clauses.push(
-                        "(CAST(r.run_id AS TEXT) LIKE ? OR CAST(r.stream_id AS TEXT) LIKE ? OR p.name LIKE ? OR rt.run_type LIKE ?)"
+                        "(LOWER(HEX(r.run_id)) LIKE ? OR LOWER(HEX(r.stream_id)) LIKE ? OR p.name LIKE ? OR rt.run_type LIKE ?)"
                             .to_string(),
                     );
-                } else if search_term.is_some() {
+                } else if id_search.is_some() {
                     // Pattern matching for non-UUID searches
                     where_clauses.push("(p.name LIKE ? OR rt.run_type LIKE ?)".to_string());
                 }
@@ -1426,10 +1241,7 @@ impl Run {
                 // Add status filter
                 let status_filter = if let Some(statuses) = statuses {
                     if !statuses.is_empty() {
-                        let placeholders = (0..statuses.len())
-                            .map(|_| "?")
-                            .collect::<Vec<&str>>()
-                            .join(", ");
+                        let placeholders = sqlite_placeholders(statuses.len());
                         Some(format!("rs.status IN ({})", placeholders))
                     } else {
                         None
@@ -1445,10 +1257,7 @@ impl Run {
                 // Add run type filter
                 let run_type_filter = if let Some(run_types) = run_types {
                     if !run_types.is_empty() {
-                        let placeholders = (0..run_types.len())
-                            .map(|_| "?")
-                            .collect::<Vec<&str>>()
-                            .join(", ");
+                        let placeholders = sqlite_placeholders(run_types.len());
                         Some(format!("rt.run_type IN ({})", placeholders))
                     } else {
                         None
@@ -1481,58 +1290,27 @@ impl Run {
                     q = q.bind(c);
                 }
 
-                // Bind search term - UUID exact match + pattern matching
-                let search_uuid = search_term.and_then(|term| {
-                    Uuid::parse_str(term).ok().or_else(|| {
-                        if term.len() == 32 && term.chars().all(|c| c.is_ascii_hexdigit()) {
-                            let with_dashes = format!(
-                                "{}-{}-{}-{}-{}",
-                                &term[0..8],
-                                &term[8..12],
-                                &term[12..16],
-                                &term[16..20],
-                                &term[20..32]
-                            );
-                            Uuid::parse_str(&with_dashes).ok()
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-                // Check if search term is a short ID (last 12 chars of UUID)
-                let is_short_id = search_term
-                    .map(|term| term.len() == 12 && term.chars().all(|c| c.is_ascii_hexdigit()))
-                    .unwrap_or(false);
-
-                // Create pattern outside the if block to extend lifetime
-                let search_pattern = search_term.map(|term| format!("%{}%", term));
-                // Short ID suffix pattern for matching end of UUID
-                let short_id_pattern = search_term.map(|term| format!("%{}", term));
-
-                if let Some(uuid) = search_uuid {
+                if let Some(search) = &id_search
+                    && let Some(uuid) = search.uuid()
+                {
                     // Bind UUID for exact matching on UUID fields
                     q = q.bind(uuid); // run_id
                     q = q.bind(uuid); // stream_id
                     // Also bind pattern for searching UUID string in text fields
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                    }
-                } else if is_short_id {
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                } else if let Some(search) = &id_search
+                    && let Some(suffix_pattern) = search.suffix_pattern()
+                {
                     // Bind short ID suffix pattern for UUID fields + regular pattern for text fields
-                    if let Some(ref suffix_pattern) = short_id_pattern {
-                        q = q.bind(suffix_pattern); // run_id suffix
-                        q = q.bind(suffix_pattern); // stream_id suffix
-                    }
-                    if let Some(ref pattern) = search_pattern {
-                        q = q.bind(pattern); // project name
-                        q = q.bind(pattern); // run_type
-                    }
-                } else if let Some(ref pattern) = search_pattern {
+                    q = q.bind(suffix_pattern); // run_id suffix
+                    q = q.bind(suffix_pattern); // stream_id suffix
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
+                } else if let Some(search) = &id_search {
                     // Bind for LIKE pattern matching
-                    q = q.bind(pattern); // project name
-                    q = q.bind(pattern); // run_type
+                    q = q.bind(search.text_pattern()); // project name
+                    q = q.bind(search.text_pattern()); // run_type
                 }
 
                 // Bind status parameters

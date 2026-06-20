@@ -232,13 +232,13 @@ pub async fn task_activity_timeline_handler(
 
             let mut query_builder =
                 sqlx::query_as::<_, (String, String, i64)>(sqlx::AssertSqlSafe(query.as_str()))
-                    .bind(env_id.to_string());
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
             }
             if let Some(project_id) = project_id {
-                query_builder = query_builder.bind(project_id.to_string());
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {
@@ -506,13 +506,13 @@ pub async fn task_cus_timeline_handler(
 
             let mut query_builder =
                 sqlx::query_as::<_, (String, i64)>(sqlx::AssertSqlSafe(query.as_str()))
-                    .bind(env_id.to_string());
+                    .bind(env_id);
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
             }
             if let Some(project_id) = project_id {
-                query_builder = query_builder.bind(project_id.to_string());
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {

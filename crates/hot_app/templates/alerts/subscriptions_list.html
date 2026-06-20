@@ -67,7 +67,7 @@
                 <p class="text-sm text-blue-800 dark:text-blue-200">
                     <span class="font-medium">Alert delivery requires the Pro plan.</span>
                     Subscriptions route matched alerts to destinations. Delivery is available on Hot Cloud's <span class="font-medium">Pro</span> plan or above.
-                    <a href="{{ page_context.pricing_url }}" target="_blank" class="underline hover:text-blue-600 dark:hover:text-blue-300">Learn more</a>
+                    <a href="{{ page_context.pricing_url }}" target="_blank" class="underline hover:text-hot-red-600 dark:hover:text-hot-red-300">Learn more</a>
                 </p>
             </div>
         </div>
@@ -187,7 +187,7 @@
     <!-- Available Channels & Destinations Info -->
     <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Available Channels</h3>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Available Channels</h3>
             {% if channels.len() > 0 %}
             <ul class="space-y-2">
                 {% for ch in channels %}
@@ -210,7 +210,7 @@
         </div>
 
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Available Destinations</h3>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Available Destinations</h3>
             {% if destinations.len() > 0 %}
             <ul class="space-y-2">
                 {% for dest in destinations %}
