@@ -4,3 +4,20 @@ Copyright 2025-2026 Hot Dev, LLC
 This product includes software developed by Hot Dev, LLC and third-party
 dependencies. See the dependency manifests and package-specific license files
 for additional notices.
+
+This product includes Fira Sans and Fira Code font assets licensed under the
+SIL Open Font License, Version 1.1. See
+resources/app/assets/fonts/LICENSE-FiraSans.txt and
+resources/app/assets/fonts/LICENSE-FiraCode.txt for license details.
+
+Third-party Rust dependency notices:
+
+cfg_aliases 0.2.1 includes code in the cfg_aliases! macro derived from
+tectonic_cfg_support::target_cfg!, which is licensed under the MIT License.
+
+Moka 0.12.15 includes files ported from the Java Caffeine library. The majority
+of Moka is dual-licensed under MIT and Apache-2.0, but the following files are
+licensed solely under Apache-2.0:
+
+- src/common/frequency_sketch.rs
+- src/common/timer_wheel.rs

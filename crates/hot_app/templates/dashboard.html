@@ -400,22 +400,26 @@ function updateHeroMetricsUI(streamData) {
     const issuesBanner = document.getElementById('issues-banner');
     if (issuesBanner) {
         issuesBanner.classList.toggle('hidden', bannerTotal === 0);
+        issuesBanner.classList.toggle('flex', bannerTotal > 0);
     }
 
     const bannerFailedRunsEl = document.getElementById('issues-banner-failed-runs');
     if (bannerFailedRunsEl) {
         bannerFailedRunsEl.classList.toggle('hidden', bannerFailedRuns === 0);
-        bannerFailedRunsEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> ${formatNumber(bannerFailedRuns)} Failed Runs`;
+        bannerFailedRunsEl.classList.toggle('inline-flex', bannerFailedRuns > 0);
+        bannerFailedRunsEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full bg-red-500/80"></span> ${formatNumber(bannerFailedRuns)} Failed Runs`;
     }
     const bannerFailedTasksEl = document.getElementById('issues-banner-failed-tasks');
     if (bannerFailedTasksEl) {
         bannerFailedTasksEl.classList.toggle('hidden', bannerFailedTasks === 0);
-        bannerFailedTasksEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> ${formatNumber(bannerFailedTasks)} Failed Tasks`;
+        bannerFailedTasksEl.classList.toggle('inline-flex', bannerFailedTasks > 0);
+        bannerFailedTasksEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full bg-pink-500/80"></span> ${formatNumber(bannerFailedTasks)} Failed Tasks`;
     }
     const bannerUnhandledEl = document.getElementById('issues-banner-unhandled');
     if (bannerUnhandledEl) {
         bannerUnhandledEl.classList.toggle('hidden', bannerUnhandled === 0);
-        bannerUnhandledEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-orange-500"></span> ${formatNumber(bannerUnhandled)} Unhandled Events`;
+        bannerUnhandledEl.classList.toggle('inline-flex', bannerUnhandled > 0);
+        bannerUnhandledEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full bg-orange-500/80"></span> ${formatNumber(bannerUnhandled)} Unhandled Events`;
     }
 }
 
