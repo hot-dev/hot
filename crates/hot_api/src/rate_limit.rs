@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use crate::ApiStateData;
 use crate::auth::AuthContext;
+use crate::models::ApiErrorResponse;
 
 // ============================================================================
 // Env → Org cache (rarely changes, no TTL)
@@ -281,10 +282,16 @@ pub fn rate_limit_response(exceeded: RateLimitExceeded) -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [("Retry-After", exceeded.retry_after_secs.to_string())],
-        axum::Json(serde_json::json!({
-            "error": exceeded.message,
-            "retry_after": exceeded.retry_after_secs
-        })),
+        axum::Json(
+            ApiErrorResponse::new(
+                "rate_limit_exceeded",
+                format!(
+                    "{} Retry after {} seconds.",
+                    exceeded.message, exceeded.retry_after_secs
+                ),
+            )
+            .with_retry_after(exceeded.retry_after_secs),
+        ),
     )
         .into_response()
 }
