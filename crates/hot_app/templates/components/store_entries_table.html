@@ -2,7 +2,7 @@
 {% if is_searching %}
 <div class="mb-3 text-xs text-gray-500 dark:text-gray-400">
     Showing <span class="font-medium">{{ total_entries }}</span> matching entr{% if total_entries == 1 %}y{% else %}ies{% endif %}.
-    <a href="/stores/{{ store.name_url }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Clear search</a>
+    <a href="/stores/{{ store.name_url }}" class="link">Clear search</a>
 </div>
 {% endif %}
 
@@ -37,7 +37,7 @@
                 <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
                     <td class="px-3 md:px-6 py-3 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400 font-mono">{{ entry.seq }}</td>
                     <td class="px-3 md:px-6 py-3 text-xs">
-                        <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-mono break-all">{{ entry.key_preview }}</a>
+                        <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="link font-mono break-all">{{ entry.key_preview }}</a>
                     </td>
                     <td class="px-3 md:px-6 py-3 text-xs text-gray-700 dark:text-gray-300 break-all">
                         {# Hidden state markup is mirrored in templates/store_entry_value_hidden_cell.html (view=cell). #}
@@ -55,7 +55,7 @@
                         <div class="text-xs text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</div>
                     </td>
                     <td class="px-3 md:px-6 py-3 whitespace-nowrap text-right text-xs">
-                        <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 mr-3">View</a>
+                        <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="link mr-3">View</a>
                         {% if is_admin %}
                         <form id="delete-entry-{{ entry.key_encoded }}" action="/stores/{{ store.name_url }}/entries/delete" method="post" class="inline">
                             <input type="hidden" name="key_encoded" value="{{ entry.key_encoded }}">
@@ -123,7 +123,7 @@
     {% for entry in entries %}
     <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
         <div class="flex items-center justify-between mb-2">
-            <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-sm font-mono text-blue-600 dark:text-blue-400 truncate">{{ entry.key_preview }}</a>
+            <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-sm font-mono link truncate">{{ entry.key_preview }}</a>
             <span class="text-xs text-gray-400 ml-2">#{{ entry.seq }}</span>
         </div>
         {# Hidden state markup is mirrored in templates/store_entry_value_hidden_cell.html (view=mobile-cell). #}
@@ -138,7 +138,7 @@
         <div class="flex justify-between items-center text-xs text-gray-500 dark:text-gray-400">
             <span>{{ entry.updated_at|tzf(page_context.display_timezone, "%Y-%m-%d %H:%M") }}</span>
             <div class="flex gap-2">
-                <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-blue-600 dark:text-blue-400">View</a>
+                <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="link">View</a>
                 {% if is_admin %}
                 <form id="m-delete-entry-{{ entry.key_encoded }}" action="/stores/{{ store.name_url }}/entries/delete" method="post" class="inline">
                     <input type="hidden" name="key_encoded" value="{{ entry.key_encoded }}">

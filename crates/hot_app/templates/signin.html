@@ -1,7 +1,7 @@
 {% extends "public_layout.html" %}
 {% block content %}
-<div class="flex justify-center items-center mt-10">
-    <div class="glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
+<div class="accent-aura flex justify-center items-center mt-10">
+    <div class="relative z-10 glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
         <div class="mb-8 text-center">
             <h1 class="text-xl font-bold flex items-center justify-center">
                 Sign In
@@ -43,7 +43,7 @@
             <div class="mb-6">
                 <div class="flex items-center justify-between mb-2">
                     <label for="password" class="block text-sm font-medium">Password</label>
-                    <a href="#" class="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Forgot password?</a>
+                    <a href="#" class="text-sm link">Forgot password?</a>
                 </div>
                 <div class="relative">
                     <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
@@ -99,7 +99,7 @@
 
         <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-800 text-center">
             <p class="text-sm text-gray-600 dark:text-gray-400">
-                Don't have an account? <a href="/signup?{% if invite_code != "" %}invite_code={{ invite_code }}&{% endif %}{% if plan != "" %}plan={{ plan }}&{% endif %}{% if billing != "" %}billing={{ billing }}{% endif %}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Sign up</a>
+                Don't have an account? <a href="/signup?{% if invite_code != "" %}invite_code={{ invite_code }}&{% endif %}{% if plan != "" %}plan={{ plan }}&{% endif %}{% if billing != "" %}billing={{ billing }}{% endif %}" class="link">Sign up</a>
             </p>
         </div>
     </div>

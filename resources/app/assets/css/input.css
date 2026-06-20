@@ -31,6 +31,23 @@
   --color-gray-700: #444444;
   --color-gray-800: #111111;
   --color-gray-900: #080808;
+
+  /* Semantic radius scale — one deliberate decision per surface type.
+     Generates rounded-control / rounded-card / rounded-pill utilities.
+     Current templates already follow this (controls=md, cards=lg), so these
+     are the canonical names to reach for going forward. */
+  --radius-control: 0.375rem;  /* inputs, buttons, small chips (= md) */
+  --radius-card: 0.5rem;       /* cards, panels, menus (= lg) */
+  --radius-pill: 9999px;       /* badges, toggles, avatars */
+
+  /* Entity accent colors — one consistent color flag per entity, shared across
+     the dashboard, graphs, and lists. Mirrors graph node colors (run/handler =
+     blue, event = green). Raw mid hue for fills/dots/borders; use the
+     .entity-* classes below for contrast-synced text/icons. */
+  --color-entity-run: #3b82f6;     /* blue */
+  --color-entity-task: #ec4899;    /* pink */
+  --color-entity-event: #10b981;   /* green */
+  --color-entity-stream: #8b5cf6;  /* purple */
 }
 
 /* Custom styles that extend Tailwind */
@@ -73,6 +90,39 @@ pre,
   background-color: var(--color-hot-red-800);
 }
 
+/* Inline text links use the brand red. Tokenized here so link color is a
+   single deliberate decision rather than a per-template choice. Shades are
+   AA-safe: -700 on light surfaces, -400 on dark. */
+.link {
+  color: var(--color-hot-red-700);
+  transition: color 0.15s ease;
+}
+
+.link:hover {
+  color: var(--color-hot-red-800);
+}
+
+.dark .link {
+  color: var(--color-hot-red-400);
+}
+
+.dark .link:hover {
+  color: var(--color-hot-red-300);
+}
+
+/* Entity text/icon color, contrast-synced per theme (darker on light, lighter
+   on dark) so the same entity reads consistently as a flag everywhere. The
+   light values match the topology graph node icons (run = blue, event = green). */
+.entity-run { color: #2563eb; }
+.entity-task { color: #db2777; }
+.entity-event { color: #16a34a; }
+.entity-stream { color: #7c3aed; }
+
+.dark .entity-run { color: #60a5fa; }
+.dark .entity-task { color: #f472b6; }
+.dark .entity-event { color: #4ade80; }
+.dark .entity-stream { color: #a78bfa; }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -83,6 +133,13 @@ pre,
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Elevation convention (one model for this app):
+   - Flat surfaces (tables, inline panels, list rows): border only.
+   - Raised cards (metrics, content cards, popovers): border + shadow-sm.
+   - Overlays (dropdown menus, modals): shadow-lg (+ .glass blur on modals).
+   Reserve heavier shadows/glass for true overlays so the working UI stays calm
+   and border-driven. */
 
 /* Simplified glass effect using Tailwind utilities */
 .glass {
@@ -109,9 +166,41 @@ pre,
 
 .dark {
   color-scheme: dark;
+
+  /* Dark-mode elevation ladder, decoupled from the light-mode gray inks.
+     Redefining the scale inside .dark lets surfaces and borders separate
+     clearly without shifting the near-black text colors used in light mode. */
+  --color-gray-950: #060608;  /* deepest inset surface: code views (neutral, no blue tint) */
+  --color-gray-900: #0a0a0c;  /* app background */
+  --color-gray-800: #17171a;  /* raised surfaces: cards, menus, inputs */
+  --color-gray-700: #2a2a30;  /* hairline borders, dividers, hover/selected */
 }
 
-/* App uses simple backgrounds with grid dots - no color splashes */
+/* Accent aura: a subtle purple secondary-accent wash used only on select
+   moments (e.g. auth pages). The working app stays calm; this keeps purple
+   a real, intentional secondary color rather than a web-only flourish. */
+.accent-aura {
+  position: relative;
+}
+
+.accent-aura::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(ellipse 60% 50% at 50% 30%,
+    rgba(168, 85, 247, 0.10) 0%,
+    rgba(168, 85, 247, 0) 70%);
+}
+
+.dark .accent-aura::before {
+  background: radial-gradient(ellipse 60% 50% at 50% 30%,
+    rgba(168, 85, 247, 0.16) 0%,
+    rgba(168, 85, 247, 0) 70%);
+}
+
+/* App uses a calm dotted grid; purple is reserved for .accent-aura moments. */
 .grid-bg {
   /* Simple dotted grid background */
   background-image: radial-gradient(circle, rgba(100, 100, 100, 0.1) 1px, transparent 1px);

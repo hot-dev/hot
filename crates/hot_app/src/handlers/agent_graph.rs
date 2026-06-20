@@ -393,7 +393,7 @@ impl GraphBuilder {
         build_id: Option<Uuid>,
     ) {
         let id = webhook_node_id(ns, var);
-        let display = format!("{} {}{}", method, service, path);
+        let display = format!("{} {}{}", method, service.trim_end_matches('/'), path);
         self.add_node(AgentGraphNode {
             id,
             name: display,

@@ -31,7 +31,7 @@
   <aside class="hidden md:block w-64 flex-shrink-0 border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 overflow-y-auto">
     <nav class="sticky top-0 p-4">
       <!-- Back to docs index -->
-      <a href="/docs{% if project_name.is_some() %}?project={{ project_name.as_ref().unwrap() }}{% endif %}" class="flex items-center mb-4 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+      <a href="/docs{% if project_name.is_some() %}?project={{ project_name.as_ref().unwrap() }}{% endif %}" class="flex items-center mb-4 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-hot-red-600 dark:hover:text-hot-red-400 transition-colors">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
         </svg>
@@ -81,7 +81,7 @@
           <ul class="space-y-1">
             {% for item in section.items %}
             <li>
-              <a href="#{{ item.anchor }}" class="toc-link block text-sm text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 truncate transition-colors">
+              <a href="#{{ item.anchor }}" class="toc-link block text-sm text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 truncate transition-colors">
                 {{ item.name }}{% for badge in item.badges %} <span class="meta-badge {{ badge }}-badge meta-badge-sm">{{ badge }}</span>{% endfor %}
               </a>
             </li>

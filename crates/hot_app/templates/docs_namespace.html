@@ -632,13 +632,13 @@ html.dark .docs-content pre.deps-code-block {
             <!-- README and LICENSE links (for dependencies) -->
             {% if is_dependency %}
             <div class="mb-4 flex gap-2 text-xs">
-                <a href="/docs/{{ project_name }}/pkg/{{ dep_name }}/readme" class="flex items-center gap-1 px-2 py-1 rounded {% if current_path.ends_with("/readme") %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400{% endif %} transition-colors">
+                <a href="/docs/{{ project_name }}/pkg/{{ dep_name }}/readme" class="flex items-center gap-1 px-2 py-1 rounded {% if current_path.ends_with("/readme") %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400{% endif %} transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                     README
                 </a>
-                <a href="/docs/{{ project_name }}/pkg/{{ dep_name }}/license" class="flex items-center gap-1 px-2 py-1 rounded {% if current_path.ends_with("/license") %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400{% endif %} transition-colors">
+                <a href="/docs/{{ project_name }}/pkg/{{ dep_name }}/license" class="flex items-center gap-1 px-2 py-1 rounded {% if current_path.ends_with("/license") %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400{% endif %} transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                     </svg>
@@ -661,7 +661,7 @@ html.dark .docs-content pre.deps-code-block {
                 <a href="{{ item_path }}"
                    style="padding-left: calc(0.5rem + {{ item.indent }} * 0.75rem)"
                    class="flex items-center pr-2 py-1 text-sm rounded-r-md transition-all duration-200
-                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500 -ml-px{% else %}text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-[#222]/50{% endif %}">
+                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500 -ml-px{% else %}text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:bg-gray-100 dark:hover:bg-[#222]/50{% endif %}">
                     {{ item.title }}
                 </a>
                 {% else %}
@@ -685,7 +685,7 @@ html.dark .docs-content pre.deps-code-block {
         <div class="max-w-4xl mt-12 pt-8 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center text-sm">
             {% match prev_page %}
             {% when Some with (prev) %}
-            <a href="{{ prev.path.as_ref().unwrap() }}" class="flex items-center text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+            <a href="{{ prev.path.as_ref().unwrap() }}" class="flex items-center text-gray-500 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
                 </svg>
@@ -697,7 +697,7 @@ html.dark .docs-content pre.deps-code-block {
 
             {% match next_page %}
             {% when Some with (next) %}
-            <a href="{{ next.path.as_ref().unwrap() }}" class="flex items-center text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+            <a href="{{ next.path.as_ref().unwrap() }}" class="flex items-center text-gray-500 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 transition-colors">
                 {{ next.title }}
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
@@ -723,7 +723,7 @@ html.dark .docs-content pre.deps-code-block {
                     </div>
                     {% for item in section.items %}
                     <a href="#{{ item.anchor }}"
-                       class="block px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors rounded"
+                       class="block px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 transition-colors rounded"
                        style="{% if item.indent > 0 %}padding-left: {{ item.indent * 12 + 8 }}px{% endif %}">
                         {{ item.name }}
                         {% if item.is_core %}

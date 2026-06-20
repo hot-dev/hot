@@ -324,7 +324,7 @@ function updateHeroMetricsUI(streamData) {
     const runsTotal = document.querySelector('#hero-runs-total');
     if (runsTotal) {
         const totalRuns = streamData.total_runs ?? 0;
-        runsTotal.innerHTML = `${formatNumber(totalRuns)} <span class="text-2xl font-semibold text-blue-600 dark:text-blue-400">Runs</span>`;
+        runsTotal.innerHTML = `${formatNumber(totalRuns)} <span class="text-2xl font-semibold">Runs</span>`;
     }
 
     // Handle run status counts from streamData
@@ -350,7 +350,7 @@ function updateHeroMetricsUI(streamData) {
     const eventsTotal = document.querySelector('#hero-events-total');
     if (eventsTotal) {
         const eventCount = streamData.total_events ?? 0;
-        eventsTotal.innerHTML = `${formatNumber(eventCount)} <span class="text-2xl font-semibold text-green-600 dark:text-green-400">Events</span>`;
+        eventsTotal.innerHTML = `${formatNumber(eventCount)} <span class="text-2xl font-semibold">Events</span>`;
     }
 
     // Update event status counts
@@ -371,7 +371,7 @@ function updateHeroMetricsUI(streamData) {
     const tasksTotal = document.querySelector('#hero-tasks-total');
     if (tasksTotal) {
         const count = streamData.total_tasks ?? 0;
-        tasksTotal.innerHTML = `${formatNumber(count)} <span class="text-xl font-semibold text-pink-600 dark:text-pink-400">Tasks</span>`;
+        tasksTotal.innerHTML = `${formatNumber(count)} <span class="text-2xl font-semibold">Tasks</span>`;
     }
     const tasksRunning = document.querySelector('#hero-tasks-running');
     if (tasksRunning) tasksRunning.textContent = `${formatNumber(streamData.tasks_running ?? 0)} Running`;
@@ -386,7 +386,7 @@ function updateHeroMetricsUI(streamData) {
     const streamsTotal = document.querySelector('#hero-streams-total');
     if (streamsTotal) {
         const count = streamData.total_streams ?? 0;
-        streamsTotal.innerHTML = `${formatNumber(count)} <span class="text-2xl font-semibold text-purple-600 dark:text-purple-400">Streams</span>`;
+        streamsTotal.innerHTML = `${formatNumber(count)} <span class="text-2xl font-semibold">Streams</span>`;
     }
 
     // Update Issues Banner
@@ -410,7 +410,7 @@ function updateHeroMetricsUI(streamData) {
     const bannerFailedTasksEl = document.getElementById('issues-banner-failed-tasks');
     if (bannerFailedTasksEl) {
         bannerFailedTasksEl.classList.toggle('hidden', bannerFailedTasks === 0);
-        bannerFailedTasksEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-pink-500"></span> ${formatNumber(bannerFailedTasks)} Failed Tasks`;
+        bannerFailedTasksEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> ${formatNumber(bannerFailedTasks)} Failed Tasks`;
     }
     const bannerUnhandledEl = document.getElementById('issues-banner-unhandled');
     if (bannerUnhandledEl) {

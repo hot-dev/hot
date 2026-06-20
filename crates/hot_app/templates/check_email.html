@@ -44,7 +44,7 @@
             </p>
             <p class="text-sm text-gray-500 dark:text-gray-400">
                 Check your spam folder for one of the earlier emails, try again
-                later, or contact <a href="mailto:support@hot.dev" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">support@hot.dev</a> if you're stuck.
+                later, or contact <a href="mailto:support@hot.dev" class="link">support@hot.dev</a> if you're stuck.
             </p>
             {% else %}
             <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
@@ -54,7 +54,7 @@
             <form action="/resend-verification" method="post">
                 <input type="hidden" name="email" value="{{ email }}">
                 <input type="hidden" name="form_token" value="{{ form_token }}">
-                <button type="submit" class="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 text-sm font-medium">
+                <button type="submit" class="link text-sm font-medium">
                     Resend verification email
                 </button>
             </form>
@@ -63,7 +63,7 @@
 
         <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-800 text-center">
             <p class="text-sm text-gray-600 dark:text-gray-400">
-                Wrong email? <a href="/signup" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">Start over</a>
+                Wrong email? <a href="/signup" class="link">Start over</a>
             </p>
         </div>
     </div>

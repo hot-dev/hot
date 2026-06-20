@@ -1,7 +1,7 @@
 {% if !agent_health_cards.is_empty() %}
 <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-4">
     <h2 class="text-lg font-semibold mb-4 text-gray-900 dark:text-white flex items-center gap-2">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-indigo-500">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-purple-500">
             <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
             <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
             <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
@@ -26,7 +26,7 @@
                 <tr class="group hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                     <td class="px-4 py-2 whitespace-nowrap">
                         <a href="/workflows/agents/{{ agent.qualified_name }}"
-                           class="font-medium text-gray-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                           class="font-medium text-gray-900 dark:text-white group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">
                             {{ agent.display_name }}
                         </a>
                     </td>

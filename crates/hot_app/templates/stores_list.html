@@ -45,7 +45,7 @@
                     {% for store in stores %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
                         <td class="px-3 md:px-6 py-4 text-xs font-medium">
-                            <a href="/stores/{{ store.name_url }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-all font-mono">{{ store.name }}</a>
+                            <a href="/stores/{{ store.name_url }}" class="link transition-all font-mono">{{ store.name }}</a>
                         </td>
                         <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">{{ store.entry_count }}</td>
                         <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">{{ store.storage_bytes_formatted }}</td>

@@ -13,11 +13,11 @@
         <div class="border-b border-gray-200 dark:border-gray-700">
             <nav class="-mb-px flex gap-6" aria-label="Tabs">
                 <a href="?tab=all"
-                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "all" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "all" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     All Workflows <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ workflow_cards.len() }}</span>
                 </a>
                 <a href="?tab=graph"
-                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-indigo-500 text-indigo-600 dark:text-indigo-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     Graph
                 </a>
             </nav>
@@ -60,7 +60,7 @@
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {% for card in workflow_cards %}
         <a href="{{ card.url }}"
-           class="group block rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-black p-5 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-md transition-all duration-200">
+           class="group block rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-black p-5 hover:border-purple-400 dark:hover:border-purple-500 hover:shadow-md transition-all duration-200">
             <div class="flex items-center gap-2 mb-2">
                 {% if card.kind == "workflow" %}
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-emerald-500 dark:text-emerald-400 flex-shrink-0">
@@ -73,7 +73,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 5.25A2.25 2.25 0 0 1 6 3h12a2.25 2.25 0 0 1 2.25 2.25v13.5A2.25 2.25 0 0 1 18 21H6a2.25 2.25 0 0 1-2.25-2.25V5.25Z" />
                 </svg>
                 {% else %}
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-indigo-500 dark:text-indigo-400 flex-shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-purple-500 dark:text-purple-400 flex-shrink-0">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
                     <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
                     <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
@@ -81,7 +81,7 @@
                     <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
                 </svg>
                 {% endif %}
-                <span class="text-base font-semibold text-gray-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">{{ card.display_name }}</span>
+                <span class="text-base font-semibold text-gray-900 dark:text-white group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">{{ card.display_name }}</span>
                 <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ card.kind_label }}</span>
             </div>
 
@@ -104,13 +104,13 @@
 
             <div class="flex flex-wrap gap-1.5">
                 {% for tag in card.tags %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300">{{ tag }}</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300">{{ tag }}</span>
                 {% endfor %}
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ card.project_name }}</span>
             </div>
 
             <div class="mt-3 flex justify-end">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-gray-400 group-hover:text-indigo-500 dark:group-hover:text-indigo-400 group-hover:translate-x-0.5 transition-all">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-gray-400 group-hover:text-purple-500 dark:group-hover:text-purple-400 group-hover:translate-x-0.5 transition-all">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
                 </svg>
             </div>
@@ -186,7 +186,7 @@
         <div class="flex flex-wrap items-center gap-3">
             <!-- Workflow filter -->
             <select x-model="workflow" @change="applyFilters()"
-                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-hot-red-500 focus:border-hot-red-500">
                 <option value="">All Workflows</option>
                 <template x-for="w in workflows" :key="w">
                     <option :value="w" x-text="w"></option>
@@ -195,7 +195,7 @@
 
             <!-- Agent filter -->
             <select x-model="agent" @change="applyFilters()"
-                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-hot-red-500 focus:border-hot-red-500">
                 <option value="">All Agents</option>
                 <template x-for="a in agents" :key="a.qualified_name">
                     <option :value="a.qualified_name" x-text="a.name"></option>
@@ -204,7 +204,7 @@
 
             <!-- Project filter -->
             <select x-model="project" @change="applyFilters()"
-                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-hot-red-500 focus:border-hot-red-500">
                 <option value="">All Projects</option>
                 <template x-for="p in projects" :key="p">
                     <option :value="p" x-text="p"></option>
@@ -213,7 +213,7 @@
 
             <!-- Tag filter -->
             <select x-model="tag" @change="applyFilters()"
-                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:ring-hot-red-500 focus:border-hot-red-500">
                 <option value="">All Tags</option>
                 <template x-for="t in tags" :key="t">
                     <option :value="t" x-text="t"></option>
@@ -230,7 +230,7 @@
                 <input type="text" x-model="search"
                        @input.debounce.150ms="searchGraph()"
                        placeholder="Find nodes…"
-                       class="text-sm w-full pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:ring-indigo-500 focus:border-indigo-500">
+                       class="text-sm w-full pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:ring-hot-red-500 focus:border-hot-red-500">
             </div>
             <div x-show="search.length > 0"
                  x-cloak
@@ -367,7 +367,7 @@
                             <!-- Agent link -->
                             <template x-if="inspectorData.node.agent_name && inspectorData.node.qualified_name">
                                 <a :href="'/workflows/agents/' + inspectorData.node.qualified_name"
-                                   class="inline-flex items-center gap-1 text-sm text-indigo-600 dark:text-indigo-400 hover:underline mb-2">
+                                   class="inline-flex items-center gap-1 text-sm link hover:underline mb-2">
                                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5">
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
@@ -384,7 +384,7 @@
                             </template>
                             <template x-if="inspectorData.node.source_file">
                                 <button type="button"
-                                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                        class="text-xs link hover:underline font-mono mb-1 truncate max-w-full text-left"
                                         :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
                                         @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
                                         x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
@@ -424,7 +424,7 @@
                                     <template x-for="s in inspectorData.sends" :key="s.node.id">
                                         <div class="mb-1">
                                             <button @click="selectNode(s.node.id)"
-                                                    class="block w-full text-left px-2 py-1 rounded text-indigo-700 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 font-mono text-xs transition-colors"
+                                                    class="block w-full text-left px-2 py-1 rounded text-purple-700 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/40 font-mono text-xs transition-colors"
                                                     x-text="s.node.name"></button>
                                             <template x-if="s.edge.doc">
                                                 <div class="text-xs text-gray-400 dark:text-gray-500 italic pl-2 mt-0.5" x-text="s.edge.doc"></div>
@@ -493,7 +493,7 @@
                             </template>
                             <template x-if="inspectorData.node.source_file">
                                 <button type="button"
-                                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                        class="text-xs link hover:underline font-mono mb-1 truncate max-w-full text-left"
                                         :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
                                         @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
                                         x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
