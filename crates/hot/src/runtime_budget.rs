@@ -102,6 +102,38 @@ pub fn derive_task_code_concurrency(conf: &Val, requested: usize) -> DerivedConc
     }
 }
 
+pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
+    let worker_budget = if conf.get("worker").is_some() {
+        let requested = conf.get_int_or_default("worker.threads", 4).max(1) as usize;
+        derive_worker_vm_concurrency(conf, requested).resolved
+    } else {
+        0
+    };
+    let task_code_budget = if conf.get("task").is_some() {
+        let requested = conf
+            .get_int_or_default("task.code-max-concurrent", 500)
+            .max(1) as usize;
+        derive_task_code_concurrency(conf, requested).resolved
+    } else {
+        0
+    };
+    let reserved = conf
+        .get_int_or_default("worker.db-reserved-connections", 4)
+        .max(1) as usize;
+    let capacity_budget = worker_budget.max(task_code_budget);
+
+    capacity_budget
+        .saturating_add(reserved)
+        .max(10)
+        .min(u32::MAX as usize) as u32
+}
+
+pub fn derive_sqlite_pool_connections(conf: &Val) -> u32 {
+    conf.get_int_or_default("worker.local-write-concurrency", 1)
+        .max(1)
+        .min(u32::MAX as i64) as u32
+}
+
 fn configured_usize(conf: &Val, path: &str) -> Option<usize> {
     let value = conf.get(path)?;
     match value {
@@ -245,5 +277,34 @@ mod tests {
 
         assert!(budget.resolved >= 1);
         assert!(budget.resolved <= 500);
+    }
+
+    #[test]
+    fn postgres_pool_includes_execution_capacity_and_reserved_connections() {
+        let conf = val!({
+            "worker": {
+                "threads": 4i64,
+                "vm-concurrency": 3i64,
+                "db-reserved-connections": 4i64,
+                "shared-process": false,
+            },
+        });
+
+        let max_connections = derive_postgres_pool_connections(&conf);
+
+        assert_eq!(max_connections, 10);
+    }
+
+    #[test]
+    fn sqlite_pool_uses_local_write_concurrency_cap() {
+        let conf = val!({
+            "worker": {
+                "local-write-concurrency": 2i64,
+            },
+        });
+
+        let max_connections = derive_sqlite_pool_connections(&conf);
+
+        assert_eq!(max_connections, 2);
     }
 }

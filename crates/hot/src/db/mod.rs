@@ -375,8 +375,13 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             );
 
             use sqlx::sqlite::SqlitePoolOptions;
+            let max_connections = crate::runtime_budget::derive_sqlite_pool_connections(conf);
+            tracing::debug!(
+                "SQLite pool max_connections={} from worker.local-write-concurrency",
+                max_connections
+            );
             let db = SqlitePoolOptions::new()
-                .max_connections(10)
+                .max_connections(max_connections)
                 .acquire_timeout(std::time::Duration::from_secs(30))
                 .after_connect(|conn, _meta| {
                     Box::pin(async move {
@@ -414,8 +419,14 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             };
             tracing::debug!("Using Postgres schema: {}", schema);
 
+            let max_connections = crate::runtime_budget::derive_postgres_pool_connections(conf);
+            tracing::debug!(
+                "Postgres pool max_connections={} from derived local execution budget",
+                max_connections
+            );
+
             let db = PgPoolOptions::new()
-                .max_connections(10)
+                .max_connections(max_connections)
                 .acquire_timeout(std::time::Duration::from_secs(5)) // Fail fast instead of hanging
                 .idle_timeout(std::time::Duration::from_secs(60))
                 .max_lifetime(std::time::Duration::from_secs(1800)) // 30 minutes
