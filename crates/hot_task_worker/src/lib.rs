@@ -239,7 +239,10 @@ pub struct TaskWorkerConfig {
 
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let code_max = config.code_max_concurrent.max(1);
+    let requested_code_max = config.code_max_concurrent.max(1);
+    let code_budget =
+        hot::runtime_budget::derive_task_code_concurrency(&config.worker_conf, requested_code_max);
+    let code_max = code_budget.resolved;
     let worker_mem = config.worker_memory_mb.max(256);
     let worker_disk = config.worker_disk_mb.max(1024);
 
@@ -253,8 +256,12 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     let box_defaults = Arc::new(box_defaults);
 
     tracing::info!(
-        "Starting hot_task_worker (code_max_concurrent={}, container_budget={}MB mem / {}MB disk, backend={}, box_defaults={}MB mem / {}MB disk)",
+        "Starting hot_task_worker (code_max_concurrent={} requested={} cpu_limit={} memory_limit={:?} memory_limit_mb={:?}, container_budget={}MB mem / {}MB disk, backend={}, box_defaults={}MB mem / {}MB disk)",
         code_max,
+        code_budget.requested,
+        code_budget.cpu_limit,
+        code_budget.memory_limit,
+        code_budget.memory_limit_mb,
         worker_mem,
         worker_disk,
         config.container_backend,
@@ -290,6 +297,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         config.serialization,
     )?
     .with_consumer_name(format!("{}-{}-task", host, pid))
+    .with_read_batch_size(code_max)
     .with_startup_window(task_startup_window);
 
     // Verify queue connectivity with a quick health check. Mirrors hot_worker's
@@ -751,8 +759,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // ACKs one message. The inner `code_semaphore` / `container_budget` still
     // gate by *resource type* within each spawned future.
     //
-    // Use the same `code_max` as a generous upper bound; code tasks are
-    // small/cheap, and container tasks self-throttle on the container budget.
+    // Use the derived code-task budget as the outer claim cap. This prevents
+    // Redis PEL from filling with more active code work than local resources
+    // can execute, while container tasks still self-throttle on their budget.
     let inflight_semaphore = Arc::new(Semaphore::new(code_max));
 
     loop {

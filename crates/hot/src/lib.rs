@@ -27,6 +27,7 @@ pub mod project;
 pub mod queue;
 pub mod redis;
 pub mod resources;
+pub mod runtime_budget;
 pub mod secret_scan;
 pub mod signal;
 pub mod skill_codegen;

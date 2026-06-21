@@ -345,6 +345,19 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
+    /// Configure how many Redis stream entries this handle may claim per read.
+    /// Memory queues ignore this. Keeping this at 1 is useful when local
+    /// execution capacity is 1-per-handle and we do not want to hide backlog in
+    /// Redis PEL or the local prefetch buffer.
+    pub fn with_read_batch_size(self, size: usize) -> Self {
+        match self {
+            ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Redis(q) => {
+                ProcessingQueue::Redis(Box::new((*q).with_read_batch_size(size)))
+            }
+        }
+    }
+
     /// Fast-forward the consumer group's last-delivered-id past any backlog
     /// older than the configured startup window, so a worker coming back from
     /// a long outage doesn't drain a stale 4-day flood.

@@ -3235,6 +3235,10 @@ pub async fn run_with_components_shared_context(
     let admin_alert_name = format!("{}-w0-alert", consumer_prefix);
     let admin_email_name = format!("{}-w0-email", consumer_prefix);
 
+    // The main worker executes one message per loop per handle, so keep Redis
+    // reads at one entry to avoid hiding backlog in PEL/local prefetch.
+    let worker_read_batch_size = 1usize;
+
     // Create processing queues with dequeue_and_work support - all using unified Message type
     let request_queue = ProcessingQueue::<Message>::new_with_cluster(
         queue_type,
@@ -3244,6 +3248,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(request_window)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_request_name.clone());
 
     let response_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3254,6 +3259,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(response_window)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_response_name.clone());
 
     let event_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3264,6 +3270,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(event_window)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_event_name.clone());
 
     // Create alert and email notification queues
@@ -3278,6 +3285,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(alert_window)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_alert_name.clone());
 
     let email_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3288,6 +3296,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(email_window)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_email_name.clone());
 
     // hot:task queue is owned by hot_task_worker; hot_worker only ENQUEUEs to
@@ -3717,12 +3726,22 @@ pub async fn run_with_components_shared_context(
         });
     }
 
-    // Number of worker threads to spawn
-    let worker_count = threads.unwrap_or(DEFAULT_WORKER_THREADS);
+    // Number of worker threads to spawn. This first second-batch step only
+    // caps concurrency; it does not raise fan-out beyond worker.threads.
+    let requested_worker_count = threads.unwrap_or(DEFAULT_WORKER_THREADS);
+    let vm_budget =
+        hot::runtime_budget::derive_worker_vm_concurrency(&worker_conf, requested_worker_count);
+    let worker_count = vm_budget.resolved;
 
     info!(
-        "hot.dev: WORKER starting with {} concurrent workers",
-        worker_count
+        "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={})",
+        worker_count,
+        vm_budget.requested,
+        vm_budget.cpu_limit,
+        vm_budget.memory_limit,
+        vm_budget.memory_limit_mb,
+        vm_budget.explicit,
+        vm_budget.shared_process,
     );
 
     // Create shared bytecode cache for all workers (in-memory LRU cache)

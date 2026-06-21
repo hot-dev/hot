@@ -330,6 +330,8 @@ pub struct RedisStreamQueue<T> {
     /// entry into the buffer. Cleared per-entry by the success/DLQ paths
     /// in `process_inner`.
     in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Max entries claimed by one XREADGROUP for this queue handle.
+    read_batch_size: usize,
     /// Optional retention window (ms) used when **creating** a brand-new
     /// consumer group. If set, `XGROUP CREATE` uses `<now-window>-0` as the
     /// starting position instead of `0`, so a freshly-created group only
@@ -363,6 +365,7 @@ impl<T> Clone for RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            read_batch_size: self.read_batch_size,
             startup_window_ms: self.startup_window_ms,
             _phantom: std::marker::PhantomData,
         }
@@ -396,6 +399,7 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            read_batch_size: READ_BATCH_SIZE,
             startup_window_ms: None,
             _phantom: std::marker::PhantomData,
         }
@@ -427,6 +431,7 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            read_batch_size: READ_BATCH_SIZE,
             startup_window_ms: None,
             _phantom: std::marker::PhantomData,
         }
@@ -446,6 +451,11 @@ impl<T> RedisStreamQueue<T> {
 
     pub fn with_serialization(mut self, format: Serialization) -> Self {
         self.serialization = format;
+        self
+    }
+
+    pub fn with_read_batch_size(mut self, size: usize) -> Self {
+        self.read_batch_size = size.max(1);
         self
     }
 
@@ -1663,7 +1673,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // re-buffer the same un-ACKed entries and the next worker would
         // execute them a second time.
         let pending = self
-            .read_batch_with(FetchSource::Pending, READ_BATCH_SIZE, 0)
+            .read_batch_with(FetchSource::Pending, self.read_batch_size, 0)
             .await?;
         if !pending.is_empty() {
             let in_flight = self.in_flight.lock().await;
@@ -1691,7 +1701,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // XREADGROUP > and wake together when *any* message arrives,
         // re-creating the original duplication on the new-message path.
         let fresh = self
-            .read_batch_with(FetchSource::Fresh, READ_BATCH_SIZE, block_ms)
+            .read_batch_with(FetchSource::Fresh, self.read_batch_size, block_ms)
             .await?;
         if fresh.is_empty() {
             return Ok(false);
