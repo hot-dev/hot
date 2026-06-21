@@ -514,6 +514,7 @@ impl Engine {
         file_storage: Option<Arc<dyn crate::file_storage::FileStorage>>,
         store: Option<Arc<dyn crate::store::Store>>,
         embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
+        external_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<crate::val::Val, String> {
         tracing::debug!(
             "Calling function '{}' directly with {} args (skipping parsing entirely!)",
@@ -555,6 +556,9 @@ impl Engine {
             core_variables,
             conf.cloned(),
         );
+        if let Some(token) = external_cancel {
+            vm.set_external_cancel(token);
+        }
 
         // Set context storage, database, event publisher, and stream publisher BEFORE initialization
         // (these don't trigger run recording)

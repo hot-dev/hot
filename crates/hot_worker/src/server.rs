@@ -40,6 +40,7 @@ mod graceful_shutdown {
     use super::*;
     use ahash::AHashSet;
     use hot::db::Run;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
     use tokio::time::{Duration, Instant, timeout};
     use tracing::{error, info, warn};
@@ -50,6 +51,8 @@ mod graceful_shutdown {
     pub struct ShutdownCoordinator {
         /// Active run IDs being processed by all workers
         active_runs: Arc<RwLock<AHashSet<Uuid>>>,
+        /// Cancellation tokens for active VMs, keyed by run ID
+        active_cancel_tokens: Arc<RwLock<AHashMap<Uuid, Arc<AtomicBool>>>>,
         /// Shutdown timeout duration
         timeout_duration: Duration,
         /// Shutdown initiated flag
@@ -61,6 +64,7 @@ mod graceful_shutdown {
         pub fn new(timeout_secs: u64) -> Self {
             Self {
                 active_runs: Arc::new(RwLock::new(AHashSet::new())),
+                active_cancel_tokens: Arc::new(RwLock::new(AHashMap::new())),
                 timeout_duration: Duration::from_secs(timeout_secs),
                 shutdown_initiated: Arc::new(RwLock::new(false)),
             }
@@ -77,6 +81,35 @@ mod graceful_shutdown {
         pub fn unregister_run(&self, run_id: &Uuid) {
             if let Ok(mut runs) = self.active_runs.write() {
                 runs.remove(run_id);
+            }
+            if let Ok(mut tokens) = self.active_cancel_tokens.write() {
+                tokens.remove(run_id);
+            }
+        }
+
+        pub fn register_cancel_token(&self, run_id: Uuid, token: Arc<AtomicBool>) {
+            if let Ok(mut tokens) = self.active_cancel_tokens.write() {
+                tokens.insert(run_id, token);
+            }
+        }
+
+        fn cancel_active_tokens(&self, reason: &str) {
+            let tokens: Vec<Arc<AtomicBool>> = self
+                .active_cancel_tokens
+                .read()
+                .map(|tokens| tokens.values().cloned().collect())
+                .unwrap_or_default();
+            if tokens.is_empty() {
+                return;
+            }
+
+            warn!(
+                "Signaling cancellation to {} active VM run(s): {}",
+                tokens.len(),
+                reason
+            );
+            for token in tokens {
+                token.store(true, Ordering::Relaxed);
             }
         }
 
@@ -153,6 +186,7 @@ mod graceful_shutdown {
                         "Shutdown timeout reached after {}s",
                         self.timeout_duration.as_secs()
                     );
+                    self.cancel_active_tokens("worker shutdown timeout");
 
                     // Fail remaining active runs (marks as Failed so retry can kick in)
                     if let Some(db) = db {
@@ -2546,6 +2580,22 @@ async fn execute_single_event_handler(
     let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
         hot::store::embedding::embedding_provider_from_config(worker_conf).map(Arc::from);
 
+    let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shutdown_coordinator.register_cancel_token(run_id, Arc::clone(&token));
+        Some(token)
+    } else {
+        None
+    };
+    let cancel_timer = external_cancel.as_ref().map(|token| {
+        let token = Arc::clone(token);
+        let timeout = get_run_timeout(worker_conf);
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+    });
+
     let result = {
         // Clone/move all data needed for the blocking task
         let function_name = function_name.clone();
@@ -2564,6 +2614,7 @@ async fn execute_single_event_handler(
         let task_queue = task_queue.clone();
         let file_storage = file_storage.clone();
         let run_id_for_timing = run_id;
+        let external_cancel = external_cancel.clone();
 
         let panic_label = format!("worker:{}", function_name);
         tokio::task::spawn_blocking(move || {
@@ -2599,6 +2650,7 @@ async fn execute_single_event_handler(
                     file_storage.clone(),
                     store.clone(),
                     embedding_provider.clone(),
+                    external_cancel.clone(),
                 );
                 debug!("TIMING [{}]: function execution complete (total spawn_blocking: {:?})", run_id_for_timing.as_simple(), spawn_entered.elapsed());
                 result
@@ -2633,6 +2685,7 @@ async fn execute_single_event_handler(
                             file_storage.clone(),
                             store.clone(),
                             embedding_provider.clone(),
+                            external_cancel.clone(),
                         );
                     }
 
@@ -2662,6 +2715,7 @@ async fn execute_single_event_handler(
                             file_storage.clone(),
                             store.clone(),
                             embedding_provider.clone(),
+                            external_cancel.clone(),
                         );
                     }
 
@@ -2748,6 +2802,7 @@ async fn execute_single_event_handler(
                             file_storage.clone(),
                             store.clone(),
                             embedding_provider.clone(),
+                            external_cancel.clone(),
                         )
                     }
                     Err(e) => Err(e),
@@ -2767,6 +2822,9 @@ async fn execute_single_event_handler(
             Err(format!("Event handler panicked: {}", panic.summary()))
         })
     };
+    if let Some(timer) = cancel_timer {
+        timer.abort();
+    }
 
     // Handle result (rest of function continues as before)
     let result = match result {
