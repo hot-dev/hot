@@ -3001,6 +3001,31 @@ async fn execute_single_event_handler(
 
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u64 = 60;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerLoopMode {
+    Legacy,
+    Blocking,
+}
+
+fn get_worker_loop_mode(worker_conf: &Val) -> WorkerLoopMode {
+    let default_mode = worker_conf.get_str_or_default("loop-mode", "legacy");
+    let mode = worker_conf
+        .get_str_or_default("worker.loop-mode", &default_mode)
+        .to_ascii_lowercase();
+
+    match mode.as_str() {
+        "legacy" => WorkerLoopMode::Legacy,
+        "blocking" | "bounded" | "vm-aware" => WorkerLoopMode::Blocking,
+        other => {
+            warn!(
+                "hot.dev: WORKER unknown worker.loop-mode '{}', falling back to legacy",
+                other
+            );
+            WorkerLoopMode::Legacy
+        }
+    }
+}
+
 pub fn get_resolved_conf(conf: Val) -> Val {
     // Start with defaults
     let default_conf = val!({
@@ -3790,9 +3815,10 @@ pub async fn run_with_components_shared_context(
     let vm_budget =
         hot::runtime_budget::derive_worker_vm_concurrency(&worker_conf, requested_worker_count);
     let worker_count = vm_budget.resolved;
+    let worker_loop_mode = get_worker_loop_mode(&worker_conf);
 
     info!(
-        "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={})",
+        "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={}, loop_mode={:?})",
         worker_count,
         vm_budget.requested,
         vm_budget.cpu_limit,
@@ -3800,6 +3826,7 @@ pub async fn run_with_components_shared_context(
         vm_budget.memory_limit_mb,
         vm_budget.explicit,
         vm_budget.shared_process,
+        worker_loop_mode,
     );
 
     // Create shared bytecode cache for all workers (in-memory LRU cache)
@@ -5188,10 +5215,14 @@ pub async fn run_with_components_shared_context(
                     // every queue is empty. The longer BLOCK window is reserved
                     // for `process_blocking`, used by the dedicated task worker.
                     if !processed_any {
-                        tokio::select! {
-                            biased;
-                            _ = shutdown_rx_loop.changed() => {}
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                        match worker_loop_mode {
+                            WorkerLoopMode::Legacy | WorkerLoopMode::Blocking => {
+                                tokio::select! {
+                                    biased;
+                                    _ = shutdown_rx_loop.changed() => {}
+                                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                                }
+                            }
                         }
                     }
                 }
