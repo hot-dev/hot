@@ -377,7 +377,7 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             use sqlx::sqlite::SqlitePoolOptions;
             let max_connections = crate::runtime_budget::derive_sqlite_pool_connections(conf);
             tracing::debug!(
-                "SQLite pool max_connections={} from worker.local-write-concurrency",
+                "SQLite pool max_connections={} (read concurrency + write headroom)",
                 max_connections
             );
             let db = SqlitePoolOptions::new()

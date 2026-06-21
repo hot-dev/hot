@@ -814,7 +814,6 @@ impl Engine {
     /// Like `call_function_with_cached_bytecode`, but also wires a task receive
     /// channel onto the VM for `::hot::task/receive()` support.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn call_function_with_cached_bytecode_and_task(
         function_name: &str,
         args: &[crate::val::Val],

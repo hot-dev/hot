@@ -9,6 +9,7 @@
 // Database Configuration
 hot.db.uri ::env/get("HOT_DB_URI", "")
 hot.db.schema "hot"
+hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
 
 // Logging Configuration
 hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
@@ -38,6 +39,7 @@ hot.emitter.type "db"
 hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
 hot.task.code-max-concurrent Int(::env/get("HOT_TASK_CODE_MAX_CONCURRENT", "500"))
 hot.task.code-vm-memory-mb Int(::env/get("HOT_TASK_CODE_VM_MEMORY_MB", "256"))
+hot.task.code-memory-percent Int(::env/get("HOT_TASK_CODE_MEMORY_PERCENT", "50"))
 hot.task.worker-memory-mb Int(::env/get("HOT_TASK_WORKER_MEMORY_MB", "8192"))
 hot.task.worker-disk-mb Int(::env/get("HOT_TASK_WORKER_DISK_MB", "51200"))
 hot.task.container-max-concurrent ::env/get("HOT_TASK_CONTAINER_MAX_CONCURRENT", "auto")

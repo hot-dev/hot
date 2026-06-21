@@ -1,6 +1,15 @@
 use crate::val::Val;
 use std::num::NonZeroUsize;
 
+/// Default hard ceiling on the derived Postgres pool size when no explicit
+/// `worker.db-max-connections` is configured. Prevents large hosts from
+/// deriving connection counts that exhaust the database's connection limit.
+const DEFAULT_DB_MAX_CONNECTIONS: usize = 50;
+
+/// Process memory (MB) held back from the task-worker budget for the runtime
+/// itself before dividing the rest between code VMs and containers.
+const TASK_PROCESS_RESERVE_MB: u64 = 512;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedConcurrency {
     pub requested: usize,
@@ -75,29 +84,16 @@ pub fn derive_task_code_concurrency(conf: &Val, requested: usize) -> DerivedConc
     let requested = requested.max(1);
     let shared_process = conf.get_bool_or_default("worker.shared-process", false);
     let cpu_limit = effective_cpu_parallelism(shared_process).max(1);
-    let memory_limit_mb = detected_memory_limit_mb().or_else(|| {
-        let configured = conf.get_int_or_default("task.worker-memory-mb", 8192);
-        (configured > 0).then_some(configured as u64)
-    });
     let vm_memory_mb = conf
         .get_int_or_default("task.code-vm-memory-mb", 256)
         .max(1) as u64;
-    let container_reserve_mb = conf
-        .get_int_or_default("task.container-reserved-memory-mb", 512)
-        .max(0) as u64;
-    let recovery_slots = conf
-        .get_int_or_default("task.recovery-reserved-slots", 1)
-        .max(0) as u64;
-    let process_reserve_mb = 512;
-    let reserved_memory_mb =
-        process_reserve_mb + container_reserve_mb.saturating_mul(recovery_slots.max(1));
-    let memory_limit = memory_limit_mb.map(|limit| {
-        limit
-            .saturating_sub(reserved_memory_mb)
-            .checked_div(vm_memory_mb)
-            .unwrap_or(1)
-            .max(1) as usize
-    });
+    let ceiling_mb = task_memory_ceiling_mb(conf);
+    let usable_mb = task_usable_memory_mb(conf, ceiling_mb);
+    // Code VMs and containers draw from disjoint shares of usable memory so the
+    // two budgets never double-count the same RAM.
+    let code_share_mb = usable_mb.saturating_mul(code_memory_percent(conf)) / 100;
+    let memory_limit_mb = Some(ceiling_mb);
+    let memory_limit = Some(code_share_mb.checked_div(vm_memory_mb).unwrap_or(1).max(1) as usize);
 
     let mut resolved = requested.min(cpu_limit);
     if let Some(memory_limit) = memory_limit {
@@ -131,10 +127,6 @@ pub fn derive_task_container_concurrency(
     let recovery_reserved_slots = conf
         .get_int_or_default("task.recovery-reserved-slots", 1)
         .max(0) as usize;
-    let reserved_memory_mb = conf
-        .get_int_or_default("task.container-reserved-memory-mb", 512)
-        .max(0) as u64
-        * recovery_reserved_slots.max(1) as u64;
     let reserved_disk_mb = conf
         .get_int_or_default("task.container-reserved-disk-mb", 10_240)
         .max(0) as u64
@@ -144,7 +136,11 @@ pub fn derive_task_container_concurrency(
     let memory_ceiling_mb = detected_memory_mb
         .map(|limit| limit.min(worker_memory_mb.max(1)))
         .unwrap_or_else(|| worker_memory_mb.max(1));
-    let memory_budget_mb = memory_ceiling_mb.saturating_sub(reserved_memory_mb).max(1);
+    let usable_mb = task_usable_memory_mb(conf, memory_ceiling_mb);
+    // Containers take the complement of the code-VM memory share so the two
+    // resource classes do not over-commit the same RAM.
+    let container_percent = 100u64.saturating_sub(code_memory_percent(conf));
+    let memory_budget_mb = (usable_mb.saturating_mul(container_percent) / 100).max(1);
     let disk_budget_mb = worker_disk_mb
         .max(1)
         .saturating_sub(reserved_disk_mb)
@@ -195,17 +191,72 @@ pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
         .get_int_or_default("worker.db-reserved-connections", 4)
         .max(1) as usize;
     let capacity_budget = worker_budget.max(task_code_budget);
+    let derived = capacity_budget.saturating_add(reserved).max(10);
 
-    capacity_budget
-        .saturating_add(reserved)
+    // Clamp so large hosts don't derive a pool that exhausts the database's
+    // global connection limit. An explicit `worker.db-max-connections` raises
+    // or lowers the ceiling; otherwise a conservative default cap applies.
+    let ceiling = configured_usize(conf, "worker.db-max-connections")
+        .map(|c| c.max(10))
+        .unwrap_or(DEFAULT_DB_MAX_CONNECTIONS);
+
+    derived.min(ceiling).min(u32::MAX as usize) as u32
+}
+
+/// Size the SQLite connection pool. SQLite in WAL mode allows many concurrent
+/// readers but serializes writers at the storage layer, so the pool is sized
+/// for *read* concurrency (worker execution slots) plus a small write headroom.
+/// `worker.local-write-concurrency` adds headroom rather than capping the whole
+/// pool, and a floor of 10 preserves prior behavior for default deployments.
+pub fn derive_sqlite_pool_connections(conf: &Val) -> u32 {
+    let read_capacity = if conf.get("worker").is_some() {
+        let requested = conf.get_int_or_default("worker.threads", 4).max(1) as usize;
+        derive_worker_vm_concurrency(conf, requested).resolved
+    } else {
+        0
+    };
+    let write_headroom = conf
+        .get_int_or_default("worker.local-write-concurrency", 1)
+        .max(1) as usize;
+
+    read_capacity
+        .saturating_add(write_headroom)
         .max(10)
         .min(u32::MAX as usize) as u32
 }
 
-pub fn derive_sqlite_pool_connections(conf: &Val) -> u32 {
-    conf.get_int_or_default("worker.local-write-concurrency", 1)
+fn code_memory_percent(conf: &Val) -> u64 {
+    conf.get_int_or_default("task.code-memory-percent", 50)
+        .clamp(0, 100) as u64
+}
+
+/// Memory ceiling (MB) available to a task worker: the smaller of the detected
+/// cgroup limit and the operator-declared `task.worker-memory-mb`.
+fn task_memory_ceiling_mb(conf: &Val) -> u64 {
+    let configured = conf
+        .get_int_or_default("task.worker-memory-mb", 8192)
+        .max(1) as u64;
+    match detected_memory_limit_mb() {
+        Some(detected) => detected.min(configured),
+        None => configured,
+    }
+}
+
+/// Memory (MB) that may be split between code VMs and containers after holding
+/// back process overhead and a recovery reserve for adopting in-flight
+/// containers on restart.
+fn task_usable_memory_mb(conf: &Val, ceiling_mb: u64) -> u64 {
+    let container_reserve_mb = conf
+        .get_int_or_default("task.container-reserved-memory-mb", 512)
+        .max(0) as u64;
+    let recovery_slots = conf
+        .get_int_or_default("task.recovery-reserved-slots", 1)
+        .max(0) as u64;
+    let recovery_reserve_mb = container_reserve_mb.saturating_mul(recovery_slots.max(1));
+    ceiling_mb
+        .saturating_sub(TASK_PROCESS_RESERVE_MB)
+        .saturating_sub(recovery_reserve_mb)
         .max(1)
-        .min(u32::MAX as i64) as u32
 }
 
 fn configured_usize(conf: &Val, path: &str) -> Option<usize> {
@@ -370,16 +421,35 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_pool_uses_local_write_concurrency_cap() {
+    fn sqlite_pool_keeps_read_floor_and_adds_write_headroom() {
         let conf = val!({
             "worker": {
+                "threads": 4i64,
                 "local-write-concurrency": 2i64,
             },
         });
 
         let max_connections = derive_sqlite_pool_connections(&conf);
 
-        assert_eq!(max_connections, 2);
+        // Pool stays at least at the historical floor so reads never serialize
+        // behind a single connection.
+        assert!(max_connections >= 10);
+    }
+
+    #[test]
+    fn postgres_pool_respects_explicit_ceiling() {
+        let conf = val!({
+            "worker": {
+                "threads": 64i64,
+                "db-max-connections": 20i64,
+                "db-reserved-connections": 4i64,
+            },
+        });
+
+        let max_connections = derive_postgres_pool_connections(&conf);
+
+        assert!(max_connections >= 10);
+        assert!(max_connections <= 20);
     }
 
     #[test]
@@ -395,11 +465,13 @@ mod tests {
 
         let budget =
             derive_task_container_concurrency(&conf, 8, 4096, 30_720, 512, 5_120, 500, "docker");
-        let expected_memory_budget = detected_memory_limit_mb()
+        // ceiling - process reserve (512) - recovery reserve (512) -> usable,
+        // then containers take the 50% complement of the code-VM share.
+        let ceiling = detected_memory_limit_mb()
             .map(|limit| limit.min(4096))
-            .unwrap_or(4096)
-            .saturating_sub(512)
-            .max(1);
+            .unwrap_or(4096);
+        let usable = ceiling.saturating_sub(512).saturating_sub(512).max(1);
+        let expected_memory_budget = (usable * 50 / 100).max(1);
         let expected_memory_limit = (expected_memory_budget / 1012).max(1) as usize;
 
         assert_eq!(budget.requested, 8);
