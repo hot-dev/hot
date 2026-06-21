@@ -73,6 +73,19 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
+      postgres:
+        image: postgres:18.3
+        env:
+          POSTGRES_USER: hot
+          POSTGRES_PASSWORD: hot
+          POSTGRES_DB: hot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hot -d hot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
       valkey:
         image: valkey/valkey:latest
         ports:
@@ -93,9 +106,16 @@ jobs:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
 
+      - name: Install pgvector for Postgres tests
+        run: |
+          docker exec "${{ job.services.postgres.id }}" \
+            bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
+
       - name: Run Rust tests
         env:
           REDIS_URL: redis://localhost:6379
+          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_POSTGRES_RESET_SCHEMA: '1'
         run: cargo test --workspace --all-targets --locked -j 4
 
       - name: sccache stats
@@ -105,6 +125,29 @@ jobs:
     name: Hot Tests
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    services:
+      postgres:
+        image: postgres:18.3
+        env:
+          POSTGRES_USER: hot
+          POSTGRES_PASSWORD: hot
+          POSTGRES_DB: hot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hot -d hot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Free disk space
         run: |
@@ -129,10 +172,38 @@ jobs:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
         run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
 
+      - name: Install pgvector for Postgres tests
+        run: |
+          docker exec "${{ job.services.postgres.id }}" \
+            bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
+
+      - name: Run Hot init (Postgres + Redis)
+        env:
+          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_REDIS_URI: redis://localhost:6379
+          HOT_QUEUE_TYPE: redis
+        run: cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Hot tests (Postgres + Redis)
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_REDIS_URI: redis://localhost:6379
+          HOT_QUEUE_TYPE: redis
+        run: cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+
       - name: Run Hot Box tests (Docker integration)
         env:
           HOT_BOX_ENABLED: true
         run: cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Hot Box tests (Postgres + Redis)
+        env:
+          HOT_BOX_ENABLED: true
+          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_REDIS_URI: redis://localhost:6379
+          HOT_QUEUE_TYPE: redis
+        run: cargo run --locked --bin hot -- test box -c pg.redis.test.hot --ctx hot/ci.ctx.hot
 
       - name: sccache stats
         run: sccache --show-stats || true

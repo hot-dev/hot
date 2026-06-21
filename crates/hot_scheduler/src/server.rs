@@ -69,12 +69,17 @@ pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 pub const DEFAULT_REDIS_URL: &str = "redis://localhost:6379";
 pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30; // Sync with database every 30 seconds
+pub const DEFAULT_RETRY_INTERVAL_SECONDS: u64 = 1;
+pub const DEFAULT_AT_INTERVAL_SECONDS: u64 = 1;
 
 pub fn get_resolved_conf(conf: Val) -> Val {
     // Start with defaults
     let default_conf = val!({
         "sync-interval-seconds": DEFAULT_SYNC_INTERVAL_SECONDS as i64,
-        "backfill": false
+        "backfill": false,
+        "retry-interval-seconds": DEFAULT_RETRY_INTERVAL_SECONDS as i64,
+        "at-interval-seconds": DEFAULT_AT_INTERVAL_SECONDS as i64,
+        "singleton": true
     });
 
     // Merge with provided conf (the provided conf will override defaults)
@@ -89,6 +94,8 @@ pub async fn run(
     serialization: Serialization,
     db: Option<DatabasePool>,
     sync_interval_seconds: Option<u64>,
+    retry_interval_seconds: Option<u64>,
+    at_interval_seconds: Option<u64>,
     backfill_enabled: bool,
     schedule_policy: SchedulePolicy,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -168,7 +175,19 @@ pub async fn run(
     // If database is provided, start the sync loop and retry processor
     if let Some(db) = db {
         let db = Arc::new(db);
-        let sync_interval = sync_interval_seconds.unwrap_or(DEFAULT_SYNC_INTERVAL_SECONDS);
+        let sync_interval = sync_interval_seconds
+            .unwrap_or(DEFAULT_SYNC_INTERVAL_SECONDS)
+            .max(1);
+        let retry_interval = retry_interval_seconds
+            .unwrap_or(DEFAULT_RETRY_INTERVAL_SECONDS)
+            .max(1);
+        let at_interval = at_interval_seconds
+            .unwrap_or(DEFAULT_AT_INTERVAL_SECONDS)
+            .max(1);
+        info!(
+            "hot.dev: SCHEDULER intervals: sync={}s retry={}s at={}s",
+            sync_interval, retry_interval, at_interval
+        );
 
         // Start the database sync task
         let scheduler_clone = scheduler.clone();
@@ -204,13 +223,13 @@ pub async fn run(
             }
         });
 
-        // Start the retry processor task (checks for pending retries every 5 seconds)
+        // Start the retry processor task.
         let retry_queue_clone = Arc::clone(&event_queue);
         let retry_db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            let mut retry_timer = interval(Duration::from_secs(5));
+            let mut retry_timer = interval(Duration::from_secs(retry_interval));
 
             loop {
                 tokio::select! {
@@ -227,13 +246,13 @@ pub async fn run(
             }
         });
 
-        // Start the @at: schedule processor task (checks for due one-time schedules every 5 seconds)
+        // Start the @at schedule processor task.
         let at_queue_clone = Arc::clone(&event_queue);
         let at_db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            let mut at_timer = interval(Duration::from_secs(5));
+            let mut at_timer = interval(Duration::from_secs(at_interval));
 
             loop {
                 tokio::select! {

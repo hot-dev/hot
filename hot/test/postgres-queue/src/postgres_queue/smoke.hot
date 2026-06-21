@@ -1,0 +1,5 @@
+::postgres_queue::smoke ns
+
+db-uri fn (): Str {
+    ::hot::env/get("HOT_TEST_POSTGRES_URI", "postgres://hot:hot@127.0.0.1:55432/hot")
+}

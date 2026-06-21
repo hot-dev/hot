@@ -170,7 +170,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let task_queue = vm.get_task_queue();
 
     tokio::runtime::Handle::current().block_on(async {
-        if let Some(db) = db {
+        let task_inserted = if let Some(db) = db {
             // Ensure the origin run row exists in the DB before inserting the task.
             // The emitter/writer pipeline is async, so the run:start may not be committed yet.
             // Use ON CONFLICT to avoid duplicates if the writer already flushed it.
@@ -199,7 +199,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             } else {
                 Some(&args_json)
             };
-            if let Err(e) = crate::db::Task::insert(
+            match crate::db::Task::insert(
                 &db,
                 &task_id,
                 &env_id,
@@ -215,16 +215,34 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             )
             .await
             {
-                tracing::error!("::hot::task/start: failed to insert task row: {}", e);
-            }
-        }
-
-        // Enqueue to task queue
-        if let Some(queue) = task_queue {
-            if let Err(e) = queue.enqueue(request).await {
-                tracing::error!("::hot::task/start: failed to enqueue task: {}", e);
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(
+                        task_id = %task_id,
+                        "::hot::task/start: failed to insert task row; task will not be enqueued: {}",
+                        e
+                    );
+                    false
+                }
             }
         } else {
+            tracing::error!(
+                task_id = %task_id,
+                "::hot::task/start: no database configured; task will not be enqueued"
+            );
+            false
+        };
+
+        // Enqueue to task queue
+        if task_inserted && let Some(queue) = task_queue {
+            if let Err(e) = queue.enqueue(request).await {
+                tracing::error!(
+                    task_id = %task_id,
+                    "::hot::task/start: failed to enqueue task: {}",
+                    e
+                );
+            }
+        } else if task_inserted {
             tracing::warn!("::hot::task/start: no task queue configured");
         }
     });

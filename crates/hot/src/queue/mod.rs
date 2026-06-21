@@ -1,11 +1,12 @@
 use crate::data::serialization::Serialization;
-use crate::val::Val;
+use crate::val::{Val, val};
 use async_trait::async_trait;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub mod mem;
 pub mod streams;
@@ -56,6 +57,33 @@ impl std::fmt::Display for QueueProcessingError {
 }
 
 impl std::error::Error for QueueProcessingError {}
+
+#[derive(Debug)]
+pub struct QueueInfrastructureError {
+    message: String,
+    backoff: Duration,
+}
+
+impl QueueInfrastructureError {
+    pub fn new(message: impl Into<String>, backoff: Duration) -> Self {
+        Self {
+            message: message.into(),
+            backoff,
+        }
+    }
+
+    pub fn backoff(&self) -> Duration {
+        self.backoff
+    }
+}
+
+impl std::fmt::Display for QueueInfrastructureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for QueueInfrastructureError {}
 
 /// Trait for stream-level cleanup operations (consumer pruning, stream trimming).
 /// Not parameterised on item type so callers can clean up heterogeneous queues uniformly.
@@ -563,6 +591,15 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
 /// When `in_project` is true (hot.hot exists), defaults to "memory" for local event publishing.
 /// When `in_project` is false, defaults to "none" (queue disabled).
 pub fn get_resolved_conf(conf: Val, in_project: bool) -> Val {
+    let default_conf = val!({
+        "event-orphan-idle-ms": 60_000i64,
+        "task-orphan-idle-ms": 60_000i64,
+        "infra-retry-backoff-ms": 1_000i64,
+        "wait-target-p99-ms": 1_000i64,
+        "metrics-enabled": true
+    });
+    let conf = default_conf.merge(&conf);
+
     // Check if user explicitly set a type (from hot.hot or CLI)
     // Empty string means not set, so use context-based default
     let user_type = conf.get_str_or_default("type", "");

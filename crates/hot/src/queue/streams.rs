@@ -10,7 +10,7 @@
 //! - Full cluster mode support
 //! - Connection caching to minimize Redis connection overhead
 
-use super::{Queue, QueueProcessingError, QueueProcessor};
+use super::{Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor};
 use crate::data::serialization::Serialization;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
@@ -20,8 +20,9 @@ use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::future::Future;
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use zstd::{Decoder, Encoder};
@@ -259,6 +260,35 @@ struct PrefetchedMessage {
     msg_id: String,
     payload: Vec<u8>,
     source: FetchSource,
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn stream_message_age_ms(msg_id: &str) -> u64 {
+    let Some((millis, _sequence)) = msg_id.split_once('-') else {
+        return 0;
+    };
+    let Ok(enqueued_at_ms) = millis.parse::<i64>() else {
+        return 0;
+    };
+    chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(enqueued_at_ms)
+        .max(0) as u64
+}
+
+fn queue_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HOT_QUEUE_METRICS_ENABLED")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true)
+    })
 }
 
 /// Redis Streams queue implementation.
@@ -1798,6 +1828,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 self.get_delivery_count(conn, &msg_id).await?
             }
         };
+        let queue_wait_ms = stream_message_age_ms(&msg_id);
 
         if delivery_count > MAX_PROCESSING_RETRIES {
             tracing::warn!(
@@ -1806,6 +1837,20 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 delivery_count,
                 MAX_PROCESSING_RETRIES
             );
+            if queue_timing_enabled() {
+                tracing::info!(
+                    target: "hot::queue::timing",
+                    queue = %self.stream_name,
+                    backend = "redis",
+                    delivery_source = ?source,
+                    queue_wait_ms = queue_wait_ms,
+                    processing_ms = 0u64,
+                    retry_count = delivery_count.saturating_sub(1),
+                    outcome = "retry_exhausted",
+                    message_id = %msg_id,
+                    "queue item skipped"
+                );
+            }
             self.move_msg_to_dlq(
                 &msg_id,
                 &payload,
@@ -1827,6 +1872,20 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     msg_id,
                     e
                 );
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.stream_name,
+                        backend = "redis",
+                        delivery_source = ?source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = 0u64,
+                        retry_count = delivery_count.saturating_sub(1),
+                        outcome = "deserialize_error",
+                        message_id = %msg_id,
+                        "queue item skipped"
+                    );
+                }
                 self.move_msg_to_dlq(&msg_id, &payload, format!("Deserialization error: {}", e))
                     .await?;
                 return Err(Box::new(e));
@@ -1840,6 +1899,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             source,
         );
 
+        let processing_started = Instant::now();
         match worker(item).await {
             Ok(result) => {
                 // Success — ACK only. We no longer XDEL per message because
@@ -1857,10 +1917,63 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                             .clone(),
                     )
                     .await;
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.stream_name,
+                        backend = "redis",
+                        delivery_source = ?source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = delivery_count.saturating_sub(1),
+                        outcome = "success",
+                        message_id = %msg_id,
+                        "queue item processed"
+                    );
+                }
                 tracing::debug!("Successfully processed and ACKed message {}", msg_id);
                 Ok(Some(result))
             }
             Err(e) => {
+                if let Some(infra) = e.downcast_ref::<QueueInfrastructureError>() {
+                    let backoff = infra.backoff();
+                    let reason = infra.to_string();
+                    if queue_timing_enabled() {
+                        tracing::info!(
+                            target: "hot::queue::timing",
+                            queue = %self.stream_name,
+                            backend = "redis",
+                            delivery_source = ?source,
+                            queue_wait_ms = queue_wait_ms,
+                            processing_ms = duration_ms(processing_started.elapsed()),
+                            retry_count = delivery_count.saturating_sub(1),
+                            outcome = "infrastructure_retry",
+                            backoff_ms = duration_ms(backoff),
+                            message_id = %msg_id,
+                            "queue item deferred for infrastructure retry"
+                        );
+                    }
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                    self.requeue_msg_for_infrastructure_retry(&msg_id, &payload, reason)
+                        .await?;
+                    return Err(Box::new(QueueProcessingError::QueueError(e)));
+                }
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.stream_name,
+                        backend = "redis",
+                        delivery_source = ?source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = delivery_count.saturating_sub(1),
+                        outcome = "worker_error",
+                        message_id = %msg_id,
+                        "queue item processing failed"
+                    );
+                }
                 // Worker failed — don't ACK; message stays in our PEL and
                 // will be re-read with `0` on the next call. Any other
                 // prefetched messages stay in the buffer and will still be
@@ -1881,6 +1994,52 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 Err(Box::new(QueueProcessingError::WorkerError(e)))
             }
         }
+    }
+
+    /// Copy the payload to a fresh stream entry and ACK the current pending
+    /// entry. This is for infrastructure failures where the work item is still
+    /// healthy, but the worker could not make a conclusive ownership decision.
+    async fn requeue_msg_for_infrastructure_retry(
+        &self,
+        msg_id: &str,
+        payload: &[u8],
+        reason: String,
+    ) -> Result<(), StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
+
+        let _: String = conn
+            .cmd(
+                &redis::cmd("XADD")
+                    .arg(&self.stream_name)
+                    .arg("MAXLEN")
+                    .arg("~")
+                    .arg(STREAM_MAXLEN)
+                    .arg("*")
+                    .arg("payload")
+                    .arg(payload)
+                    .arg("retry_reason")
+                    .arg(&reason)
+                    .arg("original_id")
+                    .arg(msg_id)
+                    .arg("timestamp")
+                    .arg(chrono::Utc::now().timestamp())
+                    .clone(),
+            )
+            .await
+            .map(|v| redis::from_redis_value_ref(&v).unwrap_or_default())?;
+
+        let _ = conn
+            .cmd(
+                &redis::cmd("XACK")
+                    .arg(&self.stream_name)
+                    .arg(&self.consumer_group)
+                    .arg(msg_id)
+                    .clone(),
+            )
+            .await;
+
+        Ok(())
     }
 
     /// ACK a single message and copy it into the DLQ. Used both for retry
@@ -2319,6 +2478,59 @@ mod tests {
             dlq_len >= 1,
             "expected at least one message in DLQ, got {}",
             dlq_len
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_infrastructure_retry_requeues_without_dlq_retry_budget() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_infra_retry_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue("flaky-infra".to_string()).await.unwrap();
+
+        for _ in 0..(MAX_PROCESSING_RETRIES + 2) {
+            let res = queue
+                .dequeue_and_work(|_: String| async move {
+                    Err::<(), Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            "temporary infrastructure failure",
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+            assert!(res.is_err(), "infrastructure retry should be observable");
+            queue.prefetched.lock().await.clear();
+        }
+
+        let res = queue
+            .dequeue_and_work(|item: String| async move {
+                assert_eq!(item, "flaky-infra");
+                Ok::<(), Box<dyn Error + Send + Sync>>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(res, Some(()));
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let dlq_key = format!("{{{}}}:deadletter", queue_name);
+        let dlq_len: i64 = redis::cmd("XLEN")
+            .arg(&dlq_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(0);
+        assert_eq!(dlq_len, 0, "infrastructure retries must not DLQ");
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0,
+            "successful final processing should ACK the remaining delivery"
         );
 
         cleanup(&client, &queue_name).await;

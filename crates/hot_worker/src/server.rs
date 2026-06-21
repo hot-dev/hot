@@ -2948,7 +2948,18 @@ pub fn get_resolved_conf(conf: Val) -> Val {
     let default_conf = val!({
         "threads": DEFAULT_WORKER_THREADS as i64,
         "run-timeout": DEFAULT_RUN_TIMEOUT_SECONDS as i64,
-        "shutdown-timeout": DEFAULT_SHUTDOWN_TIMEOUT_SECONDS as i64
+        "shutdown-timeout": DEFAULT_SHUTDOWN_TIMEOUT_SECONDS as i64,
+        "queue-concurrency": "auto",
+        "vm-concurrency": "auto",
+        "vm-memory-mb": 256i64,
+        "reserved-memory-mb": 512i64,
+        "db-reserved-connections": 4i64,
+        "cancel-on-timeout": true,
+        "event-ordering": "current",
+        "handler-concurrency": "serial",
+        "loop-mode": "legacy",
+        "shared-process": false,
+        "local-write-concurrency": 1i64
     });
 
     // Merge with provided conf (the provided conf will override defaults)
@@ -3198,8 +3209,6 @@ pub async fn run_with_components_shared_context(
     let event_window = std::time::Duration::from_secs(4 * 60 * 60); // 4h
     let alert_window = std::time::Duration::from_secs(60 * 60); // 1h
     let email_window = std::time::Duration::from_secs(60 * 60); // 1h
-    let task_window = std::time::Duration::from_secs(24 * 60 * 60); // 24h
-
     // Stable consumer-name prefix for this worker process. Computed early so we
     // can pin admin-path consumer names (startup recovery, janitor, daily
     // queue_cleanup) to the same identity as worker_id=0. Without that pinning
@@ -3289,16 +3298,13 @@ pub async fn run_with_components_shared_context(
     // target for orphaned task PEL entries. If hot_worker reclaimed task
     // orphans into its own consumer it would be a dead end (we don't run
     // process_blocking on this queue here).
-    let task_queue = Arc::new(
-        ProcessingQueue::<TaskRequest>::new_with_cluster(
-            queue_type,
-            "hot:task".to_string(),
-            redis_uri.clone(),
-            redis_cluster,
-            serialization,
-        )?
-        .with_startup_window(task_window),
-    );
+    let task_queue = Arc::new(ProcessingQueue::<TaskRequest>::new_with_cluster(
+        queue_type,
+        "hot:task".to_string(),
+        redis_uri.clone(),
+        redis_cluster,
+        serialization,
+    )?);
 
     // Initialize global notification queue registry so publish_alert() can enqueue
     hot::notification_queue::init_alert_queue(std::sync::Arc::new(alert_queue.clone()));
@@ -3486,10 +3492,6 @@ pub async fn run_with_components_shared_context(
                     "hot:email",
                     tokio::time::timeout(ff_timeout, email_queue.fast_forward_if_stale()).await,
                 ),
-                (
-                    "hot:task",
-                    tokio::time::timeout(ff_timeout, task_queue.fast_forward_if_stale()).await,
-                ),
             ] {
                 match result {
                     Ok(Ok(skipped)) if skipped > 0 => {
@@ -3595,15 +3597,6 @@ pub async fn run_with_components_shared_context(
                     )
                     .await,
                 ),
-                (
-                    "hot:task",
-                    task_window,
-                    tokio::time::timeout(
-                        purge_timeout,
-                        task_queue.purge_old_pending(task_window.as_millis() as u64),
-                    )
-                    .await,
-                ),
             ] {
                 match result {
                     Ok(Ok(purged)) if purged > 0 => {
@@ -3659,7 +3652,6 @@ pub async fn run_with_components_shared_context(
             ("hot:response", &response_queue),
             ("hot:alert", &alert_queue),
             ("hot:email", &email_queue),
-            ("hot:task", task_queue.as_ref()),
         ];
 
         let cleanup_fut = async {
@@ -3966,7 +3958,6 @@ pub async fn run_with_components_shared_context(
                             ] {
                                 let _ = queue.unregister_consumer().await;
                             }
-                            let _ = task_queue_clone.unregister_consumer().await;
                         }
                         break;
                     }
@@ -5001,15 +4992,37 @@ pub async fn run_with_components_shared_context(
                                     None
                                 };
 
-                                let _ = hot::db::alert::process_single_alert_delivery(
+                                match hot::db::alert::process_single_alert_delivery(
                                     &db,
                                     &http_client,
                                     email_sender_ref,
                                     &alert_email_config,
                                     &alert_msg.body.alert_delivery_id,
-                                ).await;
-
-                                Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
+                                ).await {
+                                    Ok(success) => {
+                                        if success {
+                                            tracing::info!(
+                                                "Alert delivery {} sent successfully",
+                                                alert_msg.body.alert_delivery_id
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Alert delivery {} failed (DB retry state owns redelivery if attempts remain)",
+                                                alert_msg.body.alert_delivery_id
+                                            );
+                                        }
+                                        Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Alert delivery {} processing error: {}",
+                                            alert_msg.body.alert_delivery_id,
+                                            e
+                                        );
+                                        Err(Box::new(std::io::Error::other(e.to_string()))
+                                            as Box<dyn std::error::Error + Send + Sync>)
+                                    }
+                                }
                             }
                         }).await {
                             Ok(Some(_)) => { processed_any = true; },

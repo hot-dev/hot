@@ -14,8 +14,8 @@ use hot::val;
 use hot::val::Val;
 
 use crate::cli::{
-    Command, EmitterOptions, GlobalOptions, NetworkOptions, QueueOptions, ServerOptions,
-    ShowConfOptions, TestOptions, WorkerOptions,
+    Command, EmitterOptions, GlobalOptions, NetworkOptions, QueueOptions, SchedulerOptions,
+    ServerOptions, ShowConfOptions, TestOptions, WorkerOptions,
 };
 
 /// Tuple returned by [`extract_options_from_command`] containing every
@@ -26,6 +26,7 @@ pub(crate) type ExtractedOptions = (
     Option<NetworkOptions>,
     Option<QueueOptions>,
     Option<WorkerOptions>,
+    Option<SchedulerOptions>,
     Option<TestOptions>,
     Option<ShowConfOptions>,
 );
@@ -102,6 +103,15 @@ pub(crate) fn create_default_conf() -> Val {
     let task_conf = val!({
         "max-concurrent": 4i64,
         "code-max-concurrent": 500i64,
+        "code-vm-memory-mb": 256i64,
+        "container-max-concurrent": "auto",
+        "container-reserved-memory-mb": 512i64,
+        "container-reserved-disk-mb": 10_240i64,
+        "recovery-reserved-slots": 1i64,
+        "capacity-fairness": "none",
+        "shutdown-container-timeout-seconds": 30i64,
+        "reconcile-queued-after-seconds": 60i64,
+        "reconcile-interval-seconds": 30i64,
         "worker-memory-mb": 8192i64,
         "worker-disk-mb": 51200i64
     });
@@ -207,7 +217,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             network,
             queue,
             worker,
-            scheduler: _,
+            scheduler,
             dev: _,
             show_conf,
         } => (
@@ -216,6 +226,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(network.clone()),
             Some(queue.clone()),
             Some(worker.clone()),
+            Some(scheduler.clone()),
             None,
             Some(show_conf.clone()),
         ),
@@ -232,6 +243,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(queue.clone()),
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::App {
@@ -243,6 +255,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             global.clone(),
             Some(server.clone()),
             Some(network.clone()),
+            None,
             None,
             None,
             None,
@@ -261,6 +274,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(queue.clone()),
             Some(worker.clone()),
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::TaskWorker {
@@ -274,13 +288,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(queue.clone()),
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Scheduler {
             global,
             server,
             queue,
-            scheduler: _,
+            scheduler,
             show_conf,
         } => (
             global.clone(),
@@ -288,6 +303,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             Some(queue.clone()),
             None,
+            Some(scheduler.clone()),
             None,
             Some(show_conf.clone()),
         ),
@@ -295,6 +311,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -311,12 +328,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Repl {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -331,6 +350,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -353,6 +373,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             Some(network.clone()),
             Some(queue.clone()),
             Some(worker.clone()),
+            None,
             Some(test.clone()),
             None,
         ),
@@ -365,9 +386,10 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
-        Command::Cache { global, .. } => (global.clone(), None, None, None, None, None, None),
+        Command::Cache { global, .. } => (global.clone(), None, None, None, None, None, None, None),
         Command::Init {
             global, show_conf, ..
         } => (
@@ -377,13 +399,24 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
-        Command::Ai { .. } => (GlobalOptions::default(), None, None, None, None, None, None),
+        Command::Ai { .. } => (
+            GlobalOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         Command::Build {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -400,12 +433,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Projects {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -422,12 +457,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Extract {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -444,12 +481,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Check {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -466,12 +505,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Deploy {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -488,12 +529,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
         Command::Lsp {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -533,12 +576,14 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
         ),
-        Command::Fmt { global, .. } => (global.clone(), None, None, None, None, None, None),
+        Command::Fmt { global, .. } => (global.clone(), None, None, None, None, None, None, None),
         Command::Deps {
             global, show_conf, ..
         } => (
             global.clone(),
+            None,
             None,
             None,
             None,
@@ -555,14 +600,16 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
             Some(show_conf.clone()),
         ),
-        Command::Docs { global, .. } => (global.clone(), None, None, None, None, None, None),
+        Command::Docs { global, .. } => (global.clone(), None, None, None, None, None, None, None),
         Command::Queue { global, queue, .. } => (
             global.clone(),
             None,
             None,
             Some(queue.clone()),
+            None,
             None,
             None,
             None,
@@ -597,6 +644,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
             None,
+            None,
         ),
     }
 }
@@ -610,6 +658,7 @@ pub(crate) fn apply_configuration_options(
     network: Option<&NetworkOptions>,
     queue: Option<&QueueOptions>,
     worker: Option<&WorkerOptions>,
+    scheduler: Option<&SchedulerOptions>,
     test: Option<&TestOptions>,
 ) -> Val {
     // Apply global options
@@ -696,6 +745,22 @@ pub(crate) fn apply_configuration_options(
         && let Some(threads) = worker.worker_threads
     {
         conf = conf.set_int("worker.threads", Some(threads as i64), 0);
+    }
+
+    // Apply scheduler options
+    if let Some(scheduler) = scheduler {
+        if let Some(backfill) = scheduler.scheduler_backfill {
+            conf = conf.set_bool("scheduler.backfill", Some(backfill), false);
+        }
+        if let Some(seconds) = scheduler.scheduler_sync_interval_seconds {
+            conf = conf.set_int("scheduler.sync-interval-seconds", Some(seconds as i64), 0);
+        }
+        if let Some(seconds) = scheduler.scheduler_retry_interval_seconds {
+            conf = conf.set_int("scheduler.retry-interval-seconds", Some(seconds as i64), 0);
+        }
+        if let Some(seconds) = scheduler.scheduler_at_interval_seconds {
+            conf = conf.set_int("scheduler.at-interval-seconds", Some(seconds as i64), 0);
+        }
     }
 
     // Apply test options
@@ -1024,6 +1089,9 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
                 "worker.serialization",
                 "scheduler.backfill",
                 "scheduler.sync-interval-seconds",
+                "scheduler.retry-interval-seconds",
+                "scheduler.at-interval-seconds",
+                "scheduler.singleton",
                 "scheduler.queue.type",
                 "scheduler.serialization",
                 "schedule.min-interval-seconds",
@@ -1476,6 +1544,39 @@ mod tests {
         assert_eq!(
             conf.get_int_or_default("schedule.max-active-per-org", -999),
             -1
+        );
+    }
+
+    #[test]
+    fn test_scheduler_cli_options_override_config() {
+        let conf = apply_configuration_options(
+            create_default_conf(),
+            &GlobalOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(&SchedulerOptions {
+                scheduler_backfill: Some(true),
+                scheduler_sync_interval_seconds: Some(7),
+                scheduler_retry_interval_seconds: Some(2),
+                scheduler_at_interval_seconds: Some(3),
+            }),
+            None,
+        );
+
+        assert!(conf.get_bool_or_default("scheduler.backfill", false));
+        assert_eq!(
+            conf.get_int_or_default("scheduler.sync-interval-seconds", -1),
+            7
+        );
+        assert_eq!(
+            conf.get_int_or_default("scheduler.retry-interval-seconds", -1),
+            2
+        );
+        assert_eq!(
+            conf.get_int_or_default("scheduler.at-interval-seconds", -1),
+            3
         );
     }
 }

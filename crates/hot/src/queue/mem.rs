@@ -10,14 +10,14 @@
 //! `hot scheduler` as separate processes), use the Redis Streams backend
 //! instead by setting `HOT_QUEUE_TYPE=redis`.
 
-use super::{Queue, QueueProcessingError, QueueProcessor, Serialization};
+use super::{Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, Serialization};
 use serde::{Serialize, de::DeserializeOwned};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum number of in-flight delivery retries for a worker function.
 const MAX_PROCESSING_RETRIES: usize = 3;
@@ -26,6 +26,22 @@ const MAX_PROCESSING_RETRIES: usize = 3;
 /// can apply backpressure to upstream callers rather than exhausting heap.
 /// 100k is large enough that healthy bursty workloads never block.
 const CHANNEL_CAPACITY: usize = 100_000;
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn queue_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HOT_QUEUE_METRICS_ENABLED")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true)
+    })
+}
 
 #[derive(Debug)]
 pub enum MemQueueError {
@@ -227,9 +243,78 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T
         let next_retry_count = retry_item.retry_count + 1;
         let first_attempt = retry_item.first_attempt;
 
+        let queue_wait_ms = duration_ms(first_attempt.elapsed());
+        let processing_started = Instant::now();
+        let delivery_source = if retry_item.retry_count == 0 {
+            "fresh"
+        } else {
+            "retry"
+        };
+
         match worker(item_for_worker).await {
-            Ok(result) => Ok(Some(result)),
+            Ok(result) => {
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.queue_name,
+                        backend = "memory",
+                        delivery_source = delivery_source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = retry_item.retry_count,
+                        outcome = "success",
+                        "queue item processed"
+                    );
+                }
+                Ok(Some(result))
+            }
             Err(e) => {
+                if let Some(infra) = e.downcast_ref::<QueueInfrastructureError>() {
+                    let backoff = infra.backoff();
+                    if queue_timing_enabled() {
+                        tracing::info!(
+                            target: "hot::queue::timing",
+                            queue = %self.queue_name,
+                            backend = "memory",
+                            delivery_source = delivery_source,
+                            queue_wait_ms = queue_wait_ms,
+                            processing_ms = duration_ms(processing_started.elapsed()),
+                            retry_count = retry_item.retry_count,
+                            outcome = "infrastructure_retry",
+                            backoff_ms = duration_ms(backoff),
+                            "queue item deferred for infrastructure retry"
+                        );
+                    }
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                    let unchanged = RetryItem::from_parts(
+                        retry_item.item,
+                        retry_item.retry_count,
+                        first_attempt,
+                    );
+                    if let Err(send_err) = self.channels.tx.send(unchanged).await {
+                        tracing::warn!(
+                            queue = self.queue_name,
+                            "Failed to re-enqueue infrastructure retry: {}",
+                            send_err
+                        );
+                    }
+                    return Err(Box::new(QueueProcessingError::QueueError(e)));
+                }
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.queue_name,
+                        backend = "memory",
+                        delivery_source = delivery_source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = retry_item.retry_count,
+                        outcome = "worker_error",
+                        "queue item processing failed"
+                    );
+                }
                 let updated =
                     RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
                 if updated.exceeded_retries() {
@@ -327,9 +412,78 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> QueueProce
         let next_retry_count = retry_item.retry_count + 1;
         let first_attempt = retry_item.first_attempt;
 
+        let queue_wait_ms = duration_ms(first_attempt.elapsed());
+        let processing_started = Instant::now();
+        let delivery_source = if retry_item.retry_count == 0 {
+            "fresh"
+        } else {
+            "retry"
+        };
+
         match worker(item_for_worker).await {
-            Ok(result) => Ok(Some(result)),
+            Ok(result) => {
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.queue_name,
+                        backend = "memory",
+                        delivery_source = delivery_source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = retry_item.retry_count,
+                        outcome = "success",
+                        "queue item processed"
+                    );
+                }
+                Ok(Some(result))
+            }
             Err(e) => {
+                if let Some(infra) = e.downcast_ref::<QueueInfrastructureError>() {
+                    let backoff = infra.backoff();
+                    if queue_timing_enabled() {
+                        tracing::info!(
+                            target: "hot::queue::timing",
+                            queue = %self.queue_name,
+                            backend = "memory",
+                            delivery_source = delivery_source,
+                            queue_wait_ms = queue_wait_ms,
+                            processing_ms = duration_ms(processing_started.elapsed()),
+                            retry_count = retry_item.retry_count,
+                            outcome = "infrastructure_retry",
+                            backoff_ms = duration_ms(backoff),
+                            "queue item deferred for infrastructure retry"
+                        );
+                    }
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                    let unchanged = RetryItem::from_parts(
+                        retry_item.item,
+                        retry_item.retry_count,
+                        first_attempt,
+                    );
+                    if let Err(send_err) = self.channels.tx.send(unchanged).await {
+                        tracing::warn!(
+                            queue = self.queue_name,
+                            "Failed to re-enqueue infrastructure retry: {}",
+                            send_err
+                        );
+                    }
+                    return Err(Box::new(QueueProcessingError::QueueError(e)));
+                }
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.queue_name,
+                        backend = "memory",
+                        delivery_source = delivery_source,
+                        queue_wait_ms = queue_wait_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = retry_item.retry_count,
+                        outcome = "worker_error",
+                        "queue item processing failed"
+                    );
+                }
                 let updated =
                     RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
 
@@ -534,6 +688,36 @@ mod tests {
         assert!(result.is_err());
         // Item is re-queued at the back with retry_count incremented.
         assert_eq!(queue.len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dequeue_and_work_infrastructure_retry_does_not_burn_retry_budget() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(5).await.unwrap();
+
+        for _ in 0..(MAX_PROCESSING_RETRIES + 2) {
+            let result = queue
+                .dequeue_and_work(|_item| async move {
+                    Err::<i32, Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            "temporary infrastructure failure",
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+
+            assert!(result.is_err());
+            assert_eq!(queue.len().await.unwrap(), 1);
+            assert!(queue.try_drain_dlq().is_empty());
+        }
+
+        let result = queue
+            .dequeue_and_work(|item| async move { Ok::<i32, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(result, Some(5));
+        assert!(queue.try_drain_dlq().is_empty());
     }
 
     #[tokio::test]

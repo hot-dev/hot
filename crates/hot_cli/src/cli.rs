@@ -296,6 +296,20 @@ pub(crate) struct SchedulerOptions {
         help = "Interval for syncing schedules from database"
     )]
     pub(crate) scheduler_sync_interval_seconds: Option<u64>,
+
+    #[arg(
+        long = "scheduler.retry-interval-seconds",
+        value_name = "SECONDS",
+        help = "Interval for polling due retry work"
+    )]
+    pub(crate) scheduler_retry_interval_seconds: Option<u64>,
+
+    #[arg(
+        long = "scheduler.at-interval-seconds",
+        value_name = "SECONDS",
+        help = "Interval for polling due @at one-shot schedules"
+    )]
+    pub(crate) scheduler_at_interval_seconds: Option<u64>,
 }
 
 // Test-specific options

@@ -12,7 +12,9 @@ use hot::db::event::Event;
 use hot::db::stream::{Stream as DbStream, StreamError, StreamSummary};
 use hot::permission::actions;
 use hot::val::Val;
+use once_cell::sync::OnceCell;
 use std::str::FromStr;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ListQueryParams;
@@ -20,6 +22,51 @@ use crate::ApiStateData;
 use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
 use crate::models::*;
+
+/// The queue name that API-published events are sent to.
+/// This MUST match the worker's event queue name ("hot:event").
+const API_EVENT_QUEUE_NAME: &str = "hot:event";
+
+static API_EVENT_QUEUE: OnceCell<Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>> =
+    OnceCell::new();
+
+fn get_event_queue(
+    conf: &Val,
+) -> Result<&'static Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>, String> {
+    API_EVENT_QUEUE.get_or_try_init(|| {
+        let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+        let queue_type = hot::queue::QueueType::from_str(&queue_type_str)
+            .unwrap_or(hot::queue::QueueType::Memory);
+
+        let redis_uri_str = conf.get_str_or_default("redis.uri", "");
+        let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
+            None
+        } else {
+            Some(redis_uri_str)
+        };
+
+        let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
+
+        let serialization_str = conf.get_str_or_default("serialization.type", "zstd-json");
+        let serialization = hot::data::serialization::Serialization::from_str(&serialization_str)
+            .unwrap_or_default();
+
+        let queue = hot::queue::ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
+            queue_type,
+            API_EVENT_QUEUE_NAME.to_string(),
+            redis_uri,
+            redis_cluster,
+            serialization,
+        )
+        .map_err(|e| format!("Failed to create event queue: {}", e))?;
+
+        tracing::info!(
+            "API events: initialized shared event queue (type: {})",
+            queue_type_str
+        );
+        Ok(Arc::new(queue))
+    })
+}
 
 /// Result of publishing an event internally
 pub struct PublishedEvent {
@@ -135,40 +182,12 @@ pub async fn publish_event_internal(
     // Convert to unified Message format and enqueue
     let message: hot::data::msg::Message = event_message.into();
 
-    // Create queue for event messages
     use hot::queue::Queue;
 
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
-    let queue_type =
-        hot::queue::QueueType::from_str(&queue_type_str).unwrap_or(hot::queue::QueueType::Memory);
-
-    let redis_uri_str = conf.get_str_or_default("redis.uri", "");
-    let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
-        None
-    } else {
-        Some(redis_uri_str)
-    };
-
-    let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
-
-    let serialization_str = conf.get_str_or_default("serialization.type", "zstd-json");
-    let serialization =
-        hot::data::serialization::Serialization::from_str(&serialization_str).unwrap_or_default();
-
-    let queue = hot::queue::ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
-        queue_type,
-        "hot:event".to_string(),
-        redis_uri,
-        redis_cluster,
-        serialization,
-    )
-    .map_err(|e| {
+    let queue = get_event_queue(conf).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to create event queue: {}",
-                e
-            ))),
+            Json(ApiErrorResponse::internal_error(&e)),
         )
     })?;
 
@@ -477,4 +496,30 @@ pub async fn get_event_runs(
         params.limit,
         params.offset,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::val;
+
+    #[test]
+    fn api_event_queue_is_cached() {
+        let conf = val!({
+            "queue": {
+                "type": "memory",
+            },
+            "serialization": {
+                "type": "json",
+            },
+        });
+
+        let first = get_event_queue(&conf).expect("first queue init");
+        let second = get_event_queue(&conf).expect("second queue lookup");
+
+        assert!(
+            Arc::ptr_eq(first, second),
+            "API event publishing should reuse the shared event queue"
+        );
+    }
 }

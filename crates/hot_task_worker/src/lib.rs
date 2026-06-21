@@ -34,7 +34,7 @@ use hot::lang::cache::bytecode_cache::{BytecodeCache, CachedBytecode};
 use hot::lang::emitter::EngineEventEmitter;
 use hot::lang::event::{EventPublisher, ExecutionContext};
 use hot::lang::hot::task::TaskRequest;
-use hot::queue::{ProcessingQueue, Queue, QueueType};
+use hot::queue::{ProcessingQueue, Queue, QueueInfrastructureError, QueueType};
 use hot::stream::{
     EnvEvent, EnvPublisher, StreamEvent, StreamNext, StreamPubSub, StreamPublisher,
     StreamSubscriberFactory,
@@ -1178,13 +1178,15 @@ async fn process_task(
     // Acquire failure modes:
     //   - `Ok(None)` (sibling owns it): ACK and walk away. We're not the
     //     rightful processor for this dispatch.
-    //   - `Err(_)` (transport): also ACK and walk away. We can't safely
-    //     decide we own it without Redis confirmation, and the queue's
-    //     `XAUTOCLAIM` will redeliver to whoever holds the lease (or it'll
-    //     surface as a fresh redelivery once Redis recovers).
+    //   - `Err(_)` (transport): do not ACK/drop and do not consume poison
+    //     message retry budget. Surface a queue infrastructure retry so the
+    //     queue can defer and requeue the message as fresh work.
     //
     // The guard is bound for the rest of `process_task` — its `Drop`
     // releases the lease when the body returns (success, error, panic).
+    let infra_retry_backoff_ms = worker_conf
+        .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
+        .max(0) as u64;
     let _lease_guard = match task_lease
         .try_acquire(task_id, task_lease::DEFAULT_LEASE_TTL)
         .await
@@ -1205,10 +1207,14 @@ async fn process_task(
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
-                "Task lease acquire failed; skipping dispatch (queue will redeliver)"
+                backoff_ms = infra_retry_backoff_ms,
+                "Task lease acquire failed; deferring queue message for infrastructure retry"
             );
             coordinator.unregister_task(&task_id);
-            return Ok(());
+            return Err(Box::new(QueueInfrastructureError::new(
+                format!("task lease acquire failed: {}", e),
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )));
         }
     };
 
