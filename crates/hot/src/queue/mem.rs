@@ -201,6 +201,17 @@ impl<T: Send + Sync + 'static> MemQueue<T> {
         out
     }
 
+    async fn send_to_dlq(&self, item: T, reason: &str) {
+        if let Err(send_err) = self.channels.dlq_tx.send(item).await {
+            tracing::warn!(
+                queue = self.queue_name,
+                reason = reason,
+                "Failed to enqueue item to memory queue DLQ: {}",
+                send_err
+            );
+        }
+    }
+
     /// Internal hook for `tokio::select!`-based loops that want to await a
     /// message without polling. Phase 2 uses this to replace polling loops
     /// with truly async waits across multiple queues.
@@ -235,7 +246,8 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T
         };
 
         if retry_item.exceeded_retries() {
-            let _ = self.channels.dlq_tx.try_send(retry_item.item);
+            self.send_to_dlq(retry_item.item, "retry limit exceeded")
+                .await;
             return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
         }
 
@@ -318,7 +330,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T
                 let updated =
                     RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
                 if updated.exceeded_retries() {
-                    let _ = self.channels.dlq_tx.try_send(updated.item);
+                    self.send_to_dlq(updated.item, "retry limit exceeded").await;
                     Err(Box::new(QueueProcessingError::WorkerError(e)))
                 } else {
                     if let Err(send_err) = self.channels.tx.send(updated).await {
@@ -402,7 +414,8 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> QueueProce
 
         if retry_item.exceeded_retries() {
             // Capture into DLQ before bailing.
-            let _ = self.channels.dlq_tx.try_send(retry_item.item);
+            self.send_to_dlq(retry_item.item, "retry limit exceeded")
+                .await;
             return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
         }
 
@@ -489,7 +502,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> QueueProce
 
                 if updated.exceeded_retries() {
                     // Final failure — DLQ and surface error.
-                    let _ = self.channels.dlq_tx.try_send(updated.item);
+                    self.send_to_dlq(updated.item, "retry limit exceeded").await;
                     Err(Box::new(QueueProcessingError::WorkerError(e)))
                 } else {
                     // Re-enqueue at the BACK of the queue so other items
@@ -815,6 +828,26 @@ mod tests {
         got.sort();
         let expected: Vec<i32> = (0..n_items).collect();
         assert_eq!(got, expected, "all items should be processed exactly once");
+    }
+
+    #[tokio::test]
+    async fn test_process_blocking_retry_limit_to_dlq() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(99).await.unwrap();
+
+        for _ in 0..MAX_PROCESSING_RETRIES {
+            let _ = queue
+                .process_blocking(|_item| async move {
+                    let error: Box<dyn Error + Send + Sync> = "fail".into();
+                    let result: Result<i32, Box<dyn Error + Send + Sync>> = Err(error);
+                    result
+                })
+                .await;
+        }
+
+        assert!(queue.is_empty().await.unwrap());
+        let dlq = queue.try_drain_dlq();
+        assert_eq!(dlq, vec![99]);
     }
 
     #[tokio::test]
