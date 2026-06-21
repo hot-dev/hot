@@ -254,23 +254,46 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         cpu_quota: config.box_default_cpu_quota,
     };
     let box_defaults = Arc::new(box_defaults);
+    let default_container_memory_mb = box_defaults
+        .memory_mb
+        .unwrap_or(box_limits::BoxLimits::DEFAULT_MEMORY_MB);
+    let default_container_disk_mb = box_defaults
+        .disk_size_mb
+        .unwrap_or(box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB);
+    let default_container_tmp_mb = box_defaults
+        .tmp_size_mb
+        .unwrap_or(box_limits::BoxLimits::DEFAULT_TMP_SIZE_MB);
+    let container_budget = hot::runtime_budget::derive_task_container_concurrency(
+        &config.worker_conf,
+        config.max_concurrent,
+        worker_mem,
+        worker_disk,
+        default_container_memory_mb,
+        default_container_disk_mb,
+        default_container_tmp_mb,
+        config.container_backend.to_string(),
+    );
+    let container_max = container_budget.resolved;
+    let queue_claim_max = code_max.max(container_max);
 
     tracing::info!(
-        "Starting hot_task_worker (code_max_concurrent={} requested={} cpu_limit={} memory_limit={:?} memory_limit_mb={:?}, container_budget={}MB mem / {}MB disk, backend={}, box_defaults={}MB mem / {}MB disk)",
+        "Starting hot_task_worker (code_max_concurrent={} requested={} cpu_limit={} memory_limit={:?} memory_limit_mb={:?}, container_max_concurrent={} requested={} explicit={} memory_limit={} disk_limit={} resource_budget={}MB mem / {}MB disk recovery_reserved_slots={} backend={}, box_defaults={}MB mem / {}MB disk)",
         code_max,
         code_budget.requested,
         code_budget.cpu_limit,
         code_budget.memory_limit,
         code_budget.memory_limit_mb,
-        worker_mem,
-        worker_disk,
-        config.container_backend,
-        box_defaults
-            .memory_mb
-            .unwrap_or(box_limits::BoxLimits::DEFAULT_MEMORY_MB),
-        box_defaults
-            .disk_size_mb
-            .unwrap_or(box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB),
+        container_max,
+        container_budget.requested,
+        container_budget.explicit,
+        container_budget.memory_limit,
+        container_budget.disk_limit,
+        container_budget.memory_budget_mb,
+        container_budget.disk_budget_mb,
+        container_budget.recovery_reserved_slots,
+        container_budget.backend,
+        default_container_memory_mb,
+        default_container_disk_mb,
     );
 
     let queue_name = config
@@ -297,7 +320,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         config.serialization,
     )?
     .with_consumer_name(format!("{}-{}-task", host, pid))
-    .with_read_batch_size(code_max)
+    .with_read_batch_size(queue_claim_max)
     .with_startup_window(task_startup_window);
 
     // Verify queue connectivity with a quick health check. Mirrors hot_worker's
@@ -511,12 +534,15 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Split concurrency: high-limit semaphore for code tasks, resource budget for containers
     let code_semaphore = Arc::new(Semaphore::new(code_max));
-    let container_budget = resource_budget::ResourceBudget::new(worker_mem, worker_disk);
+    let container_budget = resource_budget::ResourceBudget::new(
+        container_budget.memory_budget_mb,
+        container_budget.disk_budget_mb,
+    );
 
     let container_executor = Arc::new(
         executor::BoxExecutor::new(
             config.container_backend,
-            config.max_concurrent,
+            container_max,
             30,
             config.containerd_socket.as_deref(),
             config.kata_vmm.as_deref(),
@@ -759,10 +785,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // ACKs one message. The inner `code_semaphore` / `container_budget` still
     // gate by *resource type* within each spawned future.
     //
-    // Use the derived code-task budget as the outer claim cap. This prevents
-    // Redis PEL from filling with more active code work than local resources
-    // can execute, while container tasks still self-throttle on their budget.
-    let inflight_semaphore = Arc::new(Semaphore::new(code_max));
+    // Use the larger derived resource-class budget as the outer claim cap.
+    // This prevents Redis PEL from filling with more work than local resources
+    // can execute, while the inner code/container gates still enforce the
+    // per-resource limits.
+    let inflight_semaphore = Arc::new(Semaphore::new(queue_claim_max));
 
     loop {
         let permit = tokio::select! {

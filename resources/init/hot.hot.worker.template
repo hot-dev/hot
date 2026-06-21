@@ -65,6 +65,8 @@ hot.emitter.type "db"
 hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
 hot.task.code-max-concurrent Int(::env/get("HOT_TASK_CODE_MAX_CONCURRENT", "500"))
 hot.task.code-vm-memory-mb Int(::env/get("HOT_TASK_CODE_VM_MEMORY_MB", "256"))
+hot.task.worker-memory-mb Int(::env/get("HOT_TASK_WORKER_MEMORY_MB", "8192"))
+hot.task.worker-disk-mb Int(::env/get("HOT_TASK_WORKER_DISK_MB", "51200"))
 hot.task.container-max-concurrent ::env/get("HOT_TASK_CONTAINER_MAX_CONCURRENT", "auto")
 hot.task.container-reserved-memory-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED_MEMORY_MB", "512"))
 hot.task.container-reserved-disk-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED_DISK_MB", "10240"))

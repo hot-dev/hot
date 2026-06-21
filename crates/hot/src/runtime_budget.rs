@@ -12,6 +12,19 @@ pub struct DerivedConcurrency {
     pub shared_process: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedContainerConcurrency {
+    pub requested: usize,
+    pub resolved: usize,
+    pub memory_limit: usize,
+    pub disk_limit: usize,
+    pub memory_budget_mb: u64,
+    pub disk_budget_mb: u64,
+    pub explicit: bool,
+    pub recovery_reserved_slots: usize,
+    pub backend: String,
+}
+
 pub fn derive_worker_vm_concurrency(conf: &Val, requested: usize) -> DerivedConcurrency {
     let requested = requested.max(1);
     let shared_process = conf.get_bool_or_default("worker.shared-process", false);
@@ -99,6 +112,67 @@ pub fn derive_task_code_concurrency(conf: &Val, requested: usize) -> DerivedConc
         memory_limit_mb,
         explicit: false,
         shared_process,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn derive_task_container_concurrency(
+    conf: &Val,
+    legacy_requested: usize,
+    worker_memory_mb: u64,
+    worker_disk_mb: u64,
+    default_container_memory_mb: u64,
+    default_container_disk_mb: u64,
+    default_container_tmp_mb: u64,
+    backend: impl Into<String>,
+) -> DerivedContainerConcurrency {
+    let explicit = configured_usize(conf, "task.container-max-concurrent");
+    let requested = explicit.unwrap_or(legacy_requested.max(1)).max(1);
+    let recovery_reserved_slots = conf
+        .get_int_or_default("task.recovery-reserved-slots", 1)
+        .max(0) as usize;
+    let reserved_memory_mb = conf
+        .get_int_or_default("task.container-reserved-memory-mb", 512)
+        .max(0) as u64
+        * recovery_reserved_slots.max(1) as u64;
+    let reserved_disk_mb = conf
+        .get_int_or_default("task.container-reserved-disk-mb", 10_240)
+        .max(0) as u64
+        * recovery_reserved_slots.max(1) as u64;
+
+    let detected_memory_mb = detected_memory_limit_mb();
+    let memory_ceiling_mb = detected_memory_mb
+        .map(|limit| limit.min(worker_memory_mb.max(1)))
+        .unwrap_or_else(|| worker_memory_mb.max(1));
+    let memory_budget_mb = memory_ceiling_mb.saturating_sub(reserved_memory_mb).max(1);
+    let disk_budget_mb = worker_disk_mb
+        .max(1)
+        .saturating_sub(reserved_disk_mb)
+        .max(1);
+    let per_container_memory_mb = default_container_memory_mb
+        .saturating_add(default_container_tmp_mb)
+        .max(1);
+    let per_container_disk_mb = default_container_disk_mb.max(1);
+    let memory_limit = memory_budget_mb
+        .checked_div(per_container_memory_mb)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let disk_limit = disk_budget_mb
+        .checked_div(per_container_disk_mb)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let resolved = requested.min(memory_limit).min(disk_limit).max(1);
+
+    DerivedContainerConcurrency {
+        requested,
+        resolved,
+        memory_limit,
+        disk_limit,
+        memory_budget_mb,
+        disk_budget_mb,
+        explicit: explicit.is_some(),
+        recovery_reserved_slots,
+        backend: backend.into(),
     }
 }
 
@@ -306,5 +380,54 @@ mod tests {
         let max_connections = derive_sqlite_pool_connections(&conf);
 
         assert_eq!(max_connections, 2);
+    }
+
+    #[test]
+    fn task_container_concurrency_derives_from_memory_disk_and_recovery_reserve() {
+        let conf = val!({
+            "task": {
+                "container-max-concurrent": "auto",
+                "container-reserved-memory-mb": 512i64,
+                "container-reserved-disk-mb": 10_240i64,
+                "recovery-reserved-slots": 1i64,
+            },
+        });
+
+        let budget =
+            derive_task_container_concurrency(&conf, 8, 4096, 30_720, 512, 5_120, 500, "docker");
+        let expected_memory_budget = detected_memory_limit_mb()
+            .map(|limit| limit.min(4096))
+            .unwrap_or(4096)
+            .saturating_sub(512)
+            .max(1);
+        let expected_memory_limit = (expected_memory_budget / 1012).max(1) as usize;
+
+        assert_eq!(budget.requested, 8);
+        assert_eq!(budget.memory_budget_mb, expected_memory_budget);
+        assert_eq!(budget.disk_budget_mb, 20_480);
+        assert_eq!(budget.memory_limit, expected_memory_limit);
+        assert_eq!(budget.disk_limit, 4);
+        assert_eq!(budget.resolved, 8.min(expected_memory_limit).min(4));
+        assert!(!budget.explicit);
+    }
+
+    #[test]
+    fn task_container_concurrency_explicit_limit_still_respects_resources() {
+        let conf = val!({
+            "task": {
+                "container-max-concurrent": 10i64,
+                "container-reserved-memory-mb": 512i64,
+                "container-reserved-disk-mb": 10_240i64,
+                "recovery-reserved-slots": 1i64,
+            },
+        });
+
+        let budget =
+            derive_task_container_concurrency(&conf, 4, 2048, 20_480, 512, 5_120, 500, "kata");
+
+        assert_eq!(budget.requested, 10);
+        assert!(budget.resolved <= 10);
+        assert!(budget.explicit);
+        assert_eq!(budget.backend, "kata");
     }
 }
