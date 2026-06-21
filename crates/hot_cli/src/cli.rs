@@ -971,7 +971,7 @@ pub(crate) enum AiAction {
 
 #[derive(Subcommand, Debug)]
 #[command(
-    after_help = "Available templates:\n  (default)   - Minimal configuration for local development\n  all         - Full configuration with all available options\n  api         - API server configuration\n  app         - App server configuration\n  worker      - Worker configuration\n  scheduler   - Scheduler configuration\n\nExamples:\n  hot conf generate              # Minimal template to stdout\n  hot conf generate all          # Full template to stdout\n  hot conf generate -o hot.hot   # Write minimal template to file\n  hot conf generate api -o api.hot.hot"
+    after_help = "Available templates:\n  (default)   - Minimal configuration for local development\n  all         - Full configuration with all available options\n  api         - API server configuration\n  app         - App server configuration\n  worker      - Worker configuration\n  task-worker - Task worker configuration\n  scheduler   - Scheduler configuration\n\nExamples:\n  hot conf generate              # Minimal template to stdout\n  hot conf generate all          # Full template to stdout\n  hot conf generate -o hot.hot   # Write minimal template to file\n  hot conf generate api -o api.hot.hot"
 )]
 pub(crate) enum ConfAction {
     /// Generate a configuration template

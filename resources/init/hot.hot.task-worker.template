@@ -1,5 +1,5 @@
-// Hot Configuration File - Worker
-// Configuration for running the Worker component.
+// Hot Configuration File - Task Worker
+// Configuration for running the Task Worker component.
 // Run `hot conf generate all` to see all available options.
 
 ::hot::conf ns
@@ -31,41 +31,31 @@ hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS
 hot.queue.wait-target-p99-ms Int(::env/get("HOT_QUEUE_WAIT_TARGET_P99_MS", "1000"))
 hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
 
-// Email Configuration
-// The worker sends queued app emails and alert emails.
-hot.product.web-url ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev")
-hot.email.app-url ::env/get("HOT_APP_URL", "https://app.hot.dev")
-hot.email.web-url ::env/get("HOT_EMAIL_WEB_URL", ::env/get("HOT_PRODUCT_WEB_URL", "https://hot.dev"))
-hot.email.docs-url ::env/get("HOT_EMAIL_DOCS_URL", "https://hot.dev/docs")
-hot.email.logo-url ::env/get("HOT_EMAIL_LOGO_URL", "https://assets.hot.dev/email/hot_logo_email.png")
-hot.email.from ::env/get("HOT_EMAIL_FROM", "hi@notifications.hot.dev")
-hot.email.from-name ::env/get("HOT_EMAIL_FROM_NAME", "Hot Dev")
-hot.email.alerts.from ::env/get("HOT_EMAIL_ALERTS_FROM", "alerts@notifications.hot.dev")
-hot.email.alerts.from-name ::env/get("HOT_EMAIL_ALERTS_FROM_NAME", "Hot Alerts")
-
-// Worker Configuration
-hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
-hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "110"))
-hot.worker.queue-concurrency ::env/get("HOT_WORKER_QUEUE_CONCURRENCY", "auto")
-hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")
-hot.worker.vm-memory-mb Int(::env/get("HOT_WORKER_VM_MEMORY_MB", "256"))
-hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "512"))
-hot.worker.db-reserved-connections Int(::env/get("HOT_WORKER_DB_RESERVED_CONNECTIONS", "4"))
-hot.worker.cancel-on-timeout Bool(::env/get("HOT_WORKER_CANCEL_ON_TIMEOUT", "true"))
-hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
-hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
-hot.worker.loop-mode ::env/get("HOT_WORKER_LOOP_MODE", "legacy")
-hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "false"))
-hot.worker.local-write-concurrency Int(::env/get("HOT_WORKER_LOCAL_WRITE_CONCURRENCY", "1"))
-
 // Emitter Configuration (required for runs to be written to database)
 hot.emitter.type "db"
 
-// Box (Container) Configuration
-hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "false"))
-hot.box.backend ::env/get("HOT_BOX_BACKEND", "docker")
+// Task Worker Configuration
+hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
+hot.task.code-max-concurrent Int(::env/get("HOT_TASK_CODE_MAX_CONCURRENT", "500"))
+hot.task.code-vm-memory-mb Int(::env/get("HOT_TASK_CODE_VM_MEMORY_MB", "256"))
+hot.task.worker-memory-mb Int(::env/get("HOT_TASK_WORKER_MEMORY_MB", "8192"))
+hot.task.worker-disk-mb Int(::env/get("HOT_TASK_WORKER_DISK_MB", "51200"))
+hot.task.container-max-concurrent ::env/get("HOT_TASK_CONTAINER_MAX_CONCURRENT", "auto")
+hot.task.container-reserved-memory-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED_MEMORY_MB", "512"))
+hot.task.container-reserved-disk-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED_DISK_MB", "10240"))
+hot.task.recovery-reserved-slots Int(::env/get("HOT_TASK_RECOVERY_RESERVED_SLOTS", "1"))
+hot.task.capacity-fairness ::env/get("HOT_TASK_CAPACITY_FAIRNESS", "none")
+hot.task.shutdown-container-timeout-seconds Int(::env/get("HOT_TASK_SHUTDOWN_CONTAINER_TIMEOUT_SECONDS", "30"))
+hot.task.reconcile-queued-after-seconds Int(::env/get("HOT_TASK_RECONCILE_QUEUED_AFTER_SECONDS", "60"))
+hot.task.reconcile-interval-seconds Int(::env/get("HOT_TASK_RECONCILE_INTERVAL_SECONDS", "30"))
 
-// Build Storage Configuration (workers load bytecode from builds)
+// Box (Container) Configuration
+hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "true"))
+hot.box.backend ::env/get("HOT_BOX_BACKEND", "docker")
+hot.box.containerd.socket ::env/get("HOT_BOX_CONTAINERD_SOCKET", "")
+hot.box.vmm ::env/get("HOT_BOX_VMM", "qemu")
+
+// Build Storage Configuration (task workers load bytecode from builds)
 hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "s3")
 hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
 hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "builds/")
@@ -73,7 +63,7 @@ hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "us-east-1")
 hot.build.aws.access-key-id ::env/get("HOT_BUILD_AWS_ACCESS_KEY_ID", "")
 hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
 
-// File Storage Configuration (workers execute code that may use file ops)
+// File Storage Configuration (tasks may use file ops)
 hot.file.mode ::env/get("HOT_FILE_MODE", "service")
 hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "s3")
 hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")

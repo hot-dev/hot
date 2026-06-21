@@ -13,10 +13,11 @@ pub(crate) fn run_conf_generate(
         "api" => "hot.hot.api.template",
         "app" => "hot.hot.app.template",
         "worker" => "hot.hot.worker.template",
+        "task-worker" | "taskworker" => "hot.hot.task-worker.template",
         "scheduler" => "hot.hot.scheduler.template",
         other => {
             return Err(format!(
-                "Unknown template '{}'. Available templates: all, api, app, worker, scheduler (default: minimal)",
+                "Unknown template '{}'. Available templates: all, api, app, worker, task-worker, scheduler (default: minimal)",
                 other
             ));
         }
