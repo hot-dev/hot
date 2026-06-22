@@ -30,8 +30,86 @@ pub trait EmbeddingProvider: Send + Sync {
 pub mod local {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, OnceLock};
     use tokio::sync::OnceCell;
+
+    /// Dedicated CPU thread pool for local (FastEmbed/ONNX) embedding work.
+    ///
+    /// Local embedding host functions are invoked from the VM, which already runs
+    /// on a Tokio `spawn_blocking` thread and bridges to async via `block_on`.
+    /// Running the CPU-bound embed/init work via `spawn_blocking` from there nests
+    /// blocking-pool usage: the parked VM thread holds one blocking-pool slot while
+    /// the embed task needs another. Under load this can exhaust Tokio's blocking
+    /// pool (every slot a VM thread parked on `block_on`, with no slot left to run
+    /// the embed task) and deadlock. Routing embed work to threads outside the
+    /// blocking pool removes that coupling. Model access is already serialized by a
+    /// `Mutex`, so a small pool is plenty.
+    type EmbedJob = Box<dyn FnOnce() + Send + 'static>;
+
+    struct EmbedExecutor {
+        tx: mpsc::Sender<EmbedJob>,
+    }
+
+    impl EmbedExecutor {
+        fn new() -> Self {
+            let (tx, rx) = mpsc::channel::<EmbedJob>();
+            let rx = Arc::new(Mutex::new(rx));
+            let threads = std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(2)
+                .clamp(1, 4);
+            for i in 0..threads {
+                let rx = Arc::clone(&rx);
+                std::thread::Builder::new()
+                    .name(format!("hot-embed-{i}"))
+                    .spawn(move || {
+                        loop {
+                            // Hold the lock only to dequeue, never while running.
+                            let job = {
+                                let guard = match rx.lock() {
+                                    Ok(g) => g,
+                                    Err(_) => break,
+                                };
+                                guard.recv()
+                            };
+                            match job {
+                                Ok(job) => {
+                                    // Isolate job panics so a single bad embed
+                                    // call cannot permanently shrink the pool.
+                                    let _ =
+                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                                }
+                                Err(_) => break, // all senders dropped
+                            }
+                        }
+                    })
+                    .expect("failed to spawn hot-embed worker thread");
+            }
+            Self { tx }
+        }
+
+        async fn run<F, T>(&self, f: F) -> Result<T, String>
+        where
+            F: FnOnce() -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            let (res_tx, res_rx) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(Box::new(move || {
+                    let _ = res_tx.send(f());
+                }))
+                .map_err(|_| "local embedding executor stopped".to_string())?;
+            res_rx
+                .await
+                .map_err(|_| "local embedding executor dropped job".to_string())
+        }
+    }
+
+    fn embed_executor() -> &'static EmbedExecutor {
+        static EXECUTOR: OnceLock<EmbedExecutor> = OnceLock::new();
+        EXECUTOR.get_or_init(EmbedExecutor::new)
+    }
 
     pub struct LocalEmbeddingProvider {
         model_name: String,
@@ -54,7 +132,7 @@ pub mod local {
                     let model_name = self.model_name.clone();
                     let cache_dir = self.cache_dir.clone();
 
-                    tokio::task::spawn_blocking(move || {
+                    embed_executor().run(move || {
                         let model_type = match model_name.as_str() {
                             "bge-small-en-v1.5" => {
                                 fastembed::EmbeddingModel::BGESmallENV15
@@ -99,35 +177,37 @@ pub mod local {
         async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
             let model = self.get_model().await?;
             let text = text.to_string();
-            tokio::task::spawn_blocking(move || {
-                let mut model = model
-                    .lock()
-                    .map_err(|e| format!("Embedding model lock poisoned: {e}"))?;
-                let results = model
-                    .embed(vec![text], None)
-                    .map_err(|e| format!("Embedding failed: {e}"))?;
-                results
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "No embedding returned".to_string())
-            })
-            .await
-            .map_err(|e| format!("Embedding task failed: {e}"))?
+            embed_executor()
+                .run(move || {
+                    let mut model = model
+                        .lock()
+                        .map_err(|e| format!("Embedding model lock poisoned: {e}"))?;
+                    let results = model
+                        .embed(vec![text], None)
+                        .map_err(|e| format!("Embedding failed: {e}"))?;
+                    results
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| "No embedding returned".to_string())
+                })
+                .await
+                .map_err(|e| format!("Embedding task failed: {e}"))?
         }
 
         async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
             let model = self.get_model().await?;
             let texts: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
-            tokio::task::spawn_blocking(move || {
-                let mut model = model
-                    .lock()
-                    .map_err(|e| format!("Embedding model lock poisoned: {e}"))?;
-                model
-                    .embed(texts, None)
-                    .map_err(|e| format!("Batch embedding failed: {e}"))
-            })
-            .await
-            .map_err(|e| format!("Batch embedding task failed: {e}"))?
+            embed_executor()
+                .run(move || {
+                    let mut model = model
+                        .lock()
+                        .map_err(|e| format!("Embedding model lock poisoned: {e}"))?;
+                    model
+                        .embed(texts, None)
+                        .map_err(|e| format!("Batch embedding failed: {e}"))
+                })
+                .await
+                .map_err(|e| format!("Batch embedding task failed: {e}"))?
         }
 
         fn dimensions(&self) -> u32 {

@@ -31,8 +31,8 @@ const BACKPRESSURE_THRESHOLD: usize = 1000;
 /// Batch size for PostgreSQL transaction batching
 const POSTGRES_BATCH_SIZE: usize = 100;
 
-/// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt)
-type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16);
+/// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id)
+type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16, i16);
 
 /// All possible database write operations
 #[derive(Debug, Clone)]
@@ -231,14 +231,26 @@ impl DatabaseWriter {
             return Err("Failed to send flush request - writer task has shut down".to_string());
         }
 
-        // Block waiting for flush completion
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                ack_receiver
-                    .await
-                    .map_err(|_| "Flush acknowledgment was dropped".to_string())
-            })
+        // VM code runs in a blocking context, where `Handle::block_on` is the
+        // correct sync-to-async bridge. Async worker code should call
+        // `flush_async()` instead.
+        tokio::runtime::Handle::current().block_on(async {
+            ack_receiver
+                .await
+                .map_err(|_| "Flush acknowledgment was dropped".to_string())
         })
+    }
+
+    pub async fn flush_async(&self) -> Result<(), String> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+
+        if self.flush_sender.send(ack_sender).is_err() {
+            return Err("Failed to send flush request - writer task has shut down".to_string());
+        }
+
+        ack_receiver
+            .await
+            .map_err(|_| "Flush acknowledgment was dropped".to_string())
     }
 
     /// Gracefully shutdown the writer, ensuring all pending writes are flushed
@@ -720,29 +732,37 @@ ON CONFLICT (call_id) DO UPDATE SET
     ) -> Result<(), sqlx::Error> {
         let result_json = val_to_jsonb_string(result);
 
-        match pool {
+        let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4"
+                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4 AND status_id = $5"
                 )
                 .bind(event_time)
                 .bind(2i16) // succeeded
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(event_time)
                 .bind(2i16) // succeeded
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
+        };
+
+        if rows_affected > 0 {
+            Self::refresh_stream_metrics(pool, run_id).await;
         }
         Ok(())
     }
@@ -761,28 +781,40 @@ ON CONFLICT (call_id) DO UPDATE SET
         // Store the failure value directly - the status_id already indicates failure
         let result_json = val_to_jsonb_string(failure);
 
-        // Query run to get type, build_id, event_id, env_id, and current retry attempt
+        // Query run to get type, build_id, event_id, env_id, current retry attempt,
+        // and status. Late `run:fail` events from detached timed-out VMs must not
+        // overwrite a terminal run or schedule a duplicate retry.
         let run_info: Option<RunInfo> = match pool {
             DatabasePool::Postgres(pg_pool) => {
-                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt FROM hot.run WHERE run_id = $1")
+                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id FROM hot.run WHERE run_id = $1")
                     .bind(run_id)
                     .fetch_optional(pg_pool)
                     .await?
             }
             DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt FROM run WHERE run_id = ?")
+                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id FROM run WHERE run_id = ?")
                     .bind(run_id)
                     .fetch_optional(sqlite_pool)
                     .await?
             }
         };
 
-        let Some((run_type_id, build_id, event_id, env_id, retry_attempt)) = run_info else {
+        let Some((run_type_id, build_id, event_id, env_id, retry_attempt, status_id)) = run_info
+        else {
             // Run not found - just mark as failed without retry
             tracing::warn!("Run {} not found when processing failure", run_id);
-            return Self::update_run_failed(pool, run_id, event_time, &result_json, None, None)
-                .await;
+            Self::update_run_failed(pool, run_id, event_time, &result_json, None, None).await?;
+            return Ok(());
         };
+
+        if status_id != 1 {
+            tracing::debug!(
+                run_id = %run_id,
+                status_id,
+                "Ignoring late run:fail for non-running run"
+            );
+            return Ok(());
+        }
 
         // Look up retry config from handler/schedule metadata based on run type
         let retry_config = match run_type_id {
@@ -827,8 +859,8 @@ ON CONFLICT (call_id) DO UPDATE SET
 
             match pool {
                 DatabasePool::Postgres(pg_pool) => {
-                    sqlx::query(
-                        "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb, retry_attempt = $4, next_retry_at = $5 WHERE run_id = $6"
+                    let result = sqlx::query(
+                        "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb, retry_attempt = $4, next_retry_at = $5 WHERE run_id = $6 AND status_id = $7"
                     )
                     .bind(event_time)
                     .bind(5i16) // pending_retry
@@ -836,12 +868,19 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(new_attempt)
                     .bind(next_retry_at)
                     .bind(run_id)
+                    .bind(1i16) // running
                     .execute(pg_pool)
                     .await?;
+                    if result.rows_affected() == 0 {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "Skipped retry scheduling for run that is no longer running"
+                        );
+                    }
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
-                    sqlx::query(
-                        "UPDATE run SET stop_time = ?, status_id = ?, result = ?, retry_attempt = ?, next_retry_at = ? WHERE run_id = ?",
+                    let result = sqlx::query(
+                        "UPDATE run SET stop_time = ?, status_id = ?, result = ?, retry_attempt = ?, next_retry_at = ? WHERE run_id = ? AND status_id = ?",
                     )
                     .bind(event_time)
                     .bind(5i16) // pending_retry
@@ -849,8 +888,15 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(new_attempt)
                     .bind(next_retry_at)
                     .bind(run_id)
+                    .bind(1i16) // running
                     .execute(sqlite_pool)
                     .await?;
+                    if result.rows_affected() == 0 {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "Skipped retry scheduling for run that is no longer running"
+                        );
+                    }
                 }
             }
         } else {
@@ -864,7 +910,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                 );
             }
 
-            Self::update_run_failed(
+            let updated = Self::update_run_failed(
                 pool,
                 run_id,
                 event_time,
@@ -873,8 +919,52 @@ ON CONFLICT (call_id) DO UPDATE SET
                 Some(run_type_id),
             )
             .await?;
+            if !updated {
+                tracing::debug!(
+                    run_id = %run_id,
+                    "Skipped run:fail update for run that is no longer running"
+                );
+            }
         }
+
+        // The run transitioned to a terminal/pending_retry state above; keep the
+        // stream's aggregate run metrics current.
+        Self::refresh_stream_metrics(pool, run_id).await;
         Ok(())
+    }
+
+    /// Best-effort refresh of a stream's aggregate run metrics after a run leaves
+    /// the `running` state. Metrics are derived data, so failures are logged but
+    /// never abort the originating write.
+    async fn refresh_stream_metrics(pool: &DatabasePool, run_id: Uuid) {
+        let stream_id: Option<Uuid> = match pool {
+            DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_scalar("SELECT stream_id FROM hot.run WHERE run_id = $1")
+                    .bind(run_id)
+                    .fetch_optional(pg_pool)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_scalar("SELECT stream_id FROM run WHERE run_id = ?")
+                    .bind(run_id)
+                    .fetch_optional(sqlite_pool)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+        };
+
+        if let Some(stream_id) = stream_id
+            && let Err(e) = crate::db::stream::Stream::update_metrics(pool, &stream_id).await
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                "Failed to refresh stream metrics after run completion: {}",
+                e
+            );
+        }
     }
 
     /// Helper to update run as failed and publish alert
@@ -885,30 +975,38 @@ ON CONFLICT (call_id) DO UPDATE SET
         result_json: &str,
         env_id: Option<Uuid>,
         run_type_id: Option<i16>,
-    ) -> Result<(), sqlx::Error> {
-        match pool {
+    ) -> Result<bool, sqlx::Error> {
+        let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4"
+                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4 AND status_id = $5"
                 )
                 .bind(event_time)
                 .bind(3i16) // failed
                 .bind(result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(event_time)
                 .bind(3i16) // failed
                 .bind(result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
+        };
+
+        if rows_affected == 0 {
+            return Ok(false);
         }
 
         // Publish run:failed alert if we have env_id
@@ -919,7 +1017,7 @@ ON CONFLICT (call_id) DO UPDATE SET
             Self::publish_run_failed_alert(pool, run_id, env_id, result_json).await;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Publish a run:failed alert (async, doesn't block)
@@ -1162,30 +1260,48 @@ ON CONFLICT (call_id) DO UPDATE SET
             }
         };
 
-        match pool {
+        // Only transition a *running* run to cancelled. A late run:cancel from a
+        // detached, cooperatively-cancelled VM (e.g. one signalled by the worker
+        // run-timeout backstop, which already recorded the run as failed) must not
+        // overwrite a terminal status.
+        let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4"
+                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4 AND status_id = $5"
                 )
                 .bind(event_time)
                 .bind(4i16) // cancelled
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(event_time)
                 .bind(4i16) // cancelled
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
+        };
+
+        if rows_affected == 0 {
+            tracing::debug!(
+                run_id = %run_id,
+                "Ignoring late run:cancel for run that is no longer running"
+            );
+            return Ok(());
         }
+
+        Self::refresh_stream_metrics(pool, run_id).await;
 
         // Publish run:cancelled alert if we have env_id
         // Skip for task-type runs (id=7) — the task worker handles its own task:cancelled alerts

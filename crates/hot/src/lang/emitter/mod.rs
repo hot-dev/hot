@@ -258,6 +258,23 @@ pub trait EngineEventEmitter: Send + Sync {
         Ok(())
     }
 
+    /// Async variant for callers already running on Tokio worker threads.
+    ///
+    /// VM code uses `flush()` from a blocking thread. Async worker code should
+    /// prefer this method so it never blocks a Tokio core thread while waiting
+    /// for DB writer acknowledgements.
+    ///
+    /// IMPORTANT: the default implementation simply calls `flush()`. That is only
+    /// safe when `flush()` is non-blocking (e.g. the no-op default). Any emitter
+    /// whose `flush()` bridges to async via `Handle::block_on` / `block_in_place`
+    /// MUST override `flush_async()` with a natively async flush. Otherwise this
+    /// default will drive a blocking `flush()` on a Tokio core thread and panic
+    /// ("Cannot block the current thread from within a runtime") or stall the
+    /// runtime. See `DatabaseEngineEventEmitter::flush_async` for the pattern.
+    fn flush_async(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async { self.flush() })
+    }
+
     /// Gracefully shutdown the emitter and wait for all events to be processed.
     ///
     /// Default implementation does nothing. Emitters that use background processing
@@ -316,6 +333,14 @@ impl<T: EngineEventEmitter> EngineEventEmitter for FilteredEmitter<T> {
 
         // EngineEvent passed filtering, emit to underlying emitter
         self.inner.emit(event);
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        self.inner.flush()
+    }
+
+    fn flush_async(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_async()
     }
 
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {

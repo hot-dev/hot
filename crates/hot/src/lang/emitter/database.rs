@@ -722,6 +722,10 @@ impl EngineEventEmitter for DatabaseEngineEventEmitter {
         self.writer.flush()
     }
 
+    fn flush_async(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move { self.writer.flush_async().await })
+    }
+
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move { self.shutdown_impl().await })
     }

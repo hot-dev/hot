@@ -160,7 +160,9 @@ pub fn create_schedule(
         }
     };
 
-    // Resolve org-scoped schedule policy for dynamic schedules.
+    // Resolve org-scoped schedule policy for dynamic schedules. Resolve the org
+    // and its features in a single block_on so the VM thread bridges to async
+    // once instead of twice.
     let (org_id, policy) = match tokio::runtime::Handle::current().block_on(async {
         let build = crate::db::Build::get_build(&db, &build_id)
             .await
@@ -171,16 +173,14 @@ pub fn create_schedule(
         let env = crate::db::Env::get_env(&db, &project.env_id)
             .await
             .map_err(|e| e.to_string())?;
-        Ok::<_, String>(env.org_id)
+        let org_id = env.org_id;
+        let features = crate::db::Features::resolve_for_org(&db, &org_id).await;
+        Ok::<_, String>((org_id, features))
     }) {
-        Ok(org_id) => {
-            let features = tokio::runtime::Handle::current()
-                .block_on(async { crate::db::Features::resolve_for_org(&db, &org_id).await });
-            (
-                Some(org_id),
-                crate::db::SchedulePolicy::from_conf(vm.get_conf()).with_features(&features),
-            )
-        }
+        Ok((org_id, features)) => (
+            Some(org_id),
+            crate::db::SchedulePolicy::from_conf(vm.get_conf()).with_features(&features),
+        ),
         Err(e) => {
             tracing::warn!(
                 "Unable to resolve org for dynamic schedule policy on build {}: {}",

@@ -6,10 +6,30 @@ use std::fmt;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub mod mem;
 pub mod streams;
+
+static QUEUE_METRICS_ENABLED: AtomicBool = AtomicBool::new(true);
+static QUEUE_WAIT_TARGET_P99_MS: AtomicU64 = AtomicU64::new(1_000);
+
+pub fn set_metrics_enabled(enabled: bool) {
+    QUEUE_METRICS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_wait_target_p99_ms(target_ms: u64) {
+    QUEUE_WAIT_TARGET_P99_MS.store(target_ms, Ordering::Relaxed);
+}
+
+pub(crate) fn queue_timing_enabled() -> bool {
+    QUEUE_METRICS_ENABLED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn queue_wait_target_p99_ms() -> u64 {
+    QUEUE_WAIT_TARGET_P99_MS.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub enum QueueType {
@@ -386,6 +406,16 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
+    /// Configure Redis orphan reclaim idle time. No-op for Memory queues.
+    pub fn with_orphan_idle_ms(self, orphan_idle_ms: u64) -> Self {
+        match self {
+            ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Redis(q) => {
+                ProcessingQueue::Redis(Box::new((*q).with_orphan_idle_ms(orphan_idle_ms)))
+            }
+        }
+    }
+
     /// Fast-forward the consumer group's last-delivered-id past any backlog
     /// older than the configured startup window, so a worker coming back from
     /// a long outage doesn't drain a stale 4-day flood.
@@ -401,6 +431,16 @@ impl<T> ProcessingQueue<T> {
             ProcessingQueue::Memory(_) => Ok(0),
             ProcessingQueue::Redis(q) => q
                 .fast_forward_if_stale()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+        }
+    }
+
+    pub async fn consumer_has_pending(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        match self {
+            ProcessingQueue::Memory(_) => Ok(false),
+            ProcessingQueue::Redis(q) => q
+                .consumer_has_pending()
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
         }
@@ -658,7 +698,7 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
 pub fn get_resolved_conf(conf: Val, in_project: bool) -> Val {
     let default_conf = val!({
         "event-orphan-idle-ms": 60_000i64,
-        "task-orphan-idle-ms": 60_000i64,
+        "task-orphan-idle-ms": 120_000i64,
         "infra-retry-backoff-ms": 1_000i64,
         "wait-target-p99-ms": 1_000i64,
         "metrics-enabled": true

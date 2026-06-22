@@ -10,7 +10,10 @@
 //! - Full cluster mode support
 //! - Connection caching to minimize Redis connection overhead
 
-use super::{Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor};
+use super::{
+    Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, queue_timing_enabled,
+    queue_wait_target_p99_ms,
+};
 use crate::data::serialization::Serialization;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
@@ -20,8 +23,8 @@ use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::future::Future;
 use std::io::{Read, Write};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -58,10 +61,10 @@ const INACTIVE_CONSUMER_THRESHOLD_MS: u64 = 24 * 3_600_000; // 24 hours
 /// Fallback stream retention when there are no pending messages at all.
 const DEFAULT_STREAM_RETENTION_MS: u64 = 30 * 24 * 3_600_000; // 30 days
 
-/// How many messages to fetch per XREADGROUP call. Larger batches amortize
-/// the network round-trip across more work items; smaller batches reduce
-/// tail latency for messages stuck behind a slow handler.
-const READ_BATCH_SIZE: usize = 16;
+/// How many messages to fetch per XREADGROUP call by default. Keep direct
+/// users at one-at-a-time so a single local worker does not hide backlog in
+/// PEL/prefetch; high-capacity workers opt in via `with_read_batch_size`.
+const READ_BATCH_SIZE: usize = 1;
 
 /// Soft upper bound on stream length. XADD uses `MAXLEN ~ N` so Redis can
 /// efficiently trim near this number without exact-cap overhead. Combined
@@ -279,18 +282,6 @@ fn stream_message_age_ms(msg_id: &str) -> u64 {
         .max(0) as u64
 }
 
-fn queue_timing_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("HOT_QUEUE_METRICS_ENABLED")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(true)
-    })
-}
-
 /// Redis Streams queue implementation.
 ///
 /// Each clone gets its own cached connection (per-worker connection). This
@@ -332,6 +323,9 @@ pub struct RedisStreamQueue<T> {
     in_flight: Arc<Mutex<HashSet<String>>>,
     /// Max entries claimed by one XREADGROUP for this queue handle.
     read_batch_size: usize,
+    /// Idle time in milliseconds before XAUTOCLAIM treats a pending message as
+    /// orphaned.
+    orphan_idle_ms: u64,
     /// Optional retention window (ms) used when **creating** a brand-new
     /// consumer group. If set, `XGROUP CREATE` uses `<now-window>-0` as the
     /// starting position instead of `0`, so a freshly-created group only
@@ -366,6 +360,7 @@ impl<T> Clone for RedisStreamQueue<T> {
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             read_batch_size: self.read_batch_size,
+            orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
             _phantom: std::marker::PhantomData,
         }
@@ -400,6 +395,7 @@ impl<T> RedisStreamQueue<T> {
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             read_batch_size: READ_BATCH_SIZE,
+            orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
             _phantom: std::marker::PhantomData,
         }
@@ -432,6 +428,7 @@ impl<T> RedisStreamQueue<T> {
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             read_batch_size: READ_BATCH_SIZE,
+            orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
             _phantom: std::marker::PhantomData,
         }
@@ -459,6 +456,11 @@ impl<T> RedisStreamQueue<T> {
         self
     }
 
+    pub fn with_orphan_idle_ms(mut self, orphan_idle_ms: u64) -> Self {
+        self.orphan_idle_ms = orphan_idle_ms.max(1);
+        self
+    }
+
     fn clone_for_lease(&self) -> Self {
         Self {
             client: self.client.clone(),
@@ -473,6 +475,7 @@ impl<T> RedisStreamQueue<T> {
             refill_lock: Arc::clone(&self.refill_lock),
             in_flight: Arc::clone(&self.in_flight),
             read_batch_size: self.read_batch_size,
+            orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
             _phantom: std::marker::PhantomData,
         }
@@ -505,6 +508,27 @@ impl<T> RedisStreamQueue<T> {
             }
             Err(_) => Ok(0),
         }
+    }
+
+    pub async fn consumer_has_pending(&self) -> Result<bool, StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
+
+        let result = conn
+            .cmd(
+                &redis::cmd("XPENDING")
+                    .arg(&self.stream_name)
+                    .arg(&self.consumer_group)
+                    .arg("-")
+                    .arg("+")
+                    .arg(1)
+                    .arg(&self.consumer_name)
+                    .clone(),
+            )
+            .await?;
+
+        let entries: Vec<redis::Value> = redis::from_redis_value_ref(&result).unwrap_or_default();
+        Ok(!entries.is_empty())
     }
 
     pub fn with_consumer_group(mut self, group: String) -> Self {
@@ -674,9 +698,10 @@ impl<T> RedisStreamQueue<T> {
         }
     }
 
-    /// Recover orphaned messages using XAUTOCLAIM
-    /// Messages that have been idle for more than ORPHAN_IDLE_MS will be claimed
-    /// by this consumer and will be reprocessed on the next dequeue_and_work call.
+    /// Recover orphaned messages using XAUTOCLAIM.
+    /// Messages that have been idle for more than this handle's orphan idle
+    /// threshold will be claimed by this consumer and reprocessed on the next
+    /// dequeue_and_work call.
     pub async fn recover_orphaned_items(&self) -> Result<usize, StreamsQueueError> {
         // Ensure consumer group exists first (acquires and releases its own connection)
         self.ensure_consumer_group().await?;
@@ -717,7 +742,7 @@ impl<T> RedisStreamQueue<T> {
                         .arg(&self.stream_name)
                         .arg(&self.consumer_group)
                         .arg(&self.consumer_name)
-                        .arg(ORPHAN_IDLE_MS)
+                        .arg(self.orphan_idle_ms)
                         .arg(&cursor)
                         .arg("COUNT")
                         .arg(100)
@@ -1874,6 +1899,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             }
         };
         let queue_wait_ms = stream_message_age_ms(&msg_id);
+        let wait_target_p99_ms = queue_wait_target_p99_ms();
 
         if delivery_count > MAX_PROCESSING_RETRIES {
             tracing::warn!(
@@ -1889,6 +1915,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     backend = "redis",
                     delivery_source = ?source,
                     queue_wait_ms = queue_wait_ms,
+                    wait_target_p99_ms = wait_target_p99_ms,
                     processing_ms = 0u64,
                     retry_count = delivery_count.saturating_sub(1),
                     outcome = "retry_exhausted",
@@ -1924,6 +1951,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         backend = "redis",
                         delivery_source = ?source,
                         queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = 0u64,
                         retry_count = delivery_count.saturating_sub(1),
                         outcome = "deserialize_error",
@@ -1969,6 +1997,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         backend = "redis",
                         delivery_source = ?source,
                         queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = duration_ms(processing_started.elapsed()),
                         retry_count = delivery_count.saturating_sub(1),
                         outcome = "success",
@@ -1990,6 +2019,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                             backend = "redis",
                             delivery_source = ?source,
                             queue_wait_ms = queue_wait_ms,
+                            wait_target_p99_ms = wait_target_p99_ms,
                             processing_ms = duration_ms(processing_started.elapsed()),
                             retry_count = delivery_count.saturating_sub(1),
                             outcome = "infrastructure_retry",
@@ -2012,6 +2042,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         backend = "redis",
                         delivery_source = ?source,
                         queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = duration_ms(processing_started.elapsed()),
                         retry_count = delivery_count.saturating_sub(1),
                         outcome = "worker_error",
@@ -2053,36 +2084,47 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         let mut guard = self.get_connection().await?;
         let conn = guard.as_mut().unwrap();
 
+        let script = r#"
+            local new_id = redis.call(
+                'XADD',
+                KEYS[1],
+                'MAXLEN',
+                '~',
+                ARGV[3],
+                '*',
+                'payload',
+                ARGV[4],
+                'retry_reason',
+                ARGV[5],
+                'original_id',
+                ARGV[2],
+                'timestamp',
+                ARGV[6]
+            )
+            local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+            if acked ~= 1 then
+                redis.call('XDEL', KEYS[1], new_id)
+                return redis.error_reply('infra retry XACK failed for ' .. ARGV[2])
+            end
+            return new_id
+        "#;
+
         let _: String = conn
             .cmd(
-                &redis::cmd("XADD")
+                &redis::cmd("EVAL")
+                    .arg(script)
+                    .arg(1)
                     .arg(&self.stream_name)
-                    .arg("MAXLEN")
-                    .arg("~")
-                    .arg(STREAM_MAXLEN)
-                    .arg("*")
-                    .arg("payload")
-                    .arg(payload)
-                    .arg("retry_reason")
-                    .arg(&reason)
-                    .arg("original_id")
+                    .arg(&self.consumer_group)
                     .arg(msg_id)
-                    .arg("timestamp")
+                    .arg(STREAM_MAXLEN)
+                    .arg(payload)
+                    .arg(&reason)
                     .arg(chrono::Utc::now().timestamp())
                     .clone(),
             )
             .await
             .map(|v| redis::from_redis_value_ref(&v).unwrap_or_default())?;
-
-        let _ = conn
-            .cmd(
-                &redis::cmd("XACK")
-                    .arg(&self.stream_name)
-                    .arg(&self.consumer_group)
-                    .arg(msg_id)
-                    .clone(),
-            )
-            .await;
 
         Ok(())
     }

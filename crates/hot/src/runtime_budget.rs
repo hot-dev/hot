@@ -37,20 +37,6 @@ pub struct DerivedContainerConcurrency {
 pub fn derive_worker_vm_concurrency(conf: &Val, requested: usize) -> DerivedConcurrency {
     let requested = requested.max(1);
     let shared_process = conf.get_bool_or_default("worker.shared-process", false);
-
-    if let Some(explicit) = configured_usize(conf, "worker.vm-concurrency") {
-        return DerivedConcurrency {
-            requested,
-            resolved: explicit.min(requested).max(1),
-            cpu_limit: requested,
-            memory_limit: None,
-            memory_limit_mb: detected_memory_limit_mb(),
-            explicit: true,
-            shared_process,
-        };
-    }
-
-    let cpu_limit = effective_cpu_parallelism(shared_process).max(1);
     let memory_limit_mb = detected_memory_limit_mb();
     let vm_memory_mb = conf.get_int_or_default("worker.vm-memory-mb", 256).max(1) as u64;
     let reserved_memory_mb = conf
@@ -63,6 +49,25 @@ pub fn derive_worker_vm_concurrency(conf: &Val, requested: usize) -> DerivedConc
             .unwrap_or(1)
             .max(1) as usize
     });
+
+    if let Some(explicit) = configured_usize(conf, "worker.vm-concurrency") {
+        let mut resolved = explicit.min(requested);
+        if let Some(memory_limit) = memory_limit {
+            resolved = resolved.min(memory_limit);
+        }
+
+        return DerivedConcurrency {
+            requested,
+            resolved: resolved.max(1),
+            cpu_limit: requested,
+            memory_limit,
+            memory_limit_mb,
+            explicit: true,
+            shared_process,
+        };
+    }
+
+    let cpu_limit = effective_cpu_parallelism(shared_process).max(1);
 
     let mut resolved = requested.min(cpu_limit);
     if let Some(memory_limit) = memory_limit {
@@ -173,12 +178,9 @@ pub fn derive_task_container_concurrency(
 }
 
 pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
-    let worker_budget = if conf.get("worker").is_some() {
-        let requested = conf.get_int_or_default("worker.threads", 4).max(1) as usize;
-        derive_worker_vm_concurrency(conf, requested).resolved
-    } else {
-        0
-    };
+    let worker_budget = configured_usize(conf, "worker.threads")
+        .map(|requested| derive_worker_vm_concurrency(conf, requested).resolved)
+        .unwrap_or(0);
     let task_code_budget = if conf.get("task").is_some() {
         let requested = conf
             .get_int_or_default("task.code-max-concurrent", 500)
@@ -196,8 +198,18 @@ pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
     // Clamp so large hosts don't derive a pool that exhausts the database's
     // global connection limit. An explicit `worker.db-max-connections` raises
     // or lowers the ceiling; otherwise a conservative default cap applies.
+    let explicit_ceiling_floor = if conf.get_bool_or_default("scheduler.singleton", false)
+        && conf.get("scheduler").is_some()
+    {
+        // The scheduler holds one Postgres connection for the lifetime of
+        // its session-level advisory lock. Keep at least one other
+        // connection available for normal scheduler DB work.
+        2
+    } else {
+        1
+    };
     let ceiling = configured_usize(conf, "worker.db-max-connections")
-        .map(|c| c.max(10))
+        .map(|c| c.max(explicit_ceiling_floor))
         .unwrap_or(DEFAULT_DB_MAX_CONNECTIONS);
 
     derived.min(ceiling).min(u32::MAX as usize) as u32
@@ -209,12 +221,9 @@ pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
 /// `worker.local-write-concurrency` adds headroom rather than capping the whole
 /// pool, and a floor of 10 preserves prior behavior for default deployments.
 pub fn derive_sqlite_pool_connections(conf: &Val) -> u32 {
-    let read_capacity = if conf.get("worker").is_some() {
-        let requested = conf.get_int_or_default("worker.threads", 4).max(1) as usize;
-        derive_worker_vm_concurrency(conf, requested).resolved
-    } else {
-        0
-    };
+    let read_capacity = configured_usize(conf, "worker.threads")
+        .map(|requested| derive_worker_vm_concurrency(conf, requested).resolved)
+        .unwrap_or(0);
     let write_headroom = conf
         .get_int_or_default("worker.local-write-concurrency", 1)
         .max(1) as usize;
@@ -450,6 +459,55 @@ mod tests {
 
         assert!(max_connections >= 10);
         assert!(max_connections <= 20);
+    }
+
+    #[test]
+    fn postgres_pool_respects_explicit_ceiling_below_default_floor() {
+        let conf = val!({
+            "worker": {
+                "threads": 64i64,
+                "db-max-connections": 5i64,
+                "db-reserved-connections": 4i64,
+            },
+        });
+
+        let max_connections = derive_postgres_pool_connections(&conf);
+
+        assert_eq!(max_connections, 5);
+    }
+
+    #[test]
+    fn scheduler_singleton_keeps_connection_for_work_beside_advisory_lock() {
+        let conf = val!({
+            "scheduler": {
+                "singleton": true,
+            },
+            "worker": {
+                "db-max-connections": 1i64,
+            },
+        });
+
+        let max_connections = derive_postgres_pool_connections(&conf);
+
+        assert_eq!(max_connections, 2);
+    }
+
+    #[test]
+    fn postgres_pool_ignores_worker_budget_when_threads_are_not_configured() {
+        let conf = val!({
+            "task": {
+                "code-max-concurrent": 2i64,
+                "worker-memory-mb": 2048i64,
+                "code-vm-memory-mb": 256i64,
+            },
+            "worker": {
+                "db-reserved-connections": 4i64,
+            },
+        });
+
+        let max_connections = derive_postgres_pool_connections(&conf);
+
+        assert_eq!(max_connections, 10);
     }
 
     #[test]

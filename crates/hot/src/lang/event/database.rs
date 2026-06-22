@@ -252,14 +252,13 @@ impl DatabaseEventPublisher {
                 "Failed to send event to database processor - channel closed".to_string()
             })?;
 
-        // Block waiting for acknowledgment (database write complete)
-        // This uses tokio's block_in_place to avoid blocking the async runtime
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                ack_receiver
-                    .await
-                    .map_err(|_| "Database write acknowledgment was dropped".to_string())
-            })
+        // VM code runs in a blocking context, where `Handle::block_on` is the
+        // correct sync-to-async bridge. Do not use `block_in_place` here:
+        // this path is called from Hot VM execution, not from async worker code.
+        tokio::runtime::Handle::current().block_on(async {
+            ack_receiver
+                .await
+                .map_err(|_| "Database write acknowledgment was dropped".to_string())
         })
     }
 }

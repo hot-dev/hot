@@ -28,7 +28,7 @@ use executor::ExecutorError;
 use base64::Engine;
 use base64::engine::general_purpose;
 use hot::data::serialization::Serialization;
-use hot::db::{self, DatabasePool, Task, TaskStatus};
+use hot::db::{self, Build, DatabasePool, Env, Project, Task, TaskStatus};
 use hot::env::retry::RetryConfig;
 use hot::lang::cache::bytecode_cache::{BytecodeCache, CachedBytecode};
 use hot::lang::emitter::EngineEventEmitter;
@@ -43,6 +43,7 @@ use hot::val::Val;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 type UsageStatsCache =
@@ -82,6 +83,15 @@ const ZOMBIE_HEARTBEAT_STALE_SECS: i64 = 30;
 /// fresher than `ZOMBIE_HEARTBEAT_STALE_SECS` at startup time, in which case
 /// the row is leaked forever without a periodic re-check.
 const ZOMBIE_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Maximum time a claimed code task will park waiting for a `code_semaphore`
+/// permit before releasing its queue lease and deferring the message back to the
+/// queue. The outer inflight cap is `max(code_max, container_max)`, so a burst of
+/// code claims can exceed `code_max`; without this bound those extra claims would
+/// hold their queue leases (and shared inflight slots) while parked, head-of-line
+/// blocking container claims. Kept well under the task lease orphan-idle window so
+/// we defer before any sibling can reclaim the message.
+const CODE_SLOT_ACQUIRE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Kill and remove a container with a wall-clock ceiling. A wedged Kata shim
 /// or hung Docker daemon can otherwise pin the worker indefinitely on
@@ -237,8 +247,54 @@ pub struct TaskWorkerConfig {
     pub queue_name: Option<String>,
 }
 
+fn validate_task_fairness_conf(conf: &Val) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let capacity_fairness = conf.get_str_or_default("task.capacity-fairness", "none");
+    if capacity_fairness != "none" {
+        return Err(format!(
+            "Unsupported task.capacity-fairness '{}'; only 'none' is implemented",
+            capacity_fairness
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn validate_task_orphan_idle_ms(
+    queue_type: QueueType,
+    task_orphan_idle_ms: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if queue_type != QueueType::Redis {
+        return Ok(());
+    }
+
+    let lease_ttl_ms = task_lease::DEFAULT_LEASE_TTL.as_millis() as u64;
+    if task_orphan_idle_ms < lease_ttl_ms {
+        return Err(format!(
+            "queue.task-orphan-idle-ms={} is lower than the Redis task lease TTL ({}ms). Set HOT_QUEUE_TASK_ORPHAN_IDLE_MS to at least {} so a crashed worker's queue message is not reclaimed before its task lease can expire.",
+            task_orphan_idle_ms, lease_ttl_ms, lease_ttl_ms
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_task_fairness_conf(&config.worker_conf)?;
+    hot::queue::set_metrics_enabled(
+        config
+            .worker_conf
+            .get_bool_or_default("queue.metrics-enabled", true),
+    );
+    hot::queue::set_wait_target_p99_ms(
+        config
+            .worker_conf
+            .get_int_or_default("queue.wait-target-p99-ms", 1_000)
+            .max(1) as u64,
+    );
+
     let requested_code_max = config.code_max_concurrent.max(1);
     let code_budget =
         hot::runtime_budget::derive_task_code_concurrency(&config.worker_conf, requested_code_max);
@@ -275,9 +331,13 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     );
     let container_max = container_budget.resolved;
     let queue_claim_max = code_max.max(container_max);
+    let shutdown_container_timeout_secs = config
+        .worker_conf
+        .get_int_or_default("task.shutdown-container-timeout-seconds", 30)
+        .max(1) as u64;
 
     tracing::info!(
-        "Starting hot_task_worker (code_max_concurrent={} requested={} cpu_limit={} memory_limit={:?} memory_limit_mb={:?}, container_max_concurrent={} requested={} explicit={} memory_limit={} disk_limit={} resource_budget={}MB mem / {}MB disk recovery_reserved_slots={} backend={}, box_defaults={}MB mem / {}MB disk)",
+        "Starting hot_task_worker (code_max_concurrent={} requested={} cpu_limit={} memory_limit={:?} memory_limit_mb={:?}, container_max_concurrent={} requested={} explicit={} memory_limit={} disk_limit={} resource_budget={}MB mem / {}MB disk recovery_reserved_slots={} backend={}, shutdown_container_timeout={}s, box_defaults={}MB mem / {}MB disk)",
         code_max,
         code_budget.requested,
         code_budget.cpu_limit,
@@ -292,6 +352,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         container_budget.disk_budget_mb,
         container_budget.recovery_reserved_slots,
         container_budget.backend,
+        shutdown_container_timeout_secs,
         default_container_memory_mb,
         default_container_disk_mb,
     );
@@ -311,6 +372,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // would now race with whatever new state replaced it. See
     // `RedisStreamQueue::with_startup_window` for full semantics.
     let task_startup_window = std::time::Duration::from_secs(24 * 60 * 60);
+    let task_orphan_idle_ms = config
+        .worker_conf
+        .get_int_or_default("queue.task-orphan-idle-ms", 120_000)
+        .max(1) as u64;
+    validate_task_orphan_idle_ms(config.queue_type, task_orphan_idle_ms)?;
 
     let task_queue = ProcessingQueue::<TaskRequest>::new_with_cluster(
         config.queue_type,
@@ -321,6 +387,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     )?
     .with_consumer_name(format!("{}-{}-task", host, pid))
     .with_read_batch_size(queue_claim_max)
+    .with_orphan_idle_ms(task_orphan_idle_ms)
     .with_startup_window(task_startup_window);
 
     // Verify queue connectivity with a quick health check. Mirrors hot_worker's
@@ -543,7 +610,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         executor::BoxExecutor::new(
             config.container_backend,
             container_max,
-            30,
+            shutdown_container_timeout_secs,
             config.containerd_socket.as_deref(),
             config.kata_vmm.as_deref(),
         )
@@ -596,16 +663,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                     Arc::new(l)
                 }
                 Err(e) => {
-                    // Don't refuse to start the worker over this — the
-                    // existing in-process `try_register_task` dedup still
-                    // covers same-pod duplication, and the queue layer's
-                    // `refill_lock` covers same-instance refill races. We
-                    // log loudly and keep going with a noop lease.
                     tracing::error!(
                         error = %e,
-                        "Failed to construct Redis task lease; falling back to NoopTaskLease (cross-pod dedup disabled)"
+                        "Failed to construct Redis task lease; refusing to start because cross-pod task dedup would be disabled"
                     );
-                    Arc::new(task_lease::NoopTaskLease)
+                    return Err(format!("Redis task lease initialization failed: {}", e).into());
                 }
             }
         }
@@ -639,6 +701,46 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Reap zombie tasks (code tasks with stale heartbeat, or container tasks with no container)
     reap_zombie_tasks(&db, &stream_publisher, &task_queue_arc).await;
+
+    let reconcile_after_secs = config
+        .worker_conf
+        .get_int_or_default("task.reconcile-queued-after-seconds", 60)
+        .max(1) as u64;
+    let reconcile_interval_secs = config
+        .worker_conf
+        .get_int_or_default("task.reconcile-interval-seconds", 30)
+        .max(1) as u64;
+    reconcile_queued_tasks(
+        &db,
+        &task_queue_arc,
+        reconcile_after_secs,
+        reconcile_interval_secs,
+    )
+    .await;
+
+    {
+        let reconciler_db = Arc::clone(&db);
+        let reconciler_queue = Arc::clone(&task_queue_arc);
+        let reconciler_coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(reconcile_interval_secs));
+            interval.tick().await; // first tick is immediate; startup reconcile already ran
+            loop {
+                interval.tick().await;
+                if reconciler_coordinator.is_shutting_down() {
+                    break;
+                }
+                reconcile_queued_tasks(
+                    &reconciler_db,
+                    &reconciler_queue,
+                    reconcile_after_secs,
+                    reconcile_interval_secs,
+                )
+                .await;
+            }
+        });
+    }
 
     // Background zombie reaper: re-runs the same query every
     // `ZOMBIE_REAPER_INTERVAL`. Without this, the only opportunity to fail
@@ -776,26 +878,35 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     let shutdown = hot::signal::shutdown_signal();
     tokio::pin!(shutdown);
+    let (task_loop_shutdown_tx, task_loop_shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Phase 5: cap on in-flight spawned task processors. Without this, every
     // permit acquired from `code_semaphore` (inside `process_task`) is
     // released only after the previous task completes — defeating the
     // purpose of concurrency. With this outer cap we spawn up to N concurrent
-    // `process_blocking` futures, each of which dequeues, processes, and
-    // ACKs one message. The inner `code_semaphore` / `container_budget` still
-    // gate by *resource type* within each spawned future.
+    // claim+process futures, each of which dequeues, processes, and ACKs one
+    // message. The inner `code_semaphore` / `container_budget` still gate by
+    // *resource type* within each spawned future.
     //
     // Use the larger derived resource-class budget as the outer claim cap.
     // This prevents Redis PEL from filling with more work than local resources
     // can execute, while the inner code/container gates still enforce the
     // per-resource limits.
     let inflight_semaphore = Arc::new(Semaphore::new(queue_claim_max));
+    let mut task_processors = JoinSet::new();
 
     loop {
+        while let Some(join_result) = task_processors.try_join_next() {
+            if let Err(e) = join_result {
+                tracing::error!("Task processor panicked or was cancelled: {}", e);
+            }
+        }
+
         let permit = tokio::select! {
             biased;
             _ = &mut shutdown => {
                 tracing::info!("Shutting down task worker");
+                let _ = task_loop_shutdown_tx.send(true);
                 coordinator.initiate_shutdown(&db, &stream_publisher, &task_queue_arc).await;
                 break;
             }
@@ -818,11 +929,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         }
 
         // Spawn a one-shot worker that holds the permit for the lifetime of
-        // one message. The permit is released when this future drops (either
-        // normally on completion, or on panic via JoinError handling). If
-        // the queue is empty `process_blocking` parks for the BLOCK window
-        // and returns Ok(None); the permit is released and the main loop
-        // simply acquires another one and re-arms the wait.
+        // one claimed message. Idle workers park in `claim_blocking`, but the
+        // claim phase is selected against task-loop shutdown so deploys do
+        // not wait on empty memory queues or Redis BLOCK windows. Once a
+        // lease is claimed, processing runs through the lease so ACK/retry/DLQ
+        // semantics stay centralized in the queue layer.
         let tq = Arc::clone(&task_queue_arc);
         let db_c = Arc::clone(&db);
         let stream_pub_c = Arc::clone(&stream_publisher);
@@ -838,49 +949,61 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         let coord_c = Arc::clone(&coordinator);
         let lease_c = Arc::clone(&task_lease);
         let wid_c = worker_id.clone();
+        let mut task_loop_shutdown_rx = task_loop_shutdown_rx.clone();
 
-        tokio::spawn(async move {
+        task_processors.spawn(async move {
             let _permit = permit; // released on drop
-            let result = tq
-                .process_blocking(|request: TaskRequest| {
-                    let db = Arc::clone(&db_c);
-                    let tq2 = Arc::clone(&tq);
-                    let stream_pub = stream_pub_c;
-                    let cache = cache_c;
-                    let code_sem = code_sem_c;
-                    let ctr_budget = ctr_budget_c;
-                    let conf = conf_c;
-                    let ep = ep_c;
-                    let executor = executor_c;
-                    let vol_base = vol_base_c;
-                    let defaults = defaults_c;
-                    let usage_cache = usage_cache_c;
-                    let coord = coord_c;
-                    let lease = lease_c;
-                    let wid = wid_c;
-                    async move {
-                        process_task(
-                            request,
-                            db,
-                            tq2,
-                            stream_pub,
-                            cache,
-                            code_sem,
-                            ctr_budget,
-                            conf,
-                            ep,
-                            executor,
-                            vol_base,
-                            defaults,
-                            usage_cache,
-                            coord,
-                            lease,
-                            wid,
-                        )
-                        .await
+            let result = tokio::select! {
+                biased;
+                _ = task_loop_shutdown_rx.changed() => Ok(None),
+                claim = tq.claim_blocking() => {
+                    match claim {
+                        Ok(Some(lease_handle)) => {
+                            lease_handle.process(|request: TaskRequest| {
+                                let db = Arc::clone(&db_c);
+                                let tq2 = Arc::clone(&tq);
+                                let stream_pub = stream_pub_c;
+                                let cache = cache_c;
+                                let code_sem = code_sem_c;
+                                let ctr_budget = ctr_budget_c;
+                                let conf = conf_c;
+                                let ep = ep_c;
+                                let executor = executor_c;
+                                let vol_base = vol_base_c;
+                                let defaults = defaults_c;
+                                let usage_cache = usage_cache_c;
+                                let coord = coord_c;
+                                let lease = lease_c;
+                                let wid = wid_c;
+                                async move {
+                                    process_task(
+                                        request,
+                                        db,
+                                        tq2,
+                                        stream_pub,
+                                        cache,
+                                        code_sem,
+                                        ctr_budget,
+                                        conf,
+                                        ep,
+                                        executor,
+                                        vol_base,
+                                        defaults,
+                                        usage_cache,
+                                        coord,
+                                        lease,
+                                        wid,
+                                    )
+                                    .await
+                                }
+                            })
+                            .await
+                        }
+                        Ok(None) => Ok(None),
+                        Err(e) => Err(e),
                     }
-                })
-                .await;
+                }
+            };
 
             match result {
                 Ok(Some(())) | Ok(None) => {}
@@ -889,6 +1012,32 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 }
             }
         });
+    }
+
+    let _ = task_loop_shutdown_tx.send(true);
+    let drain_processors = async {
+        while let Some(join_result) = task_processors.join_next().await {
+            if let Err(e) = join_result {
+                tracing::error!(
+                    "Task processor panicked or was cancelled during drain: {}",
+                    e
+                );
+            }
+        }
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(10), drain_processors)
+        .await
+        .is_err()
+    {
+        tracing::warn!("Timed out waiting for task processors to exit; aborting remaining tasks");
+        task_processors.abort_all();
+        while let Some(join_result) = task_processors.join_next().await {
+            if let Err(e) = join_result
+                && !e.is_cancelled()
+            {
+                tracing::error!("Task processor failed after abort: {}", e);
+            }
+        }
     }
 
     heartbeat_handle.abort();
@@ -978,6 +1127,109 @@ async fn reap_zombie_tasks(
             worker_id = ?task.worker_id,
             "Reaped zombie task",
         );
+    }
+}
+
+async fn task_request_from_db_row(
+    db: &DatabasePool,
+    task: &Task,
+) -> Result<TaskRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let env = Env::get_env(db, &task.env_id).await?;
+    let (project_id, project_name) = match Build::get_build(db, &task.build_id).await {
+        Ok(build) => match Project::get_project(db, &build.project_id).await {
+            Ok(project) => (
+                Some(project.project_id.to_string()),
+                Some(project.name.to_string()),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.task_id,
+                    build_id = %task.build_id,
+                    project_id = %build.project_id,
+                    "Failed to load project while reconstructing task request: {}", e,
+                );
+                (Some(build.project_id.to_string()), None)
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.task_id,
+                build_id = %task.build_id,
+                "Failed to load build while reconstructing task request: {}", e,
+            );
+            (None, None)
+        }
+    };
+
+    Ok(TaskRequest {
+        task_id: task.task_id.to_string(),
+        function_name: task.function_name.clone(),
+        args: task.args.clone().unwrap_or(serde_json::Value::Null),
+        stream_id: task.stream_id.to_string(),
+        env_id: task.env_id.to_string(),
+        build_id: task.build_id.to_string(),
+        org_id: Some(env.org_id.to_string()),
+        user_id: task.by_user_id.map(|id| id.to_string()),
+        project_id,
+        project_name,
+        timeout_ms: task.timeout_ms.max(1_000) as u64,
+        task_type: task.task_type.clone(),
+        created_at_unix_ms: task.created_at.timestamp_millis().max(0) as u64,
+        origin_run_id: task.origin_run_id.map(|id| id.to_string()),
+    })
+}
+
+async fn reconcile_queued_tasks(
+    db: &DatabasePool,
+    task_queue: &ProcessingQueue<TaskRequest>,
+    reconcile_after_secs: u64,
+    reconcile_interval_secs: u64,
+) {
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::seconds(reconcile_after_secs as i64);
+    let tasks = match Task::get_stale_queued(db, cutoff, now, 100).await {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::warn!("Queued-task reconciler failed to query stale tasks: {}", e);
+            return;
+        }
+    };
+
+    for task in tasks {
+        let task_id = task.task_id;
+        let request = match task_request_from_db_row(db, &task).await {
+            Ok(request) => request,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "Queued-task reconciler skipped task because request reconstruction failed: {}", e,
+                );
+                continue;
+            }
+        };
+
+        match task_queue.enqueue(request).await {
+            Ok(()) => {
+                let next_check_at =
+                    chrono::Utc::now() + chrono::Duration::seconds(reconcile_interval_secs as i64);
+                if let Err(e) = Task::defer_queued_reconcile(db, &task_id, next_check_at).await {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "Queued-task reconciler enqueued task but failed to defer next check: {}", e,
+                    );
+                }
+                tracing::info!(
+                    task_id = %task_id,
+                    "Queued-task reconciler re-enqueued stale queued task"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "Queued-task reconciler failed to enqueue replacement message: {}", e,
+                );
+            }
+        }
     }
 }
 
@@ -1159,8 +1411,12 @@ async fn process_task(
         }
     };
 
-    if task.task_status_id == TaskStatus::Cancelled.as_id() {
-        tracing::info!(task_id = %task_id, "Task already cancelled, skipping execution");
+    if task.task_status_id != TaskStatus::Queued.as_id() {
+        tracing::info!(
+            task_id = %task_id,
+            status = %task.status,
+            "Task is no longer queued, skipping duplicate queue message"
+        );
         return Ok(());
     }
 
@@ -1223,7 +1479,7 @@ async fn process_task(
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
-    let _lease_guard = match task_lease
+    let lease_guard = match task_lease
         .try_acquire(task_id, task_lease::DEFAULT_LEASE_TTL)
         .await
     {
@@ -1253,65 +1509,128 @@ async fn process_task(
             )));
         }
     };
+    let lease_lost_notify = lease_guard.lost_notify();
 
-    let result = if request.task_type == "container" {
-        // Container tasks use resource budget (memory + disk) instead of semaphore
-        process_container_task(
-            request,
-            task_id,
-            env_id,
-            stream_id,
-            build_id,
-            timeout_ms,
-            db,
-            task_queue,
-            stream_publisher,
-            container_executor,
-            container_budget,
-            data_vol_base,
-            worker_conf,
-            box_defaults,
-            usage_stats_cache,
-            worker_id,
-        )
-        .await
+    let execute_task = async {
+        if request.task_type == "container" {
+            // Container tasks use resource budget (memory + disk) instead of semaphore
+            process_container_task(
+                request,
+                task_id,
+                env_id,
+                stream_id,
+                build_id,
+                timeout_ms,
+                db,
+                task_queue,
+                stream_publisher,
+                container_executor,
+                container_budget,
+                data_vol_base,
+                worker_conf,
+                box_defaults,
+                usage_stats_cache,
+                worker_id,
+            )
+            .await
+        } else {
+            // Code tasks use high-limit semaphore. Bound the wait so a claimed
+            // code task does not hold its queue lease + shared inflight slot
+            // indefinitely while parked behind `code_max` peers (which would also
+            // head-of-line block container claims sharing the inflight cap). If no
+            // permit frees up within the grace window, defer the message back to
+            // the queue as fresh work so the slot is released promptly.
+            let _permit = match tokio::time::timeout(
+                CODE_SLOT_ACQUIRE_GRACE,
+                code_semaphore.acquire(),
+            )
+            .await
+            {
+                Ok(permit) => permit?,
+                Err(_) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        backoff_ms = infra_retry_backoff_ms,
+                        "Code task slot unavailable within grace window; deferring queue message to free claim slot"
+                    );
+                    return Err(Box::new(QueueInfrastructureError::new(
+                        "code task slot unavailable; deferring to free claim slot",
+                        std::time::Duration::from_millis(infra_retry_backoff_ms),
+                    ))
+                        as Box<dyn std::error::Error + Send + Sync>);
+                }
+            };
+
+            if let Err(e) = Task::mark_running(&db, &task_id).await {
+                tracing::error!(task_id = %task_id, "Failed to mark task running: {}", e);
+            }
+            if let Err(e) = Task::set_worker(&db, &task_id, &worker_id).await {
+                tracing::error!(task_id = %task_id, "Failed to set worker_id: {}", e);
+            }
+
+            emit_task_started(
+                &stream_publisher,
+                task_id,
+                env_id,
+                stream_id,
+                &request.function_name,
+                &request.task_type,
+            )
+            .await;
+
+            process_code_task(
+                request,
+                task_id,
+                stream_id,
+                env_id,
+                build_id,
+                timeout_ms,
+                db,
+                task_queue,
+                stream_publisher,
+                bytecode_cache,
+                worker_conf,
+                event_publisher,
+                Arc::clone(&coordinator),
+            )
+            .await
+        }
+    };
+
+    let result = if let Some(lease_lost_notify) = lease_lost_notify {
+        tokio::select! {
+            biased;
+            _ = lease_lost_notify.notified() => {
+                coordinator.cancel_task(&task_id);
+                tracing::warn!(
+                    task_id = %task_id,
+                    backoff_ms = infra_retry_backoff_ms,
+                    "Task lease lost while processing; cancelling local work and deferring queue message"
+                );
+                Err(Box::new(QueueInfrastructureError::new(
+                    "task lease lost while processing",
+                    std::time::Duration::from_millis(infra_retry_backoff_ms),
+                )) as Box<dyn std::error::Error + Send + Sync>)
+            }
+            result = execute_task => {
+                if lease_guard.is_lost() {
+                    coordinator.cancel_task(&task_id);
+                    tracing::warn!(
+                        task_id = %task_id,
+                        backoff_ms = infra_retry_backoff_ms,
+                        "Task completed after lease loss; deferring queue message instead of acknowledging"
+                    );
+                    Err(Box::new(QueueInfrastructureError::new(
+                        "task lease lost before completion acknowledgement",
+                        std::time::Duration::from_millis(infra_retry_backoff_ms),
+                    )) as Box<dyn std::error::Error + Send + Sync>)
+                } else {
+                    result
+                }
+            }
+        }
     } else {
-        // Code tasks use high-limit semaphore
-        let _permit = code_semaphore.acquire().await?;
-
-        if let Err(e) = Task::mark_running(&db, &task_id).await {
-            tracing::error!(task_id = %task_id, "Failed to mark task running: {}", e);
-        }
-        if let Err(e) = Task::set_worker(&db, &task_id, &worker_id).await {
-            tracing::error!(task_id = %task_id, "Failed to set worker_id: {}", e);
-        }
-
-        emit_task_started(
-            &stream_publisher,
-            task_id,
-            env_id,
-            stream_id,
-            &request.function_name,
-            &request.task_type,
-        )
-        .await;
-
-        process_code_task(
-            request,
-            task_id,
-            stream_id,
-            env_id,
-            build_id,
-            timeout_ms,
-            db,
-            task_queue,
-            stream_publisher,
-            bytecode_cache,
-            worker_conf,
-            event_publisher,
-            Arc::clone(&coordinator),
-        )
-        .await
+        execute_task.await
     };
 
     coordinator.unregister_task(&task_id);
@@ -4304,6 +4623,7 @@ fn create_event_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hot::val;
 
     fn make_task_request_and_row() -> (TaskRequest, Task, Uuid, Uuid, Uuid) {
         let task_id = Uuid::now_v7();
@@ -4390,6 +4710,50 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("function_name mismatch"));
+    }
+
+    #[test]
+    fn test_capacity_fairness_config_accepts_supported_none_mode() {
+        let conf = val!({
+            "task": {
+                "capacity-fairness": "none",
+            },
+        });
+
+        assert!(validate_task_fairness_conf(&conf).is_ok());
+    }
+
+    #[test]
+    fn test_capacity_fairness_config_rejects_unimplemented_modes() {
+        let conf = val!({
+            "task": {
+                "capacity-fairness": "org",
+            },
+        });
+
+        let err = validate_task_fairness_conf(&conf).unwrap_err().to_string();
+        assert!(err.contains("Unsupported task.capacity-fairness"));
+    }
+
+    #[test]
+    fn test_task_orphan_idle_validation_accepts_memory_queue() {
+        assert!(validate_task_orphan_idle_ms(QueueType::Memory, 1).is_ok());
+    }
+
+    #[test]
+    fn test_task_orphan_idle_validation_rejects_redis_below_lease_ttl() {
+        let err = validate_task_orphan_idle_ms(QueueType::Redis, 60_000)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Redis task lease TTL"));
+    }
+
+    #[test]
+    fn test_task_orphan_idle_validation_accepts_redis_at_lease_ttl() {
+        let lease_ttl_ms = task_lease::DEFAULT_LEASE_TTL.as_millis() as u64;
+
+        assert!(validate_task_orphan_idle_ms(QueueType::Redis, lease_ttl_ms).is_ok());
     }
 
     #[test]

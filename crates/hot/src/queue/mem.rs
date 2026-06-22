@@ -10,7 +10,10 @@
 //! `hot scheduler` as separate processes), use the Redis Streams backend
 //! instead by setting `HOT_QUEUE_TYPE=redis`.
 
-use super::{Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, Serialization};
+use super::{
+    Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, Serialization,
+    queue_timing_enabled, queue_wait_target_p99_ms,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -29,18 +32,6 @@ const CHANNEL_CAPACITY: usize = 100_000;
 
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn queue_timing_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("HOT_QUEUE_METRICS_ENABLED")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(true)
-    })
 }
 
 #[derive(Debug)]
@@ -319,6 +310,7 @@ where
         let first_attempt = retry_item.first_attempt;
 
         let queue_wait_ms = duration_ms(first_attempt.elapsed());
+        let wait_target_p99_ms = queue_wait_target_p99_ms();
         let processing_started = Instant::now();
         let delivery_source = if retry_item.retry_count == 0 {
             "fresh"
@@ -335,6 +327,7 @@ where
                         backend = "memory",
                         delivery_source = delivery_source,
                         queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = duration_ms(processing_started.elapsed()),
                         retry_count = retry_item.retry_count,
                         outcome = "success",
@@ -353,6 +346,7 @@ where
                             backend = "memory",
                             delivery_source = delivery_source,
                             queue_wait_ms = queue_wait_ms,
+                            wait_target_p99_ms = wait_target_p99_ms,
                             processing_ms = duration_ms(processing_started.elapsed()),
                             retry_count = retry_item.retry_count,
                             outcome = "infrastructure_retry",
@@ -385,6 +379,7 @@ where
                             backend = "memory",
                             delivery_source = delivery_source,
                             queue_wait_ms = queue_wait_ms,
+                            wait_target_p99_ms = wait_target_p99_ms,
                             processing_ms = duration_ms(processing_started.elapsed()),
                             retry_count = retry_item.retry_count,
                             outcome = "worker_error",
@@ -427,14 +422,45 @@ where
         if self.completed {
             return;
         }
-        if let Some(retry_item) = self.retry_item.take()
-            && let Err(send_err) = self.queue.channels.tx.try_send(retry_item)
-        {
-            tracing::warn!(
-                queue = self.queue.queue_name,
-                "Failed to restore dropped memory queue lease: {}",
-                send_err
-            );
+        let Some(retry_item) = self.retry_item.take() else {
+            return;
+        };
+
+        // Best-effort restore for the in-process local-dev queue: `Drop` is
+        // synchronous, so we first try a non-blocking `try_send`. If the channel
+        // is momentarily full we spawn a detached task to `send().await` the item
+        // back. This is intentionally best-effort — there is no durability
+        // guarantee here (unlike the Redis lease, which is backed by the stream
+        // PEL). A restore can still be lost if the runtime is torn down before
+        // the spawned task runs, which is acceptable for the memory queue.
+        match self.queue.channels.tx.try_send(retry_item) {
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Full(retry_item)) => {
+                let tx = self.queue.channels.tx.clone();
+                let queue_name = self.queue.queue_name.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Err(send_err) = tx.send(retry_item).await {
+                            tracing::warn!(
+                                queue = queue_name,
+                                "Failed to asynchronously restore dropped memory queue lease: {}",
+                                send_err
+                            );
+                        }
+                    });
+                } else {
+                    tracing::error!(
+                        queue = self.queue.queue_name,
+                        "Memory queue lease restoration hit a full channel outside a Tokio runtime; item cannot be restored"
+                    );
+                }
+            }
+            Err(async_channel::TrySendError::Closed(_retry_item)) => {
+                tracing::warn!(
+                    queue = self.queue.queue_name,
+                    "Failed to restore dropped memory queue lease: queue is closed"
+                );
+            }
         }
     }
 }

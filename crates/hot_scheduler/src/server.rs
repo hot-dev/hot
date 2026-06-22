@@ -71,6 +71,40 @@ pub const DEFAULT_REDIS_URL: &str = "redis://localhost:6379";
 pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30; // Sync with database every 30 seconds
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: u64 = 1;
 pub const DEFAULT_AT_INTERVAL_SECONDS: u64 = 1;
+const SCHEDULER_ADVISORY_LOCK_ID: i64 = 4_849_672_113_597_841;
+
+enum SchedulerSingletonGuard {
+    Postgres {
+        // Held for the scheduler lifetime so the session-level advisory lock stays active.
+        _conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    },
+}
+
+async fn acquire_scheduler_singleton_guard(
+    db: &DatabasePool,
+) -> Result<Option<SchedulerSingletonGuard>, Box<dyn std::error::Error + Send + Sync>> {
+    match db {
+        DatabasePool::Postgres(pool) => {
+            let mut conn = pool.acquire().await?;
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(SCHEDULER_ADVISORY_LOCK_ID)
+                .fetch_one(&mut *conn)
+                .await?;
+            if !acquired {
+                return Err(
+                    "another hot_scheduler instance already holds the scheduler singleton lock"
+                        .into(),
+                );
+            }
+            info!("hot.dev: SCHEDULER acquired Postgres singleton lock");
+            Ok(Some(SchedulerSingletonGuard::Postgres { _conn: conn }))
+        }
+        DatabasePool::Sqlite(_) => {
+            info!("hot.dev: SCHEDULER singleton lock is best-effort for SQLite local development");
+            Ok(None)
+        }
+    }
+}
 
 pub fn get_resolved_conf(conf: Val) -> Val {
     // Start with defaults
@@ -98,6 +132,7 @@ pub async fn run(
     at_interval_seconds: Option<u64>,
     backfill_enabled: bool,
     schedule_policy: SchedulePolicy,
+    singleton: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: SCHEDULER starting");
     debug!(
@@ -174,6 +209,13 @@ pub async fn run(
 
     // If database is provided, start the sync loop and retry processor
     if let Some(db) = db {
+        if !singleton {
+            return Err(
+                "hot.scheduler.singleton=false is not supported; multi-scheduler mode is not implemented"
+                    .into(),
+            );
+        }
+        let _singleton_guard = acquire_scheduler_singleton_guard(&db).await?;
         let db = Arc::new(db);
         let sync_interval = sync_interval_seconds
             .unwrap_or(DEFAULT_SYNC_INTERVAL_SECONDS)

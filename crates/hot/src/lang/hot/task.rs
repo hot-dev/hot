@@ -375,14 +375,39 @@ pub fn receive(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         return HotResult::Err(err_val("::hot::task/receive: expected 0 args".to_string()));
     }
 
+    // Capture the cancellation token so a blocked receive releases the VM thread
+    // on worker shutdown / run timeout instead of blocking forever.
+    let cancel_token = vm.external_cancel_token();
     let receiver = vm.get_task_receiver();
     match receiver {
         Some(rx) => {
             // parking_lot::Mutex::lock() never returns an error (no poisoning)
             let mut guard = rx.lock();
-            match guard.blocking_recv() {
+            let is_cancelled = || {
+                cancel_token
+                    .as_ref()
+                    .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false)
+            };
+            // Race the channel receive against periodic cancellation polling. A
+            // delivered message (including a cooperative cancel message published
+            // by `::hot::task/cancel`) returns immediately; a closed channel or an
+            // external cancel resolves to Null (treated as shutdown by callers).
+            let received = tokio::runtime::Handle::current().block_on(async {
+                loop {
+                    tokio::select! {
+                        msg = guard.recv() => return msg,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                            if is_cancelled() {
+                                return None;
+                            }
+                        }
+                    }
+                }
+            });
+            match received {
                 Some(val) => HotResult::Ok(val),
-                None => HotResult::Ok(Val::Null), // channel closed = shutdown
+                None => HotResult::Ok(Val::Null), // channel closed / cancelled = shutdown
             }
         }
         None => HotResult::Err(err_val(
@@ -514,11 +539,25 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    // Capture the cancellation token so the poll loop can release the blocking
+    // VM thread promptly on worker shutdown or run timeout instead of pinning it
+    // for up to the task's (potentially 24h) timeout.
+    let cancel_token = vm.external_cancel_token();
+    let is_cancelled = move || {
+        cancel_token
+            .as_ref()
+            .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+    };
+
     let task = tokio::runtime::Handle::current().block_on(async {
         const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "timed_out", "cancelled"];
         const MAX_TIMEOUT_MS: i64 = 24 * 60 * 60 * 1000; // 24 hours
         const INITIAL_DELAY_MS: u64 = 100;
         const MAX_DELAY_MS: u64 = 5000;
+        // Cap each sleep slice so cancellation is observed within ~250ms even
+        // while the backoff delay grows toward MAX_DELAY_MS.
+        const CANCEL_POLL_SLICE_MS: u64 = 250;
 
         let mut task = match crate::db::Task::get(&db, &task_id).await {
             Ok(t) => t,
@@ -531,12 +570,28 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         let mut delay_ms = INITIAL_DELAY_MS;
 
         while !TERMINAL_STATUSES.contains(&task.status.as_str()) {
+            if is_cancelled() {
+                return Err(err_val(
+                    "::hot::task/await: cancelled while waiting for task".to_string(),
+                ));
+            }
             if std::time::Instant::now() >= deadline {
                 return Err(err_val(
                     "::hot::task/await: timeout waiting for task to complete".to_string(),
                 ));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+
+            let mut remaining = delay_ms;
+            while remaining > 0 {
+                if is_cancelled() {
+                    return Err(err_val(
+                        "::hot::task/await: cancelled while waiting for task".to_string(),
+                    ));
+                }
+                let slice = remaining.min(CANCEL_POLL_SLICE_MS);
+                tokio::time::sleep(std::time::Duration::from_millis(slice)).await;
+                remaining -= slice;
+            }
             delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
 
             task = match crate::db::Task::get(&db, &task_id).await {

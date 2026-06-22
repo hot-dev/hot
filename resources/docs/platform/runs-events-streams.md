@@ -239,6 +239,10 @@ Hot guarantees **at-least-once delivery** for events:
 - Failed handlers can be [retried automatically](/docs/retries) with configurable attempts and delay
 - Retry status is visible in the Hot App UI
 
+Delivery is optimized for durability and throughput, not strict global ordering. Concurrent workers may process different events from the same stream at the same time, and retries or infrastructure redelivery can arrive after newer events. Queue message fields are additive so rolling deploys can read older messages; workers hydrate the authoritative event payload from the database before routing.
+
+Handlers should be idempotent when they perform external side effects, because the same event can be delivered more than once after a retry, worker crash, Redis pending-entry reclaim, or task reconciliation pass. This also applies to run timeouts: when a handler exceeds its run timeout it is recorded as a failure and retried according to its retry policy. The worker cancels the timed-out run cooperatively, but a handler stuck in non-cooperative work (a tight native loop or blocking syscall) can keep running in the background while its retry begins, so the two attempts may briefly overlap.
+
 ## Streams
 
 **Streams** provide real-time, bidirectional data flow for scenarios where request/response isn't sufficient.

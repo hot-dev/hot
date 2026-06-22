@@ -223,7 +223,7 @@ hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
 hot.queue.type "memory"
 //hot.queue.type "redis"
 hot.queue.event-orphan-idle-ms Int(::env/get("HOT_QUEUE_EVENT_ORPHAN_IDLE_MS", "60000"))
-hot.queue.task-orphan-idle-ms Int(::env/get("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "60000"))
+hot.queue.task-orphan-idle-ms Int(::env/get("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "120000"))
 hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS", "1000"))
 hot.queue.wait-target-p99-ms Int(::env/get("HOT_QUEUE_WAIT_TARGET_P99_MS", "1000"))
 hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
@@ -245,7 +245,6 @@ hot.watch.include-tests false
 hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
 hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
 hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "4"))
-hot.worker.queue-concurrency ::env/get("HOT_WORKER_QUEUE_CONCURRENCY", "auto")
 hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")
 hot.worker.vm-memory-mb Int(::env/get("HOT_WORKER_VM_MEMORY_MB", "256"))
 hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "512"))

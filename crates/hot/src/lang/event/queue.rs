@@ -1103,10 +1103,47 @@ mod tests {
             Some(Uuid::now_v7()), // build_id
         );
 
-        // This should not panic and should publish to both
-        combined_publisher.publish(&ctx, event);
+        let publisher_for_vm = combined_publisher.clone();
+        tokio::task::spawn_blocking(move || {
+            publisher_for_vm.publish(&ctx, event);
+        })
+        .await
+        .expect("spawn_blocking publisher call should not panic");
 
         // Test shutdown
+        assert!(combined_publisher.shutdown().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_queue_and_database_event_publisher_from_spawn_blocking() {
+        let queue_publisher = QueueEventPublisher::new_default();
+        let database_publisher = DatabaseEventPublisher::new("sqlite::memory:".to_string());
+        let combined_publisher =
+            QueueAndDatabaseEventPublisher::new(queue_publisher, database_publisher);
+        let publisher_for_vm = combined_publisher.clone();
+
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "test_combined_event_from_vm".to_string(),
+            crate::val::Val::from("test_data"),
+        );
+        let ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            4,
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+
+        tokio::task::spawn_blocking(move || {
+            publisher_for_vm.publish(&ctx, event);
+        })
+        .await
+        .expect("spawn_blocking publisher call should not panic");
+
         assert!(combined_publisher.shutdown().await.is_ok());
     }
 
