@@ -215,7 +215,15 @@ impl RedisClient {
     async fn connect(&self) -> Result<RedisConnectionOwned, StreamsQueueError> {
         match self {
             RedisClient::Standalone(client) => {
-                let conn = client.get_multiplexed_async_connection().await?;
+                // Disable redis-rs 1.x's 500ms default response timeout: this
+                // connection issues `XREADGROUP ... BLOCK 5000` and must not
+                // abort blocking reads (or commands slowed by load) mid-flight.
+                // See `crate::redis::standalone_async_config` for the rationale.
+                let conn = client
+                    .get_multiplexed_async_connection_with_config(
+                        &crate::redis::standalone_async_config(),
+                    )
+                    .await?;
                 Ok(RedisConnectionOwned::Standalone(conn))
             }
             RedisClient::Cluster(client) => {

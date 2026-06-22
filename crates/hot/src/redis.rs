@@ -4,6 +4,30 @@ use std::sync::Once;
 
 static INIT_RUSTLS: Once = Once::new();
 
+/// Build an [`AsyncConnectionConfig`](::redis::AsyncConnectionConfig) for
+/// standalone multiplexed connections.
+///
+/// redis-rs 1.x defaults `AsyncConnectionConfig` to a 500ms per-command
+/// response timeout. Hot's standalone connections issue blocking reads
+/// (`XREADGROUP ... BLOCK 5000` in the task/event queue and `XREAD BLOCK 30000`
+/// in the stream subscriber), so the 500ms default aborts every blocking read
+/// with `timed out` and clips any command slower than 500ms under load (XACK,
+/// the infrastructure-retry EVAL, XAUTOCLAIM, the task-lease `SET NX`). A
+/// clipped XACK/requeue leaves the entry in the consumer PEL; orphan reclaim
+/// then re-delivers it, inflating the delivery count until it exhausts the
+/// retry budget and lands in the dead-letter queue — stranding the underlying
+/// task in `queued` forever.
+///
+/// We disable the per-command response timeout to match cluster mode (whose
+/// builder already defaults `response_timeout` to `None`) and to restore the
+/// pre-1.x semantics the queue/subscriber code was written against. Liveness
+/// is still bounded by each blocking command's own server-side `BLOCK` timeout
+/// and by transport-level connection errors, which fail in-flight commands
+/// rather than hanging.
+pub fn standalone_async_config() -> ::redis::AsyncConnectionConfig {
+    ::redis::AsyncConnectionConfig::new().set_response_timeout(None)
+}
+
 /// Initialize Rustls crypto provider (required for TLS connections)
 /// This must be called before any TLS connections are established.
 pub fn init_crypto_provider() {

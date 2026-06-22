@@ -393,7 +393,15 @@ impl RedisLeaseInner {
         }
         let new = match &self.client {
             RedisLeaseClient::Standalone(c) => {
-                let mc = c.get_multiplexed_async_connection().await?;
+                // Disable redis-rs 1.x's 500ms default response timeout so a
+                // lease `SET NX` / extend script isn't clipped under load and
+                // spuriously deferred (which feeds the queue's retry budget).
+                // See `hot::redis::standalone_async_config` for the rationale.
+                let mc = c
+                    .get_multiplexed_async_connection_with_config(
+                        &hot::redis::standalone_async_config(),
+                    )
+                    .await?;
                 RedisLeaseConn::Standalone(mc)
             }
             RedisLeaseClient::Cluster(c) => {

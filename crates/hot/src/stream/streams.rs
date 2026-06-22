@@ -76,7 +76,9 @@ impl RedisConnectionPool {
                     conn.clone()
                 } else {
                     let conn = client
-                        .get_multiplexed_async_connection()
+                        .get_multiplexed_async_connection_with_config(
+                            &crate::redis::standalone_async_config(),
+                        )
                         .await
                         .map_err(|e| StreamPubSubError::ConnectionError(e.to_string()))?;
                     *guard = Some(conn.clone());
@@ -108,9 +110,13 @@ impl RedisConnectionPool {
     ) -> Result<SubscriberConnection, StreamPubSubError> {
         match self {
             RedisConnectionPool::Standalone { client, .. } => {
-                // Create a fresh connection for the subscriber
+                // Create a fresh connection for the subscriber. Disable the
+                // redis-rs 1.x 500ms default response timeout — the subscriber
+                // issues `XREAD BLOCK 30000` and must park the full block.
                 let conn = client
-                    .get_multiplexed_async_connection()
+                    .get_multiplexed_async_connection_with_config(
+                        &crate::redis::standalone_async_config(),
+                    )
                     .await
                     .map_err(|e| StreamPubSubError::ConnectionError(e.to_string()))?;
                 Ok(SubscriberConnection::Standalone(conn))
