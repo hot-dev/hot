@@ -103,6 +103,27 @@ pub struct CancellationState {
     pub data: Val,
 }
 
+#[derive(Clone)]
+pub(crate) struct VmHostContext {
+    emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
+    execution_context: Option<crate::lang::event::ExecutionContext>,
+    database_pool: Option<Arc<crate::db::DatabasePool>>,
+    file_storage: Option<Arc<dyn crate::file_storage::FileStorage>>,
+    store: Option<Arc<dyn crate::store::Store>>,
+    embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
+    event_publisher: Option<Arc<dyn crate::lang::event::EventPublisher>>,
+    stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
+    task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
+    task_receiver: Option<Arc<parking_lot::Mutex<tokio::sync::mpsc::Receiver<Val>>>>,
+    external_cancel: Option<Arc<AtomicBool>>,
+    task_id: Option<uuid::Uuid>,
+    context_storage: AHashMap<String, Val>,
+    secret_keys: AHashSet<String>,
+    secret_value_hashes: AHashSet<u64>,
+    run_start_time: chrono::DateTime<chrono::Utc>,
+    run_start_instant: std::time::Instant,
+}
+
 /// Thread-safe cancellation state holder
 #[derive(Debug)]
 pub struct VmCancellationState {
@@ -641,6 +662,52 @@ impl VirtualMachine {
         &self,
     ) -> Option<Arc<dyn crate::store::embedding::EmbeddingProvider>> {
         self.embedding_provider.clone()
+    }
+
+    /// Inherit host-provided capabilities when a parallel worker VM is forked
+    /// from the parent VM. Parallel branches execute user code in fresh VMs,
+    /// but host-backed functions like `send`, `::hot::task/*`, files, stores,
+    /// and ctx access must see the same runtime services as the parent run.
+    pub(crate) fn host_context_snapshot(&self) -> VmHostContext {
+        VmHostContext {
+            emitter: self.emitter.clone(),
+            execution_context: self.execution_context.clone(),
+            database_pool: self.database_pool.clone(),
+            file_storage: self.file_storage.clone(),
+            store: self.store.clone(),
+            embedding_provider: self.embedding_provider.clone(),
+            event_publisher: self.event_publisher.clone(),
+            stream_publisher: self.stream_publisher.clone(),
+            task_queue: self.task_queue.clone(),
+            task_receiver: self.task_receiver.clone(),
+            external_cancel: self.external_cancel.clone(),
+            task_id: self.task_id,
+            context_storage: self.context_storage.clone(),
+            secret_keys: self.secret_keys.clone(),
+            secret_value_hashes: self.secret_value_hashes.clone(),
+            run_start_time: self.run_start_time,
+            run_start_instant: self.run_start_instant,
+        }
+    }
+
+    pub(crate) fn inherit_host_context(&mut self, context: &VmHostContext) {
+        self.emitter = context.emitter.clone();
+        self.execution_context = context.execution_context.clone();
+        self.database_pool = context.database_pool.clone();
+        self.file_storage = context.file_storage.clone();
+        self.store = context.store.clone();
+        self.embedding_provider = context.embedding_provider.clone();
+        self.event_publisher = context.event_publisher.clone();
+        self.stream_publisher = context.stream_publisher.clone();
+        self.task_queue = context.task_queue.clone();
+        self.task_receiver = context.task_receiver.clone();
+        self.external_cancel = context.external_cancel.clone();
+        self.task_id = context.task_id;
+        self.context_storage = context.context_storage.clone();
+        self.secret_keys = context.secret_keys.clone();
+        self.secret_value_hashes = context.secret_value_hashes.clone();
+        self.run_start_time = context.run_start_time;
+        self.run_start_instant = context.run_start_instant;
     }
 
     /// Get the thread count for parallel execution
@@ -8237,6 +8304,7 @@ impl VirtualMachine {
         let core_variables = self.get_core_variables_arc();
         let conf = self.get_conf().clone();
         let shared_failure_state = self.get_failure_state_arc();
+        let host_context = self.host_context_snapshot();
 
         // Track computed variables from previous levels to pass to task VMs
         let mut computed_vars: IndexMap<String, Val> = IndexMap::new();
@@ -8359,6 +8427,7 @@ impl VirtualMachine {
                 let type_implementations_clone = type_implementations.clone();
                 let core_variables_clone = core_variables.clone();
                 let conf_clone = Some(conf.clone());
+                let host_context_clone = host_context.clone();
                 let namespace_vars_clone = current_namespace_vars.clone();
                 let namespace_clone = main_namespace.clone();
                 let computed_vars_clone = computed_vars_snapshot.clone();
@@ -8408,6 +8477,7 @@ impl VirtualMachine {
                             core_variables_clone,
                             conf_clone,
                         );
+                        task_vm.inherit_host_context(&host_context_clone);
 
                         // Share the failure state
                         task_vm.failure_state = failure_state_clone;
@@ -9564,6 +9634,12 @@ impl VirtualMachine {
 mod tests {
     use super::*;
     use crate::lang::bytecode::BytecodeProgram;
+    use crate::lang::compiler::Compiler;
+    use crate::lang::event::{Event, EventPublisher, ExecutionContext};
+    use crate::lang::parser::parse_hot;
+    use parking_lot::Mutex;
+    use std::future::Future;
+    use std::pin::Pin;
 
     #[test]
     fn test_vm_basic_execution() {
@@ -9644,5 +9720,81 @@ mod tests {
                 "scalar {scalar:?} must pass through prepare_call_arg unchanged"
             );
         }
+    }
+
+    struct RecordingEventPublisher {
+        event_types: Mutex<Vec<String>>,
+    }
+
+    impl EventPublisher for RecordingEventPublisher {
+        fn publish(&self, _ctx: &ExecutionContext, event: Event) {
+            self.event_types.lock().push(event.event_type);
+        }
+
+        fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn parallel_branches_inherit_event_publisher() {
+        let source = r#"
+            ::test ns
+
+            run fn () {
+                parallel {
+                    a call-lib(::hot::event/send, ["parallel:a", {}])
+                    b call-lib(::hot::event/send, ["parallel:b", {}])
+                }
+            }
+        "#;
+        let mut program = parse_hot(source).expect("test source should parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+
+        let bytecode = compiler.get_program_arc();
+        let recording_publisher = Arc::new(RecordingEventPublisher {
+            event_types: Mutex::new(Vec::new()),
+        });
+        let publisher: Arc<dyn EventPublisher> = recording_publisher.clone();
+        let env_id = uuid::Uuid::now_v7();
+        let stream_id = uuid::Uuid::now_v7();
+        let mut vm = VirtualMachine::new(
+            bytecode,
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        );
+        vm.set_execution_context(ExecutionContext::new(
+            uuid::Uuid::now_v7(),
+            stream_id,
+            4,
+            Some(env_id),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+        ));
+        vm.set_event_publisher(publisher.clone());
+        vm.execute().expect("module init should run");
+
+        let result = vm
+            .call_function_bypassing_unified_lookup("::test/run", &[])
+            .expect("parallel flow should run");
+
+        assert!(
+            !result.to_string().contains("no event publisher configured"),
+            "parallel branch lost event publisher: {result}"
+        );
+        let mut event_types = recording_publisher.event_types.lock().clone();
+        event_types.sort();
+        assert_eq!(
+            event_types,
+            vec!["parallel:a".to_string(), "parallel:b".to_string()]
+        );
     }
 }

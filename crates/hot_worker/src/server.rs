@@ -24,6 +24,25 @@ enum ClaimedWorkerQueue {
     Email(ProcessingQueueLease<Message>),
 }
 
+const WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 30;
+const LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 5;
+
+fn worker_queue_claimer_count(include_notifications: bool) -> usize {
+    if include_notifications { 4 } else { 2 }
+}
+
+fn worker_handoff_capacity(worker_count: usize) -> usize {
+    worker_count.max(1)
+}
+
+fn worker_shutdown_drain_timeout(is_local_dev: bool) -> tokio::time::Duration {
+    tokio::time::Duration::from_secs(if is_local_dev {
+        LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS
+    } else {
+        WORKER_SHUTDOWN_DRAIN_SECONDS
+    })
+}
+
 fn spawn_worker_queue_claimer(
     queue_name: &'static str,
     queue: ProcessingQueue<Message>,
@@ -4026,7 +4045,17 @@ pub async fn run_with_components_shared_context(
     // stream key (cluster-safe) and hands off at most one claimed lease at a
     // time into this bounded channel. Executors below provide the VM/run
     // concurrency bound.
-    let handoff_capacity = worker_count.max(1);
+    let claimer_count = worker_queue_claimer_count(db.is_some());
+    let handoff_capacity = worker_handoff_capacity(worker_count);
+    let redis_blocking_claim_connections = if matches!(queue_type, QueueType::Redis) {
+        claimer_count
+    } else {
+        0
+    };
+    info!(
+        "hot.dev: WORKER queue claimers enabled (claimers={}, executors={}, handoff_capacity={}, redis_blocking_claim_connections={})",
+        claimer_count, worker_count, handoff_capacity, redis_blocking_claim_connections,
+    );
     let (claimed_tx, claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(handoff_capacity);
     let claimed_rx = Arc::new(Mutex::new(claimed_rx));
     let mut worker_handles = Vec::new();
@@ -4248,11 +4277,13 @@ pub async fn run_with_components_shared_context(
 
                                                 debug!("TIMING: event {} dequeued, starting processing", event_message.id);
 
-                                                // SECURITY: Verify event exists in database and env_id matches
+                                                // SECURITY: Verify event exists in database and env_id matches.
+                                                // The queue carries a thin event envelope; hydrate the authoritative
+                                                // event_data from DB before routing/execution.
                                                 // This prevents attacks where a malicious actor with queue access
                                                 // injects messages with spoofed env_ids to trigger handlers in other environments
                                                 let event_id = event_message.body.event.event_id;
-                                                match hot::db::event::Event::get_event(db, &event_id).await {
+                                                let stored_event = match hot::db::event::Event::get_event(db, &event_id).await {
                                                     Ok(stored_event) => {
                                                         if stored_event.env_id != env_id {
                                                             let err_msg = format!(
@@ -4263,6 +4294,7 @@ pub async fn run_with_components_shared_context(
                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                         }
                                                         debug!("hot.dev: WORKER {} verified event {} belongs to env {}", worker_id, event_id, env_id);
+                                                        stored_event
                                                     }
                                                     Err(hot::db::event::EventError::NotFound) => {
                                                         // Event not in database - could be a race condition or malicious message
@@ -4283,7 +4315,26 @@ pub async fn run_with_components_shared_context(
                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                         return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                     }
-                                                }
+                                                };
+                                                let event_message = EventMessage {
+                                                    body: hot::lang::event::queue::EventMessageBody {
+                                                        event: hot::lang::event::Event {
+                                                            event_id: stored_event.event_id,
+                                                            env_id: stored_event.env_id,
+                                                            stream_id: stored_event.stream_id,
+                                                            event_type: stored_event.event_type,
+                                                            event_data: serde_json::from_value(
+                                                                stored_event.event_data,
+                                                            )
+                                                            .unwrap_or(hot::val::Val::Null),
+                                                            event_time: stored_event.event_time,
+                                                            target_project_id: event_message.body.event.target_project_id,
+                                                            target_project_name: event_message.body.event.target_project_name,
+                                                        },
+                                                        execution_context: event_message.body.execution_context,
+                                                    },
+                                                    ..event_message
+                                                };
 
                                                 debug!("TIMING: event {} security check done: {:?}", event_message.id, event_dequeue_time.elapsed());
 
@@ -5290,8 +5341,7 @@ pub async fn run_with_components_shared_context(
     // Phase 2: Signal all workers to shutdown and wait for them to complete
     let _ = shutdown_tx.send(true);
 
-    let worker_shutdown_timeout =
-        tokio::time::Duration::from_secs(if hot::env::is_local_dev() { 0 } else { 30 });
+    let worker_shutdown_timeout = worker_shutdown_drain_timeout(hot::env::is_local_dev());
     info!(
         "hot.dev: WORKER waiting for workers to complete (timeout: {}s)",
         worker_shutdown_timeout.as_secs()
@@ -5374,4 +5424,149 @@ pub async fn run_with_components_shared_context(
     info!("hot.dev: WORKER shutdown complete");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::val;
+
+    fn test_message() -> Message {
+        Message {
+            id: Uuid::now_v7(),
+            head: val!({
+                "__type": "RequestMessage",
+            }),
+            body: val!({
+                "ok": true,
+            }),
+        }
+    }
+
+    #[test]
+    fn worker_queue_claimer_count_tracks_notification_queues() {
+        assert_eq!(worker_queue_claimer_count(false), 2);
+        assert_eq!(worker_queue_claimer_count(true), 4);
+    }
+
+    #[test]
+    fn worker_handoff_capacity_never_drops_to_zero() {
+        assert_eq!(worker_handoff_capacity(0), 1);
+        assert_eq!(worker_handoff_capacity(4), 4);
+    }
+
+    #[test]
+    fn local_dev_shutdown_still_gets_a_drain_window() {
+        assert_eq!(
+            worker_shutdown_drain_timeout(true),
+            tokio::time::Duration::from_secs(LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS)
+        );
+        assert!(worker_shutdown_drain_timeout(true) > tokio::time::Duration::ZERO);
+        assert_eq!(
+            worker_shutdown_drain_timeout(false),
+            tokio::time::Duration::from_secs(WORKER_SHUTDOWN_DRAIN_SECONDS)
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_claimer_hands_off_one_lease_and_stops_on_shutdown() {
+        let queue_name = format!("worker-claimer-test-{}", Uuid::new_v4());
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        queue.enqueue(test_message()).await.unwrap();
+
+        let (claimed_tx, mut claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn_worker_queue_claimer(
+            "test:request",
+            queue,
+            claimed_tx,
+            shutdown_rx,
+            ClaimedWorkerQueue::Request,
+        );
+
+        let claimed = tokio::time::timeout(tokio::time::Duration::from_secs(1), claimed_rx.recv())
+            .await
+            .expect("claimer should hand off promptly")
+            .expect("claimer should send a lease");
+        let ClaimedWorkerQueue::Request(lease) = claimed else {
+            panic!("expected request lease");
+        };
+        let processed = lease
+            .process(|message| async move {
+                Ok::<Uuid, Box<dyn std::error::Error + Send + Sync>>(message.id)
+            })
+            .await
+            .unwrap();
+        assert!(processed.is_some());
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("claimer should stop on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_claimer_backpressure_leaves_backlog_visible() {
+        let queue_name = format!("worker-claimer-backpressure-test-{}", Uuid::new_v4());
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            queue.enqueue(test_message()).await.unwrap();
+        }
+
+        let (claimed_tx, mut claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn_worker_queue_claimer(
+            "test:request",
+            queue.clone(),
+            claimed_tx,
+            shutdown_rx,
+            ClaimedWorkerQueue::Request,
+        );
+
+        // With a channel capacity of 1 and no executor draining, the claimer
+        // may hold one extra lease while blocked on send, but it must not drain
+        // the entire queue into local memory.
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            loop {
+                if queue.len().await.unwrap() == 1 {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("backpressure should leave one queued item visible");
+
+        let first = claimed_rx
+            .recv()
+            .await
+            .expect("first lease should be buffered");
+        drop(first);
+        let second = claimed_rx
+            .recv()
+            .await
+            .expect("second lease should send after space opens");
+        drop(second);
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("claimer should stop on shutdown")
+            .unwrap()
+            .unwrap();
+    }
 }

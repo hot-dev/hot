@@ -367,14 +367,15 @@ impl From<EventMessage> for Message {
             "head": head_val
         });
 
-        // Convert event message body to Val
+        // Convert event message body to Val. Keep the queued event envelope
+        // intentionally thin: the worker hydrates authoritative event_data
+        // from the database by event_id before routing/execution.
         let body = crate::val!({
             "event": {
                 "event_id": event_msg.body.event.event_id.to_string(),
                 "env_id": event_msg.body.event.env_id.to_string(),
                 "stream_id": event_msg.body.event.stream_id.to_string(),
                 "event_type": event_msg.body.event.event_type,
-                "event_data": event_msg.body.event.event_data,
                 "event_time": event_msg.body.event.event_time.to_rfc3339(),
                 "target_project_id": event_msg.body.event.target_project_id.map(|id| id.to_string()),
                 "target_project_name": event_msg.body.event.target_project_name
@@ -460,10 +461,14 @@ impl TryFrom<Message> for EventMessage {
             .map_err(|e| format!("Invalid stream_id in event: {}", e))?;
 
         let event_type = event_val.get_str("event_type");
-        let event_data = event_val
-            .get("event_data")
-            .ok_or("Missing event_data")?
-            .clone();
+        // New queue messages are thin and omit event_data; older in-flight
+        // messages may still carry it. The worker hydrates from DB before
+        // execution, so a placeholder keeps parsing backward-compatible.
+        let event_data = event_val.get("event_data").unwrap_or_else(|| {
+            crate::val!({
+                "event_id": event_id.to_string(),
+            })
+        });
 
         let event_time_str = event_val.get_str("event_time");
         let event_time = chrono::DateTime::parse_from_rfc3339(&event_time_str)
@@ -1103,6 +1108,85 @@ mod tests {
 
         // Test shutdown
         assert!(combined_publisher.shutdown().await.is_ok());
+    }
+
+    #[test]
+    fn test_event_message_omits_event_data_from_queue_payload() {
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "test_event".to_string(),
+            crate::val!({
+                "large": "payload",
+                "nested": {
+                    "ok": true,
+                    "count": 3,
+                },
+            }),
+        );
+        let ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            4,
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+        let message: Message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: EventMessageBody {
+                event,
+                execution_context: ctx,
+            },
+        }
+        .into();
+
+        let event_val = message.body.get("event").expect("event envelope");
+        assert!(event_val.get("event_id").is_some());
+        assert!(event_val.get("event_data").is_none());
+    }
+
+    #[test]
+    fn test_thin_event_message_roundtrip_uses_placeholder_data() {
+        let event_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let run_id = Uuid::now_v7();
+        let message = Message {
+            id: event_id,
+            head: crate::val!({
+                "__type": "EventMessage",
+                "head": {},
+            }),
+            body: crate::val!({
+                "event": {
+                    "event_id": event_id.to_string(),
+                    "env_id": env_id.to_string(),
+                    "stream_id": stream_id.to_string(),
+                    "event_type": "test_event",
+                    "event_time": chrono::Utc::now().to_rfc3339(),
+                },
+                "execution_context": {
+                    "run_id": run_id.to_string(),
+                    "stream_id": stream_id.to_string(),
+                    "run_type_id": 4,
+                    "env_id": env_id.to_string(),
+                    "retry_attempt": 0,
+                },
+            }),
+        };
+
+        let parsed: EventMessage = message.try_into().unwrap();
+
+        assert_eq!(parsed.body.event.event_id, event_id);
+        assert_eq!(parsed.body.event.env_id, env_id);
+        assert_eq!(parsed.body.event.event_type, "test_event");
+        assert_eq!(
+            parsed.body.event.event_data.get_str("event_id"),
+            event_id.to_string()
+        );
     }
 
     #[test]
