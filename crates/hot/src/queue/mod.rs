@@ -244,6 +244,34 @@ pub enum ProcessingQueue<T> {
     Redis(Box<streams::RedisStreamQueue<T>>),
 }
 
+pub enum ProcessingQueueLease<T>
+where
+    T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
+{
+    Memory(mem::MemQueueLease<T>),
+    Redis(Box<streams::RedisQueueLease<T>>),
+}
+
+impl<T> ProcessingQueueLease<T>
+where
+    T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
+{
+    pub async fn process<F, Fut, R>(
+        self,
+        worker: F,
+    ) -> Result<Option<R>, Box<dyn Error + Send + Sync>>
+    where
+        F: FnOnce(T) -> Fut + Send,
+        Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
+        R: Send + Sync,
+    {
+        match self {
+            ProcessingQueueLease::Memory(lease) => lease.process(worker).await,
+            ProcessingQueueLease::Redis(lease) => lease.process(worker).await,
+        }
+    }
+}
+
 impl<T: Clone> Clone for ProcessingQueue<T> {
     fn clone(&self) -> Self {
         match self {
@@ -414,15 +442,39 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Blocking variant of `dequeue_and_work` intended for `tokio::select!` loops.
+    /// Claim one item, parking until work is available.
+    ///
+    /// The returned lease must be processed to completion. Dropping it is only
+    /// a best-effort recovery path: memory queues try to re-enqueue, while
+    /// Redis queues leave the stream entry pending for redelivery.
+    pub async fn claim_blocking(
+        &self,
+    ) -> Result<Option<ProcessingQueueLease<T>>, Box<dyn Error + Send + Sync>>
+    where
+        T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        match self {
+            ProcessingQueue::Memory(q) => Ok(Some(ProcessingQueueLease::Memory(
+                q.claim_blocking().await?,
+            ))),
+            ProcessingQueue::Redis(q) => Ok(q
+                .claim_blocking()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+                .map(|lease| ProcessingQueueLease::Redis(Box::new(lease)))),
+        }
+    }
+
+    /// Blocking variant of `dequeue_and_work`.
     ///
     /// - Memory: parks the future on the underlying channel until a message
     ///   is enqueued (or the channel closes).
     /// - Redis: delegates to `dequeue_and_work`; the internal `XREADGROUP BLOCK`
     ///   provides the natural park time.
     ///
-    /// Use this in worker loops that race multiple queues with shutdown via
-    /// `tokio::select!` to wake instantly on enqueue without polling.
+    /// Do not race this full claim+process future as a losing branch in
+    /// `tokio::select!`; use `claim_blocking` and process the winning lease
+    /// explicitly if the wait must be cancellation-safe.
     pub async fn process_blocking<F, Fut, R>(
         &self,
         worker: F,

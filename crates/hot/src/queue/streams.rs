@@ -459,6 +459,25 @@ impl<T> RedisStreamQueue<T> {
         self
     }
 
+    fn clone_for_lease(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            cached_conn: Arc::clone(&self.cached_conn),
+            stream_name: self.stream_name.clone(),
+            consumer_group: self.consumer_group.clone(),
+            consumer_name: self.consumer_name.clone(),
+            dlq_stream: self.dlq_stream.clone(),
+            serialization: self.serialization,
+            consumer_group_ensured: Arc::clone(&self.consumer_group_ensured),
+            prefetched: Arc::clone(&self.prefetched),
+            refill_lock: Arc::clone(&self.refill_lock),
+            in_flight: Arc::clone(&self.in_flight),
+            read_batch_size: self.read_batch_size,
+            startup_window_ms: self.startup_window_ms,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     /// Number of messages currently in-flight for the consumer group.
     /// (i.e. delivered to *some* consumer but not yet ACKed). Useful for
     /// monitoring backpressure independently of total queue depth.
@@ -1635,7 +1654,18 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
-        self.process_inner(worker, PROCESS_BLOCKING_MS).await
+        match self.claim_with(PROCESS_BLOCKING_MS).await? {
+            Some(lease) => lease.process(worker).await,
+            None => Ok(None),
+        }
+    }
+
+    pub async fn claim_blocking(&self) -> Result<Option<RedisQueueLease<T>>, StreamsQueueError> {
+        self.claim_with(PROCESS_BLOCKING_MS).await
+    }
+
+    pub async fn claim_now(&self) -> Result<Option<RedisQueueLease<T>>, StreamsQueueError> {
+        self.claim_with(0).await
     }
 
     /// Try to refill the prefetch buffer. Returns true if the buffer is
@@ -1764,6 +1794,16 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
+        match self.claim_with(block_ms).await? {
+            Some(lease) => lease.process(worker).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn claim_with(
+        &self,
+        block_ms: u64,
+    ) -> Result<Option<RedisQueueLease<T>>, StreamsQueueError> {
         // Cached after the first call — no Redis round-trip on the hot path.
         // The dedicated janitor task in `hot_worker::server` runs XAUTOCLAIM
         // periodically across all queues, so we don't pay that cost here.
@@ -1792,23 +1832,18 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             }
         };
 
-        // Mark this message as in-flight so any concurrent `refill_prefetch`
-        // that re-reads our PEL while we're still processing won't see it
-        // as fresh work and re-buffer it for a sibling worker. Guaranteed
-        // to be cleared by the unconditional `remove(&msg_id)` after the
-        // inner block, regardless of which exit path we take (success,
-        // worker failure, retry-exhaustion DLQ, deserialize-error DLQ, or
-        // an `?`-propagated transport error).
-        {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight.insert(msg_id.clone());
-        }
+        // Mark this message as in-flight so any concurrent refill that
+        // re-reads our PEL while we're still processing won't see it as fresh
+        // work and re-buffer it for a sibling worker.
+        self.in_flight.lock().await.insert(msg_id.clone());
 
-        let result = self
-            .process_one(msg_id.clone(), payload, source, worker)
-            .await;
-        self.in_flight.lock().await.remove(&msg_id);
-        result
+        Ok(Some(RedisQueueLease {
+            queue: self.clone_for_lease(),
+            msg_id: Some(msg_id),
+            payload: Some(payload),
+            source,
+            completed: false,
+        }))
     }
 
     /// Inner half of `process_inner`: runs delivery-count check, DLQ
@@ -2095,6 +2130,74 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             .map(|v| redis::from_redis_value_ref(&v).unwrap_or_default())?;
 
         Ok(())
+    }
+}
+
+pub struct RedisQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    queue: RedisStreamQueue<T>,
+    msg_id: Option<String>,
+    payload: Option<Vec<u8>>,
+    source: FetchSource,
+    completed: bool,
+}
+
+impl<T> RedisQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    pub async fn process<F, Fut, R>(
+        mut self,
+        worker: F,
+    ) -> Result<Option<R>, Box<dyn Error + Send + Sync>>
+    where
+        F: FnOnce(T) -> Fut + Send,
+        Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
+        R: Send + Sync,
+    {
+        let msg_id = self
+            .msg_id
+            .take()
+            .expect("redis queue lease already completed");
+        let payload = self
+            .payload
+            .take()
+            .expect("redis queue lease already completed");
+        let result = self
+            .queue
+            .process_one(msg_id.clone(), payload, self.source, worker)
+            .await;
+        self.queue.in_flight.lock().await.remove(&msg_id);
+        self.completed = true;
+        result
+    }
+}
+
+impl<T> Drop for RedisQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let Some(msg_id) = self.msg_id.take() else {
+            return;
+        };
+        match self.queue.in_flight.try_lock() {
+            Ok(mut in_flight) => {
+                in_flight.remove(&msg_id);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    queue = self.queue.stream_name,
+                    message_id = msg_id,
+                    "Dropped Redis queue lease before completion; message remains pending for redelivery"
+                );
+            }
+        }
     }
 }
 
@@ -2390,6 +2493,38 @@ mod tests {
             xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
             0,
             "all entries should be ACKed and out of PEL"
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_claim_blocking_processes_and_acks_message() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_claim_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_read_batch_size(1);
+
+        queue.enqueue(42).await.unwrap();
+        let lease = queue
+            .claim_blocking()
+            .await
+            .unwrap()
+            .expect("message should be claimed");
+        let got = lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+
+        assert_eq!(got, Some(42));
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0,
+            "processed lease should be ACKed"
         );
 
         cleanup(&client, &queue_name).await;

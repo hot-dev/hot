@@ -3,19 +3,88 @@ use futures::future::join_all;
 use hot::data::msg::Message;
 use hot::data::serialization::Serialization;
 use hot::lang::event::EventMessage;
-use hot::queue::{ProcessingQueue, Queue, QueueProcessor, QueueType};
+use hot::queue::{ProcessingQueue, ProcessingQueueLease, Queue, QueueType};
 use hot::val;
 use hot::val::Val;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 pub type DevContextStorage = Arc<RwLock<Option<AHashMap<String, hot::val::Val>>>>;
+
+enum ClaimedWorkerQueue {
+    Request(ProcessingQueueLease<Message>),
+    Event(ProcessingQueueLease<Message>),
+    Alert(ProcessingQueueLease<Message>),
+    Email(ProcessingQueueLease<Message>),
+}
+
+fn spawn_worker_queue_claimer(
+    queue_name: &'static str,
+    queue: ProcessingQueue<Message>,
+    claimed_tx: mpsc::Sender<ClaimedWorkerQueue>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    wrap: fn(ProcessingQueueLease<Message>) -> ClaimedWorkerQueue,
+) -> JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> {
+    tokio::spawn(async move {
+        info!("hot.dev: WORKER {} claimer started", queue_name);
+
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            let lease = match &queue {
+                ProcessingQueue::Memory(_) => {
+                    tokio::select! {
+                        biased;
+
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                            continue;
+                        }
+                        result = queue.claim_blocking() => {
+                            match result {
+                                Ok(Some(lease)) => lease,
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    debug!("hot.dev: WORKER {} claimer error: {}", queue_name, e);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                ProcessingQueue::Redis(_) => match queue.claim_blocking().await {
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        debug!("hot.dev: WORKER {} claimer error: {}", queue_name, e);
+                        continue;
+                    }
+                },
+            };
+
+            if claimed_tx.send(wrap(lease)).await.is_err() {
+                debug!(
+                    "hot.dev: WORKER {} claimer stopping because executors are gone",
+                    queue_name
+                );
+                break;
+            }
+        }
+
+        info!("hot.dev: WORKER {} claimer stopped", queue_name);
+        Ok(())
+    })
+}
 
 // Add imports for database operations and event handler execution
 use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project};
@@ -3953,41 +4022,74 @@ pub async fn run_with_components_shared_context(
         });
     }
 
-    // Spawn notification worker (alert deliveries + app emails via queues)
-    // Only if database is configured (needed for delivery status updates)
-    // Skip in local dev - alerts/emails are not sent locally
-    if !hot::env::is_local_dev()
-        && let Some(db_arc) = db.clone()
-    {
-        crate::notification_worker::spawn_notification_worker(
-            db_arc,
-            worker_conf.clone(),
-            alert_queue.clone(),
-            email_queue.clone(),
-            shutdown_rx.clone(),
-        );
-    }
-
-    // Spawn multiple worker tasks. `consumer_prefix` was computed earlier so
-    // the admin consumer names could be pinned to w0's identity.
+    // Spawn one claimer per queue. Each claimer blocks on exactly one Redis
+    // stream key (cluster-safe) and hands off at most one claimed lease at a
+    // time into this bounded channel. Executors below provide the VM/run
+    // concurrency bound.
+    let handoff_capacity = worker_count.max(1);
+    let (claimed_tx, claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(handoff_capacity);
+    let claimed_rx = Arc::new(Mutex::new(claimed_rx));
     let mut worker_handles = Vec::new();
 
+    worker_handles.push(spawn_worker_queue_claimer(
+        "hot:request",
+        request_queue
+            .clone()
+            .with_consumer_name(admin_request_name.clone()),
+        claimed_tx.clone(),
+        shutdown_rx.clone(),
+        ClaimedWorkerQueue::Request,
+    ));
+    worker_handles.push(spawn_worker_queue_claimer(
+        "hot:event",
+        event_queue
+            .clone()
+            .with_consumer_name(admin_event_name.clone()),
+        claimed_tx.clone(),
+        shutdown_rx.clone(),
+        ClaimedWorkerQueue::Event,
+    ));
+    if db.is_some() {
+        worker_handles.push(spawn_worker_queue_claimer(
+            "hot:alert",
+            alert_queue
+                .clone()
+                .with_consumer_name(admin_alert_name.clone()),
+            claimed_tx.clone(),
+            shutdown_rx.clone(),
+            ClaimedWorkerQueue::Alert,
+        ));
+        worker_handles.push(spawn_worker_queue_claimer(
+            "hot:email",
+            email_queue
+                .clone()
+                .with_consumer_name(admin_email_name.clone()),
+            claimed_tx.clone(),
+            shutdown_rx.clone(),
+            ClaimedWorkerQueue::Email,
+        ));
+    }
+    drop(claimed_tx);
+
+    // Spawn bounded executor tasks. Queue consumers live in the claimers above;
+    // these handles are only for enqueue/admin maintenance paths.
     for worker_id in 0..worker_count {
         let request_queue_clone = request_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-request", consumer_prefix, worker_id));
+            .with_consumer_name(admin_request_name.clone());
         let response_queue_clone = response_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-response", consumer_prefix, worker_id));
+            .with_consumer_name(admin_response_name.clone());
         let event_queue_clone = event_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-event", consumer_prefix, worker_id));
+            .with_consumer_name(admin_event_name.clone());
         let alert_queue_clone = alert_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-alert", consumer_prefix, worker_id));
+            .with_consumer_name(admin_alert_name.clone());
         let email_queue_clone = email_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-email", consumer_prefix, worker_id));
+            .with_consumer_name(admin_email_name.clone());
+        let claimed_rx_clone = claimed_rx.clone();
         let db_clone = db.clone();
         let worker_conf_clone = worker_conf.clone();
         let emitter_clone = emitter.clone();
@@ -3995,7 +4097,6 @@ pub async fn run_with_components_shared_context(
         let encryption_clone = encryption.clone();
         let cache_clone = shared_cache.clone();
         let build_path_cache_clone = build_path_cache.clone();
-        let shutdown_rx_clone = shutdown_rx.clone();
         let shutdown_coordinator_clone = shutdown_coordinator.clone();
         let dev_context_storage_clone = dev_context_storage.clone();
         let stream_publisher_clone = stream_publisher.clone();
@@ -4014,38 +4115,21 @@ pub async fn run_with_components_shared_context(
             async move {
                 info!("hot.dev: WORKER {} started", worker_id);
 
-                let mut shutdown_rx_loop = shutdown_rx_clone.clone();
                 loop {
-                    // Check for shutdown signal first
-                    if shutdown_coordinator_clone.is_shutting_down() || *shutdown_rx_loop.borrow() {
-                        debug!(
-                            "hot.dev: WORKER {} shutting down, unregistering consumers",
-                            worker_id
-                        );
-                        // Unregister our consumers so they don't accumulate as zombies
-                        {
-                            use hot::queue::ConsumerLifecycle;
-                            for queue in [
-                                &event_queue_clone as &dyn ConsumerLifecycle,
-                                &request_queue_clone,
-                                &response_queue_clone,
-                                &alert_queue_clone,
-                                &email_queue_clone,
-                            ] {
-                                let _ = queue.unregister_consumer().await;
-                            }
-                        }
+                    let claimed_queue = {
+                        let mut claimed_rx = claimed_rx_clone.lock().await;
+                        claimed_rx.recv().await
+                    };
+
+                    let Some(claimed_queue) = claimed_queue else {
+                        debug!("hot.dev: WORKER {} executor stopping", worker_id);
                         break;
-                    }
+                    };
 
-                    // Track whether any queue produced work this iteration so we
-                    // can sleep briefly when fully idle (avoids hot-loop on the
-                    // in-process Memory queues which return immediately when
-                    // empty).
-                    let mut processed_any = false;
-
-                    // Process ONE request message (atomic operation)
-                    match request_queue_clone.dequeue_and_work(|message| {
+                    match claimed_queue {
+                        ClaimedWorkerQueue::Request(lease) => {
+                            // Process ONE request message (atomic operation)
+                            match lease.process(|message| {
                         // Clone the response queue for use inside the async closure
                         let response_queue = response_queue_clone.clone();
                         async move {
@@ -4091,19 +4175,18 @@ pub async fn run_with_components_shared_context(
                         }
                     }).await {
                         Ok(Some(_)) => {
-                            processed_any = true;
                         },
                         Ok(None) => {
                             // No messages in queue - continue to events
                         },
                         Err(e) => {
-                            processed_any = true;
                             info!("hot.dev: WORKER {} error processing request message: {}", worker_id, e);
                         }
                     }
-
-                    // Process ONE event message (atomic operation)
-                    match event_queue_clone.dequeue_and_work(|message| {
+                        }
+                        ClaimedWorkerQueue::Event(lease) => {
+                            // Process ONE event message (atomic operation)
+                            match lease.process(|message| {
                                 let db_ref = db_clone.clone();
                                 let worker_conf_ref = worker_conf_clone.clone();
                                 let _emitter_ref = emitter_clone.clone();
@@ -5028,21 +5111,20 @@ pub async fn run_with_components_shared_context(
                                 }
                             }).await {
                                 Ok(Some(_)) => {
-                                    processed_any = true;
                                 },
                                 Ok(None) => {
                                     // No events in queue - continue to next iteration
                                 },
                                 Err(e) => {
-                                    processed_any = true;
                                     debug!("hot.dev: WORKER {} error processing event: {}", worker_id, e);
                                 }
                             }
-
-                    // Process ONE alert delivery from hot:alert queue (if any)
-                    // This allows main workers to help with alert processing when idle
-                    if let Some(ref db_ref) = db_clone {
-                        match alert_queue_clone.dequeue_and_work(|message| {
+                        }
+                        ClaimedWorkerQueue::Alert(lease) => {
+                            // Process ONE alert delivery from hot:alert queue (if any)
+                            // This allows main workers to help with alert processing when idle
+                            if let Some(ref db_ref) = db_clone {
+                                match lease.process(|message| {
                             let db = db_ref.clone();
                             let worker_conf = worker_conf_clone.clone();
                             async move {
@@ -5101,18 +5183,18 @@ pub async fn run_with_components_shared_context(
                                 }
                             }
                         }).await {
-                            Ok(Some(_)) => { processed_any = true; },
+                            Ok(Some(_)) => {},
                             Ok(None) => { /* no alerts in queue */ },
                             Err(e) => {
-                                processed_any = true;
                                 tracing::debug!("hot.dev: WORKER {} alert queue error: {}", worker_id, e);
                             }
                         }
-                    }
-
-                    // Process ONE app email from hot:email queue (if any)
-                    if let Some(ref db_ref) = db_clone {
-                        match email_queue_clone.dequeue_and_work(|message| {
+                            }
+                        }
+                        ClaimedWorkerQueue::Email(lease) => {
+                            // Process ONE app email from hot:email queue (if any)
+                            if let Some(ref db_ref) = db_clone {
+                                match lease.process(|message| {
                             let db = db_ref.clone();
                             let worker_conf = worker_conf_clone.clone();
                             async move {
@@ -5171,26 +5253,13 @@ pub async fn run_with_components_shared_context(
                                 Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
                             }
                         }).await {
-                            Ok(Some(_)) => { processed_any = true; },
+                            Ok(Some(_)) => {},
                             Ok(None) => { /* no emails in queue */ },
                             Err(e) => {
-                                processed_any = true;
                                 tracing::debug!("hot.dev: WORKER {} email queue error: {}", worker_id, e);
                             }
                         }
-                    }
-
-                    // Idle backoff: race shutdown signal vs a brief sleep so we
-                    // wake instantly on shutdown but don't hot-loop. The Redis
-                    // `dequeue_and_work` path uses BLOCK=0 (non-blocking) so
-                    // this backoff applies in both Memory and Redis modes when
-                    // every queue is empty. The longer BLOCK window is reserved
-                    // for `process_blocking`, used by the dedicated task worker.
-                    if !processed_any {
-                        tokio::select! {
-                            biased;
-                            _ = shutdown_rx_loop.changed() => {}
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                            }
                         }
                     }
                 }
@@ -5213,6 +5282,10 @@ pub async fn run_with_components_shared_context(
     {
         error!("hot.dev: WORKER graceful shutdown error: {}", e);
     }
+    debug!(
+        "hot.dev: WORKER graceful shutdown flag set: {}",
+        shutdown_coordinator.is_shutting_down()
+    );
 
     // Phase 2: Signal all workers to shutdown and wait for them to complete
     let _ = shutdown_tx.send(true);
@@ -5223,25 +5296,59 @@ pub async fn run_with_components_shared_context(
         "hot.dev: WORKER waiting for workers to complete (timeout: {}s)",
         worker_shutdown_timeout.as_secs()
     );
-    match tokio::time::timeout(worker_shutdown_timeout, join_all(&mut worker_handles)).await {
-        Ok(results) => {
-            info!("hot.dev: WORKER all workers completed gracefully");
-            for (i, result) in results.into_iter().enumerate() {
-                if let Err(e) = result {
-                    error!("hot.dev: WORKER {} task error: {}", i, e);
+    let workers_drained =
+        match tokio::time::timeout(worker_shutdown_timeout, join_all(&mut worker_handles)).await {
+            Ok(results) => {
+                info!("hot.dev: WORKER all workers completed gracefully");
+                for (i, result) in results.into_iter().enumerate() {
+                    if let Err(e) = result {
+                        error!("hot.dev: WORKER {} task error: {}", i, e);
+                    }
                 }
+                true
+            }
+            Err(_) => {
+                warn!(
+                    "hot.dev: WORKER shutdown timeout ({}s), aborting remaining worker tasks",
+                    worker_shutdown_timeout.as_secs()
+                );
+                for handle in &worker_handles {
+                    handle.abort();
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                drop(worker_handles);
+                false
+            }
+        };
+
+    if workers_drained {
+        use hot::queue::ConsumerLifecycle;
+        for queue in [
+            &event_queue
+                .clone()
+                .with_consumer_name(admin_event_name.clone()) as &dyn ConsumerLifecycle,
+            &request_queue
+                .clone()
+                .with_consumer_name(admin_request_name.clone()),
+        ] {
+            if let Err(e) = queue.unregister_consumer().await {
+                warn!("hot.dev: WORKER failed to unregister consumer: {}", e);
             }
         }
-        Err(_) => {
-            warn!(
-                "hot.dev: WORKER shutdown timeout ({}s), aborting remaining worker tasks",
-                worker_shutdown_timeout.as_secs()
-            );
-            for handle in &worker_handles {
-                handle.abort();
+        if db.is_some() {
+            for queue in [
+                &alert_queue
+                    .clone()
+                    .with_consumer_name(admin_alert_name.clone())
+                    as &dyn ConsumerLifecycle,
+                &email_queue
+                    .clone()
+                    .with_consumer_name(admin_email_name.clone()),
+            ] {
+                if let Err(e) = queue.unregister_consumer().await {
+                    warn!("hot.dev: WORKER failed to unregister consumer: {}", e);
+                }
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            drop(worker_handles);
         }
     }
 
