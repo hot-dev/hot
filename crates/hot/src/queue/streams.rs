@@ -2191,6 +2191,20 @@ where
                 in_flight.remove(&msg_id);
             }
             Err(_) => {
+                let in_flight = Arc::clone(&self.queue.in_flight);
+                let queue = self.queue.stream_name.clone();
+                let message_id = msg_id.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        in_flight.lock().await.remove(&message_id);
+                        tracing::warn!(
+                            queue = queue,
+                            message_id = message_id,
+                            "Dropped Redis queue lease before completion; removed in-flight marker asynchronously"
+                        );
+                    });
+                    return;
+                }
                 tracing::warn!(
                     queue = self.queue.stream_name,
                     message_id = msg_id,
@@ -2319,6 +2333,39 @@ mod tests {
                 .query_async(&mut conn)
                 .await;
         }
+    }
+
+    #[tokio::test]
+    async fn dropped_redis_lease_clears_in_flight_when_lock_is_busy() {
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let queue_name = format!("test_stream_drop_busy_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<i64>::new(client, queue_name);
+        let msg_id = "1-0".to_string();
+        queue.in_flight.lock().await.insert(msg_id.clone());
+
+        let guard = queue.in_flight.lock().await;
+        let lease = RedisQueueLease {
+            queue: queue.clone_for_lease(),
+            msg_id: Some(msg_id.clone()),
+            payload: Some(Vec::new()),
+            source: FetchSource::Fresh,
+            completed: false,
+        };
+
+        drop(lease);
+        assert!(guard.contains(&msg_id));
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !queue.in_flight.lock().await.contains(&msg_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropped lease should clear in-flight marker");
     }
 
     #[tokio::test]

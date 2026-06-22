@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 pub type DevContextStorage = Arc<RwLock<Option<AHashMap<String, hot::val::Val>>>>;
+type WorkerError = Box<dyn std::error::Error + Send + Sync>;
 
 enum ClaimedWorkerQueue {
     Request(ProcessingQueueLease<Message>),
@@ -43,13 +44,17 @@ fn worker_shutdown_drain_timeout(is_local_dev: bool) -> tokio::time::Duration {
     })
 }
 
+fn worker_error(message: impl Into<String>) -> WorkerError {
+    Box::new(std::io::Error::other(message.into()))
+}
+
 fn spawn_worker_queue_claimer(
     queue_name: &'static str,
     queue: ProcessingQueue<Message>,
     claimed_tx: mpsc::Sender<ClaimedWorkerQueue>,
     mut shutdown_rx: watch::Receiver<bool>,
     wrap: fn(ProcessingQueueLease<Message>) -> ClaimedWorkerQueue,
-) -> JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> {
+) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
         info!("hot.dev: WORKER {} claimer started", queue_name);
 
@@ -780,6 +785,78 @@ fn extract_target_function_from_event(event_data: &Val) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+async fn hydrate_event_message_from_db(
+    worker_id: usize,
+    db: &DatabasePool,
+    event_message: EventMessage,
+) -> Result<EventMessage, WorkerError> {
+    let env_id = event_message.body.event.env_id;
+    let event_id = event_message.body.event.event_id;
+
+    // The queue carries a thin event envelope. Load the authoritative event
+    // from DB, ensure its env_id matches the queue message, then route using
+    // hydrated event_data.
+    let stored_event = match hot::db::event::Event::get_event(db, &event_id).await {
+        Ok(stored_event) => {
+            if stored_event.env_id != env_id {
+                let err_msg = format!(
+                    "Event env_id mismatch - message claims {} but event {} belongs to {}",
+                    env_id, event_id, stored_event.env_id
+                );
+                error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                return Err(worker_error(err_msg));
+            }
+            debug!(
+                "hot.dev: WORKER {} verified event {} belongs to env {}",
+                worker_id, event_id, env_id
+            );
+            stored_event
+        }
+        Err(hot::db::event::EventError::NotFound) => {
+            let err_msg = format!(
+                "Event {} not found in database - cannot verify env_id",
+                event_id
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            return Err(worker_error(err_msg));
+        }
+        Err(e) => {
+            let err_msg = format!(
+                "Failed to verify event {} env_id - database error: {}",
+                event_id, e
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            return Err(worker_error(err_msg));
+        }
+    };
+
+    let event_data: Val = serde_json::from_value(stored_event.event_data).map_err(|e| {
+        let err_msg = format!(
+            "Invalid event_data for event {} - cannot hydrate queued event: {}",
+            event_id, e
+        );
+        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+        worker_error(err_msg)
+    })?;
+
+    Ok(EventMessage {
+        body: hot::lang::event::queue::EventMessageBody {
+            event: hot::lang::event::Event {
+                event_id: stored_event.event_id,
+                env_id: stored_event.env_id,
+                stream_id: stored_event.stream_id,
+                event_type: stored_event.event_type,
+                event_data,
+                event_time: stored_event.event_time,
+                target_project_id: event_message.body.event.target_project_id,
+                target_project_name: event_message.body.event.target_project_name,
+            },
+            execution_context: event_message.body.execution_context,
+        },
+        ..event_message
+    })
 }
 
 /// IDs extracted from an orphaned queue message
@@ -4262,6 +4339,8 @@ pub async fn run_with_components_shared_context(
                                             // Convert to EventMessage and process
                                             let event_message: EventMessage = message.try_into()
                                                 .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
+                                            let received_event_type =
+                                                event_message.body.event.event_type.clone();
 
                                             // Log the received event message (keep run_id/event_id/fn visible, hide event_data)
                                             debug!("hot.dev: WORKER {} received event: id={} type={} (event.created_at={})",
@@ -4277,64 +4356,13 @@ pub async fn run_with_components_shared_context(
 
                                                 debug!("TIMING: event {} dequeued, starting processing", event_message.id);
 
-                                                // SECURITY: Verify event exists in database and env_id matches.
-                                                // The queue carries a thin event envelope; hydrate the authoritative
-                                                // event_data from DB before routing/execution.
-                                                // This prevents attacks where a malicious actor with queue access
-                                                // injects messages with spoofed env_ids to trigger handlers in other environments
-                                                let event_id = event_message.body.event.event_id;
-                                                let stored_event = match hot::db::event::Event::get_event(db, &event_id).await {
-                                                    Ok(stored_event) => {
-                                                        if stored_event.env_id != env_id {
-                                                            let err_msg = format!(
-                                                                "Security: env_id mismatch - message claims {} but event {} belongs to {}",
-                                                                env_id, event_id, stored_event.env_id
-                                                            );
-                                                            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                            return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                        }
-                                                        debug!("hot.dev: WORKER {} verified event {} belongs to env {}", worker_id, event_id, env_id);
-                                                        stored_event
-                                                    }
-                                                    Err(hot::db::event::EventError::NotFound) => {
-                                                        // Event not in database - could be a race condition or malicious message
-                                                        // For internal events (hot:call, hot:schedule), the event should exist
-                                                        // For API-published events, the event is written before queueing
-                                                        let err_msg = format!(
-                                                            "Security: event {} not found in database - cannot verify env_id",
-                                                            event_id
-                                                        );
-                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                    }
-                                                    Err(e) => {
-                                                        let err_msg = format!(
-                                                            "Security: failed to verify event {} env_id - database error: {}",
-                                                            event_id, e
-                                                        );
-                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                    }
-                                                };
-                                                let event_message = EventMessage {
-                                                    body: hot::lang::event::queue::EventMessageBody {
-                                                        event: hot::lang::event::Event {
-                                                            event_id: stored_event.event_id,
-                                                            env_id: stored_event.env_id,
-                                                            stream_id: stored_event.stream_id,
-                                                            event_type: stored_event.event_type,
-                                                            event_data: serde_json::from_value(
-                                                                stored_event.event_data,
-                                                            )
-                                                            .unwrap_or(hot::val::Val::Null),
-                                                            event_time: stored_event.event_time,
-                                                            target_project_id: event_message.body.event.target_project_id,
-                                                            target_project_name: event_message.body.event.target_project_name,
-                                                        },
-                                                        execution_context: event_message.body.execution_context,
-                                                    },
-                                                    ..event_message
-                                                };
+                                                let event_message =
+                                                    hydrate_event_message_from_db(
+                                                        worker_id,
+                                                        db,
+                                                        event_message,
+                                                    )
+                                                    .await?;
 
                                                 debug!("TIMING: event {} security check done: {:?}", event_message.id, event_dequeue_time.elapsed());
 
@@ -4588,7 +4616,7 @@ pub async fn run_with_components_shared_context(
 
                                             debug!("hot.dev: WORKER {} processed event '{}' successfully",
                                                 worker_id,
-                                                event_message.body.event.event_type);
+                                                received_event_type);
                                         },
                                         "DeploymentMessage" => {
                                             // Convert to DeploymentMessage and process
@@ -5431,6 +5459,27 @@ mod tests {
     use super::*;
     use hot::val;
 
+    async fn migrated_sqlite_file_db() -> (DatabasePool, PathBuf) {
+        let db_path =
+            std::env::temp_dir().join(format!("hot-worker-test-{}.sqlite", Uuid::new_v4()));
+        let db_uri = format!("sqlite:{}", db_path.display());
+        let conf = val!({
+            "db": {
+                "uri": db_uri,
+                "schema": "hot",
+            },
+        });
+
+        hot::db::run_migrations(&conf)
+            .await
+            .expect("migrations should run");
+        let db = hot::db::create_db_pool(&conf)
+            .await
+            .expect("db pool should open");
+
+        (db, db_path)
+    }
+
     fn test_message() -> Message {
         Message {
             id: Uuid::now_v7(),
@@ -5466,6 +5515,79 @@ mod tests {
             worker_shutdown_drain_timeout(false),
             tokio::time::Duration::from_secs(WORKER_SHUTDOWN_DRAIN_SECONDS)
         );
+    }
+
+    #[tokio::test]
+    async fn thin_event_message_hydrates_event_data_from_db_before_routing() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let target_fn = "::demo::run-all/run-all-demos";
+        let event_time = chrono::Utc::now();
+        let db_event_data = serde_json::json!({
+            "fn": target_fn,
+            "args": [],
+        });
+
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &test_data.env_id,
+            &stream_id,
+            "hot:call",
+            &db_event_data,
+            event_time,
+            &test_data.user_id,
+            None,
+        )
+        .await
+        .expect("event should insert");
+
+        let thin_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: test_data.env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "event_id": event_id.to_string(),
+                    }),
+                    event_time,
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(test_data.env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+
+        let hydrated = hydrate_event_message_from_db(0, &db, thin_message)
+            .await
+            .expect("thin event should hydrate");
+
+        assert_eq!(hydrated.body.event.event_data.get_str("fn"), target_fn);
+        assert_eq!(
+            extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
+            Some(target_fn)
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
