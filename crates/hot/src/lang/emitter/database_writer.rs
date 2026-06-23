@@ -849,27 +849,14 @@ ON CONFLICT (call_id) DO UPDATE SET
             return Err(e);
         }
 
-        // Mark event as handled
-        if let Some(evt_id) = ctx.event_id {
-            match crate::db::Event::get_event(pool, &evt_id).await {
-                Ok(evt) if !evt.handled => {
-                    if let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await {
-                        tracing::error!(
-                            "DatabaseWriter: Failed to mark event {} as handled: {}",
-                            evt_id,
-                            e
-                        );
-                    }
-                }
-                Ok(_) => {} // Already handled
-                Err(e) => {
-                    tracing::error!(
-                        "DatabaseWriter: Failed to get event {} for marking as handled: {}",
-                        evt_id,
-                        e
-                    );
-                }
-            }
+        if let Some(evt_id) = ctx.event_id
+            && let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await
+        {
+            tracing::error!(
+                "DatabaseWriter: Failed to mark event {} as handled: {}",
+                evt_id,
+                e
+            );
         }
 
         // Update stream metrics
@@ -959,26 +946,14 @@ ON CONFLICT (call_id) DO UPDATE SET
             Self::write_run_stop(pool, ctx.run_id, stop_time, result).await?;
         }
 
-        if let Some(evt_id) = ctx.event_id {
-            match crate::db::Event::get_event(pool, &evt_id).await {
-                Ok(evt) if !evt.handled => {
-                    if let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await {
-                        tracing::error!(
-                            "DatabaseWriter: Failed to mark event {} as handled: {}",
-                            evt_id,
-                            e
-                        );
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!(
-                        "DatabaseWriter: Failed to get event {} for marking as handled: {}",
-                        evt_id,
-                        e
-                    );
-                }
-            }
+        if let Some(evt_id) = ctx.event_id
+            && let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await
+        {
+            tracing::error!(
+                "DatabaseWriter: Failed to mark event {} as handled: {}",
+                evt_id,
+                e
+            );
         }
 
         crate::db::stream::Stream::update_metrics(pool, &ctx.stream_id)

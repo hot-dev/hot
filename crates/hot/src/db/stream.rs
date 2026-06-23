@@ -160,6 +160,43 @@ impl Stream {
         }
     }
 
+    /// Update the stream counters after a successful event insert.
+    pub async fn record_event_inserted(
+        db: &crate::db::DatabasePool,
+        stream_id: &Uuid,
+    ) -> Result<(), StreamError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_events = total_events + 1,
+                        last_activity_at = now()
+                    WHERE stream_id = $1
+                    "#,
+                )
+                .bind(stream_id)
+                .execute(pg_pool)
+                .await?;
+                Ok(())
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_events = total_events + 1,
+                        last_activity_at = datetime('now')
+                    WHERE stream_id = ?
+                    "#,
+                )
+                .bind(stream_id)
+                .execute(sqlite_pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
     /// Get stream by ID
     pub async fn get_stream(
         db: &crate::db::DatabasePool,
