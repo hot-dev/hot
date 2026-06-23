@@ -925,8 +925,14 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
     let resolved_queue_conf = hot::queue::get_resolved_conf(queue_conf_from_user, true);
     conf = conf.set("queue", resolved_queue_conf);
 
-    // Preserve any settings from the original conf that may have been set via CLI flags
-    // (like db-uri) that we don't want to lose
+    Ok(preserve_runtime_overrides_after_init(conf, base_conf))
+}
+
+fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val {
+    // Preserve runtime settings from the original conf that may have been set via
+    // CLI flags. `hot dev` calls this after auto-init; losing these overrides can
+    // split DB and queue backends, e.g. services reload from hot.hot and use a
+    // default Redis while init/migrations used the CLI-provided database.
     if let Some(db_uri) = base_conf
         .get("db")
         .and_then(|db| db.get("uri"))
@@ -943,7 +949,25 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
         }
     }
 
-    Ok(conf)
+    for path in ["redis.uri", "queue.type", "serialization.type"] {
+        let value = base_conf.get_str(path);
+        if !value.is_empty() && value != "null" {
+            conf = conf.set_str(path, Some(value), "");
+        }
+    }
+
+    if let Some(redis_cluster) = base_conf
+        .get("redis")
+        .and_then(|redis| redis.get("cluster"))
+        .and_then(|cluster| match cluster {
+            Val::Bool(value) => Some(value),
+            _ => None,
+        })
+    {
+        conf = conf.set_bool("redis.cluster", Some(redis_cluster), false);
+    }
+
+    conf
 }
 
 // Function to load and parse context file(s) using engine
@@ -1578,5 +1602,53 @@ mod tests {
             conf.get_int_or_default("scheduler.at-interval-seconds", -1),
             3
         );
+    }
+
+    #[test]
+    fn test_reload_preserves_runtime_queue_overrides() {
+        let reloaded_from_hot_file = val!({
+            "db": {
+                "uri": "sqlite:./.hot/db/hot.sqlite.db",
+            },
+            "redis": {
+                "uri": "redis://localhost:6379",
+                "cluster": false,
+            },
+            "queue": {
+                "type": "memory",
+            },
+            "serialization": {
+                "type": "zstdjson",
+            },
+        });
+        let original_with_cli_overrides = val!({
+            "db": {
+                "uri": "postgres://hot:hot@127.0.0.1:55432/hot",
+            },
+            "redis": {
+                "uri": "redis://127.0.0.1:56379",
+                "cluster": true,
+            },
+            "queue": {
+                "type": "redis",
+            },
+            "serialization": {
+                "type": "json",
+            },
+        });
+
+        let conf = preserve_runtime_overrides_after_init(
+            reloaded_from_hot_file,
+            &original_with_cli_overrides,
+        );
+
+        assert_eq!(
+            conf.get_str("db.uri"),
+            "postgres://hot:hot@127.0.0.1:55432/hot"
+        );
+        assert_eq!(conf.get_str("redis.uri"), "redis://127.0.0.1:56379");
+        assert!(conf.get_bool_or_default("redis.cluster", false));
+        assert_eq!(conf.get_str("queue.type"), "redis");
+        assert_eq!(conf.get_str("serialization.type"), "json");
     }
 }

@@ -1,0 +1,56 @@
+::noisy_load::handlers ns
+
+// Plain-Hot event handlers. These do a little CPU work and fan out to more
+// events so the worker, scheduler, and emitter stay busy under load.
+
+::event ::hot::event
+
+// High-volume burst handler — intentionally no fan-out. This lets the
+// benchmark raise event throughput without recursively changing the workload
+// shape or overwhelming task/container capacity.
+on-burst meta {on-event: "noisy:burst"}
+fn (event) {
+    n or(event.data.n, 0)
+    checksum reduce(range(0, 16), (acc, i) { add(acc, mul(i, add(n, 1))) }, 0)
+    {n: n, checksum: checksum}
+}
+
+// Primary work handler: a little compute plus bounded fan-out.
+on-work meta {on-event: "noisy:work"}
+fn (event) {
+    n or(event.data.n, 0)
+    d or(event.data.depth, 0)
+
+    total reduce(range(0, 200), (acc, i) { add(acc, mul(i, add(n, 1))) }, 0)
+
+    // Bounded fan-out: every 4th event spawns one child, max depth 2.
+    children cond {
+        and(lt(d, 2), eq(mod(n, 4), 0)) => {
+            ::event/send("noisy:work", {n: n, depth: add(d, 1)})
+            1
+        }
+        => { 0 }
+    }
+
+    // Every 3rd event triggers a lightweight follow-up.
+    followups cond {
+        eq(mod(n, 3), 0) => {
+            ::event/send("noisy:followup", {n: n})
+            1
+        }
+        => { 0 }
+    }
+
+    {
+        total: total,
+        children: children,
+        followups: followups,
+    }
+}
+
+// Light follow-up handler — pure compute, no further fan-out.
+on-followup meta {on-event: "noisy:followup"}
+fn (event) {
+    n or(event.data.n, 0)
+    reduce(range(0, 64), (acc, i) { add(acc, i) }, n)
+}

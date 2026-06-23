@@ -275,6 +275,15 @@ pub trait EngineEventEmitter: Send + Sync {
         Box::pin(async { self.flush() })
     }
 
+    /// Flush writes for a specific run. Emitters that can route by run should
+    /// override this; the default preserves existing behavior by flushing all.
+    fn flush_run(
+        &self,
+        _run_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        self.flush_async()
+    }
+
     /// Gracefully shutdown the emitter and wait for all events to be processed.
     ///
     /// Default implementation does nothing. Emitters that use background processing
@@ -341,6 +350,13 @@ impl<T: EngineEventEmitter> EngineEventEmitter for FilteredEmitter<T> {
 
     fn flush_async(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         self.inner.flush_async()
+    }
+
+    fn flush_run(
+        &self,
+        run_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        self.inner.flush_run(run_id)
     }
 
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {

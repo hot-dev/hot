@@ -255,6 +255,7 @@ hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
 hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
 hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "true"))
 hot.worker.local-write-concurrency Int(::env/get("HOT_WORKER_LOCAL_WRITE_CONCURRENCY", "1"))
+hot.worker.read-batch-size Int(::env/get("HOT_WORKER_READ_BATCH_SIZE", "8"))
 
 // =============================================================================
 // Task Configuration (long-running tasks via ::hot::task/start)

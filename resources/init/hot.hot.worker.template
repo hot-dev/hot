@@ -56,6 +56,7 @@ hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
 hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
 hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "false"))
 hot.worker.local-write-concurrency Int(::env/get("HOT_WORKER_LOCAL_WRITE_CONCURRENCY", "1"))
+hot.worker.read-batch-size Int(::env/get("HOT_WORKER_READ_BATCH_SIZE", "8"))
 
 // Emitter Configuration (required for runs to be written to database)
 hot.emitter.type "db"

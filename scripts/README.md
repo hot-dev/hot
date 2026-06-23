@@ -17,6 +17,9 @@ package documentation, and local integration tests.
   the public mirror against the recorded manifest hash.
 - `integration/*.sh` contains package integration test runners. Use the package
   or service name as the filename, for example `integration/resend.sh`.
+- `noisy-load-benchmark.sh` runs the `hot/test/noisy-load` stress project
+  against SQLite/memory and PostgreSQL/Valkey, then writes DB/queue/log metrics
+  under `target/noisy-load-runs/`.
 - `git-hooks/` contains hook scripts installed by `setup-git-hooks.sh`.
 
 ## Placement

@@ -34,7 +34,7 @@ use hot::lang::cache::bytecode_cache::{BytecodeCache, CachedBytecode};
 use hot::lang::emitter::EngineEventEmitter;
 use hot::lang::event::{EventPublisher, ExecutionContext};
 use hot::lang::hot::task::TaskRequest;
-use hot::queue::{ProcessingQueue, Queue, QueueInfrastructureError, QueueType};
+use hot::queue::{ConsumerLifecycle, ProcessingQueue, Queue, QueueInfrastructureError, QueueType};
 use hot::stream::{
     EnvEvent, EnvPublisher, StreamEvent, StreamNext, StreamPubSub, StreamPublisher,
     StreamSubscriberFactory,
@@ -361,11 +361,13 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .queue_name
         .clone()
         .unwrap_or_else(|| "hot:task".to_string());
-    // Stable consumer name (host + pid) so XINFO CONSUMERS doesn't grow
-    // unbounded across restarts of the same logical task worker. See
-    // notes/ideas/QUEUE_OPTIMIZATION.md Phase 4b.
+    // Stable consumer-name prefix (host + pid) so XINFO CONSUMERS doesn't
+    // grow unbounded across restarts of the same logical task worker. Each
+    // processor adds a stable slot suffix.
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "host".to_string());
     let pid = std::process::id();
+    let processor_consumer_prefix = format!("{}-{}-task", host, pid);
+    let admin_task_consumer_name = format!("{}-0", processor_consumer_prefix);
     // Tasks legitimately run for hours (and we cap at ~7 days) so 24h is the
     // window beyond which any backlog entry is almost certainly stale —
     // either the run was already cancelled, the user moved on, or the task
@@ -385,7 +387,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         config.redis_cluster,
         config.serialization,
     )?
-    .with_consumer_name(format!("{}-{}-task", host, pid))
+    // Admin/recovery paths XAUTOCLAIM into processor 0's real consumer so
+    // reclaimed PEL entries are drained by a live processor.
+    .with_consumer_name(admin_task_consumer_name.clone())
     .with_read_batch_size(queue_claim_max)
     .with_orphan_idle_ms(task_orphan_idle_ms)
     .with_startup_window(task_startup_window);
@@ -880,61 +884,21 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     tokio::pin!(shutdown);
     let (task_loop_shutdown_tx, task_loop_shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Phase 5: cap on in-flight spawned task processors. Without this, every
-    // permit acquired from `code_semaphore` (inside `process_task`) is
-    // released only after the previous task completes — defeating the
-    // purpose of concurrency. With this outer cap we spawn up to N concurrent
-    // claim+process futures, each of which dequeues, processes, and ACKs one
-    // message. The inner `code_semaphore` / `container_budget` still gate by
-    // *resource type* within each spawned future.
-    //
-    // Use the larger derived resource-class budget as the outer claim cap.
-    // This prevents Redis PEL from filling with more work than local resources
-    // can execute, while the inner code/container gates still enforce the
-    // per-resource limits.
-    let inflight_semaphore = Arc::new(Semaphore::new(queue_claim_max));
+    // Fixed processor pool. Each processor owns a cloned Redis queue handle,
+    // which gives it a distinct connection, consumer name, prefetch buffer, and
+    // refill lock. This lets Redis distribute task entries across consumers
+    // instead of funneling every claim through one mutexed connection. The task
+    // lease below remains the cross-pod / cross-consumer duplicate guard.
     let mut task_processors = JoinSet::new();
 
-    loop {
-        while let Some(join_result) = task_processors.try_join_next() {
-            if let Err(e) = join_result {
-                tracing::error!("Task processor panicked or was cancelled: {}", e);
-            }
-        }
-
-        let permit = tokio::select! {
-            biased;
-            _ = &mut shutdown => {
-                tracing::info!("Shutting down task worker");
-                let _ = task_loop_shutdown_tx.send(true);
-                coordinator.initiate_shutdown(&db, &stream_publisher, &task_queue_arc).await;
-                break;
-            }
-            permit = Arc::clone(&inflight_semaphore).acquire_owned() => {
-                match permit {
-                    Ok(p) => p,
-                    Err(_) => {
-                        // Semaphore closed — should never happen in normal
-                        // operation, but bail safely if it does.
-                        tracing::error!("In-flight semaphore closed; exiting task loop");
-                        break;
-                    }
-                }
-            }
-        };
-
-        if coordinator.is_shutting_down() {
-            drop(permit);
-            break;
-        }
-
-        // Spawn a one-shot worker that holds the permit for the lifetime of
-        // one claimed message. Idle workers park in `claim_blocking`, but the
-        // claim phase is selected against task-loop shutdown so deploys do
-        // not wait on empty memory queues or Redis BLOCK windows. Once a
-        // lease is claimed, processing runs through the lease so ACK/retry/DLQ
-        // semantics stay centralized in the queue layer.
-        let tq = Arc::clone(&task_queue_arc);
+    for processor_idx in 0..queue_claim_max {
+        let tq = Arc::new(
+            task_queue_arc
+                .as_ref()
+                .clone()
+                .with_consumer_name(format!("{}-{}", processor_consumer_prefix, processor_idx))
+                .with_read_batch_size(1),
+        );
         let db_c = Arc::clone(&db);
         let stream_pub_c = Arc::clone(&stream_publisher);
         let cache_c = Arc::clone(&bytecode_cache);
@@ -952,69 +916,115 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         let mut task_loop_shutdown_rx = task_loop_shutdown_rx.clone();
 
         task_processors.spawn(async move {
-            let _permit = permit; // released on drop
-            let result = tokio::select! {
-                biased;
-                _ = task_loop_shutdown_rx.changed() => Ok(None),
-                claim = tq.claim_blocking() => {
-                    match claim {
-                        Ok(Some(lease_handle)) => {
-                            lease_handle.process(|request: TaskRequest| {
-                                let db = Arc::clone(&db_c);
-                                let tq2 = Arc::clone(&tq);
-                                let stream_pub = stream_pub_c;
-                                let cache = cache_c;
-                                let code_sem = code_sem_c;
-                                let ctr_budget = ctr_budget_c;
-                                let conf = conf_c;
-                                let ep = ep_c;
-                                let executor = executor_c;
-                                let vol_base = vol_base_c;
-                                let defaults = defaults_c;
-                                let usage_cache = usage_cache_c;
-                                let coord = coord_c;
-                                let lease = lease_c;
-                                let wid = wid_c;
-                                async move {
-                                    process_task(
-                                        request,
-                                        db,
-                                        tq2,
-                                        stream_pub,
-                                        cache,
-                                        code_sem,
-                                        ctr_budget,
-                                        conf,
-                                        ep,
-                                        executor,
-                                        vol_base,
-                                        defaults,
-                                        usage_cache,
-                                        coord,
-                                        lease,
-                                        wid,
-                                    )
-                                    .await
-                                }
-                            })
-                            .await
+            tracing::debug!(
+                processor_idx,
+                "Task processor started with dedicated queue consumer"
+            );
+            loop {
+                if coord_c.is_shutting_down() {
+                    break;
+                }
+
+                let result = tokio::select! {
+                    biased;
+                    _ = task_loop_shutdown_rx.changed() => break,
+                    claim = tq.claim_blocking() => {
+                        match claim {
+                            Ok(Some(lease_handle)) => {
+                                lease_handle.process(|request: TaskRequest| {
+                                    let db = Arc::clone(&db_c);
+                                    let tq2 = Arc::clone(&tq);
+                                    let stream_pub = Arc::clone(&stream_pub_c);
+                                    let cache = Arc::clone(&cache_c);
+                                    let code_sem = Arc::clone(&code_sem_c);
+                                    let ctr_budget = Arc::clone(&ctr_budget_c);
+                                    let conf = conf_c.clone();
+                                    let ep = ep_c.clone();
+                                    let executor = Arc::clone(&executor_c);
+                                    let vol_base = Arc::clone(&vol_base_c);
+                                    let defaults = Arc::clone(&defaults_c);
+                                    let usage_cache = Arc::clone(&usage_cache_c);
+                                    let coord = Arc::clone(&coord_c);
+                                    let lease = Arc::clone(&lease_c);
+                                    let wid = wid_c.clone();
+                                    async move {
+                                        process_task(
+                                            request,
+                                            db,
+                                            tq2,
+                                            stream_pub,
+                                            cache,
+                                            code_sem,
+                                            ctr_budget,
+                                            conf,
+                                            ep,
+                                            executor,
+                                            vol_base,
+                                            defaults,
+                                            usage_cache,
+                                            coord,
+                                            lease,
+                                            wid,
+                                        )
+                                        .await
+                                    }
+                                })
+                                .await
+                            }
+                            Ok(None) => Ok(None),
+                            Err(e) => Err(e),
                         }
-                        Ok(None) => Ok(None),
-                        Err(e) => Err(e),
+                    }
+                };
+
+                match result {
+                    Ok(Some(())) | Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!("Task processing error: {}", e);
                     }
                 }
-            };
+            }
 
-            match result {
-                Ok(Some(())) | Ok(None) => {}
+            match tq.consumer_has_pending().await {
+                Ok(false) => {
+                    if let Err(e) = tq.unregister_consumer().await {
+                        tracing::warn!(
+                            processor_idx,
+                            "Task processor failed to unregister idle consumer: {}",
+                            e
+                        );
+                    }
+                }
+                Ok(true) => {
+                    tracing::warn!(
+                        processor_idx,
+                        "Task processor leaving consumer registered because it still has pending messages"
+                    );
+                }
                 Err(e) => {
-                    tracing::error!("Task processing error: {}", e);
+                    tracing::warn!(
+                        processor_idx,
+                        "Task processor could not inspect consumer pending state before unregister: {}",
+                        e
+                    );
                 }
             }
+
+            tracing::debug!(processor_idx, "Task processor stopped");
         });
     }
 
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => {
+            tracing::info!("Shutting down task worker");
+        }
+    }
+
     let _ = task_loop_shutdown_tx.send(true);
+    coordinator
+        .initiate_shutdown(&db, &stream_publisher, &task_queue_arc)
+        .await;
     let drain_processors = async {
         while let Some(join_result) = task_processors.join_next().await {
             if let Err(e) = join_result {

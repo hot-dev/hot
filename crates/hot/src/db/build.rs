@@ -1,7 +1,12 @@
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
+use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
+
+use super::entity_cache::EntityCache;
+
+static BUILD_CACHE: LazyLock<EntityCache<Uuid, Build>> = LazyLock::new(|| EntityCache::new(2_000));
 
 #[derive(Error, Debug)]
 pub enum BuildError {
@@ -37,7 +42,11 @@ impl Build {
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
     ) -> Result<Build, BuildError> {
-        match db {
+        if let Some(build) = BUILD_CACHE.get(build_id) {
+            return Ok(build);
+        }
+
+        let build = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_as::<_, Build>(
                     "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.build_id = $1"
@@ -68,7 +77,18 @@ impl Build {
                     }
                 })
             }
-        }
+        }?;
+
+        BUILD_CACHE.insert(*build_id, build.clone());
+        Ok(build)
+    }
+
+    pub fn invalidate_build_cache(build_id: &Uuid) {
+        BUILD_CACHE.invalidate(build_id);
+    }
+
+    pub fn invalidate_all_build_cache() {
+        BUILD_CACHE.clear();
     }
 
     /// Get builds by project ID
@@ -270,6 +290,7 @@ impl Build {
                     .await?;
             }
         }
+        Self::invalidate_build_cache(build_id);
         Ok(())
     }
 
@@ -323,6 +344,7 @@ impl Build {
                     .await?;
             }
         }
+        Self::invalidate_build_cache(build_id);
         Ok(())
     }
 
@@ -345,6 +367,7 @@ impl Build {
                     .await?;
             }
         }
+        Self::invalidate_build_cache(build_id);
         Ok(())
     }
 
@@ -483,6 +506,7 @@ impl Build {
                     .await?;
                 }
             }
+            Self::invalidate_build_cache(&existing_build.build_id);
             // Return updated build
             Self::get_build(db, &existing_build.build_id).await
         } else {
@@ -569,6 +593,7 @@ impl Build {
 
         // Invalidate event handler cache for this environment
         crate::db::event_handler::EventHandler::invalidate_event_handler_cache_for_env(&env_id);
+        Self::invalidate_all_build_cache();
 
         Ok(())
     }
@@ -603,6 +628,7 @@ impl Build {
                 .await?;
             }
         }
+        Self::invalidate_build_cache(build_id);
         Ok(())
     }
 
@@ -699,6 +725,7 @@ impl Build {
         // (Invalidate all since we don't have env_id here and this is a rare operation)
         if rows_affected > 0 {
             crate::db::event_handler::EventHandler::invalidate_all_event_handler_cache();
+            Self::invalidate_all_build_cache();
         }
 
         Ok(rows_affected)

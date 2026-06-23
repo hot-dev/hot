@@ -1,7 +1,12 @@
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
+use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
+
+use super::entity_cache::EntityCache;
+
+static ENV_CACHE: LazyLock<EntityCache<Uuid, Env>> = LazyLock::new(|| EntityCache::new(1_000));
 
 #[derive(Error, Debug)]
 pub enum EnvError {
@@ -49,26 +54,39 @@ impl Env {
 
     /// Get environment by ID
     pub async fn get_env(db: &crate::db::DatabasePool, env_id: &Uuid) -> Result<Env, EnvError> {
-        match db {
+        if let Some(env) = ENV_CACHE.get(env_id) {
+            return Ok(env);
+        }
+
+        let env = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let env = sqlx::query_as::<_, Env>(
+                sqlx::query_as::<_, Env>(
                     "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE env_id = $1",
                 )
                 .bind(env_id)
                 .fetch_one(pg_pool)
-                .await?;
-                Ok(env)
+                .await?
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let env = sqlx::query_as::<_, Env>(
+                sqlx::query_as::<_, Env>(
                     "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE env_id = ?"
                 )
                 .bind(env_id)
                 .fetch_one(sqlite_pool)
-                .await?;
-                Ok(env)
+                .await?
             }
-        }
+        };
+
+        ENV_CACHE.insert(*env_id, env.clone());
+        Ok(env)
+    }
+
+    pub fn invalidate_env_cache(env_id: &Uuid) {
+        ENV_CACHE.invalidate(env_id);
+    }
+
+    pub fn invalidate_all_env_cache() {
+        ENV_CACHE.clear();
     }
 
     /// Get count of environments
@@ -141,6 +159,7 @@ impl Env {
                 .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 
@@ -290,6 +309,7 @@ impl Env {
                     .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 
@@ -319,6 +339,7 @@ impl Env {
                     .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 
@@ -338,6 +359,7 @@ impl Env {
                     .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 }

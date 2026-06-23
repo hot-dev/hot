@@ -1,0 +1,79 @@
+::hot::conf ns
+
+::env ::hot::env
+
+// Self-contained config for the "noisy-load" load-test project. This lives in
+// its own directory so `hot dev` / `cargo run -- dev` boots a clean,
+// isolated environment (its own .hot/ db + storage) with noisy-load as the
+// default project — no interaction with the main hot-dev workspace project.
+//
+// Local run (sqlite + in-memory queue), from this directory:
+//
+//   cargo run --manifest-path ../../../Cargo.toml -- dev
+//   # or with the system binary:  hot dev
+//
+// Postgres + Valkey run (start containers first, then override URIs):
+//
+//   cargo run --manifest-path ../../../Cargo.toml -- dev \
+//     --db.uri postgres://hot:hot@127.0.0.1:55432/hot \
+//     --redis.uri redis://127.0.0.1:56379 \
+//     --queue.type redis --serialization json
+
+hot.set.profile "noisy"
+hot.set.project "noisy-load"
+
+hot.profile.noisy.user.email "noisy@hot.dev"
+hot.profile.noisy.org.slug "noisy"
+hot.profile.noisy.env.name "development"
+
+hot.project.noisy-load.src.paths ["./src"]
+hot.project.noisy-load.test.paths []
+hot.project.noisy-load.test.capture true
+hot.project.noisy-load.skills.codegen.enabled false
+hot.project.noisy-load.deps {}
+
+hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
+hot.db.schema "hot"
+
+hot.file.mode "service"
+hot.file.storage.type "local"
+hot.file.storage.path "./.hot/file"
+
+hot.log.level "info"
+hot.log.target "stdout"
+hot.log.dir "./.hot/log"
+hot.log.rotation "daily"
+hot.log.retention 3
+
+hot.redis.uri ::env/get("HOT_REDIS_URI", "redis://localhost:6379")
+hot.redis.cluster false
+
+hot.api.host ::env/get("HOT_API_HOST", "localhost")
+hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
+hot.app.host ::env/get("HOT_APP_HOST", "localhost")
+hot.app.port Int(::env/get("HOT_APP_PORT", "4680"))
+
+hot.emitter.type "db"
+
+hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
+
+hot.queue.type ::env/get("HOT_QUEUE_TYPE", "memory")
+hot.serialization.type "zstdjson"
+
+hot.scheduler.backfill false
+hot.scheduler.sync-interval-seconds 10
+hot.scheduler.retry-interval-seconds 1
+hot.scheduler.at-interval-seconds 1
+
+hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
+hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
+hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "4"))
+hot.worker.cancel-on-timeout true
+
+hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
+
+// Container (box) tasks via ::hot::box/start — requires Docker.
+hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "true"))
+hot.box.backend "docker"
+
+hot.deploy.auto true

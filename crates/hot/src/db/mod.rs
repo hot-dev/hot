@@ -119,6 +119,7 @@ pub mod context;
 pub mod domain;
 pub mod email_queue;
 pub mod email_verification;
+pub(crate) mod entity_cache;
 pub mod env;
 pub mod event;
 pub mod event_handler;

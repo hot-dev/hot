@@ -3300,7 +3300,7 @@ async fn execute_single_event_handler(
                     &execution_context_for_events,
                     failure,
                 ));
-                if let Err(e) = em.flush_async().await {
+                if let Err(e) = em.flush_run(run_id).await {
                     error!("Failed to flush timeout failure for run {}: {}", run_id, e);
                 }
             } else if let Err(e) = hot::db::Run::fail_run(db, &run_id, &timeout_error).await {
@@ -3357,7 +3357,7 @@ async fn execute_single_event_handler(
     // Flush emitter to ensure run is written to database BEFORE publishing stream event
     // This guarantees the SSE handler can query the run from the database
     if let Some(ref em) = emitter
-        && let Err(e) = em.flush_async().await
+        && let Err(e) = em.flush_run(run_id).await
     {
         tracing::warn!("Failed to flush emitter before stream publish: {}", e);
     }
@@ -3603,9 +3603,22 @@ pub async fn run_with_components_shared_context(
             .get_int_or_default("queue.wait-target-p99-ms", 1_000)
             .max(1) as u64,
     );
-    let event_orphan_idle_ms = worker_conf
+    let queue_orphan_idle_ms = worker_conf
         .get_int_or_default("queue.event-orphan-idle-ms", 60_000)
         .max(1) as u64;
+    let min_event_orphan_idle_ms = get_run_timeout(&worker_conf)
+        .saturating_add(RUN_TIMEOUT_HARD_GRACE)
+        .saturating_add(std::time::Duration::from_secs(5))
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
+    if event_orphan_idle_ms != queue_orphan_idle_ms {
+        tracing::warn!(
+            configured_ms = queue_orphan_idle_ms,
+            effective_ms = event_orphan_idle_ms,
+            "Raising hot:event orphan reclaim idle to stay beyond worker.run-timeout and avoid duplicate live handler execution"
+        );
+    }
 
     // Create database connection for event handler processing FIRST
     // This is needed by the emitter and event publisher
@@ -3789,9 +3802,12 @@ pub async fn run_with_components_shared_context(
     let admin_alert_name = format!("{}-w0-alert", consumer_prefix);
     let admin_email_name = format!("{}-w0-email", consumer_prefix);
 
-    // The main worker executes one message per loop per handle, so keep Redis
-    // reads at one entry to avoid hiding backlog in PEL/local prefetch.
-    let worker_read_batch_size = 1usize;
+    // Read a small batch per Redis XREADGROUP round-trip. Claimer/executor
+    // handoff still bounds local concurrency, but batching avoids one Redis
+    // round-trip per event when backlog is already present.
+    let worker_read_batch_size = worker_conf
+        .get_int_or_default("worker.read-batch-size", 8)
+        .max(1) as usize;
 
     // Create processing queues with dequeue_and_work support - all using unified Message type
     let request_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3802,7 +3818,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(request_window)
-    .with_orphan_idle_ms(event_orphan_idle_ms)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
     .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_request_name.clone());
 
@@ -3814,7 +3830,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(response_window)
-    .with_orphan_idle_ms(event_orphan_idle_ms)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
     .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_response_name.clone());
 
@@ -3842,7 +3858,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(alert_window)
-    .with_orphan_idle_ms(event_orphan_idle_ms)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
     .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_alert_name.clone());
 
@@ -3854,7 +3870,7 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(email_window)
-    .with_orphan_idle_ms(event_orphan_idle_ms)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
     .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_email_name.clone());
 
@@ -4470,8 +4486,12 @@ pub async fn run_with_components_shared_context(
         "hot.dev: WORKER queue claimers enabled (claimers={}, executors={}, handoff_capacity={}, redis_blocking_claim_connections={})",
         claimer_count, worker_count, handoff_capacity, redis_blocking_claim_connections,
     );
-    let (claimed_tx, claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(handoff_capacity);
-    let claimed_rx = Arc::new(Mutex::new(claimed_rx));
+    let (request_claimed_tx, request_claimed_rx) =
+        mpsc::channel::<ClaimedWorkerQueue>(worker_handoff_capacity(1));
+    let request_claimed_rx = Arc::new(Mutex::new(request_claimed_rx));
+    let (event_claimed_tx, event_claimed_rx) =
+        mpsc::channel::<ClaimedWorkerQueue>(handoff_capacity);
+    let event_claimed_rx = Arc::new(Mutex::new(event_claimed_rx));
     let (notification_claimed_tx, notification_claimed_rx) =
         mpsc::channel::<ClaimedWorkerQueue>(worker_handoff_capacity(1));
     let notification_claimed_rx = Arc::new(Mutex::new(notification_claimed_rx));
@@ -4482,7 +4502,7 @@ pub async fn run_with_components_shared_context(
         request_queue
             .clone()
             .with_consumer_name(admin_request_name.clone()),
-        claimed_tx.clone(),
+        request_claimed_tx.clone(),
         shutdown_rx.clone(),
         ClaimedWorkerQueue::Request,
     ));
@@ -4491,7 +4511,7 @@ pub async fn run_with_components_shared_context(
         event_queue
             .clone()
             .with_consumer_name(admin_event_name.clone()),
-        claimed_tx.clone(),
+        event_claimed_tx.clone(),
         shutdown_rx.clone(),
         ClaimedWorkerQueue::Event,
     ));
@@ -4515,7 +4535,8 @@ pub async fn run_with_components_shared_context(
             ClaimedWorkerQueue::Email,
         ));
     }
-    drop(claimed_tx);
+    drop(request_claimed_tx);
+    drop(event_claimed_tx);
     drop(notification_claimed_tx);
 
     if let Some(db_for_notifications) = db.clone() {
@@ -4598,8 +4619,113 @@ pub async fn run_with_components_shared_context(
         worker_handles.push(handle);
     }
 
-    // Spawn bounded executor tasks. Queue consumers live in the claimers above;
-    // these handles are only for enqueue/admin maintenance paths.
+    {
+        let request_rx = request_claimed_rx.clone();
+        let request_shutdown_rx = shutdown_rx.clone();
+        let response_queue_for_requests = response_queue
+            .clone()
+            .with_consumer_name(admin_response_name.clone());
+        let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
+            async move {
+                let worker_id = 0usize;
+                info!("hot.dev: WORKER request executor started");
+
+                loop {
+                    let claimed_queue = {
+                        let mut claimed_rx = request_rx.lock().await;
+                        claimed_rx.recv().await
+                    };
+
+                    let Some(claimed_queue) = claimed_queue else {
+                        debug!("hot.dev: WORKER request executor stopping");
+                        break;
+                    };
+
+                    if *request_shutdown_rx.borrow() {
+                        debug!("hot.dev: WORKER request executor dropping lease during shutdown");
+                        drop(claimed_queue);
+                        break;
+                    }
+
+                    let ClaimedWorkerQueue::Request(lease) = claimed_queue else {
+                        tracing::warn!(
+                            "hot.dev: WORKER request executor received non-request lease"
+                        );
+                        continue;
+                    };
+
+                    let response_queue = response_queue_for_requests.clone();
+                    match lease
+                        .process(|message| async move {
+                            let msg_type = message.head.get_str("__type");
+                            match msg_type.as_str() {
+                                "RequestMessage" => {
+                                    let request_msg: RequestMessage = message.try_into().map_err(
+                                        |e| {
+                                            Box::new(std::io::Error::other(e))
+                                                as Box<dyn std::error::Error + Send + Sync>
+                                        },
+                                    )?;
+
+                                    info!(
+                                        "hot.dev: WORKER {} received request from hot:request queue: id={} head={:?} body={}",
+                                        worker_id,
+                                        request_msg.id,
+                                        request_msg.head,
+                                        request_msg.body.to_string()
+                                    );
+
+                                    let response_msg = ResponseMessage {
+                                        id: request_msg.id,
+                                        head: request_msg.head.clone(),
+                                        body: request_msg.body.clone(),
+                                    };
+
+                                    let response_message: Message = response_msg.into();
+                                    response_queue.enqueue(response_message).await.map_err(|e| {
+                                        let error_msg =
+                                            format!("Failed to send response message: {}", e);
+                                        info!("hot.dev: WORKER {} {}", worker_id, error_msg);
+                                        Box::new(std::io::Error::other(error_msg))
+                                            as Box<dyn std::error::Error + Send + Sync>
+                                    })?;
+
+                                    info!(
+                                        "hot.dev: WORKER {} sent response to hot:response queue",
+                                        worker_id
+                                    );
+                                }
+                                _ => {
+                                    info!(
+                                        "hot.dev: WORKER {} received unknown message type '{}' on request queue",
+                                        worker_id, msg_type
+                                    );
+                                }
+                            }
+
+                            Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
+                        })
+                        .await
+                    {
+                        Ok(Some(_)) | Ok(None) => {}
+                        Err(e) => {
+                            info!(
+                                "hot.dev: WORKER {} error processing request message: {}",
+                                worker_id, e
+                            );
+                        }
+                    }
+                }
+
+                Ok(())
+            },
+        );
+        worker_handles.push(handle);
+    }
+
+    // Spawn bounded event executor tasks. Queue consumers live in the claimers
+    // above; these handles are only for event execution plus enqueue/admin
+    // maintenance paths.
     for worker_id in 0..worker_count {
         let request_queue_clone = request_queue
             .clone()
@@ -4616,7 +4742,7 @@ pub async fn run_with_components_shared_context(
         let email_queue_clone = email_queue
             .clone()
             .with_consumer_name(admin_email_name.clone());
-        let claimed_rx_clone = claimed_rx.clone();
+        let claimed_rx_clone = event_claimed_rx.clone();
         let db_clone = db.clone();
         let worker_conf_clone = worker_conf.clone();
         let emitter_clone = emitter.clone();
@@ -4665,61 +4791,11 @@ pub async fn run_with_components_shared_context(
 
                     match claimed_queue {
                         ClaimedWorkerQueue::Request(lease) => {
-                            // Process ONE request message (atomic operation)
-                            match lease.process(|message| {
-                        // Clone the response queue for use inside the async closure
-                        let response_queue = response_queue_clone.clone();
-                        async move {
-                            // Check message type and process accordingly
-                            let msg_type = message.head.get_str("__type");
-
-                            match msg_type.as_str() {
-                                "RequestMessage" => {
-                                    // Convert to RequestMessage and process
-                                    let request_msg: RequestMessage = message.try_into()
-                                        .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                                    // Log the received message
-                                    info!("hot.dev: WORKER {} received request from hot:request queue: id={} head={:?} body={}",
-                                        worker_id, request_msg.id, request_msg.head, request_msg.body.to_string());
-
-                                    // Process the message and create a response
-                                    let response_msg = ResponseMessage {
-                                        id: request_msg.id, // Use the same ID for correlation
-                                        head: request_msg.head.clone(), // Clone the head
-                                        body: request_msg.body.clone(), // Clone the body for simplicity
-                                    };
-
-                                    // Convert response to unified Message format
-                                    let response_message: Message = response_msg.into();
-
-                                    // Send the response to the response queue
-                                    response_queue.enqueue(response_message).await.map_err(|e| {
-                                        let error_msg = format!("Failed to send response message: {}", e);
-                                        info!("hot.dev: WORKER {} {}", worker_id, error_msg);
-                                        Box::new(std::io::Error::other(error_msg)) as Box<dyn std::error::Error + Send + Sync>
-                                    })?;
-
-                                    info!("hot.dev: WORKER {} sent response to hot:response queue", worker_id);
-                                },
-                                _ => {
-                                    info!("hot.dev: WORKER {} received unknown message type '{}' on request queue", worker_id, msg_type);
-                                }
-                            }
-
-                            // Return some value as the processing result
-                            Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
-                        }
-                    }).await {
-                        Ok(Some(_)) => {
-                        },
-                        Ok(None) => {
-                            // No messages in queue - continue to events
-                        },
-                        Err(e) => {
-                            info!("hot.dev: WORKER {} error processing request message: {}", worker_id, e);
-                        }
-                    }
+                            drop(lease);
+                            tracing::warn!(
+                                "hot.dev: WORKER {} event executor received request lease",
+                                worker_id
+                            );
                         }
                         ClaimedWorkerQueue::Event(lease) => {
                             // Process ONE event message (atomic operation)

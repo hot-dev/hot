@@ -26,6 +26,7 @@ pub struct DatabaseEngineEventEmitter {
     db: Arc<RwLock<Option<DatabasePool>>>,
     writer: DatabaseWriter,
     event_sender: mpsc::UnboundedSender<EngineEvent>,
+    flush_sender: mpsc::UnboundedSender<ProcessorFlushRequest>,
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
     /// Flag to suppress errors during shutdown (when channel is expected to be closed)
     shutdown_initiated: Arc<AtomicBool>,
@@ -35,6 +36,11 @@ pub struct DatabaseEngineEventEmitter {
 struct DatabaseEngineEventEmitterProcessor {
     writer: DatabaseWriter,
     pending_calls: IndexMap<(Uuid, Uuid), CallEngineEventBatch>,
+}
+
+struct ProcessorFlushRequest {
+    run_id: Option<Uuid>,
+    completion: oneshot::Sender<Result<(), String>>,
 }
 
 /// Represents a batched call event that can be start-only, stop-only, or combined
@@ -73,6 +79,7 @@ impl DatabaseEngineEventEmitter {
 
         // Create event processing channel
         let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<EngineEvent>();
+        let (flush_sender, mut flush_receiver) = mpsc::unbounded_channel::<ProcessorFlushRequest>();
 
         // Create shutdown channel
         let (shutdown_sender, mut shutdown_receiver) =
@@ -109,6 +116,21 @@ impl DatabaseEngineEventEmitter {
                     _ = flush_timer.tick() => {
                         processor.flush_all();
                     }
+                    // Handle explicit flush requests by draining queued events
+                    // before waiting on the writer.
+                    flush_request = flush_receiver.recv() => {
+                        if let Some(request) = flush_request {
+                            while let Ok(evt) = event_receiver.try_recv() {
+                                processor.process_event(evt);
+                            }
+                            processor.flush_all();
+                            let result = match request.run_id {
+                                Some(run_id) => processor.writer.flush_run(run_id).await,
+                                None => processor.writer.flush_async().await,
+                            };
+                            let _ = request.completion.send(result);
+                        }
+                    }
                     // Handle shutdown signal
                     completion_sender = shutdown_receiver.recv() => {
                         if let Some(sender) = completion_sender {
@@ -138,6 +160,7 @@ impl DatabaseEngineEventEmitter {
             db,
             writer,
             event_sender,
+            flush_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
         }
@@ -153,6 +176,7 @@ impl DatabaseEngineEventEmitter {
 
         // Create event processing channel
         let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<EngineEvent>();
+        let (flush_sender, mut flush_receiver) = mpsc::unbounded_channel::<ProcessorFlushRequest>();
 
         // Create shutdown channel
         let (shutdown_sender, mut shutdown_receiver) =
@@ -206,6 +230,21 @@ impl DatabaseEngineEventEmitter {
                     _ = flush_timer.tick() => {
                         processor.flush_all();
                     }
+                    // Handle explicit flush requests by draining queued events
+                    // before waiting on the writer.
+                    flush_request = flush_receiver.recv() => {
+                        if let Some(request) = flush_request {
+                            while let Ok(evt) = event_receiver.try_recv() {
+                                processor.process_event(evt);
+                            }
+                            processor.flush_all();
+                            let result = match request.run_id {
+                                Some(run_id) => processor.writer.flush_run(run_id).await,
+                                None => processor.writer.flush_async().await,
+                            };
+                            let _ = request.completion.send(result);
+                        }
+                    }
                     // Handle shutdown signal
                     completion_sender = shutdown_receiver.recv() => {
                         if let Some(sender) = completion_sender {
@@ -237,9 +276,23 @@ impl DatabaseEngineEventEmitter {
             db,
             writer,
             event_sender,
+            flush_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    async fn flush_processor(&self, run_id: Option<Uuid>) -> Result<(), String> {
+        let (completion, receiver) = oneshot::channel();
+        let request = ProcessorFlushRequest { run_id, completion };
+
+        self.flush_sender
+            .send(request)
+            .map_err(|_| "Failed to send flush request - processor has shut down".to_string())?;
+
+        receiver
+            .await
+            .map_err(|_| "Flush acknowledgment was dropped".to_string())?
     }
 
     /// Gracefully shutdown the database emitter and wait for all events to be processed
@@ -718,12 +771,18 @@ impl EngineEventEmitter for DatabaseEngineEventEmitter {
     }
 
     fn flush(&self) -> Result<(), String> {
-        // Flush the underlying database writer to ensure all pending writes are committed
-        self.writer.flush()
+        tokio::runtime::Handle::current().block_on(self.flush_async())
     }
 
     fn flush_async(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
-        Box::pin(async move { self.writer.flush_async().await })
+        Box::pin(async move { self.flush_processor(None).await })
+    }
+
+    fn flush_run(
+        &self,
+        run_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move { self.flush_processor(Some(run_id)).await })
     }
 
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
@@ -737,6 +796,7 @@ impl Clone for DatabaseEngineEventEmitter {
             db: Arc::clone(&self.db),
             writer: self.writer.clone(),
             event_sender: self.event_sender.clone(),
+            flush_sender: self.flush_sender.clone(),
             shutdown_sender: self.shutdown_sender.clone(),
             shutdown_initiated: Arc::clone(&self.shutdown_initiated),
         }

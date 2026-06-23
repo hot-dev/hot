@@ -10,6 +10,7 @@ use crate::db::DatabasePool;
 use crate::lang::emitter::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
+use ahash::AHashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
@@ -83,140 +84,179 @@ pub enum DatabaseWrite {
     },
 }
 
-/// Handle to the database writer - allows sending writes without blocking
+impl DatabaseWrite {
+    fn run_id(&self) -> Uuid {
+        match self {
+            DatabaseWrite::RunStart {
+                execution_context, ..
+            } => execution_context.run_id,
+            DatabaseWrite::Call {
+                execution_context, ..
+            } => execution_context.run_id,
+            DatabaseWrite::RunStop { run_id, .. }
+            | DatabaseWrite::RunFail { run_id, .. }
+            | DatabaseWrite::RunCancel { run_id, .. } => *run_id,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct DatabaseWriter {
+struct DatabaseWriterShard {
     write_sender: mpsc::UnboundedSender<DatabaseWrite>,
     flush_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
+/// Handle to the database writer - allows sending writes without blocking
+#[derive(Clone)]
+pub struct DatabaseWriter {
+    shards: Arc<Vec<DatabaseWriterShard>>,
+}
+
 impl DatabaseWriter {
     /// Create a new database writer with the given database pool
     pub fn new(db: Arc<RwLock<Option<DatabasePool>>>) -> Self {
-        let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<DatabaseWrite>();
-        let (flush_sender, mut flush_receiver) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
-        let (shutdown_sender, mut shutdown_receiver) =
-            mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let shard_count = Self::shard_count_for_db(&db);
+        let mut shards = Vec::with_capacity(shard_count);
 
-        // Spawn the dedicated writer task
-        tokio::spawn(async move {
-            tracing::debug!("DatabaseWriter: Task started, entering event loop");
-            let mut pending_writes = Vec::new();
-            let mut last_backpressure_warning = std::time::Instant::now();
+        for shard_idx in 0..shard_count {
+            let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<DatabaseWrite>();
+            let (flush_sender, mut flush_receiver) =
+                mpsc::unbounded_channel::<oneshot::Sender<()>>();
+            let (shutdown_sender, mut shutdown_receiver) =
+                mpsc::unbounded_channel::<oneshot::Sender<()>>();
+            let db = Arc::clone(&db);
 
-            loop {
-                tokio::select! {
-                    // Receive write operations
-                    write = write_receiver.recv() => {
-                        match write {
-                            Some(w) => {
-                                pending_writes.push(w);
+            // Spawn the dedicated writer shard task.
+            tokio::spawn(async move {
+                tracing::debug!(
+                    shard_idx,
+                    shard_count,
+                    "DatabaseWriter shard started, entering event loop"
+                );
+                let mut pending_writes = Vec::new();
+                let mut last_backpressure_warning = std::time::Instant::now();
 
-                                // Check for backpressure
-                                if pending_writes.len() > BACKPRESSURE_THRESHOLD
-                                    && last_backpressure_warning.elapsed() > std::time::Duration::from_secs(5)
-                                {
-                                    tracing::warn!(
-                                        "DatabaseWriter: High backpressure detected - {} pending writes",
-                                        pending_writes.len()
-                                    );
-                                    last_backpressure_warning = std::time::Instant::now();
+                loop {
+                    tokio::select! {
+                        // Receive write operations
+                        write = write_receiver.recv() => {
+                            match write {
+                                Some(w) => {
+                                    pending_writes.push(w);
+
+                                    // Check for backpressure
+                                    if pending_writes.len() > BACKPRESSURE_THRESHOLD
+                                        && last_backpressure_warning.elapsed() > std::time::Duration::from_secs(5)
+                                    {
+                                        tracing::warn!(
+                                            shard_idx,
+                                            pending = pending_writes.len(),
+                                            "DatabaseWriter shard high backpressure detected"
+                                        );
+                                        last_backpressure_warning = std::time::Instant::now();
+                                    }
+
+                                    // Run writes stay ordered with their run's call writes by
+                                    // shard affinity. They still flush promptly, but only this
+                                    // shard is blocked; sibling runs drain on sibling shards.
+                                    let has_run_write = pending_writes.iter().any(|w| {
+                                        matches!(w, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
+                                    });
+
+                                    let should_flush = has_run_write
+                                        || pending_writes.len() >= POSTGRES_BATCH_SIZE
+                                        || write_receiver.is_empty();
+
+                                    if should_flush {
+                                        tracing::debug!(
+                                            shard_idx,
+                                            pending = pending_writes.len(),
+                                            has_run_write,
+                                            batch_size = pending_writes.len() >= POSTGRES_BATCH_SIZE,
+                                            channel_empty = write_receiver.is_empty(),
+                                            "DatabaseWriter shard flushing writes"
+                                        );
+                                        Self::process_batch(&db, &mut pending_writes).await;
+                                    }
                                 }
-
-                                // CRITICAL: Always flush immediately if we have any run writes
-                                // Run writes must be in the database before other writes that reference them
-                                let has_run_write = pending_writes.iter().any(|w| {
-                                    matches!(w, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
-                                });
-
-                                // Process batch when we have run writes, enough other writes, or channel is empty
-                                let should_flush = has_run_write
-                                    || pending_writes.len() >= POSTGRES_BATCH_SIZE
-                                    || write_receiver.is_empty();
-
-                                if should_flush {
-                                    tracing::debug!("DatabaseWriter: Flushing {} writes (has_run_write={}, batch_size={}, channel_empty={})",
-                                        pending_writes.len(), has_run_write, pending_writes.len() >= POSTGRES_BATCH_SIZE, write_receiver.is_empty());
-                                    Self::process_batch(&db, &mut pending_writes).await;
+                                None => {
+                                    tracing::debug!(
+                                        shard_idx,
+                                        pending = pending_writes.len(),
+                                        "DatabaseWriter shard write channel closed"
+                                    );
+                                    if !pending_writes.is_empty() {
+                                        Self::process_batch(&db, &mut pending_writes).await;
+                                    }
+                                    if let Some(sender) = shutdown_receiver.recv().await {
+                                        let _ = sender.send(());
+                                    }
+                                    break;
                                 }
                             }
-                            None => {
-                                // Channel closed - flush remaining writes and wait for explicit shutdown
-                                tracing::debug!(
-                                    "DatabaseWriter: Write channel closed, flushing {} pending writes",
-                                    pending_writes.len()
-                                );
+                        }
+                        // Handle flush requests - flush all pending writes and acknowledge
+                        flush_ack = flush_receiver.recv() => {
+                            if let Some(ack_sender) = flush_ack {
+                                while let Ok(write) = write_receiver.try_recv() {
+                                    pending_writes.push(write);
+                                }
+
                                 if !pending_writes.is_empty() {
+                                    tracing::debug!(
+                                        shard_idx,
+                                        pending = pending_writes.len(),
+                                        "DatabaseWriter shard flushing pending writes on explicit request"
+                                    );
                                     Self::process_batch(&db, &mut pending_writes).await;
                                 }
-                                // Wait for explicit shutdown signal
-                                if let Some(sender) = shutdown_receiver.recv().await {
-                                    let _ = sender.send(());
+
+                                let _ = ack_sender.send(());
+                            }
+                        }
+                        // Handle shutdown
+                        completion_sender = shutdown_receiver.recv() => {
+                            if let Some(sender) = completion_sender {
+                                while let Ok(write) = write_receiver.try_recv() {
+                                    pending_writes.push(write);
                                 }
+
+                                if !pending_writes.is_empty() {
+                                    tracing::debug!(
+                                        shard_idx,
+                                        pending = pending_writes.len(),
+                                        "DatabaseWriter shard flushing pending writes before shutdown"
+                                    );
+                                    Self::process_batch(&db, &mut pending_writes).await;
+                                }
+
+                                let _ = sender.send(());
                                 break;
                             }
                         }
                     }
-                    // Handle flush requests - flush all pending writes and acknowledge
-                    flush_ack = flush_receiver.recv() => {
-                        if let Some(ack_sender) = flush_ack {
-                            // Drain any pending writes from the channel first
-                            while let Ok(write) = write_receiver.try_recv() {
-                                pending_writes.push(write);
-                            }
-
-                            // Flush all pending writes
-                            if !pending_writes.is_empty() {
-                                tracing::debug!(
-                                    "DatabaseWriter: Flushing {} pending writes on explicit flush request",
-                                    pending_writes.len()
-                                );
-                                Self::process_batch(&db, &mut pending_writes).await;
-                            }
-
-                            // Signal flush completion
-                            let _ = ack_sender.send(());
-                        }
-                    }
-                    // Handle shutdown
-                    completion_sender = shutdown_receiver.recv() => {
-                        if let Some(sender) = completion_sender {
-                            // Process any remaining writes
-                            while let Ok(write) = write_receiver.try_recv() {
-                                pending_writes.push(write);
-                            }
-
-                            // Final flush
-                            if !pending_writes.is_empty() {
-                                tracing::debug!(
-                                    "DatabaseWriter: Flushing {} pending writes before shutdown",
-                                    pending_writes.len()
-                                );
-                                Self::process_batch(&db, &mut pending_writes).await;
-                            }
-
-                            // Signal completion
-                            let _ = sender.send(());
-                            break;
-                        }
-                    }
                 }
-            }
 
-            tracing::debug!("DatabaseWriter: Shutdown complete");
-        });
+                tracing::debug!(shard_idx, "DatabaseWriter shard shutdown complete");
+            });
+
+            shards.push(DatabaseWriterShard {
+                write_sender,
+                flush_sender,
+                shutdown_sender,
+            });
+        }
 
         Self {
-            write_sender,
-            flush_sender,
-            shutdown_sender,
+            shards: Arc::new(shards),
         }
     }
 
     /// Send a write operation to the database writer (never blocks)
     pub fn write(&self, write: DatabaseWrite) {
-        if self.write_sender.send(write).is_err() {
+        let shard = self.shard_for_run(write.run_id());
+        if shard.write_sender.send(write).is_err() {
             tracing::error!("DatabaseWriter: Failed to send write - writer task has shut down");
         }
     }
@@ -225,26 +265,36 @@ impl DatabaseWriter {
     /// This ensures all writes (including run:start) are committed to the database
     /// before returning. Use this before publishing events that reference the current run.
     pub fn flush(&self) -> Result<(), String> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-
-        if self.flush_sender.send(ack_sender).is_err() {
-            return Err("Failed to send flush request - writer task has shut down".to_string());
-        }
-
         // VM code runs in a blocking context, where `Handle::block_on` is the
         // correct sync-to-async bridge. Async worker code should call
         // `flush_async()` instead.
-        tokio::runtime::Handle::current().block_on(async {
-            ack_receiver
-                .await
-                .map_err(|_| "Flush acknowledgment was dropped".to_string())
-        })
+        tokio::runtime::Handle::current().block_on(self.flush_async())
     }
 
     pub async fn flush_async(&self) -> Result<(), String> {
+        let mut receivers = Vec::with_capacity(self.shards.len());
+        for shard in self.shards.iter() {
+            let (ack_sender, ack_receiver) = oneshot::channel();
+
+            if shard.flush_sender.send(ack_sender).is_err() {
+                return Err("Failed to send flush request - writer task has shut down".to_string());
+            }
+            receivers.push(ack_receiver);
+        }
+
+        for ack_receiver in receivers {
+            ack_receiver
+                .await
+                .map_err(|_| "Flush acknowledgment was dropped".to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn flush_run(&self, run_id: Uuid) -> Result<(), String> {
+        let shard = self.shard_for_run(run_id);
         let (ack_sender, ack_receiver) = oneshot::channel();
 
-        if self.flush_sender.send(ack_sender).is_err() {
+        if shard.flush_sender.send(ack_sender).is_err() {
             return Err("Failed to send flush request - writer task has shut down".to_string());
         }
 
@@ -255,16 +305,49 @@ impl DatabaseWriter {
 
     /// Gracefully shutdown the writer, ensuring all pending writes are flushed
     pub async fn shutdown(&self) -> Result<(), String> {
-        let (completion_sender, completion_receiver) = oneshot::channel();
+        let mut receivers = Vec::with_capacity(self.shards.len());
+        for shard in self.shards.iter() {
+            let (completion_sender, completion_receiver) = oneshot::channel();
 
-        if self.shutdown_sender.send(completion_sender).is_err() {
-            return Err("Failed to send shutdown signal - writer already shut down".to_string());
+            if shard.shutdown_sender.send(completion_sender).is_err() {
+                return Err("Failed to send shutdown signal - writer already shut down".to_string());
+            }
+            receivers.push(completion_receiver);
         }
 
-        match completion_receiver.await {
-            Ok(()) => Ok(()),
-            Err(_) => Err("Shutdown completion signal was dropped".to_string()),
+        for completion_receiver in receivers {
+            completion_receiver
+                .await
+                .map_err(|_| "Shutdown completion signal was dropped".to_string())?;
         }
+        Ok(())
+    }
+
+    fn shard_count_for_db(db: &Arc<RwLock<Option<DatabasePool>>>) -> usize {
+        match db.try_read().ok().and_then(|guard| guard.as_ref().cloned()) {
+            Some(DatabasePool::Postgres(_)) => std::env::var("HOT_DB_WRITER_SHARDS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(4)
+                .max(1),
+            _ => 1,
+        }
+    }
+
+    fn shard_for_run(&self, run_id: Uuid) -> &DatabaseWriterShard {
+        let bytes = run_id.as_bytes();
+        let hash = u64::from_be_bytes([
+            bytes[0] ^ bytes[8],
+            bytes[1] ^ bytes[9],
+            bytes[2] ^ bytes[10],
+            bytes[3] ^ bytes[11],
+            bytes[4] ^ bytes[12],
+            bytes[5] ^ bytes[13],
+            bytes[6] ^ bytes[14],
+            bytes[7] ^ bytes[15],
+        ]);
+        let idx = (hash as usize) % self.shards.len().max(1);
+        &self.shards[idx]
     }
 
     /// Process a batch of writes optimally based on database type
@@ -303,10 +386,86 @@ impl DatabaseWriter {
             )
         });
 
-        // Process run writes first (flush immediately on receipt)
+        // Process run writes first. If a short successful run has both
+        // run:start and run:stop pending in this shard flush, insert it once
+        // already terminal instead of doing insert+update.
+        let mut pending_starts: AHashMap<Uuid, (ExecutionContext, chrono::DateTime<chrono::Utc>)> =
+            AHashMap::new();
         for write in run_writes {
-            if let Err(e) = Self::execute_write(pool, &write).await {
-                tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+            match write {
+                DatabaseWrite::RunStart {
+                    execution_context,
+                    event_time,
+                } => {
+                    pending_starts
+                        .insert(execution_context.run_id, (execution_context, event_time));
+                }
+                DatabaseWrite::RunStop {
+                    run_id,
+                    event_time,
+                    result,
+                } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id) {
+                        if let Err(e) = Self::write_run_start_stop(
+                            pool,
+                            &execution_context,
+                            start_time,
+                            event_time,
+                            &result,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                "DatabaseWriter: Coalesced run write failed for {}: {}",
+                                run_id,
+                                e
+                            );
+                        }
+                    } else if let Err(e) =
+                        Self::write_run_stop(pool, run_id, event_time, &result).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::RunFail {
+                    run_id,
+                    event_time,
+                    failure,
+                } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
+                        && let Err(e) =
+                            Self::write_run_start(pool, &execution_context, start_time).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+                    }
+                    if let Err(e) = Self::write_run_fail(pool, run_id, event_time, &failure).await {
+                        tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::RunCancel {
+                    run_id,
+                    event_time,
+                    cancellation,
+                } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
+                        && let Err(e) =
+                            Self::write_run_start(pool, &execution_context, start_time).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+                    }
+                    if let Err(e) =
+                        Self::write_run_cancel(pool, run_id, event_time, &cancellation).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::Call { .. } => unreachable!("call writes were partitioned out"),
+            }
+        }
+
+        for (_, (execution_context, start_time)) in pending_starts {
+            if let Err(e) = Self::write_run_start(pool, &execution_context, start_time).await {
+                tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
             }
         }
 
@@ -714,6 +873,114 @@ ON CONFLICT (call_id) DO UPDATE SET
         }
 
         // Update stream metrics
+        crate::db::stream::Stream::update_metrics(pool, &ctx.stream_id)
+            .await
+            .map_err(|e| {
+                sqlx::Error::Protocol(format!("Failed to update stream metrics: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    async fn write_run_start_stop(
+        pool: &DatabasePool,
+        ctx: &ExecutionContext,
+        start_time: chrono::DateTime<chrono::Utc>,
+        stop_time: chrono::DateTime<chrono::Utc>,
+        result: &Val,
+    ) -> Result<(), sqlx::Error> {
+        let result_json = val_to_jsonb_string(result);
+
+        crate::db::stream::Stream::create_or_get_stream(
+            pool,
+            ctx.stream_id,
+            ctx.env_id.unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| sqlx::Error::Protocol(format!("Failed to create stream: {}", e)))?;
+
+        let rows_affected = match pool {
+            DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)
+                     ON CONFLICT (run_id) DO UPDATE
+                     SET stop_time = EXCLUDED.stop_time,
+                         status_id = EXCLUDED.status_id,
+                         result = EXCLUDED.result
+                     WHERE hot.run.status_id = 1"
+                )
+                .bind(ctx.run_id)
+                .bind(ctx.env_id)
+                .bind(ctx.stream_id)
+                .bind(ctx.build_id)
+                .bind(ctx.run_type_id)
+                .bind(ctx.origin_run_id)
+                .bind(ctx.event_id)
+                .bind(start_time)
+                .bind(stop_time)
+                .bind(2i16)
+                .bind(&result_json)
+                .bind(ctx.user_id)
+                .bind(ctx.retry_attempt)
+                .bind(ctx.access_id)
+                .bind(&ctx.agent_type)
+                .execute(pg_pool)
+                .await?
+                .rows_affected()
+            }
+            DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(ctx.run_id)
+                .bind(ctx.env_id)
+                .bind(ctx.stream_id)
+                .bind(ctx.build_id)
+                .bind(ctx.run_type_id)
+                .bind(ctx.origin_run_id)
+                .bind(ctx.event_id)
+                .bind(start_time)
+                .bind(stop_time)
+                .bind(2i16)
+                .bind(&result_json)
+                .bind(ctx.user_id)
+                .bind(ctx.retry_attempt)
+                .bind(ctx.access_id)
+                .bind(&ctx.agent_type)
+                .execute(sqlite_pool)
+                .await?
+                .rows_affected()
+            }
+        };
+
+        if rows_affected == 0 {
+            Self::write_run_stop(pool, ctx.run_id, stop_time, result).await?;
+        }
+
+        if let Some(evt_id) = ctx.event_id {
+            match crate::db::Event::get_event(pool, &evt_id).await {
+                Ok(evt) if !evt.handled => {
+                    if let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await {
+                        tracing::error!(
+                            "DatabaseWriter: Failed to mark event {} as handled: {}",
+                            evt_id,
+                            e
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(
+                        "DatabaseWriter: Failed to get event {} for marking as handled: {}",
+                        evt_id,
+                        e
+                    );
+                }
+            }
+        }
+
         crate::db::stream::Stream::update_metrics(pool, &ctx.stream_id)
             .await
             .map_err(|e| {

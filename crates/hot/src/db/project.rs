@@ -1,7 +1,13 @@
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
+
+use super::entity_cache::EntityCache;
+
+static PROJECT_CACHE: LazyLock<EntityCache<Uuid, Project>> =
+    LazyLock::new(|| EntityCache::new(1_000));
 
 #[derive(Error, Debug)]
 pub enum ProjectError {
@@ -35,12 +41,27 @@ impl Project {
         db: &crate::db::DatabasePool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
-        match db {
+        if let Some(project) = PROJECT_CACHE.get(project_id) {
+            return Ok(project);
+        }
+
+        let project = match db {
             crate::db::DatabasePool::Sqlite(db) => Self::get_project_sqlite(db, project_id).await,
             crate::db::DatabasePool::Postgres(db) => {
                 Self::get_project_postgres(db, project_id).await
             }
-        }
+        }?;
+
+        PROJECT_CACHE.insert(*project_id, project.clone());
+        Ok(project)
+    }
+
+    pub fn invalidate_project_cache(project_id: &Uuid) {
+        PROJECT_CACHE.invalidate(project_id);
+    }
+
+    pub fn invalidate_all_project_cache() {
+        PROJECT_CACHE.clear();
     }
 
     async fn get_project_sqlite(
@@ -299,7 +320,7 @@ impl Project {
         name: &str,
         created_by_user_id: &Uuid,
     ) -> Result<(), ProjectError> {
-        match db {
+        let result = match db {
             crate::db::DatabasePool::Sqlite(db) => {
                 Self::insert_project_sqlite(db, project_id, env_id, name, created_by_user_id).await
             }
@@ -307,7 +328,11 @@ impl Project {
                 Self::insert_project_postgres(db, project_id, env_id, name, created_by_user_id)
                     .await
             }
+        };
+        if result.is_ok() {
+            Self::invalidate_project_cache(project_id);
         }
+        result
     }
 
     async fn insert_project_sqlite(
@@ -363,14 +388,18 @@ impl Project {
         name: &str,
         updated_by_user_id: &Uuid,
     ) -> Result<(), ProjectError> {
-        match db {
+        let result = match db {
             crate::db::DatabasePool::Sqlite(db) => {
                 Self::update_name_sqlite(db, project_id, name, updated_by_user_id).await
             }
             crate::db::DatabasePool::Postgres(db) => {
                 Self::update_name_postgres(db, project_id, name, updated_by_user_id).await
             }
+        };
+        if result.is_ok() {
+            Self::invalidate_project_cache(project_id);
         }
+        result
     }
 
     async fn update_name_sqlite(
@@ -485,14 +514,18 @@ impl Project {
             }
         }
 
-        match db {
+        let result = match db {
             crate::db::DatabasePool::Sqlite(db) => {
                 Self::toggle_active_sqlite(db, project_id, active, toggled_by_user_id).await
             }
             crate::db::DatabasePool::Postgres(db) => {
                 Self::toggle_active_postgres(db, project_id, active, toggled_by_user_id).await
             }
+        };
+        if result.is_ok() {
+            Self::invalidate_project_cache(project_id);
         }
+        result
     }
 
     async fn toggle_active_sqlite(
@@ -646,6 +679,7 @@ impl Project {
                     .await?;
             }
         }
+        Self::invalidate_project_cache(project_id);
         Ok(())
     }
 }
