@@ -26,6 +26,13 @@ fn val_to_jsonb_string(v: &Val) -> String {
     sanitize_json_for_jsonb(&raw).into_owned()
 }
 
+fn duration_ms_between(
+    start: chrono::DateTime<chrono::Utc>,
+    stop: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    stop.signed_duration_since(start).num_milliseconds().max(0)
+}
+
 /// Maximum number of pending writes before backpressure warning
 const BACKPRESSURE_THRESHOLD: usize = 1000;
 
@@ -884,7 +891,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         let mut last_error: Option<sqlx::Error> = None;
 
         for attempt in 0..MAX_RETRIES {
-            let result: Result<(), sqlx::Error> = match pool {
+            let result: Result<u64, sqlx::Error> = match pool {
                 DatabasePool::Postgres(pg_pool) => {
                     sqlx::query(
                         "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type)
@@ -906,7 +913,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(&ctx.agent_type)
                     .execute(pg_pool)
                     .await
-                    .map(|_| ())
+                    .map(|result| result.rows_affected())
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
                     sqlx::query(
@@ -928,18 +935,28 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(&ctx.agent_type)
                     .execute(sqlite_pool)
                     .await
-                    .map(|_| ())
+                    .map(|result| result.rows_affected())
                 }
             };
 
             match result {
-                Ok(()) => {
+                Ok(rows_affected) => {
                     if attempt > 0 {
                         tracing::debug!(
                             "DatabaseWriter: run:start for run_id={} succeeded on attempt {}",
                             ctx.run_id,
                             attempt + 1
                         );
+                    }
+                    if rows_affected > 0 {
+                        crate::db::stream::Stream::record_run_started(pool, &ctx.stream_id)
+                            .await
+                            .map_err(|e| {
+                                sqlx::Error::Protocol(format!(
+                                    "Failed to update stream run metrics: {}",
+                                    e
+                                ))
+                            })?;
                     }
                     last_error = None;
                     break;
@@ -983,13 +1000,6 @@ ON CONFLICT (call_id) DO UPDATE SET
                 e
             );
         }
-
-        // Update stream metrics
-        crate::db::stream::Stream::update_metrics(pool, &ctx.stream_id)
-            .await
-            .map_err(|e| {
-                sqlx::Error::Protocol(format!("Failed to update stream metrics: {}", e))
-            })?;
 
         Ok(())
     }
@@ -1069,6 +1079,16 @@ ON CONFLICT (call_id) DO UPDATE SET
 
         if rows_affected == 0 {
             Self::write_run_stop(pool, ctx.run_id, stop_time, result).await?;
+        } else {
+            crate::db::stream::Stream::record_run_started_and_finished(
+                pool,
+                &ctx.stream_id,
+                duration_ms_between(start_time, stop_time),
+            )
+            .await
+            .map_err(|e| {
+                sqlx::Error::Protocol(format!("Failed to update stream run metrics: {}", e))
+            })?;
         }
 
         if let Some(evt_id) = ctx.event_id
@@ -1080,12 +1100,6 @@ ON CONFLICT (call_id) DO UPDATE SET
                 e
             );
         }
-
-        crate::db::stream::Stream::update_metrics(pool, &ctx.stream_id)
-            .await
-            .map_err(|e| {
-                sqlx::Error::Protocol(format!("Failed to update stream metrics: {}", e))
-            })?;
 
         Ok(())
     }
@@ -1129,7 +1143,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         };
 
         if rows_affected > 0 {
-            Self::refresh_stream_metrics(pool, run_id).await;
+            Self::record_run_finished(pool, run_id).await?;
         }
         Ok(())
     }
@@ -1170,7 +1184,11 @@ ON CONFLICT (call_id) DO UPDATE SET
         else {
             // Run not found - just mark as failed without retry
             tracing::warn!("Run {} not found when processing failure", run_id);
-            Self::update_run_failed(pool, run_id, event_time, &result_json, None, None).await?;
+            let updated =
+                Self::update_run_failed(pool, run_id, event_time, &result_json, None, None).await?;
+            if updated {
+                Self::record_run_finished(pool, run_id).await?;
+            }
             return Ok(());
         };
 
@@ -1243,6 +1261,8 @@ ON CONFLICT (call_id) DO UPDATE SET
                             run_id = %run_id,
                             "Skipped retry scheduling for run that is no longer running"
                         );
+                    } else {
+                        Self::record_run_finished(pool, run_id).await?;
                     }
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
@@ -1263,6 +1283,8 @@ ON CONFLICT (call_id) DO UPDATE SET
                             run_id = %run_id,
                             "Skipped retry scheduling for run that is no longer running"
                         );
+                    } else {
+                        Self::record_run_finished(pool, run_id).await?;
                     }
                 }
             }
@@ -1291,47 +1313,20 @@ ON CONFLICT (call_id) DO UPDATE SET
                     run_id = %run_id,
                     "Skipped run:fail update for run that is no longer running"
                 );
+            } else {
+                Self::record_run_finished(pool, run_id).await?;
             }
         }
 
-        // The run transitioned to a terminal/pending_retry state above; keep the
-        // stream's aggregate run metrics current.
-        Self::refresh_stream_metrics(pool, run_id).await;
         Ok(())
     }
 
-    /// Best-effort refresh of a stream's aggregate run metrics after a run leaves
-    /// the `running` state. Metrics are derived data, so failures are logged but
-    /// never abort the originating write.
-    async fn refresh_stream_metrics(pool: &DatabasePool, run_id: Uuid) {
-        let stream_id: Option<Uuid> = match pool {
-            DatabasePool::Postgres(pg_pool) => {
-                sqlx::query_scalar("SELECT stream_id FROM hot.run WHERE run_id = $1")
-                    .bind(run_id)
-                    .fetch_optional(pg_pool)
-                    .await
-                    .ok()
-                    .flatten()
-            }
-            DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query_scalar("SELECT stream_id FROM run WHERE run_id = ?")
-                    .bind(run_id)
-                    .fetch_optional(sqlite_pool)
-                    .await
-                    .ok()
-                    .flatten()
-            }
-        };
-
-        if let Some(stream_id) = stream_id
-            && let Err(e) = crate::db::stream::Stream::update_metrics(pool, &stream_id).await
-        {
-            tracing::warn!(
-                run_id = %run_id,
-                "Failed to refresh stream metrics after run completion: {}",
-                e
-            );
-        }
+    async fn record_run_finished(pool: &DatabasePool, run_id: Uuid) -> Result<(), sqlx::Error> {
+        crate::db::stream::Stream::record_run_finished(pool, &run_id)
+            .await
+            .map_err(|e| {
+                sqlx::Error::Protocol(format!("Failed to update stream run metrics: {}", e))
+            })
     }
 
     /// Helper to update run as failed and publish alert
@@ -1668,7 +1663,7 @@ ON CONFLICT (call_id) DO UPDATE SET
             return Ok(());
         }
 
-        Self::refresh_stream_metrics(pool, run_id).await;
+        Self::record_run_finished(pool, run_id).await?;
 
         // Publish run:cancelled alert if we have env_id
         // Skip for task-type runs (id=7) — the task worker handles its own task:cancelled alerts
