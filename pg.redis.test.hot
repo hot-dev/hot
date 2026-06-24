@@ -1,0 +1,54 @@
+::hot::conf ns
+
+::env ::hot::env
+
+// Postgres + Redis-backed queue/task smoke-test configuration.
+//
+// Intended for local runs with disposable Postgres 18.3 + pgvector and Valkey containers:
+//
+//   docker run --rm -p 55432:5432 \
+//     -e POSTGRES_USER=hot \
+//     -e POSTGRES_PASSWORD=hot \
+//     -e POSTGRES_DB=hot \
+//     --name hot-queue-test-postgres \
+//     postgres:18.3
+//   docker exec hot-queue-test-postgres \
+//     bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
+//   docker run --rm -p 6379:6379 valkey/valkey:latest
+//
+// Then run:
+//
+//   cargo run -p hot_cli -- test -c pg.redis.test.hot
+//
+// The matching Rust integration test uses the same default URI via
+// HOT_TEST_POSTGRES_URI.
+
+hot.set.profile "pg-test"
+hot.set.project "pg-test-queue"
+
+hot.profile.pg-test.user.email "postgres-test@hot.dev"
+hot.profile.pg-test.org.slug "pg-test"
+hot.profile.pg-test.env.name "development"
+
+hot.project.pg-test-queue.src.paths ["./hot/test/postgres-queue/src"]
+hot.project.pg-test-queue.test.paths ["./hot/test/postgres-queue/test", "./hot/pkg/hot-std/test"]
+hot.project.pg-test-queue.test.capture true
+hot.project.pg-test-queue.resources.paths ["./hot/pkg/hot-std/test/fixtures/resources"]
+hot.project.pg-test-queue.skills.codegen.enabled false
+
+hot.db.uri ::env/get("HOT_TEST_POSTGRES_URI", "postgres://hot:hot@127.0.0.1:55432/hot")
+hot.db.schema ::env/get("HOT_TEST_POSTGRES_SCHEMA", "hot")
+
+hot.file.storage.type "local"
+hot.file.storage.path "./.hot/pg-test/file"
+
+hot.log.level "info"
+hot.log.target "stdout"
+hot.log.dir ".hot/pg-test/log"
+
+hot.redis.uri ::env/get("HOT_REDIS_URI", "redis://127.0.0.1:6379")
+hot.redis.cluster false
+hot.queue.type ::env/get("HOT_QUEUE_TYPE", "redis")
+hot.serialization.type "json"
+hot.emitter.type "none"
+hot.test.capture true

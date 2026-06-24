@@ -10,14 +10,17 @@
 //! `hot scheduler` as separate processes), use the Redis Streams backend
 //! instead by setting `HOT_QUEUE_TYPE=redis`.
 
-use super::{Queue, QueueProcessingError, QueueProcessor, Serialization};
+use super::{
+    Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, Serialization,
+    queue_timing_enabled, queue_wait_target_p99_ms,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum number of in-flight delivery retries for a worker function.
 const MAX_PROCESSING_RETRIES: usize = 3;
@@ -26,6 +29,10 @@ const MAX_PROCESSING_RETRIES: usize = 3;
 /// can apply backpressure to upstream callers rather than exhausting heap.
 /// 100k is large enough that healthy bursty workloads never block.
 const CHANNEL_CAPACITY: usize = 100_000;
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Debug)]
 pub enum MemQueueError {
@@ -185,6 +192,17 @@ impl<T: Send + Sync + 'static> MemQueue<T> {
         out
     }
 
+    async fn send_to_dlq(&self, item: T, reason: &str) {
+        if let Err(send_err) = self.channels.dlq_tx.send(item).await {
+            tracing::warn!(
+                queue = self.queue_name,
+                reason = reason,
+                "Failed to enqueue item to memory queue DLQ: {}",
+                send_err
+            );
+        }
+    }
+
     /// Internal hook for `tokio::select!`-based loops that want to await a
     /// message without polling. Phase 2 uses this to replace polling loops
     /// with truly async waits across multiple queues.
@@ -200,6 +218,50 @@ impl<T: Send + Sync + 'static> MemQueue<T> {
 }
 
 impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T> {
+    async fn claim_with(
+        &self,
+        block: bool,
+    ) -> Result<Option<MemQueueLease<T>>, Box<dyn Error + Send + Sync>> {
+        let retry_item = if block {
+            match self.channels.rx.recv().await {
+                Ok(item) => item,
+                Err(_) => return Err(Box::new(MemQueueError::Closed)),
+            }
+        } else {
+            match self.channels.rx.try_recv() {
+                Ok(item) => item,
+                Err(async_channel::TryRecvError::Empty) => return Ok(None),
+                Err(async_channel::TryRecvError::Closed) => {
+                    return Err(Box::new(MemQueueError::Closed));
+                }
+            }
+        };
+
+        if retry_item.exceeded_retries() {
+            self.send_to_dlq(retry_item.item, "retry limit exceeded")
+                .await;
+            return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
+        }
+
+        Ok(Some(MemQueueLease {
+            queue: self.clone(),
+            retry_item: Some(retry_item),
+            completed: false,
+        }))
+    }
+
+    pub async fn claim_blocking(&self) -> Result<MemQueueLease<T>, Box<dyn Error + Send + Sync>> {
+        self.claim_with(true)
+            .await?
+            .ok_or_else(|| Box::new(MemQueueError::Closed) as Box<dyn Error + Send + Sync>)
+    }
+
+    pub async fn claim_now(
+        &self,
+    ) -> Result<Option<MemQueueLease<T>>, Box<dyn Error + Send + Sync>> {
+        self.claim_with(false).await
+    }
+
     /// Blocking variant of `dequeue_and_work`: parks the future on the
     /// underlying channel until a message is enqueued (or the channel
     /// closes). Designed to be used inside `tokio::select!` so worker
@@ -213,38 +275,191 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
-        let retry_item = match self.channels.rx.recv().await {
-            Ok(item) => item,
-            Err(_) => return Err(Box::new(MemQueueError::Closed)),
-        };
+        self.claim_blocking().await?.process(worker).await
+    }
+}
 
-        if retry_item.exceeded_retries() {
-            let _ = self.channels.dlq_tx.try_send(retry_item.item);
-            return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
-        }
+pub struct MemQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    queue: MemQueue<T>,
+    retry_item: Option<RetryItem<T>>,
+    completed: bool,
+}
 
+impl<T> MemQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    pub async fn process<F, Fut, R>(
+        mut self,
+        worker: F,
+    ) -> Result<Option<R>, Box<dyn Error + Send + Sync>>
+    where
+        F: FnOnce(T) -> Fut + Send,
+        Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
+        R: Send + Sync,
+    {
+        let retry_item = self
+            .retry_item
+            .take()
+            .expect("memory queue lease already completed");
         let item_for_worker = retry_item.item.clone();
         let next_retry_count = retry_item.retry_count + 1;
         let first_attempt = retry_item.first_attempt;
 
-        match worker(item_for_worker).await {
-            Ok(result) => Ok(Some(result)),
+        let queue_wait_ms = duration_ms(first_attempt.elapsed());
+        let wait_target_p99_ms = queue_wait_target_p99_ms();
+        let processing_started = Instant::now();
+        let delivery_source = if retry_item.retry_count == 0 {
+            "fresh"
+        } else {
+            "retry"
+        };
+
+        let result = match worker(item_for_worker).await {
+            Ok(result) => {
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.queue.queue_name,
+                        backend = "memory",
+                        delivery_source = delivery_source,
+                        queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = retry_item.retry_count,
+                        outcome = "success",
+                        "queue item processed"
+                    );
+                }
+                Ok(Some(result))
+            }
             Err(e) => {
-                let updated =
-                    RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
-                if updated.exceeded_retries() {
-                    let _ = self.channels.dlq_tx.try_send(updated.item);
-                    Err(Box::new(QueueProcessingError::WorkerError(e)))
-                } else {
-                    if let Err(send_err) = self.channels.tx.send(updated).await {
+                if let Some(infra) = e.downcast_ref::<QueueInfrastructureError>() {
+                    let backoff = infra.backoff();
+                    if queue_timing_enabled() {
+                        tracing::info!(
+                            target: "hot::queue::timing",
+                            queue = %self.queue.queue_name,
+                            backend = "memory",
+                            delivery_source = delivery_source,
+                            queue_wait_ms = queue_wait_ms,
+                            wait_target_p99_ms = wait_target_p99_ms,
+                            processing_ms = duration_ms(processing_started.elapsed()),
+                            retry_count = retry_item.retry_count,
+                            outcome = "infrastructure_retry",
+                            backoff_ms = duration_ms(backoff),
+                            "queue item deferred for infrastructure retry"
+                        );
+                    }
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                    let unchanged = RetryItem::from_parts(
+                        retry_item.item,
+                        retry_item.retry_count,
+                        first_attempt,
+                    );
+                    if let Err(send_err) = self.queue.channels.tx.send(unchanged).await {
                         tracing::warn!(
-                            queue = self.queue_name,
-                            "Failed to re-enqueue retry: {}",
+                            queue = self.queue.queue_name,
+                            "Failed to re-enqueue infrastructure retry: {}",
                             send_err
                         );
                     }
-                    Err(Box::new(QueueProcessingError::WorkerError(e)))
+                    Err(Box::new(QueueProcessingError::QueueError(e))
+                        as Box<dyn Error + Send + Sync>)
+                } else {
+                    if queue_timing_enabled() {
+                        tracing::info!(
+                            target: "hot::queue::timing",
+                            queue = %self.queue.queue_name,
+                            backend = "memory",
+                            delivery_source = delivery_source,
+                            queue_wait_ms = queue_wait_ms,
+                            wait_target_p99_ms = wait_target_p99_ms,
+                            processing_ms = duration_ms(processing_started.elapsed()),
+                            retry_count = retry_item.retry_count,
+                            outcome = "worker_error",
+                            "queue item processing failed"
+                        );
+                    }
+                    let updated =
+                        RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
+                    if updated.exceeded_retries() {
+                        self.queue
+                            .send_to_dlq(updated.item, "retry limit exceeded")
+                            .await;
+                        Err(Box::new(QueueProcessingError::WorkerError(e))
+                            as Box<dyn Error + Send + Sync>)
+                    } else {
+                        if let Err(send_err) = self.queue.channels.tx.send(updated).await {
+                            tracing::warn!(
+                                queue = self.queue.queue_name,
+                                "Failed to re-enqueue retry: {}",
+                                send_err
+                            );
+                        }
+                        Err(Box::new(QueueProcessingError::WorkerError(e))
+                            as Box<dyn Error + Send + Sync>)
+                    }
                 }
+            }
+        };
+
+        self.completed = true;
+        result
+    }
+}
+
+impl<T> Drop for MemQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let Some(retry_item) = self.retry_item.take() else {
+            return;
+        };
+
+        // Best-effort restore for the in-process local-dev queue: `Drop` is
+        // synchronous, so we first try a non-blocking `try_send`. If the channel
+        // is momentarily full we spawn a detached task to `send().await` the item
+        // back. This is intentionally best-effort — there is no durability
+        // guarantee here (unlike the Redis lease, which is backed by the stream
+        // PEL). A restore can still be lost if the runtime is torn down before
+        // the spawned task runs, which is acceptable for the memory queue.
+        match self.queue.channels.tx.try_send(retry_item) {
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Full(retry_item)) => {
+                let tx = self.queue.channels.tx.clone();
+                let queue_name = self.queue.queue_name.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Err(send_err) = tx.send(retry_item).await {
+                            tracing::warn!(
+                                queue = queue_name,
+                                "Failed to asynchronously restore dropped memory queue lease: {}",
+                                send_err
+                            );
+                        }
+                    });
+                } else {
+                    tracing::error!(
+                        queue = self.queue.queue_name,
+                        "Memory queue lease restoration hit a full channel outside a Tokio runtime; item cannot be restored"
+                    );
+                }
+            }
+            Err(async_channel::TrySendError::Closed(_retry_item)) => {
+                tracing::warn!(
+                    queue = self.queue.queue_name,
+                    "Failed to restore dropped memory queue lease: queue is closed"
+                );
             }
         }
     }
@@ -303,53 +518,9 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> QueueProce
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
-        // Non-blocking pop. Returning `Ok(None)` when empty preserves the
-        // existing polling-loop semantics in callers; Phase 2 introduces
-        // `tokio::select!`-based loops that use `recv_async` for true
-        // async wakeup.
-        let retry_item = match self.channels.rx.try_recv() {
-            Ok(item) => item,
-            Err(async_channel::TryRecvError::Empty) => return Ok(None),
-            Err(async_channel::TryRecvError::Closed) => {
-                return Err(Box::new(MemQueueError::Closed));
-            }
-        };
-
-        if retry_item.exceeded_retries() {
-            // Capture into DLQ before bailing.
-            let _ = self.channels.dlq_tx.try_send(retry_item.item);
-            return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
-        }
-
-        // Clone for the worker so we still have the original to re-enqueue
-        // if the worker fails (avoids requiring `T: Clone` on the basic Queue trait).
-        let item_for_worker = retry_item.item.clone();
-        let next_retry_count = retry_item.retry_count + 1;
-        let first_attempt = retry_item.first_attempt;
-
-        match worker(item_for_worker).await {
-            Ok(result) => Ok(Some(result)),
-            Err(e) => {
-                let updated =
-                    RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
-
-                if updated.exceeded_retries() {
-                    // Final failure — DLQ and surface error.
-                    let _ = self.channels.dlq_tx.try_send(updated.item);
-                    Err(Box::new(QueueProcessingError::WorkerError(e)))
-                } else {
-                    // Re-enqueue at the BACK of the queue so other items
-                    // can interleave (matches prior behavior).
-                    if let Err(send_err) = self.channels.tx.send(updated).await {
-                        tracing::warn!(
-                            queue = self.queue_name,
-                            "Failed to re-enqueue retry: {}",
-                            send_err
-                        );
-                    }
-                    Err(Box::new(QueueProcessingError::WorkerError(e)))
-                }
-            }
+        match self.claim_now().await? {
+            Some(lease) => lease.process(worker).await,
+            None => Ok(None),
         }
     }
 }
@@ -537,6 +708,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_dequeue_and_work_infrastructure_retry_does_not_burn_retry_budget() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(5).await.unwrap();
+
+        for _ in 0..(MAX_PROCESSING_RETRIES + 2) {
+            let result = queue
+                .dequeue_and_work(|_item| async move {
+                    Err::<i32, Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            "temporary infrastructure failure",
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+
+            assert!(result.is_err());
+            assert_eq!(queue.len().await.unwrap(), 1);
+            assert!(queue.try_drain_dlq().is_empty());
+        }
+
+        let result = queue
+            .dequeue_and_work(|item| async move { Ok::<i32, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(result, Some(5));
+        assert!(queue.try_drain_dlq().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_dequeue_and_work_retry_limit_to_dlq() {
         let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
         queue.enqueue(99).await.unwrap();
@@ -631,6 +832,45 @@ mod tests {
         got.sort();
         let expected: Vec<i32> = (0..n_items).collect();
         assert_eq!(got, expected, "all items should be processed exactly once");
+    }
+
+    #[tokio::test]
+    async fn test_process_blocking_retry_limit_to_dlq() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(99).await.unwrap();
+
+        for _ in 0..MAX_PROCESSING_RETRIES {
+            let _ = queue
+                .process_blocking(|_item| async move {
+                    let error: Box<dyn Error + Send + Sync> = "fail".into();
+                    let result: Result<i32, Box<dyn Error + Send + Sync>> = Err(error);
+                    result
+                })
+                .await;
+        }
+
+        assert!(queue.is_empty().await.unwrap());
+        let dlq = queue.try_drain_dlq();
+        assert_eq!(dlq, vec![99]);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_lease_requeues_item() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(123).await.unwrap();
+
+        let lease = queue.claim_blocking().await.unwrap();
+        drop(lease);
+
+        let got = queue
+            .dequeue_and_work(|item| async move {
+                let result: Result<i32, Box<dyn Error + Send + Sync>> = Ok(item);
+                result
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(got, Some(123));
     }
 
     #[tokio::test]

@@ -10,7 +10,10 @@
 //! - Full cluster mode support
 //! - Connection caching to minimize Redis connection overhead
 
-use super::{Queue, QueueProcessingError, QueueProcessor};
+use super::{
+    Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, queue_timing_enabled,
+    queue_wait_target_p99_ms,
+};
 use crate::data::serialization::Serialization;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
@@ -21,7 +24,9 @@ use std::error::Error;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use zstd::{Decoder, Encoder};
@@ -57,10 +62,10 @@ const INACTIVE_CONSUMER_THRESHOLD_MS: u64 = 24 * 3_600_000; // 24 hours
 /// Fallback stream retention when there are no pending messages at all.
 const DEFAULT_STREAM_RETENTION_MS: u64 = 30 * 24 * 3_600_000; // 30 days
 
-/// How many messages to fetch per XREADGROUP call. Larger batches amortize
-/// the network round-trip across more work items; smaller batches reduce
-/// tail latency for messages stuck behind a slow handler.
-const READ_BATCH_SIZE: usize = 16;
+/// How many messages to fetch per XREADGROUP call by default. Keep direct
+/// users at one-at-a-time so a single local worker does not hide backlog in
+/// PEL/prefetch; high-capacity workers opt in via `with_read_batch_size`.
+const READ_BATCH_SIZE: usize = 1;
 
 /// Soft upper bound on stream length. XADD uses `MAXLEN ~ N` so Redis can
 /// efficiently trim near this number without exact-cap overhead. Combined
@@ -211,7 +216,15 @@ impl RedisClient {
     async fn connect(&self) -> Result<RedisConnectionOwned, StreamsQueueError> {
         match self {
             RedisClient::Standalone(client) => {
-                let conn = client.get_multiplexed_async_connection().await?;
+                // Disable redis-rs 1.x's 500ms default response timeout: this
+                // connection issues `XREADGROUP ... BLOCK 5000` and must not
+                // abort blocking reads (or commands slowed by load) mid-flight.
+                // See `crate::redis::standalone_async_config` for the rationale.
+                let conn = client
+                    .get_multiplexed_async_connection_with_config(
+                        &crate::redis::standalone_async_config(),
+                    )
+                    .await?;
                 Ok(RedisConnectionOwned::Standalone(conn))
             }
             RedisClient::Cluster(client) => {
@@ -261,6 +274,151 @@ struct PrefetchedMessage {
     source: FetchSource,
 }
 
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn stream_message_age_ms(msg_id: &str) -> u64 {
+    let Some((millis, _sequence)) = msg_id.split_once('-') else {
+        return 0;
+    };
+    let Ok(enqueued_at_ms) = millis.parse::<i64>() else {
+        return 0;
+    };
+    chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(enqueued_at_ms)
+        .max(0) as u64
+}
+
+struct RedisQueueDrainStats {
+    last_log_at: StdMutex<Instant>,
+    refill_calls: AtomicU64,
+    refill_buffer_hits: AtomicU64,
+    refill_lock_wait_ms: AtomicU64,
+    pending_reads: AtomicU64,
+    pending_read_ms: AtomicU64,
+    pending_messages: AtomicU64,
+    pending_buffered: AtomicU64,
+    pending_filtered_inflight: AtomicU64,
+    pending_all_inflight: AtomicU64,
+    fresh_reads: AtomicU64,
+    fresh_read_ms: AtomicU64,
+    fresh_messages: AtomicU64,
+    fresh_empty: AtomicU64,
+    nogroup_recoveries: AtomicU64,
+    claims: AtomicU64,
+    claim_none: AtomicU64,
+    max_prefetch_depth: AtomicU64,
+    max_in_flight: AtomicU64,
+}
+
+impl RedisQueueDrainStats {
+    fn new() -> Self {
+        Self {
+            last_log_at: StdMutex::new(Instant::now()),
+            refill_calls: AtomicU64::new(0),
+            refill_buffer_hits: AtomicU64::new(0),
+            refill_lock_wait_ms: AtomicU64::new(0),
+            pending_reads: AtomicU64::new(0),
+            pending_read_ms: AtomicU64::new(0),
+            pending_messages: AtomicU64::new(0),
+            pending_buffered: AtomicU64::new(0),
+            pending_filtered_inflight: AtomicU64::new(0),
+            pending_all_inflight: AtomicU64::new(0),
+            fresh_reads: AtomicU64::new(0),
+            fresh_read_ms: AtomicU64::new(0),
+            fresh_messages: AtomicU64::new(0),
+            fresh_empty: AtomicU64::new(0),
+            nogroup_recoveries: AtomicU64::new(0),
+            claims: AtomicU64::new(0),
+            claim_none: AtomicU64::new(0),
+            max_prefetch_depth: AtomicU64::new(0),
+            max_in_flight: AtomicU64::new(0),
+        }
+    }
+
+    fn observe_prefetch_depth(&self, depth: usize) {
+        self.max_prefetch_depth
+            .fetch_max(depth as u64, Ordering::Relaxed);
+    }
+
+    fn observe_in_flight_depth(&self, depth: usize) {
+        self.max_in_flight
+            .fetch_max(depth as u64, Ordering::Relaxed);
+    }
+
+    fn maybe_log(&self, stream_name: &str, consumer_name: &str, read_batch_size: usize) {
+        if !queue_timing_enabled() {
+            return;
+        }
+
+        let Ok(mut last_log_at) = self.last_log_at.try_lock() else {
+            return;
+        };
+        let elapsed = last_log_at.elapsed();
+        if elapsed < Duration::from_secs(5) {
+            return;
+        }
+        *last_log_at = Instant::now();
+
+        let refill_calls = self.refill_calls.swap(0, Ordering::Relaxed);
+        let refill_buffer_hits = self.refill_buffer_hits.swap(0, Ordering::Relaxed);
+        let refill_lock_wait_ms = self.refill_lock_wait_ms.swap(0, Ordering::Relaxed);
+        let pending_reads = self.pending_reads.swap(0, Ordering::Relaxed);
+        let pending_read_ms = self.pending_read_ms.swap(0, Ordering::Relaxed);
+        let pending_messages = self.pending_messages.swap(0, Ordering::Relaxed);
+        let pending_buffered = self.pending_buffered.swap(0, Ordering::Relaxed);
+        let pending_filtered_inflight = self.pending_filtered_inflight.swap(0, Ordering::Relaxed);
+        let pending_all_inflight = self.pending_all_inflight.swap(0, Ordering::Relaxed);
+        let fresh_reads = self.fresh_reads.swap(0, Ordering::Relaxed);
+        let fresh_read_ms = self.fresh_read_ms.swap(0, Ordering::Relaxed);
+        let fresh_messages = self.fresh_messages.swap(0, Ordering::Relaxed);
+        let fresh_empty = self.fresh_empty.swap(0, Ordering::Relaxed);
+        let nogroup_recoveries = self.nogroup_recoveries.swap(0, Ordering::Relaxed);
+        let claims = self.claims.swap(0, Ordering::Relaxed);
+        let claim_none = self.claim_none.swap(0, Ordering::Relaxed);
+        let max_prefetch_depth = self.max_prefetch_depth.swap(0, Ordering::Relaxed);
+        let max_in_flight = self.max_in_flight.swap(0, Ordering::Relaxed);
+
+        if claims == 0
+            && pending_messages == 0
+            && fresh_messages == 0
+            && pending_all_inflight == 0
+            && nogroup_recoveries == 0
+        {
+            return;
+        }
+
+        tracing::info!(
+            target: "hot::queue::drain",
+            queue = %stream_name,
+            consumer = %consumer_name,
+            read_batch_size = read_batch_size,
+            interval_ms = duration_ms(elapsed),
+            refill_calls = refill_calls,
+            refill_buffer_hits = refill_buffer_hits,
+            refill_lock_wait_ms = refill_lock_wait_ms,
+            pending_reads = pending_reads,
+            pending_read_ms = pending_read_ms,
+            pending_messages = pending_messages,
+            pending_buffered = pending_buffered,
+            pending_filtered_inflight = pending_filtered_inflight,
+            pending_all_inflight = pending_all_inflight,
+            fresh_reads = fresh_reads,
+            fresh_read_ms = fresh_read_ms,
+            fresh_messages = fresh_messages,
+            fresh_empty = fresh_empty,
+            nogroup_recoveries = nogroup_recoveries,
+            claims = claims,
+            claim_none = claim_none,
+            max_prefetch_depth = max_prefetch_depth,
+            max_in_flight = max_in_flight,
+            "redis queue drain stats"
+        );
+    }
+}
+
 /// Redis Streams queue implementation.
 ///
 /// Each clone gets its own cached connection (per-worker connection). This
@@ -300,6 +458,11 @@ pub struct RedisStreamQueue<T> {
     /// entry into the buffer. Cleared per-entry by the success/DLQ paths
     /// in `process_inner`.
     in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Max entries claimed by one XREADGROUP for this queue handle.
+    read_batch_size: usize,
+    /// Idle time in milliseconds before XAUTOCLAIM treats a pending message as
+    /// orphaned.
+    orphan_idle_ms: u64,
     /// Optional retention window (ms) used when **creating** a brand-new
     /// consumer group. If set, `XGROUP CREATE` uses `<now-window>-0` as the
     /// starting position instead of `0`, so a freshly-created group only
@@ -310,6 +473,7 @@ pub struct RedisStreamQueue<T> {
     ///
     /// `None` preserves the historical "consume from beginning" behavior.
     startup_window_ms: Option<u64>,
+    drain_stats: Arc<RedisQueueDrainStats>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -333,7 +497,10 @@ impl<T> Clone for RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            read_batch_size: self.read_batch_size,
+            orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
+            drain_stats: Arc::new(RedisQueueDrainStats::new()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -366,7 +533,10 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            read_batch_size: READ_BATCH_SIZE,
+            orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
+            drain_stats: Arc::new(RedisQueueDrainStats::new()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -397,7 +567,10 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            read_batch_size: READ_BATCH_SIZE,
+            orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
+            drain_stats: Arc::new(RedisQueueDrainStats::new()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -417,6 +590,37 @@ impl<T> RedisStreamQueue<T> {
     pub fn with_serialization(mut self, format: Serialization) -> Self {
         self.serialization = format;
         self
+    }
+
+    pub fn with_read_batch_size(mut self, size: usize) -> Self {
+        self.read_batch_size = size.max(1);
+        self
+    }
+
+    pub fn with_orphan_idle_ms(mut self, orphan_idle_ms: u64) -> Self {
+        self.orphan_idle_ms = orphan_idle_ms.max(1);
+        self
+    }
+
+    fn clone_for_lease(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            cached_conn: Arc::clone(&self.cached_conn),
+            stream_name: self.stream_name.clone(),
+            consumer_group: self.consumer_group.clone(),
+            consumer_name: self.consumer_name.clone(),
+            dlq_stream: self.dlq_stream.clone(),
+            serialization: self.serialization,
+            consumer_group_ensured: Arc::clone(&self.consumer_group_ensured),
+            prefetched: Arc::clone(&self.prefetched),
+            refill_lock: Arc::clone(&self.refill_lock),
+            in_flight: Arc::clone(&self.in_flight),
+            read_batch_size: self.read_batch_size,
+            orphan_idle_ms: self.orphan_idle_ms,
+            startup_window_ms: self.startup_window_ms,
+            drain_stats: Arc::clone(&self.drain_stats),
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     /// Number of messages currently in-flight for the consumer group.
@@ -446,6 +650,27 @@ impl<T> RedisStreamQueue<T> {
             }
             Err(_) => Ok(0),
         }
+    }
+
+    pub async fn consumer_has_pending(&self) -> Result<bool, StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
+
+        let result = conn
+            .cmd(
+                &redis::cmd("XPENDING")
+                    .arg(&self.stream_name)
+                    .arg(&self.consumer_group)
+                    .arg("-")
+                    .arg("+")
+                    .arg(1)
+                    .arg(&self.consumer_name)
+                    .clone(),
+            )
+            .await?;
+
+        let entries: Vec<redis::Value> = redis::from_redis_value_ref(&result).unwrap_or_default();
+        Ok(!entries.is_empty())
     }
 
     pub fn with_consumer_group(mut self, group: String) -> Self {
@@ -615,9 +840,10 @@ impl<T> RedisStreamQueue<T> {
         }
     }
 
-    /// Recover orphaned messages using XAUTOCLAIM
-    /// Messages that have been idle for more than ORPHAN_IDLE_MS will be claimed
-    /// by this consumer and will be reprocessed on the next dequeue_and_work call.
+    /// Recover orphaned messages using XAUTOCLAIM.
+    /// Messages that have been idle for more than this handle's orphan idle
+    /// threshold will be claimed by this consumer and reprocessed on the next
+    /// dequeue_and_work call.
     pub async fn recover_orphaned_items(&self) -> Result<usize, StreamsQueueError> {
         // Ensure consumer group exists first (acquires and releases its own connection)
         self.ensure_consumer_group().await?;
@@ -658,7 +884,7 @@ impl<T> RedisStreamQueue<T> {
                         .arg(&self.stream_name)
                         .arg(&self.consumer_group)
                         .arg(&self.consumer_name)
-                        .arg(ORPHAN_IDLE_MS)
+                        .arg(self.orphan_idle_ms)
                         .arg(&cursor)
                         .arg("COUNT")
                         .arg(100)
@@ -1595,7 +1821,18 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
-        self.process_inner(worker, PROCESS_BLOCKING_MS).await
+        match self.claim_with(PROCESS_BLOCKING_MS).await? {
+            Some(lease) => lease.process(worker).await,
+            None => Ok(None),
+        }
+    }
+
+    pub async fn claim_blocking(&self) -> Result<Option<RedisQueueLease<T>>, StreamsQueueError> {
+        self.claim_with(PROCESS_BLOCKING_MS).await
+    }
+
+    pub async fn claim_now(&self) -> Result<Option<RedisQueueLease<T>>, StreamsQueueError> {
+        self.claim_with(0).await
     }
 
     /// Try to refill the prefetch buffer. Returns true if the buffer is
@@ -1603,6 +1840,9 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
     /// (`>`) read blocks inside Redis; pending (`0`) reads are always
     /// non-blocking. The pending read happens first to keep retries snappy.
     async fn refill_prefetch(&self, block_ms: u64) -> Result<bool, StreamsQueueError> {
+        self.drain_stats
+            .refill_calls
+            .fetch_add(1, Ordering::Relaxed);
         // Serialize concurrent refills against the *same* RedisStreamQueue
         // instance. Without this lock, multiple `process_blocking` futures
         // sharing the same `Arc<RedisStreamQueue>` would each fire an
@@ -1611,7 +1851,12 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // yet), `extend` them all into the prefetch buffer, and proceed
         // to execute every PEL entry N times in parallel. See the
         // `refill_lock` field doc for the long-form rationale.
+        let refill_lock_wait_started = Instant::now();
         let _refill_guard = self.refill_lock.lock().await;
+        self.drain_stats.refill_lock_wait_ms.fetch_add(
+            duration_ms(refill_lock_wait_started.elapsed()),
+            Ordering::Relaxed,
+        );
 
         // Re-check the buffer under the refill lock. If a sibling refill
         // landed while we were waiting, we have nothing to do — let the
@@ -1620,6 +1865,15 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         {
             let buf = self.prefetched.lock().await;
             if !buf.is_empty() {
+                self.drain_stats
+                    .refill_buffer_hits
+                    .fetch_add(1, Ordering::Relaxed);
+                self.drain_stats.observe_prefetch_depth(buf.len());
+                self.drain_stats.maybe_log(
+                    &self.stream_name,
+                    &self.consumer_name,
+                    self.read_batch_size,
+                );
                 return Ok(true);
             }
         }
@@ -1632,27 +1886,56 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // while an earlier batch is still being processed — would
         // re-buffer the same un-ACKed entries and the next worker would
         // execute them a second time.
+        self.drain_stats
+            .pending_reads
+            .fetch_add(1, Ordering::Relaxed);
+        let pending_read_started = Instant::now();
         let pending = self
-            .read_batch_with(FetchSource::Pending, READ_BATCH_SIZE, 0)
+            .read_batch_with(FetchSource::Pending, self.read_batch_size, 0)
             .await?;
+        self.drain_stats.pending_read_ms.fetch_add(
+            duration_ms(pending_read_started.elapsed()),
+            Ordering::Relaxed,
+        );
+        let mut pending_all_inflight = false;
         if !pending.is_empty() {
+            let pending_count = pending.len();
             let in_flight = self.in_flight.lock().await;
+            self.drain_stats.observe_in_flight_depth(in_flight.len());
             let filtered: Vec<PrefetchedMessage> = pending
                 .into_iter()
                 .filter(|m| !in_flight.contains(&m.msg_id))
                 .collect();
             drop(in_flight);
+            self.drain_stats
+                .pending_messages
+                .fetch_add(pending_count as u64, Ordering::Relaxed);
+            self.drain_stats.pending_filtered_inflight.fetch_add(
+                pending_count.saturating_sub(filtered.len()) as u64,
+                Ordering::Relaxed,
+            );
             if !filtered.is_empty() {
+                self.drain_stats
+                    .pending_buffered
+                    .fetch_add(filtered.len() as u64, Ordering::Relaxed);
                 let mut buf = self.prefetched.lock().await;
                 buf.extend(filtered);
+                self.drain_stats.observe_prefetch_depth(buf.len());
+                self.drain_stats.maybe_log(
+                    &self.stream_name,
+                    &self.consumer_name,
+                    self.read_batch_size,
+                );
                 return Ok(true);
             }
             // Every entry the PEL handed back is currently being processed
-            // by a sibling worker. Treat as "no work right now" — the
-            // caller will get None and the outer loop will park briefly
-            // before retrying. This matches the behavior the caller sees
-            // for an empty stream.
-            return Ok(false);
+            // by a sibling worker. Keep going to the fresh read below so a
+            // full in-flight PEL does not starve new backlog or spin on
+            // repeated non-blocking pending reads.
+            self.drain_stats
+                .pending_all_inflight
+                .fetch_add(1, Ordering::Relaxed);
+            pending_all_inflight = true;
         }
 
         // No pending → try fresh, optionally blocking. We hold the refill
@@ -1660,14 +1943,32 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // N parallel waiters would each park inside Redis on their own
         // XREADGROUP > and wake together when *any* message arrives,
         // re-creating the original duplication on the new-message path.
+        let fresh_block_ms = if pending_all_inflight { 0 } else { block_ms };
+        self.drain_stats.fresh_reads.fetch_add(1, Ordering::Relaxed);
+        let fresh_read_started = Instant::now();
         let fresh = self
-            .read_batch_with(FetchSource::Fresh, READ_BATCH_SIZE, block_ms)
+            .read_batch_with(FetchSource::Fresh, self.read_batch_size, fresh_block_ms)
             .await?;
+        self.drain_stats
+            .fresh_read_ms
+            .fetch_add(duration_ms(fresh_read_started.elapsed()), Ordering::Relaxed);
         if fresh.is_empty() {
+            self.drain_stats.fresh_empty.fetch_add(1, Ordering::Relaxed);
+            self.drain_stats.maybe_log(
+                &self.stream_name,
+                &self.consumer_name,
+                self.read_batch_size,
+            );
             return Ok(false);
         }
+        self.drain_stats
+            .fresh_messages
+            .fetch_add(fresh.len() as u64, Ordering::Relaxed);
         let mut buf = self.prefetched.lock().await;
         buf.extend(fresh);
+        self.drain_stats.observe_prefetch_depth(buf.len());
+        self.drain_stats
+            .maybe_log(&self.stream_name, &self.consumer_name, self.read_batch_size);
         Ok(true)
     }
 
@@ -1700,7 +2001,25 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         }
         cmd.arg("STREAMS").arg(&self.stream_name).arg(id_arg);
 
-        let result = conn.cmd(&cmd.clone()).await?;
+        let result = match conn.cmd(&cmd.clone()).await {
+            Ok(result) => result,
+            Err(StreamsQueueError::RedisError(e)) if e.contains("NOGROUP") => {
+                // `hot queue clear` deletes Redis stream keys, which also
+                // deletes consumer groups. Long-lived workers keep queue
+                // handles, so recover by recreating the group and retrying
+                // the read once.
+                self.consumer_group_ensured
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.drain_stats
+                    .nogroup_recoveries
+                    .fetch_add(1, Ordering::Relaxed);
+                self.ensure_consumer_group().await?;
+                let mut guard = self.get_connection().await?;
+                let conn = guard.as_mut().unwrap();
+                conn.cmd(&cmd.clone()).await?
+            }
+            Err(e) => return Err(e),
+        };
         Ok(parse_stream_messages(&result)
             .into_iter()
             .map(|(msg_id, payload)| PrefetchedMessage {
@@ -1724,6 +2043,16 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
+        match self.claim_with(block_ms).await? {
+            Some(lease) => lease.process(worker).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn claim_with(
+        &self,
+        block_ms: u64,
+    ) -> Result<Option<RedisQueueLease<T>>, StreamsQueueError> {
         // Cached after the first call — no Redis round-trip on the hot path.
         // The dedicated janitor task in `hot_worker::server` runs XAUTOCLAIM
         // periodically across all queues, so we don't pay that cost here.
@@ -1742,33 +2071,49 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             Some(m) => m,
             None => {
                 if !self.refill_prefetch(block_ms).await? {
+                    self.drain_stats.claim_none.fetch_add(1, Ordering::Relaxed);
+                    self.drain_stats.maybe_log(
+                        &self.stream_name,
+                        &self.consumer_name,
+                        self.read_batch_size,
+                    );
                     return Ok(None);
                 }
                 let mut buf = self.prefetched.lock().await;
+                self.drain_stats.observe_prefetch_depth(buf.len());
                 match buf.pop_front() {
                     Some(m) => m,
-                    None => return Ok(None),
+                    None => {
+                        self.drain_stats.claim_none.fetch_add(1, Ordering::Relaxed);
+                        self.drain_stats.maybe_log(
+                            &self.stream_name,
+                            &self.consumer_name,
+                            self.read_batch_size,
+                        );
+                        return Ok(None);
+                    }
                 }
             }
         };
 
-        // Mark this message as in-flight so any concurrent `refill_prefetch`
-        // that re-reads our PEL while we're still processing won't see it
-        // as fresh work and re-buffer it for a sibling worker. Guaranteed
-        // to be cleared by the unconditional `remove(&msg_id)` after the
-        // inner block, regardless of which exit path we take (success,
-        // worker failure, retry-exhaustion DLQ, deserialize-error DLQ, or
-        // an `?`-propagated transport error).
-        {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight.insert(msg_id.clone());
-        }
+        // Mark this message as in-flight so any concurrent refill that
+        // re-reads our PEL while we're still processing won't see it as fresh
+        // work and re-buffer it for a sibling worker.
+        let mut in_flight = self.in_flight.lock().await;
+        in_flight.insert(msg_id.clone());
+        self.drain_stats.observe_in_flight_depth(in_flight.len());
+        drop(in_flight);
+        self.drain_stats.claims.fetch_add(1, Ordering::Relaxed);
+        self.drain_stats
+            .maybe_log(&self.stream_name, &self.consumer_name, self.read_batch_size);
 
-        let result = self
-            .process_one(msg_id.clone(), payload, source, worker)
-            .await;
-        self.in_flight.lock().await.remove(&msg_id);
-        result
+        Ok(Some(RedisQueueLease {
+            queue: self.clone_for_lease(),
+            msg_id: Some(msg_id),
+            payload: Some(payload),
+            source,
+            completed: false,
+        }))
     }
 
     /// Inner half of `process_inner`: runs delivery-count check, DLQ
@@ -1798,6 +2143,8 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 self.get_delivery_count(conn, &msg_id).await?
             }
         };
+        let queue_wait_ms = stream_message_age_ms(&msg_id);
+        let wait_target_p99_ms = queue_wait_target_p99_ms();
 
         if delivery_count > MAX_PROCESSING_RETRIES {
             tracing::warn!(
@@ -1806,6 +2153,21 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 delivery_count,
                 MAX_PROCESSING_RETRIES
             );
+            if queue_timing_enabled() {
+                tracing::info!(
+                    target: "hot::queue::timing",
+                    queue = %self.stream_name,
+                    backend = "redis",
+                    delivery_source = ?source,
+                    queue_wait_ms = queue_wait_ms,
+                    wait_target_p99_ms = wait_target_p99_ms,
+                    processing_ms = 0u64,
+                    retry_count = delivery_count.saturating_sub(1),
+                    outcome = "retry_exhausted",
+                    message_id = %msg_id,
+                    "queue item skipped"
+                );
+            }
             self.move_msg_to_dlq(
                 &msg_id,
                 &payload,
@@ -1827,6 +2189,21 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     msg_id,
                     e
                 );
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.stream_name,
+                        backend = "redis",
+                        delivery_source = ?source,
+                        queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
+                        processing_ms = 0u64,
+                        retry_count = delivery_count.saturating_sub(1),
+                        outcome = "deserialize_error",
+                        message_id = %msg_id,
+                        "queue item skipped"
+                    );
+                }
                 self.move_msg_to_dlq(&msg_id, &payload, format!("Deserialization error: {}", e))
                     .await?;
                 return Err(Box::new(e));
@@ -1840,6 +2217,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             source,
         );
 
+        let processing_started = Instant::now();
         match worker(item).await {
             Ok(result) => {
                 // Success — ACK only. We no longer XDEL per message because
@@ -1857,10 +2235,66 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                             .clone(),
                     )
                     .await;
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.stream_name,
+                        backend = "redis",
+                        delivery_source = ?source,
+                        queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = delivery_count.saturating_sub(1),
+                        outcome = "success",
+                        message_id = %msg_id,
+                        "queue item processed"
+                    );
+                }
                 tracing::debug!("Successfully processed and ACKed message {}", msg_id);
                 Ok(Some(result))
             }
             Err(e) => {
+                if let Some(infra) = e.downcast_ref::<QueueInfrastructureError>() {
+                    let backoff = infra.backoff();
+                    let reason = infra.to_string();
+                    if queue_timing_enabled() {
+                        tracing::info!(
+                            target: "hot::queue::timing",
+                            queue = %self.stream_name,
+                            backend = "redis",
+                            delivery_source = ?source,
+                            queue_wait_ms = queue_wait_ms,
+                            wait_target_p99_ms = wait_target_p99_ms,
+                            processing_ms = duration_ms(processing_started.elapsed()),
+                            retry_count = delivery_count.saturating_sub(1),
+                            outcome = "infrastructure_retry",
+                            backoff_ms = duration_ms(backoff),
+                            message_id = %msg_id,
+                            "queue item deferred for infrastructure retry"
+                        );
+                    }
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                    self.requeue_msg_for_infrastructure_retry(&msg_id, &payload, reason)
+                        .await?;
+                    return Err(Box::new(QueueProcessingError::QueueError(e)));
+                }
+                if queue_timing_enabled() {
+                    tracing::info!(
+                        target: "hot::queue::timing",
+                        queue = %self.stream_name,
+                        backend = "redis",
+                        delivery_source = ?source,
+                        queue_wait_ms = queue_wait_ms,
+                        wait_target_p99_ms = wait_target_p99_ms,
+                        processing_ms = duration_ms(processing_started.elapsed()),
+                        retry_count = delivery_count.saturating_sub(1),
+                        outcome = "worker_error",
+                        message_id = %msg_id,
+                        "queue item processing failed"
+                    );
+                }
                 // Worker failed — don't ACK; message stays in our PEL and
                 // will be re-read with `0` on the next call. Any other
                 // prefetched messages stay in the buffer and will still be
@@ -1881,6 +2315,63 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 Err(Box::new(QueueProcessingError::WorkerError(e)))
             }
         }
+    }
+
+    /// Copy the payload to a fresh stream entry and ACK the current pending
+    /// entry. This is for infrastructure failures where the work item is still
+    /// healthy, but the worker could not make a conclusive ownership decision.
+    async fn requeue_msg_for_infrastructure_retry(
+        &self,
+        msg_id: &str,
+        payload: &[u8],
+        reason: String,
+    ) -> Result<(), StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
+
+        let script = r#"
+            local new_id = redis.call(
+                'XADD',
+                KEYS[1],
+                'MAXLEN',
+                '~',
+                ARGV[3],
+                '*',
+                'payload',
+                ARGV[4],
+                'retry_reason',
+                ARGV[5],
+                'original_id',
+                ARGV[2],
+                'timestamp',
+                ARGV[6]
+            )
+            local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+            if acked ~= 1 then
+                redis.call('XDEL', KEYS[1], new_id)
+                return redis.error_reply('infra retry XACK failed for ' .. ARGV[2])
+            end
+            return new_id
+        "#;
+
+        let _: String = conn
+            .cmd(
+                &redis::cmd("EVAL")
+                    .arg(script)
+                    .arg(1)
+                    .arg(&self.stream_name)
+                    .arg(&self.consumer_group)
+                    .arg(msg_id)
+                    .arg(STREAM_MAXLEN)
+                    .arg(payload)
+                    .arg(&reason)
+                    .arg(chrono::Utc::now().timestamp())
+                    .clone(),
+            )
+            .await
+            .map(|v| redis::from_redis_value_ref(&v).unwrap_or_default())?;
+
+        Ok(())
     }
 
     /// ACK a single message and copy it into the DLQ. Used both for retry
@@ -1926,6 +2417,88 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             .map(|v| redis::from_redis_value_ref(&v).unwrap_or_default())?;
 
         Ok(())
+    }
+}
+
+pub struct RedisQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    queue: RedisStreamQueue<T>,
+    msg_id: Option<String>,
+    payload: Option<Vec<u8>>,
+    source: FetchSource,
+    completed: bool,
+}
+
+impl<T> RedisQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    pub async fn process<F, Fut, R>(
+        mut self,
+        worker: F,
+    ) -> Result<Option<R>, Box<dyn Error + Send + Sync>>
+    where
+        F: FnOnce(T) -> Fut + Send,
+        Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
+        R: Send + Sync,
+    {
+        let msg_id = self
+            .msg_id
+            .take()
+            .expect("redis queue lease already completed");
+        let payload = self
+            .payload
+            .take()
+            .expect("redis queue lease already completed");
+        let result = self
+            .queue
+            .process_one(msg_id.clone(), payload, self.source, worker)
+            .await;
+        self.queue.in_flight.lock().await.remove(&msg_id);
+        self.completed = true;
+        result
+    }
+}
+
+impl<T> Drop for RedisQueueLease<T>
+where
+    T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+{
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let Some(msg_id) = self.msg_id.take() else {
+            return;
+        };
+        match self.queue.in_flight.try_lock() {
+            Ok(mut in_flight) => {
+                in_flight.remove(&msg_id);
+            }
+            Err(_) => {
+                let in_flight = Arc::clone(&self.queue.in_flight);
+                let queue = self.queue.stream_name.clone();
+                let message_id = msg_id.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        in_flight.lock().await.remove(&message_id);
+                        tracing::warn!(
+                            queue = queue,
+                            message_id = message_id,
+                            "Dropped Redis queue lease before completion; removed in-flight marker asynchronously"
+                        );
+                    });
+                    return;
+                }
+                tracing::warn!(
+                    queue = self.queue.stream_name,
+                    message_id = msg_id,
+                    "Dropped Redis queue lease before completion; message remains pending for redelivery"
+                );
+            }
+        }
     }
 }
 
@@ -2050,6 +2623,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropped_redis_lease_clears_in_flight_when_lock_is_busy() {
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let queue_name = format!("test_stream_drop_busy_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<i64>::new(client, queue_name);
+        let msg_id = "1-0".to_string();
+        queue.in_flight.lock().await.insert(msg_id.clone());
+
+        let guard = queue.in_flight.lock().await;
+        let lease = RedisQueueLease {
+            queue: queue.clone_for_lease(),
+            msg_id: Some(msg_id.clone()),
+            payload: Some(Vec::new()),
+            source: FetchSource::Fresh,
+            completed: false,
+        };
+
+        drop(lease);
+        assert!(guard.contains(&msg_id));
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !queue.in_flight.lock().await.contains(&msg_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropped lease should clear in-flight marker");
+    }
+
+    #[tokio::test]
     async fn test_stream_queue_basic() {
         let Some(client) = try_client().await else {
             eprintln!("skipping: Redis not available");
@@ -2108,6 +2714,45 @@ mod tests {
             .unwrap();
         assert!(res.is_none());
 
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_in_flight_pending_does_not_starve_fresh_claims() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_inflight_pending_fresh_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_read_batch_size(1);
+
+        queue.enqueue(1).await.unwrap();
+        let first_lease = queue
+            .claim_now()
+            .await
+            .unwrap()
+            .expect("first message should be claimed");
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            1,
+            "first lease should be pending while it remains in-flight"
+        );
+
+        queue.enqueue(2).await.unwrap();
+        let second_lease = queue
+            .claim_now()
+            .await
+            .unwrap()
+            .expect("fresh message should be claimed despite in-flight pending entry");
+        let got = second_lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got, Some(2));
+
+        drop(first_lease);
         cleanup(&client, &queue_name).await;
     }
 
@@ -2226,6 +2871,38 @@ mod tests {
         cleanup(&client, &queue_name).await;
     }
 
+    #[tokio::test]
+    async fn test_claim_blocking_processes_and_acks_message() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_claim_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_read_batch_size(1);
+
+        queue.enqueue(42).await.unwrap();
+        let lease = queue
+            .claim_blocking()
+            .await
+            .unwrap()
+            .expect("message should be claimed");
+        let got = lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+
+        assert_eq!(got, Some(42));
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0,
+            "processed lease should be ACKed"
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
     /// Phase 3a: ensure_consumer_group is cached. The second call should
     /// flip no Redis state — hard to observe directly, but at minimum the
     /// in-memory flag should be set after the first call.
@@ -2319,6 +2996,59 @@ mod tests {
             dlq_len >= 1,
             "expected at least one message in DLQ, got {}",
             dlq_len
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_infrastructure_retry_requeues_without_dlq_retry_budget() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_infra_retry_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue("flaky-infra".to_string()).await.unwrap();
+
+        for _ in 0..(MAX_PROCESSING_RETRIES + 2) {
+            let res = queue
+                .dequeue_and_work(|_: String| async move {
+                    Err::<(), Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            "temporary infrastructure failure",
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+            assert!(res.is_err(), "infrastructure retry should be observable");
+            queue.prefetched.lock().await.clear();
+        }
+
+        let res = queue
+            .dequeue_and_work(|item: String| async move {
+                assert_eq!(item, "flaky-infra");
+                Ok::<(), Box<dyn Error + Send + Sync>>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(res, Some(()));
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let dlq_key = format!("{{{}}}:deadletter", queue_name);
+        let dlq_len: i64 = redis::cmd("XLEN")
+            .arg(&dlq_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(0);
+        assert_eq!(dlq_len, 0, "infrastructure retries must not DLQ");
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0,
+            "successful final processing should ACK the remaining delivery"
         );
 
         cleanup(&client, &queue_name).await;

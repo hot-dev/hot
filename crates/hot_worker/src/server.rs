@@ -3,19 +3,226 @@ use futures::future::join_all;
 use hot::data::msg::Message;
 use hot::data::serialization::Serialization;
 use hot::lang::event::EventMessage;
-use hot::queue::{ProcessingQueue, Queue, QueueProcessor, QueueType};
+use hot::queue::{
+    ConsumerLifecycle, ProcessingQueue, ProcessingQueueLease, Queue, QueueInfrastructureError,
+    QueueType,
+};
 use hot::val;
 use hot::val::Val;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
-use tokio::sync::watch;
+use std::sync::{Arc, OnceLock, RwLock};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 pub type DevContextStorage = Arc<RwLock<Option<AHashMap<String, hot::val::Val>>>>;
+type WorkerError = Box<dyn std::error::Error + Send + Sync>;
+
+enum ClaimedWorkerQueue {
+    Request(ProcessingQueueLease<Message>),
+    Event(ProcessingQueueLease<Message>),
+    Alert(ProcessingQueueLease<Message>),
+    Email(ProcessingQueueLease<Message>),
+}
+
+const WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 30;
+const LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 5;
+const WORKER_HANDOFF_WAIT_LOG_MS: u64 = 100;
+
+fn worker_queue_claimer_count(include_notifications: bool) -> usize {
+    if include_notifications { 4 } else { 2 }
+}
+
+fn worker_handoff_capacity(worker_count: usize) -> usize {
+    worker_count.max(1)
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn worker_shutdown_drain_timeout(is_local_dev: bool) -> tokio::time::Duration {
+    tokio::time::Duration::from_secs(if is_local_dev {
+        LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS
+    } else {
+        WORKER_SHUTDOWN_DRAIN_SECONDS
+    })
+}
+
+fn worker_error(message: impl Into<String>) -> WorkerError {
+    Box::new(std::io::Error::other(message.into()))
+}
+
+fn worker_infrastructure_retry_error(message: impl Into<String>, backoff_ms: u64) -> WorkerError {
+    Box::new(QueueInfrastructureError::new(
+        message,
+        std::time::Duration::from_millis(backoff_ms),
+    ))
+}
+
+fn validate_worker_semantics_conf(conf: &Val) -> Result<(), WorkerError> {
+    let event_ordering = conf.get_str_or_default("worker.event-ordering", "current");
+    if event_ordering != "current" {
+        return Err(worker_error(format!(
+            "Unsupported worker.event-ordering '{}'; only 'current' is implemented",
+            event_ordering
+        )));
+    }
+
+    let handler_concurrency = conf.get_str_or_default("worker.handler-concurrency", "serial");
+    if handler_concurrency != "serial" {
+        return Err(worker_error(format!(
+            "Unsupported worker.handler-concurrency '{}'; only 'serial' is implemented",
+            handler_concurrency
+        )));
+    }
+
+    Ok(())
+}
+
+fn alert_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("static alert HTTP client configuration should be valid")
+        })
+        .clone()
+}
+
+async fn unregister_idle_consumer(queue_name: &str, queue: &ProcessingQueue<Message>) {
+    match queue.consumer_has_pending().await {
+        Ok(false) => {
+            if let Err(e) = queue.unregister_consumer().await {
+                warn!(
+                    "hot.dev: WORKER failed to unregister {} consumer: {}",
+                    queue_name, e
+                );
+            }
+        }
+        Ok(true) => {
+            warn!(
+                "hot.dev: WORKER leaving {} consumer registered because it still has pending messages",
+                queue_name
+            );
+        }
+        Err(e) => {
+            warn!(
+                "hot.dev: WORKER could not inspect {} consumer pending state before unregister: {}",
+                queue_name, e
+            );
+        }
+    }
+}
+
+fn spawn_worker_queue_claimer(
+    queue_name: &'static str,
+    queue: ProcessingQueue<Message>,
+    claimed_tx: mpsc::Sender<ClaimedWorkerQueue>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    wrap: fn(ProcessingQueueLease<Message>) -> ClaimedWorkerQueue,
+    queue_metrics_enabled: bool,
+) -> JoinHandle<Result<(), WorkerError>> {
+    tokio::spawn(async move {
+        info!("hot.dev: WORKER {} claimer started", queue_name);
+
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            let lease = match &queue {
+                ProcessingQueue::Memory(_) => {
+                    tokio::select! {
+                        biased;
+
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                            continue;
+                        }
+                        result = queue.claim_blocking() => {
+                            match result {
+                                Ok(Some(lease)) => lease,
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    debug!("hot.dev: WORKER {} claimer error: {}", queue_name, e);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                ProcessingQueue::Redis(_) => {
+                    tokio::select! {
+                        biased;
+
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                            continue;
+                        }
+                        result = queue.claim_blocking() => {
+                            match result {
+                                Ok(Some(lease)) => lease,
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    debug!("hot.dev: WORKER {} claimer error: {}", queue_name, e);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            let handoff_started = std::time::Instant::now();
+            tokio::select! {
+                biased;
+
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        debug!(
+                            "hot.dev: WORKER {} claimer dropping claimed lease during shutdown",
+                            queue_name
+                        );
+                        break;
+                    }
+                    continue;
+                }
+                send_result = claimed_tx.send(wrap(lease)) => {
+                    let handoff_wait_ms = duration_ms(handoff_started.elapsed());
+                    if queue_metrics_enabled && handoff_wait_ms >= WORKER_HANDOFF_WAIT_LOG_MS {
+                        tracing::info!(
+                            target: "hot::queue::handoff",
+                            queue = queue_name,
+                            handoff_wait_ms = handoff_wait_ms,
+                            threshold_ms = WORKER_HANDOFF_WAIT_LOG_MS,
+                            "worker queue claimer handoff waited"
+                        );
+                    }
+                    if send_result.is_err() {
+                        debug!(
+                            "hot.dev: WORKER {} claimer stopping because executors are gone",
+                            queue_name
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("hot.dev: WORKER {} claimer stopped", queue_name);
+        Ok(())
+    })
+}
 
 // Add imports for database operations and event handler execution
 use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project};
@@ -40,6 +247,7 @@ mod graceful_shutdown {
     use super::*;
     use ahash::AHashSet;
     use hot::db::Run;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
     use tokio::time::{Duration, Instant, timeout};
     use tracing::{error, info, warn};
@@ -50,6 +258,8 @@ mod graceful_shutdown {
     pub struct ShutdownCoordinator {
         /// Active run IDs being processed by all workers
         active_runs: Arc<RwLock<AHashSet<Uuid>>>,
+        /// Cancellation tokens for active VMs, keyed by run ID
+        active_cancel_tokens: Arc<RwLock<AHashMap<Uuid, Arc<AtomicBool>>>>,
         /// Shutdown timeout duration
         timeout_duration: Duration,
         /// Shutdown initiated flag
@@ -61,6 +271,7 @@ mod graceful_shutdown {
         pub fn new(timeout_secs: u64) -> Self {
             Self {
                 active_runs: Arc::new(RwLock::new(AHashSet::new())),
+                active_cancel_tokens: Arc::new(RwLock::new(AHashMap::new())),
                 timeout_duration: Duration::from_secs(timeout_secs),
                 shutdown_initiated: Arc::new(RwLock::new(false)),
             }
@@ -77,6 +288,35 @@ mod graceful_shutdown {
         pub fn unregister_run(&self, run_id: &Uuid) {
             if let Ok(mut runs) = self.active_runs.write() {
                 runs.remove(run_id);
+            }
+            if let Ok(mut tokens) = self.active_cancel_tokens.write() {
+                tokens.remove(run_id);
+            }
+        }
+
+        pub fn register_cancel_token(&self, run_id: Uuid, token: Arc<AtomicBool>) {
+            if let Ok(mut tokens) = self.active_cancel_tokens.write() {
+                tokens.insert(run_id, token);
+            }
+        }
+
+        fn cancel_active_tokens(&self, reason: &str) {
+            let tokens: Vec<Arc<AtomicBool>> = self
+                .active_cancel_tokens
+                .read()
+                .map(|tokens| tokens.values().cloned().collect())
+                .unwrap_or_default();
+            if tokens.is_empty() {
+                return;
+            }
+
+            warn!(
+                "Signaling cancellation to {} active VM run(s): {}",
+                tokens.len(),
+                reason
+            );
+            for token in tokens {
+                token.store(true, Ordering::Relaxed);
             }
         }
 
@@ -153,6 +393,7 @@ mod graceful_shutdown {
                         "Shutdown timeout reached after {}s",
                         self.timeout_duration.as_secs()
                     );
+                    self.cancel_active_tokens("worker shutdown timeout");
 
                     // Fail remaining active runs (marks as Failed so retry can kick in)
                     if let Some(db) = db {
@@ -523,6 +764,10 @@ impl TryFrom<Message> for ResponseMessage {
 
 pub const DEFAULT_WORKER_THREADS: usize = 2;
 pub const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
+/// Extra grace period granted after `run-timeout` for a cooperatively-cancelled
+/// VM to unwind before the worker hard-detaches the blocking thread and frees the
+/// executor slot. Only applied when `worker.cancel-on-timeout` is enabled.
+pub const RUN_TIMEOUT_HARD_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 
@@ -657,6 +902,239 @@ fn extract_target_function_from_event(event_data: &Val) -> Option<String> {
             _ => None,
         }),
         _ => None,
+    }
+}
+
+async fn hydrate_event_message_from_db(
+    worker_id: usize,
+    db: &DatabasePool,
+    event_message: EventMessage,
+    infra_retry_backoff_ms: u64,
+) -> Result<EventMessage, WorkerError> {
+    let env_id = event_message.body.event.env_id;
+    let event_id = event_message.body.event.event_id;
+
+    // The queue carries a thin event envelope. Load the authoritative event
+    // from DB, ensure its env_id matches the queue message, then route using
+    // hydrated event_data.
+    let stored_event = match hot::db::event::Event::get_event(db, &event_id).await {
+        Ok(stored_event) => {
+            if stored_event.env_id != env_id {
+                let err_msg = format!(
+                    "Event env_id mismatch - message claims {} but event {} belongs to {}",
+                    env_id, event_id, stored_event.env_id
+                );
+                error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                return Err(worker_error(err_msg));
+            }
+            debug!(
+                "hot.dev: WORKER {} verified event {} belongs to env {}",
+                worker_id, event_id, env_id
+            );
+            stored_event
+        }
+        Err(hot::db::event::EventError::NotFound) => {
+            let err_msg = format!(
+                "Event {} not found in database - cannot verify env_id",
+                event_id
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            return Err(worker_error(err_msg));
+        }
+        Err(e) => {
+            let err_msg = format!(
+                "Failed to verify event {} env_id - database error: {}",
+                event_id, e
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            return Err(worker_infrastructure_retry_error(
+                err_msg,
+                infra_retry_backoff_ms,
+            ));
+        }
+    };
+
+    let event_data: Val = serde_json::from_value(stored_event.event_data).map_err(|e| {
+        let err_msg = format!(
+            "Invalid event_data for event {} - cannot hydrate queued event: {}",
+            event_id, e
+        );
+        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+        worker_error(err_msg)
+    })?;
+
+    Ok(EventMessage {
+        body: hot::lang::event::queue::EventMessageBody {
+            event: hot::lang::event::Event {
+                event_id: stored_event.event_id,
+                env_id: stored_event.env_id,
+                stream_id: stored_event.stream_id,
+                event_type: stored_event.event_type,
+                event_data,
+                event_time: stored_event.event_time,
+                target_project_id: event_message.body.event.target_project_id,
+                target_project_name: event_message.body.event.target_project_name,
+            },
+            execution_context: event_message.body.execution_context,
+        },
+        ..event_message
+    })
+}
+
+async fn should_defer_missing_event_handlers(
+    worker_id: usize,
+    db: &DatabasePool,
+    env_id: &Uuid,
+    event_type: &str,
+    infra_retry_backoff_ms: u64,
+) -> Result<bool, WorkerError> {
+    let builds = Build::get_builds_by_env(db, env_id, Some(8), None)
+        .await
+        .map_err(|e| {
+            let err_msg = format!(
+                "Failed to inspect deployed builds before handling missing event handlers for '{}': {}",
+                event_type, e
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            worker_infrastructure_retry_error(err_msg, infra_retry_backoff_ms)
+        })?;
+
+    let deployment_in_progress = builds.iter().any(|build| {
+        build.is_bundle()
+            && build.deployment_sequence > 0
+            && (build.runtime_status == Build::RUNTIME_STATUS_PENDING
+                || build.runtime_status == Build::RUNTIME_STATUS_LOADING)
+    });
+
+    if deployment_in_progress {
+        debug!(
+            "hot.dev: WORKER {} deferring event '{}' while bundle deployment preparation is in progress",
+            worker_id, event_type
+        );
+    }
+
+    Ok(deployment_in_progress)
+}
+
+async fn process_alert_delivery_message(
+    worker_id: usize,
+    db: Arc<DatabasePool>,
+    worker_conf: Val,
+    message: Message,
+) -> Result<(), WorkerError> {
+    let alert_msg: hot::lang::event::queue::AlertDeliveryMessage =
+        message.try_into().map_err(|e: String| worker_error(e))?;
+
+    tracing::debug!(
+        "hot.dev: WORKER {} processing alert delivery {} from hot:alert queue",
+        worker_id,
+        alert_msg.body.alert_delivery_id
+    );
+
+    let http_client = alert_http_client();
+
+    let alert_email_sender = hot::email::EmailSender::alerts_from_conf(&worker_conf);
+    let alert_email_config = hot::email::EmailConfig::alerts_from_conf(&worker_conf);
+    let email_sender_ref: Option<&dyn hot::db::alert::AlertEmailSender> =
+        if alert_email_sender.is_available() {
+            Some(&alert_email_sender)
+        } else {
+            None
+        };
+
+    match hot::db::alert::process_single_alert_delivery(
+        &db,
+        &http_client,
+        email_sender_ref,
+        &alert_email_config,
+        &alert_msg.body.alert_delivery_id,
+    )
+    .await
+    {
+        Ok(success) => {
+            if success {
+                tracing::info!(
+                    "Alert delivery {} sent successfully",
+                    alert_msg.body.alert_delivery_id
+                );
+            } else {
+                tracing::warn!(
+                    "Alert delivery {} failed (DB retry state owns redelivery if attempts remain)",
+                    alert_msg.body.alert_delivery_id
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(
+                "Alert delivery {} processing error: {}",
+                alert_msg.body.alert_delivery_id,
+                e
+            );
+            Err(worker_error(e.to_string()))
+        }
+    }
+}
+
+async fn process_email_message(
+    worker_id: usize,
+    db: Arc<DatabasePool>,
+    worker_conf: Val,
+    message: Message,
+) -> Result<(), WorkerError> {
+    let email_msg: hot::lang::event::queue::EmailMessage =
+        message.try_into().map_err(|e: String| worker_error(e))?;
+
+    tracing::debug!(
+        "hot.dev: WORKER {} processing app email to {} from hot:email queue",
+        worker_id,
+        email_msg.body.to_address
+    );
+
+    let sender = hot::email::EmailSender::from_conf(&worker_conf);
+    if !sender.is_available() {
+        let _ = hot::db::email_queue::EmailQueueEntry::mark_failed(
+            &db,
+            &email_msg.body.email_queue_id,
+            "Email sender not configured",
+        )
+        .await;
+        return Ok(());
+    }
+
+    let email = hot::email::Email {
+        to: email_msg.body.to_address.clone(),
+        subject: email_msg.body.subject.clone(),
+        html: email_msg.body.html_body.clone(),
+        text: email_msg.body.text_body.clone(),
+    };
+
+    match sender
+        .send_email_with_from(&email, &email_msg.body.from_address)
+        .await
+    {
+        Ok(()) => {
+            let _ = hot::db::email_queue::EmailQueueEntry::mark_sent(
+                &db,
+                &email_msg.body.email_queue_id,
+            )
+            .await;
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "hot.dev: WORKER {} failed to send app email {} (to: {}), will retry via queue: {}",
+                worker_id,
+                email_msg.body.email_queue_id,
+                email_msg.body.to_address,
+                e
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            Err(worker_error(format!(
+                "app email send failed for {}: {}",
+                email_msg.body.email_queue_id, e
+            )))
+        }
     }
 }
 
@@ -2546,7 +3024,23 @@ async fn execute_single_event_handler(
     let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
         hot::store::embedding::embedding_provider_from_config(worker_conf).map(Arc::from);
 
-    let result = {
+    let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shutdown_coordinator.register_cancel_token(run_id, Arc::clone(&token));
+        Some(token)
+    } else {
+        None
+    };
+    let cancel_timer = external_cancel.as_ref().map(|token| {
+        let token = Arc::clone(token);
+        let timeout = get_run_timeout(worker_conf);
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+    });
+
+    let handle = {
         // Clone/move all data needed for the blocking task
         let function_name = function_name.clone();
         let event_object = event_object.clone();
@@ -2564,11 +3058,21 @@ async fn execute_single_event_handler(
         let task_queue = task_queue.clone();
         let file_storage = file_storage.clone();
         let run_id_for_timing = run_id;
+        let external_cancel = external_cancel.clone();
 
         let panic_label = format!("worker:{}", function_name);
+        let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             let spawn_entered = std::time::Instant::now();
-            debug!("TIMING [{}]: spawn_blocking entered", run_id_for_timing.as_simple());
+            debug!(
+                "TIMING [{}]: spawn_blocking entered",
+                run_id_for_timing.as_simple()
+            );
+            debug!(
+                "TIMING [{}]: spawn_blocking_queue_wait: {:?}",
+                run_id_for_timing.as_simple(),
+                spawn_entered.duration_since(spawn_scheduled)
+            );
 
             // Wrap all user-code execution in run_user_code so any panic from
             // user-supplied Hot code (or from a third-party crate it triggers)
@@ -2577,196 +3081,357 @@ async fn execute_single_event_handler(
             // spawn_blocking still provides defense-in-depth catching outside
             // this boundary in case run_user_code itself misses something.
             hot::lang::user_code::run_user_code(&panic_label, || {
-            if let Some(cached) = cached_bytecode {
-                // ===== CACHE HIT: Call function directly with cached bytecode =====
-                debug!("TIMING [{}]: cache HIT - calling function (spawn wait: {:?})", run_id_for_timing.as_simple(), spawn_entered.elapsed());
-                debug!(
-                    "✓ Calling function with cached bytecode for project '{}' (no parsing!)",
-                    project_name
-                );
-                let result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                    &function_name,
-                    std::slice::from_ref(&event_object),
-                    cached,
-                    Some(&worker_conf),
-                    emitter_for_events.clone(),
-                    Some(execution_context_for_events.clone()),
-                    event_publisher.clone(),
-                    context_storage,
-                    Some(Arc::new(db.clone())),
-                    stream_publisher.clone(),
-                    Some(task_queue.clone()),
-                    file_storage.clone(),
-                    store.clone(),
-                    embedding_provider.clone(),
-                );
-                debug!("TIMING [{}]: function execution complete (total spawn_blocking: {:?})", run_id_for_timing.as_simple(), spawn_entered.elapsed());
-                result
-            } else {
-                // ===== CACHE MISS: Compile project, cache, then call function directly =====
-                // Use locking to prevent duplicate compilation across threads and processes
-                let cache_for_locking = hot::lang::cache::bytecode_cache::BytecodeCache::new(effective_cache_dir.clone());
+                if let Some(cached) = cached_bytecode {
+                    // ===== CACHE HIT: Call function directly with cached bytecode =====
+                    debug!(
+                        "TIMING [{}]: cache HIT - calling function (spawn wait: {:?})",
+                        run_id_for_timing.as_simple(),
+                        spawn_entered.elapsed()
+                    );
+                    debug!(
+                        "✓ Calling function with cached bytecode for project '{}' (no parsing!)",
+                        project_name
+                    );
+                    let call_started = std::time::Instant::now();
+                    let result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
+                        &function_name,
+                        std::slice::from_ref(&event_object),
+                        cached,
+                        Some(&worker_conf),
+                        emitter_for_events.clone(),
+                        Some(execution_context_for_events.clone()),
+                        event_publisher.clone(),
+                        context_storage,
+                        Some(Arc::new(db.clone())),
+                        stream_publisher.clone(),
+                        Some(task_queue.clone()),
+                        file_storage.clone(),
+                        store.clone(),
+                        embedding_provider.clone(),
+                        external_cancel.clone(),
+                    );
+                    debug!(
+                        "TIMING [{}]: call_function_with_cached_bytecode: {:?}",
+                        run_id_for_timing.as_simple(),
+                        call_started.elapsed()
+                    );
+                    debug!(
+                        "TIMING [{}]: function execution complete (total spawn_blocking: {:?})",
+                        run_id_for_timing.as_simple(),
+                        spawn_entered.elapsed()
+                    );
+                    result
+                } else {
+                    // ===== CACHE MISS: Compile project, cache, then call function directly =====
+                    // Use locking to prevent duplicate compilation across threads and processes
+                    let cache_for_locking = hot::lang::cache::bytecode_cache::BytecodeCache::new(
+                        effective_cache_dir.clone(),
+                    );
 
-                // In-process lock (prevents thread races)
-                let compilation_lock = cache_for_locking.get_compilation_lock(&cache_key);
-                let _compilation_guard = compilation_lock.lock();
+                    // In-process lock (prevents thread races)
+                    let compilation_lock = cache_for_locking.get_compilation_lock(&cache_key);
+                    let lock_wait_started = std::time::Instant::now();
+                    let _compilation_guard = compilation_lock.lock();
+                    debug!(
+                        "TIMING [{}]: bytecode_lock_wait: {:?}",
+                        run_id_for_timing.as_simple(),
+                        lock_wait_started.elapsed()
+                    );
 
-                // Re-check cache after acquiring in-process lock (another thread may have just finished)
-                if !cache_key.is_empty() && cache_for_locking.exists(&cache_key)
-                    && let Ok(cached) = cache_for_locking.load(&cache_key) {
+                    // Re-check cache after acquiring in-process lock (another thread may have just finished)
+                    let reload_started = std::time::Instant::now();
+                    let cached_after_lock =
+                        if !cache_key.is_empty() && cache_for_locking.exists(&cache_key) {
+                            cache_for_locking.load(&cache_key).ok()
+                        } else {
+                            None
+                        };
+                    debug!(
+                        "TIMING [{}]: bytecode_reload_after_lock: {:?}",
+                        run_id_for_timing.as_simple(),
+                        reload_started.elapsed()
+                    );
+                    let cached_result = if let Some(cached) = cached_after_lock {
                         debug!(
                             "✓ Bytecode cache populated by another thread for '{}' while waiting",
                             project_name
                         );
-                        return hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                            &function_name,
-                            std::slice::from_ref(&event_object),
-                            cached,
-                            Some(&worker_conf),
-                            emitter_for_events.clone(),
-                            Some(execution_context_for_events.clone()),
-                            event_publisher.clone(),
-                            context_storage,
-                            Some(Arc::new(db.clone())),
-                            stream_publisher.clone(),
-                            Some(task_queue.clone()),
-                            file_storage.clone(),
-                            store.clone(),
-                            embedding_provider.clone(),
-                        );
-                    }
-
-                // Cross-process file lock (prevents process races)
-                let mut file_lock = cache_for_locking.acquire_file_lock(&cache_key).ok();
-                let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
-
-                // Re-check cache after acquiring file lock (another process may have just finished)
-                if !cache_key.is_empty() && cache_for_locking.exists(&cache_key)
-                    && let Ok(cached) = cache_for_locking.load(&cache_key) {
+                        Ok(cached)
+                    } else {
+                        // Cross-process file lock (prevents process races)
+                        let file_lock_wait_started = std::time::Instant::now();
+                        let mut file_lock = cache_for_locking.acquire_file_lock(&cache_key).ok();
+                        let _file_lock_guard =
+                            file_lock.as_mut().and_then(|lock| lock.try_write().ok());
                         debug!(
-                            "✓ Bytecode cache populated by another process for '{}' while waiting",
-                            project_name
+                            "TIMING [{}]: bytecode_file_lock_wait: {:?}",
+                            run_id_for_timing.as_simple(),
+                            file_lock_wait_started.elapsed()
                         );
-                        return hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                            &function_name,
-                            std::slice::from_ref(&event_object),
-                            cached,
-                            Some(&worker_conf),
-                            emitter_for_events.clone(),
-                            Some(execution_context_for_events.clone()),
-                            event_publisher.clone(),
-                            context_storage,
-                            Some(Arc::new(db.clone())),
-                            stream_publisher.clone(),
-                            Some(task_queue.clone()),
-                            file_storage.clone(),
-                            store.clone(),
-                            embedding_provider.clone(),
+
+                        // Re-check cache after acquiring file lock (another process may have just finished)
+                        let reload_started = std::time::Instant::now();
+                        let cached_after_file_lock =
+                            if !cache_key.is_empty() && cache_for_locking.exists(&cache_key) {
+                                cache_for_locking.load(&cache_key).ok()
+                            } else {
+                                None
+                            };
+                        debug!(
+                            "TIMING [{}]: bytecode_reload_after_file_lock: {:?}",
+                            run_id_for_timing.as_simple(),
+                            reload_started.elapsed()
                         );
-                    }
+                        if let Some(cached) = cached_after_file_lock {
+                            debug!(
+                                "✓ Bytecode cache populated by another process for '{}' while waiting",
+                                project_name
+                            );
+                            Ok(cached)
+                        } else {
+                            debug!("Compiling project from source for '{}'", project_name);
 
-                debug!("Compiling project from source for '{}'", project_name);
-
-                // Compile the project sources ONLY (no function call code to parse!)
-                // Don't pass emitter/execution_context here - we're just compiling, not recording a run
-                // The run will be recorded when we call the function via call_function_with_cached_bytecode
-                //
-                // IMPORTANT: For bundle builds, pass None for project_name to skip global dependency
-                // resolution in the engine. Bundle builds have dependencies pre-bundled in hot/pkg/
-                // which is already included in src_paths. Passing project_name would cause the engine
-                // to also load dependencies from the global cache, causing double-loading or version
-                // mismatches.
-                let compile_project_name: Option<&str> = if is_bundle_build { None } else { Some(&project_name) };
-                let compile_result = hot::lang::engine::Engine::compile_project_for_cache(
-                    &src_paths,
-                    Some(&worker_conf),
-                    compile_project_name,
-                    None, // No emitter during compilation
-                    None, // No execution_context during compilation
-                    event_publisher.clone(),
-                    context_storage.clone(),
-                    Some(Arc::new(db.clone())),
-                    stream_publisher.clone(),
-                );
-
-                match compile_result {
-                    Ok((_init_result, artifacts)) => {
-                        // Save to cache before calling function
-                        // Use bundle-specific cache for bundle builds, shared cache otherwise
-                        if !cache_key.is_empty() && !file_hashes.is_empty() {
-                            let metadata = hot::lang::cache::bytecode_cache::create_cache_metadata(
-                                &project_name,
-                                file_hashes.clone(),
-                                cache_key.clone(),
+                            // Compile the project sources ONLY (no function call code to parse!)
+                            // Don't pass emitter/execution_context here - we're just compiling, not recording a run
+                            // The run will be recorded when we call the function via call_function_with_cached_bytecode
+                            //
+                            // IMPORTANT: For bundle builds, pass None for project_name to skip global dependency
+                            // resolution in the engine. Bundle builds have dependencies pre-bundled in hot/pkg/
+                            // which is already included in src_paths. Passing project_name would cause the engine
+                            // to also load dependencies from the global cache, causing double-loading or version
+                            // mismatches.
+                            let compile_project_name: Option<&str> = if is_bundle_build {
+                                None
+                            } else {
+                                Some(&project_name)
+                            };
+                            let compile_started = std::time::Instant::now();
+                            let compile_result =
+                                hot::lang::engine::Engine::compile_project_for_cache(
+                                    &src_paths,
+                                    Some(&worker_conf),
+                                    compile_project_name,
+                                    None, // No emitter during compilation
+                                    None, // No execution_context during compilation
+                                    event_publisher.clone(),
+                                    context_storage.clone(),
+                                    Some(Arc::new(db.clone())),
+                                    stream_publisher.clone(),
+                                );
+                            debug!(
+                                "TIMING [{}]: compile_project_for_cache: {:?}",
+                                run_id_for_timing.as_simple(),
+                                compile_started.elapsed()
                             );
 
-                            let cache_for_save = hot::lang::cache::bytecode_cache::BytecodeCache::new(effective_cache_dir.clone());
-                            // Bake tool/skill spec registries into the on-disk
-                            // cache so that fresh worker processes (and zip
-                            // builds) can serve `::hot::internal::mcp/schema-from-fn`
-                            // without recompiling.
-                            let spec_compiler = hot::lang::compiler::Compiler::new();
-                            let tool_specs = spec_compiler.build_tool_specs(&artifacts.ast_program);
-                            let skill_specs = spec_compiler.build_skill_specs(&artifacts.ast_program);
-                            if let Err(e) = cache_for_save.save(
-                                &cache_key,
-                                &artifacts.program,
-                                metadata,
-                                &artifacts.function_mapping,
-                                &artifacts.core_functions,
-                                &artifacts.type_implementations,
-                                &artifacts.ast_program,
-                                &artifacts.hot_ast,
-                                &tool_specs,
-                                &skill_specs,
-                            ) {
-                                tracing::warn!("Failed to save bytecode cache: {}", e);
-                            } else {
-                                debug!(
-                                    "✓ Saved bytecode cache for project '{}' (key: {}) with {} functions",
-                                    project_name,
-                                    &cache_key[..12.min(cache_key.len())],
-                                    artifacts.function_mapping.len(),
-                                );
+                            match compile_result {
+                                Ok((_init_result, artifacts)) => {
+                                    // Save to cache before calling function
+                                    // Use bundle-specific cache for bundle builds, shared cache otherwise
+                                    if !cache_key.is_empty() && !file_hashes.is_empty() {
+                                        let metadata =
+                                            hot::lang::cache::bytecode_cache::create_cache_metadata(
+                                                &project_name,
+                                                file_hashes.clone(),
+                                                cache_key.clone(),
+                                            );
+
+                                        let cache_for_save =
+                                            hot::lang::cache::bytecode_cache::BytecodeCache::new(
+                                                effective_cache_dir.clone(),
+                                            );
+                                        // Bake tool/skill spec registries into the on-disk
+                                        // cache so that fresh worker processes (and zip
+                                        // builds) can serve `::hot::internal::mcp/schema-from-fn`
+                                        // without recompiling.
+                                        let spec_compiler = hot::lang::compiler::Compiler::new();
+                                        let tool_specs =
+                                            spec_compiler.build_tool_specs(&artifacts.ast_program);
+                                        let skill_specs =
+                                            spec_compiler.build_skill_specs(&artifacts.ast_program);
+                                        let cache_save_started = std::time::Instant::now();
+                                        if let Err(e) = cache_for_save.save(
+                                            &cache_key,
+                                            &artifacts.program,
+                                            metadata,
+                                            &artifacts.function_mapping,
+                                            &artifacts.core_functions,
+                                            &artifacts.type_implementations,
+                                            &artifacts.ast_program,
+                                            &artifacts.hot_ast,
+                                            &tool_specs,
+                                            &skill_specs,
+                                        ) {
+                                            tracing::warn!("Failed to save bytecode cache: {}", e);
+                                        } else {
+                                            debug!(
+                                                "✓ Saved bytecode cache for project '{}' (key: {}) with {} functions",
+                                                project_name,
+                                                &cache_key[..12.min(cache_key.len())],
+                                                artifacts.function_mapping.len(),
+                                            );
+                                        }
+                                        debug!(
+                                            "TIMING [{}]: bytecode_cache_save: {:?}",
+                                            run_id_for_timing.as_simple(),
+                                            cache_save_started.elapsed()
+                                        );
+                                    }
+
+                                    // Convert artifacts to cached bytecode before releasing
+                                    // the compile lock; handler execution happens below.
+                                    let artifacts_convert_started = std::time::Instant::now();
+                                    let cached =
+                                        hot::lang::engine::Engine::artifacts_to_cached_bytecode(
+                                            artifacts,
+                                        );
+                                    debug!(
+                                        "TIMING [{}]: artifacts_to_cached_bytecode: {:?}",
+                                        run_id_for_timing.as_simple(),
+                                        artifacts_convert_started.elapsed()
+                                    );
+                                    Ok(cached)
+                                }
+                                Err(e) => Err(e),
                             }
                         }
+                    };
 
-                        // Convert artifacts to cached bytecode and call function directly
-                        let cached = hot::lang::engine::Engine::artifacts_to_cached_bytecode(artifacts);
-                        hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                            &function_name,
-                            std::slice::from_ref(&event_object),
-                            cached,
-                            Some(&worker_conf),
-                            emitter_for_events.clone(),
-                            Some(execution_context_for_events.clone()),
-                            event_publisher.clone(),
-                            context_storage,
-                            Some(Arc::new(db.clone())),
-                            stream_publisher.clone(),
-                            Some(task_queue.clone()),
-                            file_storage.clone(),
-                            store.clone(),
-                            embedding_provider.clone(),
-                        )
+                    drop(_compilation_guard);
+
+                    match cached_result {
+                        Ok(cached) => {
+                            let call_started = std::time::Instant::now();
+                            let result =
+                                hot::lang::engine::Engine::call_function_with_cached_bytecode(
+                                    &function_name,
+                                    std::slice::from_ref(&event_object),
+                                    cached,
+                                    Some(&worker_conf),
+                                    emitter_for_events.clone(),
+                                    Some(execution_context_for_events.clone()),
+                                    event_publisher.clone(),
+                                    context_storage,
+                                    Some(Arc::new(db.clone())),
+                                    stream_publisher.clone(),
+                                    Some(task_queue.clone()),
+                                    file_storage.clone(),
+                                    store.clone(),
+                                    embedding_provider.clone(),
+                                    external_cancel.clone(),
+                                );
+                            debug!(
+                                "TIMING [{}]: call_function_with_cached_bytecode: {:?}",
+                                run_id_for_timing.as_simple(),
+                                call_started.elapsed()
+                            );
+                            debug!(
+                                "TIMING [{}]: function execution complete (total spawn_blocking: {:?})",
+                                run_id_for_timing.as_simple(),
+                                spawn_entered.elapsed()
+                            );
+                            result
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
                 }
-            }
             }) // end run_user_code
-        }).await
-        .map_err(|e| format!("Blocking task failed: {}", e))?
-        .unwrap_or_else(|panic| {
-            tracing::error!(
-                target: "hot::panic",
-                location = panic.location.as_deref().unwrap_or("<unknown>"),
-                thread = %panic.thread,
-                "user code panicked in worker event handler: {}",
-                panic.message,
-            );
-            Err(format!("Event handler panicked: {}", panic.summary()))
-        })
+        }) // end spawn_blocking
     };
+
+    // Hard run-timeout backstop.
+    //
+    // The cooperative cancel token (when `worker.cancel-on-timeout` is enabled)
+    // fires at `run-timeout` and asks the VM to unwind. This select! guarantees
+    // the executor slot is freed even when the VM cannot observe cancellation
+    // (tight native loop, blocking syscall, or `cancel-on-timeout` disabled). On
+    // the backstop we record the run as failed and detach the blocking thread:
+    // it keeps running until it returns naturally, but no longer holds up the
+    // worker. We still set the cancel token so a cooperative VM can exit.
+    //
+    // Caveat: the timeout failure flows through the retry policy, so a
+    // retry-configured handler may start a fresh run while a detached,
+    // non-cooperative orphan is still executing. Cooperative VMs unwind promptly
+    // and avoid overlap; for non-cooperative ones the two can briefly run
+    // concurrently, which is why event handlers must be idempotent.
+    let run_timeout = get_run_timeout(worker_conf);
+    let hard_timeout = if external_cancel.is_some() {
+        run_timeout.saturating_add(RUN_TIMEOUT_HARD_GRACE)
+    } else {
+        run_timeout
+    };
+    let vm_wait_started = std::time::Instant::now();
+    let result = tokio::select! {
+        joined = handle => {
+            let joined_result = joined
+                .map_err(|e| format!("Blocking task failed: {}", e))?
+                .unwrap_or_else(|panic| {
+                    tracing::error!(
+                        target: "hot::panic",
+                        location = panic.location.as_deref().unwrap_or("<unknown>"),
+                        thread = %panic.thread,
+                        "user code panicked in worker event handler: {}",
+                        panic.message,
+                    );
+                    Err(format!("Event handler panicked: {}", panic.summary()))
+                });
+            debug!(
+                "TIMING [{}]: vm_spawn_blocking_wait: {:?}",
+                run_id.as_simple(),
+                vm_wait_started.elapsed()
+            );
+            joined_result
+        }
+        _ = tokio::time::sleep(hard_timeout) => {
+            if let Some(timer) = &cancel_timer {
+                timer.abort();
+            }
+            if let Some(token) = &external_cancel {
+                token.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let timeout_secs = run_timeout.as_secs();
+            error!(
+                "Event handler '{}' timed out after {}s for event '{}' (run {}); freeing executor slot",
+                function_name, timeout_secs, event_message.body.event.event_type, run_id
+            );
+            let timeout_error = format!("Run timed out after {} seconds", timeout_secs);
+            // Route the timeout through the emitter so it is treated like any other
+            // run failure: the database writer applies the handler/schedule retry
+            // policy (a timed-out run may be retried) and publishes the standard
+            // `run:failed` alert. This is intentional — a timeout is a failure.
+            // The direct `fail_run` fallback (no emitter, e.g. in tests) is
+            // best-effort and applies neither retry nor alerting.
+            if let Some(ref em) = emitter {
+                let failure = val!({
+                    "$type": "::hot::run/Failure",
+                    "$val": {
+                        "msg": timeout_error.clone(),
+                        "err": Val::Null,
+                    },
+                });
+                em.emit(hot::lang::emitter::EngineEvent::run_fail(
+                    &execution_context_for_events,
+                    failure,
+                ));
+                let flush_started = std::time::Instant::now();
+                if let Err(e) = em.flush_run(run_id).await {
+                    error!("Failed to flush timeout failure for run {}: {}", run_id, e);
+                }
+                debug!(
+                    "TIMING [{}]: timeout_flush_run: {:?}",
+                    run_id.as_simple(),
+                    flush_started.elapsed()
+                );
+            } else if let Err(e) = hot::db::Run::fail_run(db, &run_id, &timeout_error).await {
+                error!("Failed to mark run {} as timed out: {}", run_id, e);
+            }
+            shutdown_coordinator.unregister_run(&run_id);
+            return Err(timeout_error);
+        }
+    };
+    if let Some(timer) = cancel_timer {
+        timer.abort();
+    }
 
     // Handle result (rest of function continues as before)
     let result = match result {
@@ -2810,10 +3475,16 @@ async fn execute_single_event_handler(
 
     // Flush emitter to ensure run is written to database BEFORE publishing stream event
     // This guarantees the SSE handler can query the run from the database
-    if let Some(ref em) = emitter
-        && let Err(e) = em.flush()
-    {
-        tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+    if let Some(ref em) = emitter {
+        let flush_started = std::time::Instant::now();
+        if let Err(e) = em.flush_run(run_id).await {
+            tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+        }
+        debug!(
+            "TIMING [{}]: flush_run: {:?}",
+            run_id.as_simple(),
+            flush_started.elapsed()
+        );
     }
 
     // Publish stream event for real-time SSE updates (fire-and-forget)
@@ -2948,7 +3619,16 @@ pub fn get_resolved_conf(conf: Val) -> Val {
     let default_conf = val!({
         "threads": DEFAULT_WORKER_THREADS as i64,
         "run-timeout": DEFAULT_RUN_TIMEOUT_SECONDS as i64,
-        "shutdown-timeout": DEFAULT_SHUTDOWN_TIMEOUT_SECONDS as i64
+        "shutdown-timeout": DEFAULT_SHUTDOWN_TIMEOUT_SECONDS as i64,
+        "vm-concurrency": "auto",
+        "vm-memory-mb": 256i64,
+        "reserved-memory-mb": 512i64,
+        "db-reserved-connections": 4i64,
+        "cancel-on-timeout": true,
+        "event-ordering": "current",
+        "handler-concurrency": "serial",
+        "shared-process": false,
+        "local-write-concurrency": 1i64
     });
 
     // Merge with provided conf (the provided conf will override defaults)
@@ -3041,6 +3721,33 @@ pub async fn run_with_components_shared_context(
     stream_publisher: Option<Arc<StreamPubSub>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: WORKER starting");
+    validate_worker_semantics_conf(&worker_conf)?;
+    let queue_metrics_enabled = worker_conf.get_bool_or_default("queue.metrics-enabled", true);
+    let queue_wait_target_p99_ms = worker_conf
+        .get_int_or_default("queue.wait-target-p99-ms", 1_000)
+        .max(1) as u64;
+    hot::queue::set_metrics_enabled(queue_metrics_enabled);
+    hot::queue::set_wait_target_p99_ms(queue_wait_target_p99_ms);
+    info!(
+        "hot.dev: WORKER queue metrics configured (metrics_enabled={}, wait_target_p99_ms={})",
+        queue_metrics_enabled, queue_wait_target_p99_ms,
+    );
+    let queue_orphan_idle_ms = worker_conf
+        .get_int_or_default("queue.event-orphan-idle-ms", 60_000)
+        .max(1) as u64;
+    let min_event_orphan_idle_ms = get_run_timeout(&worker_conf)
+        .saturating_add(RUN_TIMEOUT_HARD_GRACE)
+        .saturating_add(std::time::Duration::from_secs(5))
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
+    if event_orphan_idle_ms != queue_orphan_idle_ms {
+        tracing::warn!(
+            configured_ms = queue_orphan_idle_ms,
+            effective_ms = event_orphan_idle_ms,
+            "Raising hot:event orphan reclaim idle to stay beyond worker.run-timeout and avoid duplicate live handler execution"
+        );
+    }
 
     // Create database connection for event handler processing FIRST
     // This is needed by the emitter and event publisher
@@ -3198,8 +3905,6 @@ pub async fn run_with_components_shared_context(
     let event_window = std::time::Duration::from_secs(4 * 60 * 60); // 4h
     let alert_window = std::time::Duration::from_secs(60 * 60); // 1h
     let email_window = std::time::Duration::from_secs(60 * 60); // 1h
-    let task_window = std::time::Duration::from_secs(24 * 60 * 60); // 24h
-
     // Stable consumer-name prefix for this worker process. Computed early so we
     // can pin admin-path consumer names (startup recovery, janitor, daily
     // queue_cleanup) to the same identity as worker_id=0. Without that pinning
@@ -3226,6 +3931,13 @@ pub async fn run_with_components_shared_context(
     let admin_alert_name = format!("{}-w0-alert", consumer_prefix);
     let admin_email_name = format!("{}-w0-email", consumer_prefix);
 
+    // Read a small batch per Redis XREADGROUP round-trip. Claimer/executor
+    // handoff still bounds local concurrency, but batching avoids one Redis
+    // round-trip per event when backlog is already present.
+    let worker_read_batch_size = worker_conf
+        .get_int_or_default("worker.read-batch-size", 8)
+        .max(1) as usize;
+
     // Create processing queues with dequeue_and_work support - all using unified Message type
     let request_queue = ProcessingQueue::<Message>::new_with_cluster(
         queue_type,
@@ -3235,6 +3947,8 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(request_window)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_request_name.clone());
 
     let response_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3245,6 +3959,8 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(response_window)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_response_name.clone());
 
     let event_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3255,6 +3971,8 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(event_window)
+    .with_orphan_idle_ms(event_orphan_idle_ms)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_event_name.clone());
 
     // Create alert and email notification queues
@@ -3269,6 +3987,8 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(alert_window)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_alert_name.clone());
 
     let email_queue = ProcessingQueue::<Message>::new_with_cluster(
@@ -3279,6 +3999,8 @@ pub async fn run_with_components_shared_context(
         serialization,
     )?
     .with_startup_window(email_window)
+    .with_orphan_idle_ms(queue_orphan_idle_ms)
+    .with_read_batch_size(worker_read_batch_size)
     .with_consumer_name(admin_email_name.clone());
 
     // hot:task queue is owned by hot_task_worker; hot_worker only ENQUEUEs to
@@ -3289,16 +4011,13 @@ pub async fn run_with_components_shared_context(
     // target for orphaned task PEL entries. If hot_worker reclaimed task
     // orphans into its own consumer it would be a dead end (we don't run
     // process_blocking on this queue here).
-    let task_queue = Arc::new(
-        ProcessingQueue::<TaskRequest>::new_with_cluster(
-            queue_type,
-            "hot:task".to_string(),
-            redis_uri.clone(),
-            redis_cluster,
-            serialization,
-        )?
-        .with_startup_window(task_window),
-    );
+    let task_queue = Arc::new(ProcessingQueue::<TaskRequest>::new_with_cluster(
+        queue_type,
+        "hot:task".to_string(),
+        redis_uri.clone(),
+        redis_cluster,
+        serialization,
+    )?);
 
     // Initialize global notification queue registry so publish_alert() can enqueue
     hot::notification_queue::init_alert_queue(std::sync::Arc::new(alert_queue.clone()));
@@ -3486,10 +4205,6 @@ pub async fn run_with_components_shared_context(
                     "hot:email",
                     tokio::time::timeout(ff_timeout, email_queue.fast_forward_if_stale()).await,
                 ),
-                (
-                    "hot:task",
-                    tokio::time::timeout(ff_timeout, task_queue.fast_forward_if_stale()).await,
-                ),
             ] {
                 match result {
                     Ok(Ok(skipped)) if skipped > 0 => {
@@ -3595,15 +4310,6 @@ pub async fn run_with_components_shared_context(
                     )
                     .await,
                 ),
-                (
-                    "hot:task",
-                    task_window,
-                    tokio::time::timeout(
-                        purge_timeout,
-                        task_queue.purge_old_pending(task_window.as_millis() as u64),
-                    )
-                    .await,
-                ),
             ] {
                 match result {
                     Ok(Ok(purged)) if purged > 0 => {
@@ -3659,7 +4365,6 @@ pub async fn run_with_components_shared_context(
             ("hot:response", &response_queue),
             ("hot:alert", &alert_queue),
             ("hot:email", &email_queue),
-            ("hot:task", task_queue.as_ref()),
         ];
 
         let cleanup_fut = async {
@@ -3725,12 +4430,22 @@ pub async fn run_with_components_shared_context(
         });
     }
 
-    // Number of worker threads to spawn
-    let worker_count = threads.unwrap_or(DEFAULT_WORKER_THREADS);
+    // Number of worker threads to spawn. This first second-batch step only
+    // caps concurrency; it does not raise fan-out beyond worker.threads.
+    let requested_worker_count = threads.unwrap_or(DEFAULT_WORKER_THREADS);
+    let vm_budget =
+        hot::runtime_budget::derive_worker_vm_concurrency(&worker_conf, requested_worker_count);
+    let worker_count = vm_budget.resolved;
 
     info!(
-        "hot.dev: WORKER starting with {} concurrent workers",
-        worker_count
+        "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={})",
+        worker_count,
+        vm_budget.requested,
+        vm_budget.cpu_limit,
+        vm_budget.memory_limit,
+        vm_budget.memory_limit_mb,
+        vm_budget.explicit,
+        vm_budget.shared_process,
     );
 
     // Create shared bytecode cache for all workers (in-memory LRU cache)
@@ -3885,41 +4600,282 @@ pub async fn run_with_components_shared_context(
         });
     }
 
-    // Spawn notification worker (alert deliveries + app emails via queues)
-    // Only if database is configured (needed for delivery status updates)
-    // Skip in local dev - alerts/emails are not sent locally
-    if !hot::env::is_local_dev()
-        && let Some(db_arc) = db.clone()
-    {
-        crate::notification_worker::spawn_notification_worker(
-            db_arc,
-            worker_conf.clone(),
-            alert_queue.clone(),
-            email_queue.clone(),
-            shutdown_rx.clone(),
-        );
-    }
-
-    // Spawn multiple worker tasks. `consumer_prefix` was computed earlier so
-    // the admin consumer names could be pinned to w0's identity.
+    // Spawn one claimer per queue. Each claimer blocks on exactly one Redis
+    // stream key (cluster-safe) and hands off at most one claimed lease at a
+    // time into this bounded channel. Executors below provide the VM/run
+    // concurrency bound.
+    let claimer_count = worker_queue_claimer_count(db.is_some());
+    let handoff_capacity = worker_handoff_capacity(worker_count);
+    let redis_blocking_claim_connections = if matches!(queue_type, QueueType::Redis) {
+        claimer_count
+    } else {
+        0
+    };
+    info!(
+        "hot.dev: WORKER queue claimers enabled (claimers={}, executors={}, handoff_capacity={}, redis_blocking_claim_connections={})",
+        claimer_count, worker_count, handoff_capacity, redis_blocking_claim_connections,
+    );
+    let (request_claimed_tx, request_claimed_rx) =
+        mpsc::channel::<ClaimedWorkerQueue>(worker_handoff_capacity(1));
+    let request_claimed_rx = Arc::new(Mutex::new(request_claimed_rx));
+    let (event_claimed_tx, event_claimed_rx) =
+        mpsc::channel::<ClaimedWorkerQueue>(handoff_capacity);
+    let event_claimed_rx = Arc::new(Mutex::new(event_claimed_rx));
+    let (notification_claimed_tx, notification_claimed_rx) =
+        mpsc::channel::<ClaimedWorkerQueue>(worker_handoff_capacity(1));
+    let notification_claimed_rx = Arc::new(Mutex::new(notification_claimed_rx));
     let mut worker_handles = Vec::new();
 
+    worker_handles.push(spawn_worker_queue_claimer(
+        "hot:request",
+        request_queue
+            .clone()
+            .with_consumer_name(admin_request_name.clone()),
+        request_claimed_tx.clone(),
+        shutdown_rx.clone(),
+        ClaimedWorkerQueue::Request,
+        queue_metrics_enabled,
+    ));
+    worker_handles.push(spawn_worker_queue_claimer(
+        "hot:event",
+        event_queue
+            .clone()
+            .with_consumer_name(admin_event_name.clone()),
+        event_claimed_tx.clone(),
+        shutdown_rx.clone(),
+        ClaimedWorkerQueue::Event,
+        queue_metrics_enabled,
+    ));
+    if db.is_some() {
+        worker_handles.push(spawn_worker_queue_claimer(
+            "hot:alert",
+            alert_queue
+                .clone()
+                .with_consumer_name(admin_alert_name.clone()),
+            notification_claimed_tx.clone(),
+            shutdown_rx.clone(),
+            ClaimedWorkerQueue::Alert,
+            queue_metrics_enabled,
+        ));
+        worker_handles.push(spawn_worker_queue_claimer(
+            "hot:email",
+            email_queue
+                .clone()
+                .with_consumer_name(admin_email_name.clone()),
+            notification_claimed_tx.clone(),
+            shutdown_rx.clone(),
+            ClaimedWorkerQueue::Email,
+            queue_metrics_enabled,
+        ));
+    }
+    drop(request_claimed_tx);
+    drop(event_claimed_tx);
+    drop(notification_claimed_tx);
+
+    if let Some(db_for_notifications) = db.clone() {
+        let notification_rx = notification_claimed_rx.clone();
+        let notification_worker_conf = worker_conf.clone();
+        let notification_shutdown_rx = shutdown_rx.clone();
+        let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
+            async move {
+                let worker_id = worker_count;
+                info!("hot.dev: WORKER notification executor started");
+
+                loop {
+                    let claimed_queue = {
+                        let mut claimed_rx = notification_rx.lock().await;
+                        claimed_rx.recv().await
+                    };
+
+                    let Some(claimed_queue) = claimed_queue else {
+                        debug!("hot.dev: WORKER notification executor stopping");
+                        break;
+                    };
+
+                    if *notification_shutdown_rx.borrow() {
+                        debug!(
+                            "hot.dev: WORKER notification executor dropping lease during shutdown"
+                        );
+                        drop(claimed_queue);
+                        break;
+                    }
+
+                    match claimed_queue {
+                        ClaimedWorkerQueue::Alert(lease) => {
+                            let db = db_for_notifications.clone();
+                            let worker_conf = notification_worker_conf.clone();
+                            if let Err(e) = lease
+                                .process(|message| async move {
+                                    process_alert_delivery_message(
+                                        worker_id,
+                                        db,
+                                        worker_conf,
+                                        message,
+                                    )
+                                    .await
+                                })
+                                .await
+                            {
+                                tracing::debug!(
+                                    "hot.dev: WORKER notification alert queue error: {}",
+                                    e
+                                );
+                            }
+                        }
+                        ClaimedWorkerQueue::Email(lease) => {
+                            let db = db_for_notifications.clone();
+                            let worker_conf = notification_worker_conf.clone();
+                            if let Err(e) = lease
+                                .process(|message| async move {
+                                    process_email_message(worker_id, db, worker_conf, message).await
+                                })
+                                .await
+                            {
+                                tracing::debug!(
+                                    "hot.dev: WORKER notification email queue error: {}",
+                                    e
+                                );
+                            }
+                        }
+                        other => {
+                            drop(other);
+                            tracing::warn!(
+                                "hot.dev: WORKER notification executor received non-notification lease"
+                            );
+                        }
+                    }
+                }
+
+                Ok(())
+            },
+        );
+        worker_handles.push(handle);
+    }
+
+    {
+        let request_rx = request_claimed_rx.clone();
+        let request_shutdown_rx = shutdown_rx.clone();
+        let response_queue_for_requests = response_queue
+            .clone()
+            .with_consumer_name(admin_response_name.clone());
+        let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
+            async move {
+                let worker_id = 0usize;
+                info!("hot.dev: WORKER request executor started");
+
+                loop {
+                    let claimed_queue = {
+                        let mut claimed_rx = request_rx.lock().await;
+                        claimed_rx.recv().await
+                    };
+
+                    let Some(claimed_queue) = claimed_queue else {
+                        debug!("hot.dev: WORKER request executor stopping");
+                        break;
+                    };
+
+                    if *request_shutdown_rx.borrow() {
+                        debug!("hot.dev: WORKER request executor dropping lease during shutdown");
+                        drop(claimed_queue);
+                        break;
+                    }
+
+                    let ClaimedWorkerQueue::Request(lease) = claimed_queue else {
+                        tracing::warn!(
+                            "hot.dev: WORKER request executor received non-request lease"
+                        );
+                        continue;
+                    };
+
+                    let response_queue = response_queue_for_requests.clone();
+                    match lease
+                        .process(|message| async move {
+                            let msg_type = message.head.get_str("__type");
+                            match msg_type.as_str() {
+                                "RequestMessage" => {
+                                    let request_msg: RequestMessage = message.try_into().map_err(
+                                        |e| {
+                                            Box::new(std::io::Error::other(e))
+                                                as Box<dyn std::error::Error + Send + Sync>
+                                        },
+                                    )?;
+
+                                    info!(
+                                        "hot.dev: WORKER {} received request from hot:request queue: id={} head={:?} body={}",
+                                        worker_id,
+                                        request_msg.id,
+                                        request_msg.head,
+                                        request_msg.body.to_string()
+                                    );
+
+                                    let response_msg = ResponseMessage {
+                                        id: request_msg.id,
+                                        head: request_msg.head.clone(),
+                                        body: request_msg.body.clone(),
+                                    };
+
+                                    let response_message: Message = response_msg.into();
+                                    response_queue.enqueue(response_message).await.map_err(|e| {
+                                        let error_msg =
+                                            format!("Failed to send response message: {}", e);
+                                        info!("hot.dev: WORKER {} {}", worker_id, error_msg);
+                                        Box::new(std::io::Error::other(error_msg))
+                                            as Box<dyn std::error::Error + Send + Sync>
+                                    })?;
+
+                                    info!(
+                                        "hot.dev: WORKER {} sent response to hot:response queue",
+                                        worker_id
+                                    );
+                                }
+                                _ => {
+                                    info!(
+                                        "hot.dev: WORKER {} received unknown message type '{}' on request queue",
+                                        worker_id, msg_type
+                                    );
+                                }
+                            }
+
+                            Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
+                        })
+                        .await
+                    {
+                        Ok(Some(_)) | Ok(None) => {}
+                        Err(e) => {
+                            info!(
+                                "hot.dev: WORKER {} error processing request message: {}",
+                                worker_id, e
+                            );
+                        }
+                    }
+                }
+
+                Ok(())
+            },
+        );
+        worker_handles.push(handle);
+    }
+
+    // Spawn bounded event executor tasks. Queue consumers live in the claimers
+    // above; these handles are only for event execution plus enqueue/admin
+    // maintenance paths.
     for worker_id in 0..worker_count {
         let request_queue_clone = request_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-request", consumer_prefix, worker_id));
+            .with_consumer_name(admin_request_name.clone());
         let response_queue_clone = response_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-response", consumer_prefix, worker_id));
+            .with_consumer_name(admin_response_name.clone());
         let event_queue_clone = event_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-event", consumer_prefix, worker_id));
+            .with_consumer_name(admin_event_name.clone());
         let alert_queue_clone = alert_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-alert", consumer_prefix, worker_id));
+            .with_consumer_name(admin_alert_name.clone());
         let email_queue_clone = email_queue
             .clone()
-            .with_consumer_name(format!("{}-w{}-email", consumer_prefix, worker_id));
+            .with_consumer_name(admin_email_name.clone());
+        let claimed_rx_clone = event_claimed_rx.clone();
         let db_clone = db.clone();
         let worker_conf_clone = worker_conf.clone();
         let emitter_clone = emitter.clone();
@@ -3927,8 +4883,8 @@ pub async fn run_with_components_shared_context(
         let encryption_clone = encryption.clone();
         let cache_clone = shared_cache.clone();
         let build_path_cache_clone = build_path_cache.clone();
-        let shutdown_rx_clone = shutdown_rx.clone();
         let shutdown_coordinator_clone = shutdown_coordinator.clone();
+        let shutdown_rx_clone = shutdown_rx.clone();
         let dev_context_storage_clone = dev_context_storage.clone();
         let stream_publisher_clone = stream_publisher.clone();
         let task_queue_clone = task_queue.clone();
@@ -3946,97 +4902,37 @@ pub async fn run_with_components_shared_context(
             async move {
                 info!("hot.dev: WORKER {} started", worker_id);
 
-                let mut shutdown_rx_loop = shutdown_rx_clone.clone();
                 loop {
-                    // Check for shutdown signal first
-                    if shutdown_coordinator_clone.is_shutting_down() || *shutdown_rx_loop.borrow() {
+                    let claimed_queue = {
+                        let mut claimed_rx = claimed_rx_clone.lock().await;
+                        claimed_rx.recv().await
+                    };
+
+                    let Some(claimed_queue) = claimed_queue else {
+                        debug!("hot.dev: WORKER {} executor stopping", worker_id);
+                        break;
+                    };
+
+                    if *shutdown_rx_clone.borrow() {
                         debug!(
-                            "hot.dev: WORKER {} shutting down, unregistering consumers",
+                            "hot.dev: WORKER {} dropping claimed queue lease during shutdown",
                             worker_id
                         );
-                        // Unregister our consumers so they don't accumulate as zombies
-                        {
-                            use hot::queue::ConsumerLifecycle;
-                            for queue in [
-                                &event_queue_clone as &dyn ConsumerLifecycle,
-                                &request_queue_clone,
-                                &response_queue_clone,
-                                &alert_queue_clone,
-                                &email_queue_clone,
-                            ] {
-                                let _ = queue.unregister_consumer().await;
-                            }
-                            let _ = task_queue_clone.unregister_consumer().await;
-                        }
+                        drop(claimed_queue);
                         break;
                     }
 
-                    // Track whether any queue produced work this iteration so we
-                    // can sleep briefly when fully idle (avoids hot-loop on the
-                    // in-process Memory queues which return immediately when
-                    // empty).
-                    let mut processed_any = false;
-
-                    // Process ONE request message (atomic operation)
-                    match request_queue_clone.dequeue_and_work(|message| {
-                        // Clone the response queue for use inside the async closure
-                        let response_queue = response_queue_clone.clone();
-                        async move {
-                            // Check message type and process accordingly
-                            let msg_type = message.head.get_str("__type");
-
-                            match msg_type.as_str() {
-                                "RequestMessage" => {
-                                    // Convert to RequestMessage and process
-                                    let request_msg: RequestMessage = message.try_into()
-                                        .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                                    // Log the received message
-                                    info!("hot.dev: WORKER {} received request from hot:request queue: id={} head={:?} body={}",
-                                        worker_id, request_msg.id, request_msg.head, request_msg.body.to_string());
-
-                                    // Process the message and create a response
-                                    let response_msg = ResponseMessage {
-                                        id: request_msg.id, // Use the same ID for correlation
-                                        head: request_msg.head.clone(), // Clone the head
-                                        body: request_msg.body.clone(), // Clone the body for simplicity
-                                    };
-
-                                    // Convert response to unified Message format
-                                    let response_message: Message = response_msg.into();
-
-                                    // Send the response to the response queue
-                                    response_queue.enqueue(response_message).await.map_err(|e| {
-                                        let error_msg = format!("Failed to send response message: {}", e);
-                                        info!("hot.dev: WORKER {} {}", worker_id, error_msg);
-                                        Box::new(std::io::Error::other(error_msg)) as Box<dyn std::error::Error + Send + Sync>
-                                    })?;
-
-                                    info!("hot.dev: WORKER {} sent response to hot:response queue", worker_id);
-                                },
-                                _ => {
-                                    info!("hot.dev: WORKER {} received unknown message type '{}' on request queue", worker_id, msg_type);
-                                }
-                            }
-
-                            // Return some value as the processing result
-                            Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
+                    match claimed_queue {
+                        ClaimedWorkerQueue::Request(lease) => {
+                            drop(lease);
+                            tracing::warn!(
+                                "hot.dev: WORKER {} event executor received request lease",
+                                worker_id
+                            );
                         }
-                    }).await {
-                        Ok(Some(_)) => {
-                            processed_any = true;
-                        },
-                        Ok(None) => {
-                            // No messages in queue - continue to events
-                        },
-                        Err(e) => {
-                            processed_any = true;
-                            info!("hot.dev: WORKER {} error processing request message: {}", worker_id, e);
-                        }
-                    }
-
-                    // Process ONE event message (atomic operation)
-                    match event_queue_clone.dequeue_and_work(|message| {
+                        ClaimedWorkerQueue::Event(lease) => {
+                            // Process ONE event message (atomic operation)
+                            match lease.process(|message| {
                                 let db_ref = db_clone.clone();
                                 let worker_conf_ref = worker_conf_clone.clone();
                                 let _emitter_ref = emitter_clone.clone();
@@ -4083,6 +4979,8 @@ pub async fn run_with_components_shared_context(
                                             // Convert to EventMessage and process
                                             let event_message: EventMessage = message.try_into()
                                                 .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
+                                            let received_event_type =
+                                                event_message.body.event.event_type.clone();
 
                                             // Log the received event message (keep run_id/event_id/fn visible, hide event_data)
                                             debug!("hot.dev: WORKER {} received event: id={} type={} (event.created_at={})",
@@ -4095,45 +4993,23 @@ pub async fn run_with_components_shared_context(
                                             // Uses `once: true` metadata to determine which handlers run once vs all
                                             if let Some(ref db) = db_ref {
                                                 let env_id = event_message.body.event.env_id;
+                                                let infra_retry_backoff_ms = worker_conf_ref
+                                                    .get_int_or_default(
+                                                        "queue.infra-retry-backoff-ms",
+                                                        1_000,
+                                                    )
+                                                    .max(0) as u64;
 
                                                 debug!("TIMING: event {} dequeued, starting processing", event_message.id);
 
-                                                // SECURITY: Verify event exists in database and env_id matches
-                                                // This prevents attacks where a malicious actor with queue access
-                                                // injects messages with spoofed env_ids to trigger handlers in other environments
-                                                let event_id = event_message.body.event.event_id;
-                                                match hot::db::event::Event::get_event(db, &event_id).await {
-                                                    Ok(stored_event) => {
-                                                        if stored_event.env_id != env_id {
-                                                            let err_msg = format!(
-                                                                "Security: env_id mismatch - message claims {} but event {} belongs to {}",
-                                                                env_id, event_id, stored_event.env_id
-                                                            );
-                                                            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                            return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                        }
-                                                        debug!("hot.dev: WORKER {} verified event {} belongs to env {}", worker_id, event_id, env_id);
-                                                    }
-                                                    Err(hot::db::event::EventError::NotFound) => {
-                                                        // Event not in database - could be a race condition or malicious message
-                                                        // For internal events (hot:call, hot:schedule), the event should exist
-                                                        // For API-published events, the event is written before queueing
-                                                        let err_msg = format!(
-                                                            "Security: event {} not found in database - cannot verify env_id",
-                                                            event_id
-                                                        );
-                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                    }
-                                                    Err(e) => {
-                                                        let err_msg = format!(
-                                                            "Security: failed to verify event {} env_id - database error: {}",
-                                                            event_id, e
-                                                        );
-                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                    }
-                                                }
+                                                let event_message =
+                                                    hydrate_event_message_from_db(
+                                                        worker_id,
+                                                        db,
+                                                        event_message,
+                                                        infra_retry_backoff_ms,
+                                                    )
+                                                    .await?;
 
                                                 debug!("TIMING: event {} security check done: {:?}", event_message.id, event_dequeue_time.elapsed());
 
@@ -4146,6 +5022,18 @@ pub async fn run_with_components_shared_context(
                                                     Ok(all_handlers) => {
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
+                                                            if should_defer_missing_event_handlers(
+                                                                worker_id,
+                                                                db,
+                                                                &env_id,
+                                                                &event_message.body.event.event_type,
+                                                                infra_retry_backoff_ms,
+                                                            ).await? {
+                                                                return Err(worker_infrastructure_retry_error(
+                                                                    err_msg,
+                                                                    infra_retry_backoff_ms,
+                                                                ));
+                                                            }
                                                             debug!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                         }
@@ -4242,6 +5130,18 @@ pub async fn run_with_components_shared_context(
 
                                                         if handlers_to_execute.is_empty() {
                                                             let err_msg = format!("No handlers to execute for event type '{}'", event_message.body.event.event_type);
+                                                            if should_defer_missing_event_handlers(
+                                                                worker_id,
+                                                                db,
+                                                                &env_id,
+                                                                &event_message.body.event.event_type,
+                                                                infra_retry_backoff_ms,
+                                                            ).await? {
+                                                                return Err(worker_infrastructure_retry_error(
+                                                                    err_msg,
+                                                                    infra_retry_backoff_ms,
+                                                                ));
+                                                            }
                                                             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                         }
@@ -4265,17 +5165,17 @@ pub async fn run_with_components_shared_context(
                                                                     }
                                                                 };
 
-                                                                // Skip if build is no longer deployed (deactivated while event was in queue)
-                                                                if !handler_build.deployed {
-                                                                    warn!("hot.dev: WORKER {} skipping handler {}/{} - build {} is no longer deployed",
+                                                                // Skip if build is no longer runtime-visible (deactivated or superseded while event was in queue).
+                                                                if !handler_build.deployed
+                                                                    || handler_build.runtime_status
+                                                                        != Build::RUNTIME_STATUS_READY
+                                                                {
+                                                                    warn!("hot.dev: WORKER {} skipping handler {}/{} - build {} is not deployed and ready",
                                                                         worker_id, event_handler.ns, event_handler.var, handler_build.build_id);
                                                                     continue;
                                                                 }
 
-                                                                // Get timeout from config (hot.worker.run-timeout)
-                                                                let timeout_duration = get_run_timeout(&worker_conf_ref);
-
-                                                                // Generate run_id here so we can unregister it on timeout
+                                                                // Generate run_id here so the handler can register cancellation state before execution.
                                                                 let run_id = Uuid::now_v7();
                                                                 shutdown_coord_ref.register_run(run_id);
 
@@ -4292,8 +5192,8 @@ pub async fn run_with_components_shared_context(
 
                                                                 let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone());
 
-                                                                                            match tokio::time::timeout(timeout_duration, execution_future).await {
-                                                                                                Ok(Ok(())) => {
+                                                                                            match execution_future.await {
+                                                                                                Ok(()) => {
                                                                                                     debug!("Successfully executed event handler: {}", event_handler.event_handler_id);
                                                                                                     // Run is already unregistered by execute_single_event_handler
 
@@ -4305,7 +5205,7 @@ pub async fn run_with_components_shared_context(
                                                                                                                 warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
                                                                                                             }
                                                                                                 }
-                                                                                                Ok(Err(e)) => {
+                                                                                                Err(e) => {
                                                                                                     error!("Failed to execute event handler {}: {}", event_handler.event_handler_id, e);
                                                                                                     all_success = false;
                                                                                                     // Run is already unregistered by execute_single_event_handler
@@ -4317,36 +5217,6 @@ pub async fn run_with_components_shared_context(
                                                                                                                 warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
                                                                                                             }
                                                                                                     // Continue with other handlers even if one fails
-                                                                                                }
-                                                                                                Err(_) => {
-                                                                                                    let timeout_secs = timeout_duration.as_secs();
-                                                                                                    error!("hot.dev: WORKER {} run {} TIMED OUT after {}s executing {}/{}",
-                                                                                                        worker_id, run_id, timeout_secs, event_handler.ns, event_handler.var);
-
-                                                                                                    // Mark the run as failed with timeout error
-                                                                                                    let timeout_error = format!(
-                                                                                                        "Run timed out after {} seconds. Configure HOT_WORKER_RUN_TIMEOUT to increase the limit.",
-                                                                                                        timeout_secs
-                                                                                                    );
-                                                                                                    if let Err(e) = hot::db::run::Run::fail_run(
-                                                                                                        db,
-                                                                                                        &run_id,
-                                                                                                        &timeout_error
-                                                                                                    ).await {
-                                                                                                        error!("hot.dev: WORKER {} failed to mark run {} as failed: {}", worker_id, run_id, e);
-                                                                                                    }
-
-                                                                                                    // Update run info with routing warning even on timeout
-                                                                                                    if is_first_handler
-                                                                                                        && let Some(ref warning_info) = routing_warning
-                                                                                                            && let Err(e) = hot::db::run::Run::update_info(db, &run_id, Some(warning_info)).await {
-                                                                                                                warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
-                                                                                                            }
-
-                                                                                                    // Unregister the run since timeout prevented normal cleanup
-                                                                                                    shutdown_coord_ref.unregister_run(&run_id);
-                                                                                                    all_success = false;
-                                                                                                    // Continue with other handlers even if one times out
                                                                                                 }
                                                                                             }
                                                                                             is_first_handler = false;
@@ -4376,7 +5246,10 @@ pub async fn run_with_components_shared_context(
                                                                     Err(e) => {
                                                                         let err_msg = format!("Failed to get event handlers: {}", e);
                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                        return Err(worker_infrastructure_retry_error(
+                                                                            err_msg,
+                                                                            infra_retry_backoff_ms,
+                                                                        ));
                                                                     }
                                                                 }
                                                             } else {
@@ -4387,7 +5260,7 @@ pub async fn run_with_components_shared_context(
 
                                             debug!("hot.dev: WORKER {} processed event '{}' successfully",
                                                 worker_id,
-                                                event_message.body.event.event_type);
+                                                received_event_type);
                                         },
                                         "DeploymentMessage" => {
                                             // Convert to DeploymentMessage and process
@@ -4415,6 +5288,19 @@ pub async fn run_with_components_shared_context(
                                                                             build.build_id,
                                                                             project.env_id,
                                                                             env.org_id);
+
+                                                                        let already_ready = build.deployed
+                                                                            && build.runtime_status == Build::RUNTIME_STATUS_READY;
+                                                                        if already_ready {
+                                                                            debug!("hot.dev: WORKER {} deployment for build {} is already ready and active",
+                                                                                worker_id,
+                                                                                build.build_id);
+                                                                        } else if let Err(e) = Build::mark_runtime_loading(db, &build.build_id).await {
+                                                                            warn!("hot.dev: WORKER {} failed to mark build {} loading: {}",
+                                                                                worker_id,
+                                                                                build.build_id,
+                                                                                e);
+                                                                        }
 
                                                                         // Download the build from storage
                                                                         match hot::storage::build_storage_from_config(&worker_conf_ref).await {
@@ -4519,6 +5405,12 @@ pub async fn run_with_components_shared_context(
                                                                                                     Err(e) => {
                                                                                                         let err_msg = format!("Failed to extract build {}: {}", build.build_id, e);
                                                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                                worker_id,
+                                                                                                                build.build_id,
+                                                                                                                status_err);
+                                                                                                        }
                                                                                                         hot::db::alert::publish_deploy_failed_alert(
                                                                                                             db,
                                                                                                             &env.org_id,
@@ -4545,18 +5437,63 @@ pub async fn run_with_components_shared_context(
                                                                                                     worker_id,
                                                                                                     build.build_id);
 
-                                                                                                // Publish deploy:succeeded alert
-                                                                                                hot::db::alert::publish_deploy_succeeded_alert(
-                                                                                                    db,
-                                                                                                    &env.org_id,
-                                                                                                    &project.env_id,
-                                                                                                    &build.build_id,
-                                                                                                    &project.name,
-                                                                                                ).await;
+                                                                                                let deployment_user_id = build
+                                                                                                    .updated_by_user_id
+                                                                                                    .unwrap_or(build.created_by_user_id);
+                                                                                                match Build::activate_prepared_build(db, &build.build_id, &deployment_user_id).await {
+                                                                                                    Ok(true) => {
+                                                                                                        // Publish deploy:succeeded alert only after the atomic activation flip succeeds.
+                                                                                                        hot::db::alert::publish_deploy_succeeded_alert(
+                                                                                                            db,
+                                                                                                            &env.org_id,
+                                                                                                            &project.env_id,
+                                                                                                            &build.build_id,
+                                                                                                            &project.name,
+                                                                                                        ).await;
+                                                                                                    }
+                                                                                                    Ok(false) => {
+                                                                                                        debug!("hot.dev: WORKER {} skipped activation for stale or inactive build {}",
+                                                                                                            worker_id,
+                                                                                                            build.build_id);
+                                                                                                        if !already_ready
+                                                                                                            && let Err(status_err) = Build::mark_runtime_superseded(db, &build.build_id, "superseded by newer deployment or inactive environment").await
+                                                                                                        {
+                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} superseded: {}",
+                                                                                                                worker_id,
+                                                                                                                build.build_id,
+                                                                                                                status_err);
+                                                                                                        }
+                                                                                                    }
+                                                                                                    Err(e) => {
+                                                                                                        let err_msg = format!("Failed to activate build {}: {}", build.build_id, e);
+                                                                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                                worker_id,
+                                                                                                                build.build_id,
+                                                                                                                status_err);
+                                                                                                        }
+                                                                                                        hot::db::alert::publish_deploy_failed_alert(
+                                                                                                            db,
+                                                                                                            &env.org_id,
+                                                                                                            &project.env_id,
+                                                                                                            &build.build_id,
+                                                                                                            &project.name,
+                                                                                                            &err_msg,
+                                                                                                        ).await;
+                                                                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                                                    }
+                                                                                                }
                                                                                             }
                                                                                             Err(e) => {
                                                                                                 let err_msg = format!("Failed to load handlers and schedules for build {}: {}", build.build_id, e);
                                                                                                 error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                        worker_id,
+                                                                                                        build.build_id,
+                                                                                                        status_err);
+                                                                                                }
                                                                                                 hot::db::alert::publish_deploy_failed_alert(
                                                                                                     db,
                                                                                                     &env.org_id,
@@ -4572,6 +5509,12 @@ pub async fn run_with_components_shared_context(
                                                                                     Err(e) => {
                                                                                         let err_msg = format!("Failed to retrieve build {} from storage: {}", build.build_id, e);
                                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                worker_id,
+                                                                                                build.build_id,
+                                                                                                status_err);
+                                                                                        }
                                                                                         hot::db::alert::publish_deploy_failed_alert(
                                                                                             db,
                                                                                             &env.org_id,
@@ -4587,6 +5530,12 @@ pub async fn run_with_components_shared_context(
                                                                             Err(e) => {
                                                                                 let err_msg = format!("Failed to create build storage: {}", e);
                                                                                 error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                        worker_id,
+                                                                                        build.build_id,
+                                                                                        status_err);
+                                                                                }
                                                                                 hot::db::alert::publish_deploy_failed_alert(
                                                                                     db,
                                                                                     &env.org_id,
@@ -4961,147 +5910,77 @@ pub async fn run_with_components_shared_context(
                                 }
                             }).await {
                                 Ok(Some(_)) => {
-                                    processed_any = true;
                                 },
                                 Ok(None) => {
                                     // No events in queue - continue to next iteration
                                 },
                                 Err(e) => {
-                                    processed_any = true;
                                     debug!("hot.dev: WORKER {} error processing event: {}", worker_id, e);
                                 }
                             }
-
-                    // Process ONE alert delivery from hot:alert queue (if any)
-                    // This allows main workers to help with alert processing when idle
-                    if let Some(ref db_ref) = db_clone {
-                        match alert_queue_clone.dequeue_and_work(|message| {
-                            let db = db_ref.clone();
-                            let worker_conf = worker_conf_clone.clone();
-                            async move {
-                                let alert_msg: hot::lang::event::queue::AlertDeliveryMessage = message.try_into()
-                                    .map_err(|e: String| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                                tracing::debug!(
-                                    "hot.dev: WORKER {} processing alert delivery {} from hot:alert queue",
-                                    worker_id,
-                                    alert_msg.body.alert_delivery_id
-                                );
-
-                                let http_client = reqwest::Client::builder()
-                                    .timeout(std::time::Duration::from_secs(10))
-                                    .build()
-                                    .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                                let alert_email_sender = hot::email::EmailSender::alerts_from_conf(&worker_conf);
-                                let alert_email_config = hot::email::EmailConfig::alerts_from_conf(&worker_conf);
-                                let email_sender_ref: Option<&dyn hot::db::alert::AlertEmailSender> = if alert_email_sender.is_available() {
-                                    Some(&alert_email_sender)
-                                } else {
-                                    None
-                                };
-
-                                let _ = hot::db::alert::process_single_alert_delivery(
-                                    &db,
-                                    &http_client,
-                                    email_sender_ref,
-                                    &alert_email_config,
-                                    &alert_msg.body.alert_delivery_id,
-                                ).await;
-
-                                Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
-                            }
-                        }).await {
-                            Ok(Some(_)) => { processed_any = true; },
-                            Ok(None) => { /* no alerts in queue */ },
-                            Err(e) => {
-                                processed_any = true;
-                                tracing::debug!("hot.dev: WORKER {} alert queue error: {}", worker_id, e);
-                            }
                         }
-                    }
-
-                    // Process ONE app email from hot:email queue (if any)
-                    if let Some(ref db_ref) = db_clone {
-                        match email_queue_clone.dequeue_and_work(|message| {
-                            let db = db_ref.clone();
-                            let worker_conf = worker_conf_clone.clone();
-                            async move {
-                                let email_msg: hot::lang::event::queue::EmailMessage = message.try_into()
-                                    .map_err(|e: String| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
-
-                                tracing::debug!(
-                                    "hot.dev: WORKER {} processing app email to {} from hot:email queue",
-                                    worker_id,
-                                    email_msg.body.to_address
-                                );
-
-                                let sender = hot::email::EmailSender::from_conf(&worker_conf);
-                                if !sender.is_available() {
-                                    let _ = hot::db::email_queue::EmailQueueEntry::mark_failed(
-                                        &db,
-                                        &email_msg.body.email_queue_id,
-                                        "Email sender not configured",
-                                    ).await;
-                                    return Ok(());
-                                }
-
-                                let email = hot::email::Email {
-                                    to: email_msg.body.to_address.clone(),
-                                    subject: email_msg.body.subject.clone(),
-                                    html: email_msg.body.html_body.clone(),
-                                    text: email_msg.body.text_body.clone(),
-                                };
-
-                                match sender.send_email_with_from(&email, &email_msg.body.from_address).await {
-                                    Ok(()) => {
-                                        let _ = hot::db::email_queue::EmailQueueEntry::mark_sent(
-                                            &db,
-                                            &email_msg.body.email_queue_id,
-                                        ).await;
-                                    }
+                        ClaimedWorkerQueue::Alert(lease) => {
+                            // Process ONE alert delivery from hot:alert queue (if any)
+                            // This allows main workers to help with alert processing when idle
+                            if let Some(ref db_ref) = db_clone {
+                                match lease
+                                    .process(|message| {
+                                        let db = db_ref.clone();
+                                        let worker_conf = worker_conf_clone.clone();
+                                        async move {
+                                            process_alert_delivery_message(
+                                                worker_id,
+                                                db,
+                                                worker_conf,
+                                                message,
+                                            )
+                                            .await
+                                        }
+                                    })
+                                    .await
+                                {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => { /* no alerts in queue */ }
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "hot.dev: WORKER {} failed to send app email {} (to: {}), will retry via queue: {}",
+                                        tracing::debug!(
+                                            "hot.dev: WORKER {} alert queue error: {}",
                                             worker_id,
-                                            email_msg.body.email_queue_id,
-                                            email_msg.body.to_address,
                                             e
                                         );
-                                        // Add a small interval before requeue retry to avoid hot-looping.
-                                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                        return Err(
-                                            Box::new(std::io::Error::other(format!(
-                                                "app email send failed for {}: {}",
-                                                email_msg.body.email_queue_id, e
-                                            ))) as Box<dyn std::error::Error + Send + Sync>
+                                    }
+                                }
+                            }
+                        }
+                        ClaimedWorkerQueue::Email(lease) => {
+                            // Process ONE app email from hot:email queue (if any)
+                            if let Some(ref db_ref) = db_clone {
+                                match lease
+                                    .process(|message| {
+                                        let db = db_ref.clone();
+                                        let worker_conf = worker_conf_clone.clone();
+                                        async move {
+                                            process_email_message(
+                                                worker_id,
+                                                db,
+                                                worker_conf,
+                                                message,
+                                            )
+                                            .await
+                                        }
+                                    })
+                                    .await
+                                {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => { /* no emails in queue */ }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            "hot.dev: WORKER {} email queue error: {}",
+                                            worker_id,
+                                            e
                                         );
                                     }
                                 }
-
-                                Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
                             }
-                        }).await {
-                            Ok(Some(_)) => { processed_any = true; },
-                            Ok(None) => { /* no emails in queue */ },
-                            Err(e) => {
-                                processed_any = true;
-                                tracing::debug!("hot.dev: WORKER {} email queue error: {}", worker_id, e);
-                            }
-                        }
-                    }
-
-                    // Idle backoff: race shutdown signal vs a brief sleep so we
-                    // wake instantly on shutdown but don't hot-loop. The Redis
-                    // `dequeue_and_work` path uses BLOCK=0 (non-blocking) so
-                    // this backoff applies in both Memory and Redis modes when
-                    // every queue is empty. The longer BLOCK window is reserved
-                    // for `process_blocking`, used by the dedicated task worker.
-                    if !processed_any {
-                        tokio::select! {
-                            biased;
-                            _ = shutdown_rx_loop.changed() => {}
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
                         }
                     }
                 }
@@ -5117,43 +5996,91 @@ pub async fn run_with_components_shared_context(
     hot::signal::shutdown_signal().await;
     info!("hot.dev: WORKER received shutdown signal");
 
-    // Phase 1: Initiate graceful shutdown (sets flag to stop dequeueing new items)
+    // Phase 1: Stop claimers first so the graceful drain only waits on work
+    // that had already started executing before shutdown.
+    let _ = shutdown_tx.send(true);
+
+    // Phase 2: Initiate graceful shutdown and wait for active runs to complete
     if let Err(e) = shutdown_coordinator
         .initiate_shutdown(db.as_ref().map(|d| d.as_ref()))
         .await
     {
         error!("hot.dev: WORKER graceful shutdown error: {}", e);
     }
+    debug!(
+        "hot.dev: WORKER graceful shutdown flag set: {}",
+        shutdown_coordinator.is_shutting_down()
+    );
 
-    // Phase 2: Signal all workers to shutdown and wait for them to complete
-    let _ = shutdown_tx.send(true);
-
-    let worker_shutdown_timeout =
-        tokio::time::Duration::from_secs(if hot::env::is_local_dev() { 0 } else { 30 });
+    let worker_shutdown_timeout = worker_shutdown_drain_timeout(hot::env::is_local_dev());
     info!(
         "hot.dev: WORKER waiting for workers to complete (timeout: {}s)",
         worker_shutdown_timeout.as_secs()
     );
-    match tokio::time::timeout(worker_shutdown_timeout, join_all(&mut worker_handles)).await {
-        Ok(results) => {
-            info!("hot.dev: WORKER all workers completed gracefully");
-            for (i, result) in results.into_iter().enumerate() {
-                if let Err(e) = result {
-                    error!("hot.dev: WORKER {} task error: {}", i, e);
+    let workers_drained =
+        match tokio::time::timeout(worker_shutdown_timeout, join_all(&mut worker_handles)).await {
+            Ok(results) => {
+                info!("hot.dev: WORKER all workers completed gracefully");
+                for (i, result) in results.into_iter().enumerate() {
+                    if let Err(e) = result {
+                        error!("hot.dev: WORKER {} task error: {}", i, e);
+                    }
                 }
+                true
             }
-        }
-        Err(_) => {
-            warn!(
-                "hot.dev: WORKER shutdown timeout ({}s), aborting remaining worker tasks",
-                worker_shutdown_timeout.as_secs()
-            );
-            for handle in &worker_handles {
-                handle.abort();
+            Err(_) => {
+                warn!(
+                    "hot.dev: WORKER shutdown timeout ({}s), aborting remaining worker tasks",
+                    worker_shutdown_timeout.as_secs()
+                );
+                for handle in &worker_handles {
+                    handle.abort();
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                drop(worker_handles);
+                false
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            drop(worker_handles);
-        }
+        };
+
+    if !workers_drained {
+        warn!("hot.dev: WORKER workers were aborted; only idle consumers will be unregistered");
+    }
+    unregister_idle_consumer(
+        "hot:event",
+        &event_queue
+            .clone()
+            .with_consumer_name(admin_event_name.clone()),
+    )
+    .await;
+    unregister_idle_consumer(
+        "hot:request",
+        &request_queue
+            .clone()
+            .with_consumer_name(admin_request_name.clone()),
+    )
+    .await;
+    unregister_idle_consumer(
+        "hot:response",
+        &response_queue
+            .clone()
+            .with_consumer_name(admin_response_name.clone()),
+    )
+    .await;
+    if db.is_some() {
+        unregister_idle_consumer(
+            "hot:alert",
+            &alert_queue
+                .clone()
+                .with_consumer_name(admin_alert_name.clone()),
+        )
+        .await;
+        unregister_idle_consumer(
+            "hot:email",
+            &email_queue
+                .clone()
+                .with_consumer_name(admin_email_name.clone()),
+        )
+        .await;
     }
 
     // Phase 3: Flush emitter/publisher after workers have stopped
@@ -5178,4 +6105,282 @@ pub async fn run_with_components_shared_context(
     info!("hot.dev: WORKER shutdown complete");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::val;
+
+    async fn migrated_sqlite_file_db() -> (DatabasePool, PathBuf) {
+        let db_path =
+            std::env::temp_dir().join(format!("hot-worker-test-{}.sqlite", Uuid::new_v4()));
+        let db_uri = format!("sqlite:{}", db_path.display());
+        let conf = val!({
+            "db": {
+                "uri": db_uri,
+                "schema": "hot",
+            },
+        });
+
+        hot::db::run_migrations(&conf)
+            .await
+            .expect("migrations should run");
+        let db = hot::db::create_db_pool(&conf)
+            .await
+            .expect("db pool should open");
+
+        (db, db_path)
+    }
+
+    fn test_message() -> Message {
+        Message {
+            id: Uuid::now_v7(),
+            head: val!({
+                "__type": "RequestMessage",
+            }),
+            body: val!({
+                "ok": true,
+            }),
+        }
+    }
+
+    #[test]
+    fn worker_queue_claimer_count_tracks_notification_queues() {
+        assert_eq!(worker_queue_claimer_count(false), 2);
+        assert_eq!(worker_queue_claimer_count(true), 4);
+    }
+
+    #[test]
+    fn worker_handoff_capacity_never_drops_to_zero() {
+        assert_eq!(worker_handoff_capacity(0), 1);
+        assert_eq!(worker_handoff_capacity(4), 4);
+    }
+
+    #[test]
+    fn local_dev_shutdown_still_gets_a_drain_window() {
+        assert_eq!(
+            worker_shutdown_drain_timeout(true),
+            tokio::time::Duration::from_secs(LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS)
+        );
+        assert!(worker_shutdown_drain_timeout(true) > tokio::time::Duration::ZERO);
+        assert_eq!(
+            worker_shutdown_drain_timeout(false),
+            tokio::time::Duration::from_secs(WORKER_SHUTDOWN_DRAIN_SECONDS)
+        );
+    }
+
+    #[test]
+    fn worker_semantics_config_accepts_current_serial_contract() {
+        let conf = val!({
+            "worker": {
+                "event-ordering": "current",
+                "handler-concurrency": "serial",
+            },
+        });
+
+        assert!(validate_worker_semantics_conf(&conf).is_ok());
+    }
+
+    #[test]
+    fn worker_semantics_config_rejects_unimplemented_modes() {
+        let ordering_conf = val!({
+            "worker": {
+                "event-ordering": "strict",
+                "handler-concurrency": "serial",
+            },
+        });
+        let ordering_err = validate_worker_semantics_conf(&ordering_conf)
+            .unwrap_err()
+            .to_string();
+        assert!(ordering_err.contains("Unsupported worker.event-ordering"));
+
+        let concurrency_conf = val!({
+            "worker": {
+                "event-ordering": "current",
+                "handler-concurrency": "parallel",
+            },
+        });
+        let concurrency_err = validate_worker_semantics_conf(&concurrency_conf)
+            .unwrap_err()
+            .to_string();
+        assert!(concurrency_err.contains("Unsupported worker.handler-concurrency"));
+    }
+
+    #[tokio::test]
+    async fn thin_event_message_hydrates_event_data_from_db_before_routing() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let target_fn = "::demo::run-all/run-all-demos";
+        let event_time = chrono::Utc::now();
+        let db_event_data = serde_json::json!({
+            "fn": target_fn,
+            "args": [],
+        });
+
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &test_data.env_id,
+            &stream_id,
+            "hot:call",
+            &db_event_data,
+            event_time,
+            &test_data.user_id,
+            None,
+        )
+        .await
+        .expect("event should insert");
+
+        let thin_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: test_data.env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "event_id": event_id.to_string(),
+                    }),
+                    event_time,
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(test_data.env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+
+        let hydrated = hydrate_event_message_from_db(0, &db, thin_message, 0)
+            .await
+            .expect("thin event should hydrate");
+
+        assert_eq!(hydrated.body.event.event_data.get_str("fn"), target_fn);
+        assert_eq!(
+            extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
+            Some(target_fn)
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn memory_claimer_hands_off_one_lease_and_stops_on_shutdown() {
+        let queue_name = format!("worker-claimer-test-{}", Uuid::new_v4());
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        queue.enqueue(test_message()).await.unwrap();
+
+        let (claimed_tx, mut claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn_worker_queue_claimer(
+            "test:request",
+            queue,
+            claimed_tx,
+            shutdown_rx,
+            ClaimedWorkerQueue::Request,
+            false,
+        );
+
+        let claimed = tokio::time::timeout(tokio::time::Duration::from_secs(1), claimed_rx.recv())
+            .await
+            .expect("claimer should hand off promptly")
+            .expect("claimer should send a lease");
+        let ClaimedWorkerQueue::Request(lease) = claimed else {
+            panic!("expected request lease");
+        };
+        let processed = lease
+            .process(|message| async move {
+                Ok::<Uuid, Box<dyn std::error::Error + Send + Sync>>(message.id)
+            })
+            .await
+            .unwrap();
+        assert!(processed.is_some());
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("claimer should stop on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_claimer_backpressure_leaves_backlog_visible() {
+        let queue_name = format!("worker-claimer-backpressure-test-{}", Uuid::new_v4());
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            queue.enqueue(test_message()).await.unwrap();
+        }
+
+        let (claimed_tx, mut claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn_worker_queue_claimer(
+            "test:request",
+            queue.clone(),
+            claimed_tx,
+            shutdown_rx,
+            ClaimedWorkerQueue::Request,
+            false,
+        );
+
+        // With a channel capacity of 1 and no executor draining, the claimer
+        // may hold one extra lease while blocked on send, but it must not drain
+        // the entire queue into local memory.
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            loop {
+                if queue.len().await.unwrap() == 1 {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("backpressure should leave one queued item visible");
+
+        let first = claimed_rx
+            .recv()
+            .await
+            .expect("first lease should be buffered");
+        drop(first);
+        let second = claimed_rx
+            .recv()
+            .await
+            .expect("second lease should send after space opens");
+        drop(second);
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("claimer should stop on shutdown")
+            .unwrap()
+            .unwrap();
+    }
 }

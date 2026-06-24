@@ -1,7 +1,12 @@
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
+use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
+
+use super::entity_cache::EntityCache;
+
+static ENV_CACHE: LazyLock<EntityCache<Uuid, Env>> = LazyLock::new(|| EntityCache::new(1_000));
 
 #[derive(Error, Debug)]
 pub enum EnvError {
@@ -23,6 +28,7 @@ pub struct Env {
     pub updated_by_user_id: Option<Uuid>,
     pub active_toggle_at: Option<DateTime<Utc>>,
     pub active_toggle_by_user_id: Option<Uuid>,
+    pub runtime_revision: i64,
 }
 
 impl Env {
@@ -49,26 +55,97 @@ impl Env {
 
     /// Get environment by ID
     pub async fn get_env(db: &crate::db::DatabasePool, env_id: &Uuid) -> Result<Env, EnvError> {
-        match db {
+        if let Some(env) = ENV_CACHE.get(env_id) {
+            return Ok(env);
+        }
+
+        let env = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE env_id = $1",
+                sqlx::query_as::<_, Env>(
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE env_id = $1",
                 )
                 .bind(env_id)
                 .fetch_one(pg_pool)
-                .await?;
-                Ok(env)
+                .await?
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE env_id = ?"
+                sqlx::query_as::<_, Env>(
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE env_id = ?"
                 )
                 .bind(env_id)
                 .fetch_one(sqlite_pool)
-                .await?;
-                Ok(env)
+                .await?
+            }
+        };
+
+        ENV_CACHE.insert(*env_id, env.clone());
+        Ok(env)
+    }
+
+    pub fn invalidate_env_cache(env_id: &Uuid) {
+        ENV_CACHE.invalidate(env_id);
+    }
+
+    pub fn invalidate_all_env_cache() {
+        ENV_CACHE.clear();
+    }
+
+    pub async fn get_runtime_revision(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+    ) -> Result<i64, EnvError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let revision =
+                    sqlx::query_scalar("SELECT runtime_revision FROM env WHERE env_id = $1")
+                        .bind(env_id)
+                        .fetch_one(pg_pool)
+                        .await?;
+                Ok(revision)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let revision =
+                    sqlx::query_scalar("SELECT runtime_revision FROM env WHERE env_id = ?")
+                        .bind(env_id)
+                        .fetch_one(sqlite_pool)
+                        .await?;
+                Ok(revision)
             }
         }
+    }
+
+    pub async fn bump_runtime_revision(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+        updated_by_user_id: &Uuid,
+    ) -> Result<i64, EnvError> {
+        let revision = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_scalar(
+                    "UPDATE env SET runtime_revision = runtime_revision + 1, updated_at = NOW(), updated_by_user_id = $2 WHERE env_id = $1 RETURNING runtime_revision"
+                )
+                .bind(env_id)
+                .bind(updated_by_user_id)
+                .fetch_one(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE env SET runtime_revision = runtime_revision + 1, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE env_id = ?"
+                )
+                .bind(updated_by_user_id)
+                .bind(env_id)
+                .execute(sqlite_pool)
+                .await?;
+
+                sqlx::query_scalar("SELECT runtime_revision FROM env WHERE env_id = ?")
+                    .bind(env_id)
+                    .fetch_one(sqlite_pool)
+                    .await?
+            }
+        };
+        Self::invalidate_env_cache(env_id);
+        Ok(revision)
     }
 
     /// Get count of environments
@@ -94,7 +171,7 @@ impl Env {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env ORDER BY created_at LIMIT 1"
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env ORDER BY created_at LIMIT 1"
                 )
                 .fetch_one(pg_pool)
                 .await?;
@@ -102,7 +179,7 @@ impl Env {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env ORDER BY created_at LIMIT 1"
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env ORDER BY created_at LIMIT 1"
                 )
                 .fetch_one(sqlite_pool)
                 .await?;
@@ -141,6 +218,7 @@ impl Env {
                 .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 
@@ -152,7 +230,7 @@ impl Env {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let envs = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE org_id = $1 ORDER BY created_at",
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE org_id = $1 ORDER BY created_at",
                 )
                 .bind(org_id)
                 .fetch_all(pg_pool)
@@ -161,7 +239,7 @@ impl Env {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let envs = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE org_id = ? ORDER BY created_at"
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE org_id = ? ORDER BY created_at"
                 )
                 .bind(org_id)
                 .fetch_all(sqlite_pool)
@@ -179,7 +257,7 @@ impl Env {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE org_id = $1 ORDER BY created_at LIMIT 1"
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE org_id = $1 ORDER BY created_at LIMIT 1"
                 )
                 .bind(org_id)
                 .fetch_one(pg_pool)
@@ -188,7 +266,7 @@ impl Env {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE org_id = ? ORDER BY created_at LIMIT 1"
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE org_id = ? ORDER BY created_at LIMIT 1"
                 )
                 .bind(org_id)
                 .fetch_one(sqlite_pool)
@@ -207,7 +285,7 @@ impl Env {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let env = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env WHERE org_id = $1 AND name = $2",
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env WHERE org_id = $1 AND name = $2",
                 )
                 .bind(org_id)
                 .bind(name)
@@ -220,7 +298,7 @@ impl Env {
                     r#"SELECT env_id, org_id, name, active,
                               created_by_user_id, created_at, updated_at,
                               updated_by_user_id, active_toggle_at,
-                              active_toggle_by_user_id
+                              active_toggle_by_user_id, runtime_revision
                        FROM env WHERE org_id = ? AND name = ?"#,
                 )
                 .bind(org_id)
@@ -244,7 +322,7 @@ impl Env {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let envs = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env ORDER BY created_at DESC LIMIT $1 OFFSET $2",
                 )
                 .bind(limit)
                 .bind(offset)
@@ -254,7 +332,7 @@ impl Env {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let envs = sqlx::query_as::<_, Env>(
-                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM env ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    "SELECT env_id, org_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, runtime_revision FROM env ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 )
                 .bind(limit)
                 .bind(offset)
@@ -290,6 +368,7 @@ impl Env {
                     .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 
@@ -319,6 +398,7 @@ impl Env {
                     .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 
@@ -338,6 +418,7 @@ impl Env {
                     .await?;
             }
         }
+        Self::invalidate_env_cache(env_id);
         Ok(())
     }
 }

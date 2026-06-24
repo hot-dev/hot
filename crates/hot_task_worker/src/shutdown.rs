@@ -26,10 +26,10 @@
 //!            2. mark the original task row failed in DB
 //!            3. publish task:complete event so consumers see the failure
 //!
-//! T+~50s : XGROUP DELCONSUMER our consumer name on {hot:task}
-//!          (releases any PEL entries we still own — the retry copies we
-//!           just enqueued are independent stream entries, so abandoning
-//!           the originals is safe)
+//! T+~50s : If Redis reports that our consumer has no pending messages,
+//!          XGROUP DELCONSUMER our consumer name on {hot:task}. If pending
+//!          messages remain, leave the consumer registered so a later
+//!          janitor/XAUTOCLAIM pass can recover them.
 //!
 //! T+~55s : process exits cleanly. ECS stopTimeout is 120s, so we have
 //!          ~65s of slack.
@@ -44,10 +44,9 @@
 //!    might not even be up yet during a deploy. Re-enqueueing makes the
 //!    work *immediately* available to any live worker.
 //!
-//! 2. **Cleanliness**. We can DELCONSUMER our own consumer at the end so
-//!    the consumer group doesn't accumulate ghost entries. The original
-//!    PEL entries become unreachable but that's fine — we have fresh
-//!    copies in the stream.
+//! 2. **Cleanliness**. We can DELCONSUMER our own consumer at the end if
+//!    Redis confirms there are no pending entries left for that consumer,
+//!    so the consumer group doesn't accumulate ghost entries.
 //!
 //! ## Container vs code task handling
 //!
@@ -174,6 +173,19 @@ impl TaskShutdownCoordinator {
         }
     }
 
+    /// Signal cooperative cancellation for one active task, if it has
+    /// registered a VM/container cancel token.
+    pub fn cancel_task(&self, task_id: &Uuid) {
+        if let Ok(tasks) = self.active_tasks.read()
+            && let Some(token) = tasks
+                .iter()
+                .find(|t| &t.task_id == task_id)
+                .and_then(|t| t.cancel_token.as_ref())
+        {
+            token.store(true, Ordering::Release);
+        }
+    }
+
     fn snapshot_active_tasks(&self) -> Vec<ActiveTask> {
         self.active_tasks
             .read()
@@ -250,9 +262,9 @@ impl TaskShutdownCoordinator {
             }
         }
 
-        // Phase 4: clean Redis state. DELCONSUMER releases any PEL entries
-        // we still own. The retry copies we enqueued in phase 3 are
-        // independent stream entries, so abandoning the originals is safe.
+        // Phase 4: clean Redis state only if the consumer has no pending
+        // entries left. If Redis still sees PEL entries, leave the consumer
+        // registered so another worker's janitor can XAUTOCLAIM them.
         Self::unregister_consumer(task_queue).await;
 
         tracing::info!(
@@ -455,21 +467,40 @@ impl TaskShutdownCoordinator {
         }
     }
 
-    /// Fire-and-log XGROUP DELCONSUMER. Wrapped in a short timeout — even
-    /// if Redis is unresponsive we want to exit promptly so ECS doesn't
-    /// hard-kill us.
+    /// Fire-and-log XGROUP DELCONSUMER only when this consumer has no pending
+    /// entries. Wrapped in a short timeout — even if Redis is unresponsive we
+    /// want to exit promptly so ECS doesn't hard-kill us.
     async fn unregister_consumer(task_queue: &ProcessingQueue<TaskRequest>) {
         let op_timeout = Duration::from_secs(SHUTDOWN_OP_TIMEOUT_SECS);
-        match timeout(op_timeout, task_queue.unregister_consumer()).await {
-            Ok(Ok(())) => {
-                tracing::info!("Shutdown: unregistered consumer from {{hot:task}}");
+        match timeout(op_timeout, task_queue.consumer_has_pending()).await {
+            Ok(Ok(false)) => match timeout(op_timeout, task_queue.unregister_consumer()).await {
+                Ok(Ok(())) => {
+                    tracing::info!("Shutdown: unregistered idle consumer from {{hot:task}}");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Shutdown: failed to unregister consumer: {}", e);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Shutdown: unregister_consumer timed out after {}s",
+                        SHUTDOWN_OP_TIMEOUT_SECS,
+                    );
+                }
+            },
+            Ok(Ok(true)) => {
+                tracing::warn!(
+                    "Shutdown: leaving {{hot:task}} consumer registered because it still has pending messages"
+                );
             }
             Ok(Err(e)) => {
-                tracing::warn!("Shutdown: failed to unregister consumer: {}", e);
+                tracing::warn!(
+                    "Shutdown: could not inspect consumer pending state before unregister: {}",
+                    e
+                );
             }
             Err(_) => {
                 tracing::warn!(
-                    "Shutdown: unregister_consumer timed out after {}s",
+                    "Shutdown: consumer pending-state check timed out after {}s",
                     SHUTDOWN_OP_TIMEOUT_SECS,
                 );
             }

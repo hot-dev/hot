@@ -190,6 +190,7 @@ impl Webhook {
             WHERE p.env_id = ?
               AND p.active = 1
               AND b.deployed = 1
+              AND b.runtime_status = 'ready'
               AND we.service = ?
               AND we.path = ?
               AND we.method = ?
@@ -224,6 +225,7 @@ impl Webhook {
             WHERE p.env_id = $1
               AND p.active = true
               AND b.deployed = true
+              AND b.runtime_status = 'ready'
               AND we.service = $2
               AND we.path = $3
               AND we.method = $4
@@ -272,6 +274,7 @@ impl Webhook {
             WHERE p.env_id = ?
               AND p.active = 1
               AND b.deployed = 1
+              AND b.runtime_status = 'ready'
               AND we.service = ?
             ORDER BY we.path
             "#,
@@ -299,6 +302,7 @@ impl Webhook {
             WHERE p.env_id = $1
               AND p.active = true
               AND b.deployed = true
+              AND b.runtime_status = 'ready'
               AND we.service = $2
             ORDER BY we.path
             "#,
@@ -337,7 +341,7 @@ impl Webhook {
                FROM webhook we
                JOIN build b ON we.build_id = b.build_id
                JOIN project p ON b.project_id = p.project_id
-               WHERE b.deployed = 1 AND b.active = 1 AND p.env_id = ?
+               WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.env_id = ?
                ORDER BY we.service, we.path"#,
         )
         .bind(env_id)
@@ -358,7 +362,7 @@ impl Webhook {
                FROM webhook we
                JOIN build b ON we.build_id = b.build_id
                JOIN project p ON b.project_id = p.project_id
-               WHERE b.deployed = true AND b.active = true AND p.env_id = $1
+               WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.env_id = $1
                ORDER BY we.service, we.path"#,
         )
         .bind(env_id)
@@ -891,7 +895,7 @@ impl Webhook {
                        FROM webhook we
                        JOIN build b ON we.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE p.env_id = $1 AND p.active = true AND b.deployed = true
+                       WHERE p.env_id = $1 AND p.active = true AND b.deployed = true AND b.runtime_status = 'ready'
                        GROUP BY we.service, p.name
                        ORDER BY we.service, p.name"#,
                 )
@@ -905,7 +909,7 @@ impl Webhook {
                        FROM webhook we
                        JOIN build b ON we.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1
+                       WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready'
                        GROUP BY we.service, p.name
                        ORDER BY we.service, p.name"#,
                 )

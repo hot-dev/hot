@@ -10,7 +10,12 @@ use crate::db::DatabasePool;
 use crate::lang::emitter::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
-use std::sync::Arc;
+use ahash::AHashMap;
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Instant;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
@@ -25,14 +30,192 @@ fn val_to_jsonb_string(v: &Val) -> String {
     sanitize_json_for_jsonb(&raw).into_owned()
 }
 
+fn duration_ms_between(
+    start: chrono::DateTime<chrono::Utc>,
+    stop: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    stop.signed_duration_since(start).num_milliseconds().max(0)
+}
+
 /// Maximum number of pending writes before backpressure warning
 const BACKPRESSURE_THRESHOLD: usize = 1000;
 
 /// Batch size for PostgreSQL transaction batching
 const POSTGRES_BATCH_SIZE: usize = 100;
 
-/// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt)
-type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16);
+/// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id)
+type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16, i16);
+
+fn elapsed_ms(elapsed: std::time::Duration) -> u64 {
+    elapsed.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn atomic_max(cell: &AtomicU64, value: u64) {
+    let mut current = cell.load(Ordering::Relaxed);
+    while value > current {
+        match cell.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
+struct DatabaseWriterPressureStats {
+    enqueued: AtomicU64,
+    enqueued_run: AtomicU64,
+    enqueued_call: AtomicU64,
+    batches: AtomicU64,
+    input_writes: AtomicU64,
+    run_writes: AtomicU64,
+    other_writes: AtomicU64,
+    other_write_errors: AtomicU64,
+    batch_ms: AtomicU64,
+    max_batch_ms: AtomicU64,
+    run_write_ms: AtomicU64,
+    max_run_write_ms: AtomicU64,
+    other_write_ms: AtomicU64,
+    max_other_write_ms: AtomicU64,
+    max_local_pending: AtomicU64,
+    last_log_at: StdMutex<Instant>,
+}
+
+impl DatabaseWriterPressureStats {
+    fn new() -> Self {
+        Self {
+            enqueued: AtomicU64::new(0),
+            enqueued_run: AtomicU64::new(0),
+            enqueued_call: AtomicU64::new(0),
+            batches: AtomicU64::new(0),
+            input_writes: AtomicU64::new(0),
+            run_writes: AtomicU64::new(0),
+            other_writes: AtomicU64::new(0),
+            other_write_errors: AtomicU64::new(0),
+            batch_ms: AtomicU64::new(0),
+            max_batch_ms: AtomicU64::new(0),
+            run_write_ms: AtomicU64::new(0),
+            max_run_write_ms: AtomicU64::new(0),
+            other_write_ms: AtomicU64::new(0),
+            max_other_write_ms: AtomicU64::new(0),
+            max_local_pending: AtomicU64::new(0),
+            last_log_at: StdMutex::new(Instant::now()),
+        }
+    }
+
+    fn observe_enqueued(&self, write: &DatabaseWrite) {
+        self.enqueued.fetch_add(1, Ordering::Relaxed);
+        if matches!(
+            write,
+            DatabaseWrite::RunStart { .. }
+                | DatabaseWrite::RunStop { .. }
+                | DatabaseWrite::RunFail { .. }
+                | DatabaseWrite::RunCancel { .. }
+        ) {
+            self.enqueued_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.enqueued_call.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn observe_local_pending(&self, pending: usize) {
+        atomic_max(&self.max_local_pending, pending as u64);
+    }
+
+    fn observe_batch(
+        &self,
+        input_writes: usize,
+        run_writes: usize,
+        other_writes: usize,
+        other_write_errors: usize,
+        elapsed_ms: u64,
+    ) {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        self.input_writes
+            .fetch_add(input_writes as u64, Ordering::Relaxed);
+        self.run_writes
+            .fetch_add(run_writes as u64, Ordering::Relaxed);
+        self.other_writes
+            .fetch_add(other_writes as u64, Ordering::Relaxed);
+        self.other_write_errors
+            .fetch_add(other_write_errors as u64, Ordering::Relaxed);
+        self.batch_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        atomic_max(&self.max_batch_ms, elapsed_ms);
+    }
+
+    fn observe_run_write_ms(&self, elapsed_ms: u64) {
+        self.run_write_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        atomic_max(&self.max_run_write_ms, elapsed_ms);
+    }
+
+    fn observe_other_write_ms(&self, elapsed_ms: u64) {
+        self.other_write_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        atomic_max(&self.max_other_write_ms, elapsed_ms);
+    }
+
+    fn maybe_log(&self) {
+        let Ok(mut last_log_at) = self.last_log_at.try_lock() else {
+            return;
+        };
+        if last_log_at.elapsed() < std::time::Duration::from_secs(5) {
+            return;
+        }
+        *last_log_at = Instant::now();
+
+        let batches = self.batches.load(Ordering::Relaxed);
+        let input_writes = self.input_writes.load(Ordering::Relaxed);
+        if batches == 0 && input_writes == 0 {
+            return;
+        }
+
+        let batch_ms = self.batch_ms.load(Ordering::Relaxed);
+        let run_writes = self.run_writes.load(Ordering::Relaxed);
+        let run_write_ms = self.run_write_ms.load(Ordering::Relaxed);
+        let other_writes = self.other_writes.load(Ordering::Relaxed);
+        let other_write_ms = self.other_write_ms.load(Ordering::Relaxed);
+
+        tracing::info!(
+            target: "hot::db_writer::pressure",
+            enqueued = self.enqueued.load(Ordering::Relaxed),
+            enqueued_run = self.enqueued_run.load(Ordering::Relaxed),
+            enqueued_call = self.enqueued_call.load(Ordering::Relaxed),
+            batches,
+            input_writes,
+            run_writes,
+            other_writes,
+            other_write_errors = self.other_write_errors.load(Ordering::Relaxed),
+            avg_batch_ms = batch_ms.checked_div(batches).unwrap_or(0),
+            max_batch_ms = self.max_batch_ms.load(Ordering::Relaxed),
+            avg_run_write_ms = run_write_ms.checked_div(run_writes).unwrap_or(0),
+            max_run_write_ms = self.max_run_write_ms.load(Ordering::Relaxed),
+            avg_other_write_ms = other_write_ms.checked_div(other_writes).unwrap_or(0),
+            max_other_write_ms = self.max_other_write_ms.load(Ordering::Relaxed),
+            max_local_pending = self.max_local_pending.load(Ordering::Relaxed),
+            "DatabaseWriter pressure"
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DatabaseWriterFlushTrigger {
+    AutoRunWrite,
+    BatchSize,
+    ChannelEmpty,
+    ExplicitFlush,
+    ChannelClosed,
+    Shutdown,
+}
+
+impl DatabaseWriterFlushTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            DatabaseWriterFlushTrigger::AutoRunWrite => "auto_run_write",
+            DatabaseWriterFlushTrigger::BatchSize => "batch_size",
+            DatabaseWriterFlushTrigger::ChannelEmpty => "channel_empty",
+            DatabaseWriterFlushTrigger::ExplicitFlush => "explicit_flush",
+            DatabaseWriterFlushTrigger::ChannelClosed => "channel_closed",
+            DatabaseWriterFlushTrigger::Shutdown => "shutdown",
+        }
+    }
+}
 
 /// All possible database write operations
 #[derive(Debug, Clone)]
@@ -83,140 +266,225 @@ pub enum DatabaseWrite {
     },
 }
 
-/// Handle to the database writer - allows sending writes without blocking
+impl DatabaseWrite {
+    fn run_id(&self) -> Uuid {
+        match self {
+            DatabaseWrite::RunStart {
+                execution_context, ..
+            } => execution_context.run_id,
+            DatabaseWrite::Call {
+                execution_context, ..
+            } => execution_context.run_id,
+            DatabaseWrite::RunStop { run_id, .. }
+            | DatabaseWrite::RunFail { run_id, .. }
+            | DatabaseWrite::RunCancel { run_id, .. } => *run_id,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct DatabaseWriter {
+struct DatabaseWriterShard {
     write_sender: mpsc::UnboundedSender<DatabaseWrite>,
     flush_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
+/// Handle to the database writer - allows sending writes without blocking
+#[derive(Clone)]
+pub struct DatabaseWriter {
+    shards: Arc<Vec<DatabaseWriterShard>>,
+    pressure_stats: Option<Arc<DatabaseWriterPressureStats>>,
+}
+
 impl DatabaseWriter {
     /// Create a new database writer with the given database pool
     pub fn new(db: Arc<RwLock<Option<DatabasePool>>>) -> Self {
-        let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<DatabaseWrite>();
-        let (flush_sender, mut flush_receiver) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
-        let (shutdown_sender, mut shutdown_receiver) =
-            mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let shard_count = Self::shard_count_for_db(&db);
+        let mut shards = Vec::with_capacity(shard_count);
+        let pressure_stats = Self::pressure_stats_from_env();
 
-        // Spawn the dedicated writer task
-        tokio::spawn(async move {
-            tracing::debug!("DatabaseWriter: Task started, entering event loop");
-            let mut pending_writes = Vec::new();
-            let mut last_backpressure_warning = std::time::Instant::now();
+        for shard_idx in 0..shard_count {
+            let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<DatabaseWrite>();
+            let (flush_sender, mut flush_receiver) =
+                mpsc::unbounded_channel::<oneshot::Sender<()>>();
+            let (shutdown_sender, mut shutdown_receiver) =
+                mpsc::unbounded_channel::<oneshot::Sender<()>>();
+            let db = Arc::clone(&db);
+            let pressure_stats_for_task = pressure_stats.clone();
 
-            loop {
-                tokio::select! {
-                    // Receive write operations
-                    write = write_receiver.recv() => {
-                        match write {
-                            Some(w) => {
-                                pending_writes.push(w);
+            // Spawn the dedicated writer shard task.
+            tokio::spawn(async move {
+                tracing::debug!(
+                    shard_idx,
+                    shard_count,
+                    "DatabaseWriter shard started, entering event loop"
+                );
+                let mut pending_writes = Vec::new();
+                let mut last_backpressure_warning = std::time::Instant::now();
 
-                                // Check for backpressure
-                                if pending_writes.len() > BACKPRESSURE_THRESHOLD
-                                    && last_backpressure_warning.elapsed() > std::time::Duration::from_secs(5)
-                                {
-                                    tracing::warn!(
-                                        "DatabaseWriter: High backpressure detected - {} pending writes",
-                                        pending_writes.len()
-                                    );
-                                    last_backpressure_warning = std::time::Instant::now();
+                loop {
+                    tokio::select! {
+                        // Receive write operations
+                        write = write_receiver.recv() => {
+                            match write {
+                                Some(w) => {
+                                    pending_writes.push(w);
+                                    if let Some(stats) = pressure_stats_for_task.as_deref() {
+                                        stats.observe_local_pending(pending_writes.len());
+                                    }
+
+                                    // Check for backpressure
+                                    if pending_writes.len() > BACKPRESSURE_THRESHOLD
+                                        && last_backpressure_warning.elapsed() > std::time::Duration::from_secs(5)
+                                    {
+                                        tracing::warn!(
+                                            shard_idx,
+                                            pending = pending_writes.len(),
+                                            "DatabaseWriter shard high backpressure detected"
+                                        );
+                                        last_backpressure_warning = std::time::Instant::now();
+                                    }
+
+                                    // Run writes stay ordered with their run's call writes by
+                                    // shard affinity. They still flush promptly, but only this
+                                    // shard is blocked; sibling runs drain on sibling shards.
+                                    let has_run_write = pending_writes.iter().any(|w| {
+                                        matches!(w, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
+                                    });
+
+                                    let should_flush = has_run_write
+                                        || pending_writes.len() >= POSTGRES_BATCH_SIZE
+                                        || write_receiver.is_empty();
+
+                                    if should_flush {
+                                        let trigger = if has_run_write {
+                                            DatabaseWriterFlushTrigger::AutoRunWrite
+                                        } else if pending_writes.len() >= POSTGRES_BATCH_SIZE {
+                                            DatabaseWriterFlushTrigger::BatchSize
+                                        } else {
+                                            DatabaseWriterFlushTrigger::ChannelEmpty
+                                        };
+                                        tracing::debug!(
+                                            shard_idx,
+                                            pending = pending_writes.len(),
+                                            has_run_write,
+                                            batch_size = pending_writes.len() >= POSTGRES_BATCH_SIZE,
+                                            channel_empty = write_receiver.is_empty(),
+                                            trigger = trigger.as_str(),
+                                            "DatabaseWriter shard flushing writes"
+                                        );
+                                        Self::process_batch(
+                                            &db,
+                                            &mut pending_writes,
+                                            shard_idx,
+                                            trigger,
+                                            pressure_stats_for_task.as_deref(),
+                                        )
+                                        .await;
+                                    }
                                 }
-
-                                // CRITICAL: Always flush immediately if we have any run writes
-                                // Run writes must be in the database before other writes that reference them
-                                let has_run_write = pending_writes.iter().any(|w| {
-                                    matches!(w, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
-                                });
-
-                                // Process batch when we have run writes, enough other writes, or channel is empty
-                                let should_flush = has_run_write
-                                    || pending_writes.len() >= POSTGRES_BATCH_SIZE
-                                    || write_receiver.is_empty();
-
-                                if should_flush {
-                                    tracing::debug!("DatabaseWriter: Flushing {} writes (has_run_write={}, batch_size={}, channel_empty={})",
-                                        pending_writes.len(), has_run_write, pending_writes.len() >= POSTGRES_BATCH_SIZE, write_receiver.is_empty());
-                                    Self::process_batch(&db, &mut pending_writes).await;
+                                None => {
+                                    tracing::debug!(
+                                        shard_idx,
+                                        pending = pending_writes.len(),
+                                        "DatabaseWriter shard write channel closed"
+                                    );
+                                    if !pending_writes.is_empty() {
+                                        Self::process_batch(
+                                            &db,
+                                            &mut pending_writes,
+                                            shard_idx,
+                                            DatabaseWriterFlushTrigger::ChannelClosed,
+                                            pressure_stats_for_task.as_deref(),
+                                        )
+                                        .await;
+                                    }
+                                    if let Some(sender) = shutdown_receiver.recv().await {
+                                        let _ = sender.send(());
+                                    }
+                                    break;
                                 }
                             }
-                            None => {
-                                // Channel closed - flush remaining writes and wait for explicit shutdown
-                                tracing::debug!(
-                                    "DatabaseWriter: Write channel closed, flushing {} pending writes",
-                                    pending_writes.len()
-                                );
+                        }
+                        // Handle flush requests - flush all pending writes and acknowledge
+                        flush_ack = flush_receiver.recv() => {
+                            if let Some(ack_sender) = flush_ack {
+                                while let Ok(write) = write_receiver.try_recv() {
+                                    pending_writes.push(write);
+                                }
+
                                 if !pending_writes.is_empty() {
-                                    Self::process_batch(&db, &mut pending_writes).await;
+                                    tracing::debug!(
+                                        shard_idx,
+                                        pending = pending_writes.len(),
+                                        "DatabaseWriter shard flushing pending writes on explicit request"
+                                    );
+                                    Self::process_batch(
+                                        &db,
+                                        &mut pending_writes,
+                                        shard_idx,
+                                        DatabaseWriterFlushTrigger::ExplicitFlush,
+                                        pressure_stats_for_task.as_deref(),
+                                    )
+                                    .await;
                                 }
-                                // Wait for explicit shutdown signal
-                                if let Some(sender) = shutdown_receiver.recv().await {
-                                    let _ = sender.send(());
+
+                                let _ = ack_sender.send(());
+                            }
+                        }
+                        // Handle shutdown
+                        completion_sender = shutdown_receiver.recv() => {
+                            if let Some(sender) = completion_sender {
+                                while let Ok(write) = write_receiver.try_recv() {
+                                    pending_writes.push(write);
                                 }
+
+                                if !pending_writes.is_empty() {
+                                    tracing::debug!(
+                                        shard_idx,
+                                        pending = pending_writes.len(),
+                                        "DatabaseWriter shard flushing pending writes before shutdown"
+                                    );
+                                    Self::process_batch(
+                                        &db,
+                                        &mut pending_writes,
+                                        shard_idx,
+                                        DatabaseWriterFlushTrigger::Shutdown,
+                                        pressure_stats_for_task.as_deref(),
+                                    )
+                                    .await;
+                                }
+
+                                let _ = sender.send(());
                                 break;
                             }
                         }
                     }
-                    // Handle flush requests - flush all pending writes and acknowledge
-                    flush_ack = flush_receiver.recv() => {
-                        if let Some(ack_sender) = flush_ack {
-                            // Drain any pending writes from the channel first
-                            while let Ok(write) = write_receiver.try_recv() {
-                                pending_writes.push(write);
-                            }
-
-                            // Flush all pending writes
-                            if !pending_writes.is_empty() {
-                                tracing::debug!(
-                                    "DatabaseWriter: Flushing {} pending writes on explicit flush request",
-                                    pending_writes.len()
-                                );
-                                Self::process_batch(&db, &mut pending_writes).await;
-                            }
-
-                            // Signal flush completion
-                            let _ = ack_sender.send(());
-                        }
-                    }
-                    // Handle shutdown
-                    completion_sender = shutdown_receiver.recv() => {
-                        if let Some(sender) = completion_sender {
-                            // Process any remaining writes
-                            while let Ok(write) = write_receiver.try_recv() {
-                                pending_writes.push(write);
-                            }
-
-                            // Final flush
-                            if !pending_writes.is_empty() {
-                                tracing::debug!(
-                                    "DatabaseWriter: Flushing {} pending writes before shutdown",
-                                    pending_writes.len()
-                                );
-                                Self::process_batch(&db, &mut pending_writes).await;
-                            }
-
-                            // Signal completion
-                            let _ = sender.send(());
-                            break;
-                        }
-                    }
                 }
-            }
 
-            tracing::debug!("DatabaseWriter: Shutdown complete");
-        });
+                tracing::debug!(shard_idx, "DatabaseWriter shard shutdown complete");
+            });
+
+            shards.push(DatabaseWriterShard {
+                write_sender,
+                flush_sender,
+                shutdown_sender,
+            });
+        }
 
         Self {
-            write_sender,
-            flush_sender,
-            shutdown_sender,
+            shards: Arc::new(shards),
+            pressure_stats,
         }
     }
 
     /// Send a write operation to the database writer (never blocks)
     pub fn write(&self, write: DatabaseWrite) {
-        if self.write_sender.send(write).is_err() {
+        if let Some(stats) = &self.pressure_stats {
+            stats.observe_enqueued(&write);
+        }
+        let shard = self.shard_for_run(write.run_id());
+        if shard.write_sender.send(write).is_err() {
             tracing::error!("DatabaseWriter: Failed to send write - writer task has shut down");
         }
     }
@@ -225,34 +493,97 @@ impl DatabaseWriter {
     /// This ensures all writes (including run:start) are committed to the database
     /// before returning. Use this before publishing events that reference the current run.
     pub fn flush(&self) -> Result<(), String> {
+        // VM code runs in a blocking context, where `Handle::block_on` is the
+        // correct sync-to-async bridge. Async worker code should call
+        // `flush_async()` instead.
+        tokio::runtime::Handle::current().block_on(self.flush_async())
+    }
+
+    pub async fn flush_async(&self) -> Result<(), String> {
+        let mut receivers = Vec::with_capacity(self.shards.len());
+        for shard in self.shards.iter() {
+            let (ack_sender, ack_receiver) = oneshot::channel();
+
+            if shard.flush_sender.send(ack_sender).is_err() {
+                return Err("Failed to send flush request - writer task has shut down".to_string());
+            }
+            receivers.push(ack_receiver);
+        }
+
+        for ack_receiver in receivers {
+            ack_receiver
+                .await
+                .map_err(|_| "Flush acknowledgment was dropped".to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn flush_run(&self, run_id: Uuid) -> Result<(), String> {
+        let shard = self.shard_for_run(run_id);
         let (ack_sender, ack_receiver) = oneshot::channel();
 
-        if self.flush_sender.send(ack_sender).is_err() {
+        if shard.flush_sender.send(ack_sender).is_err() {
             return Err("Failed to send flush request - writer task has shut down".to_string());
         }
 
-        // Block waiting for flush completion
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                ack_receiver
-                    .await
-                    .map_err(|_| "Flush acknowledgment was dropped".to_string())
-            })
-        })
+        ack_receiver
+            .await
+            .map_err(|_| "Flush acknowledgment was dropped".to_string())
     }
 
     /// Gracefully shutdown the writer, ensuring all pending writes are flushed
     pub async fn shutdown(&self) -> Result<(), String> {
-        let (completion_sender, completion_receiver) = oneshot::channel();
+        let mut receivers = Vec::with_capacity(self.shards.len());
+        for shard in self.shards.iter() {
+            let (completion_sender, completion_receiver) = oneshot::channel();
 
-        if self.shutdown_sender.send(completion_sender).is_err() {
-            return Err("Failed to send shutdown signal - writer already shut down".to_string());
+            if shard.shutdown_sender.send(completion_sender).is_err() {
+                return Err("Failed to send shutdown signal - writer already shut down".to_string());
+            }
+            receivers.push(completion_receiver);
         }
 
-        match completion_receiver.await {
-            Ok(()) => Ok(()),
-            Err(_) => Err("Shutdown completion signal was dropped".to_string()),
+        for completion_receiver in receivers {
+            completion_receiver
+                .await
+                .map_err(|_| "Shutdown completion signal was dropped".to_string())?;
         }
+        Ok(())
+    }
+
+    fn shard_count_for_db(db: &Arc<RwLock<Option<DatabasePool>>>) -> usize {
+        match db.try_read().ok().and_then(|guard| guard.as_ref().cloned()) {
+            Some(DatabasePool::Postgres(_)) => std::env::var("HOT_DB_WRITER_SHARDS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(4)
+                .max(1),
+            _ => 1,
+        }
+    }
+
+    fn pressure_stats_from_env() -> Option<Arc<DatabaseWriterPressureStats>> {
+        let enabled = std::env::var("HOT_DB_WRITER_METRICS_ENABLED")
+            .ok()
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        enabled.then(|| Arc::new(DatabaseWriterPressureStats::new()))
+    }
+
+    fn shard_for_run(&self, run_id: Uuid) -> &DatabaseWriterShard {
+        let bytes = run_id.as_bytes();
+        let hash = u64::from_be_bytes([
+            bytes[0] ^ bytes[8],
+            bytes[1] ^ bytes[9],
+            bytes[2] ^ bytes[10],
+            bytes[3] ^ bytes[11],
+            bytes[4] ^ bytes[12],
+            bytes[5] ^ bytes[13],
+            bytes[6] ^ bytes[14],
+            bytes[7] ^ bytes[15],
+        ]);
+        let idx = (hash as usize) % self.shards.len().max(1);
+        &self.shards[idx]
     }
 
     /// Process a batch of writes optimally based on database type
@@ -260,11 +591,16 @@ impl DatabaseWriter {
     async fn process_batch(
         db: &Arc<RwLock<Option<DatabasePool>>>,
         writes: &mut Vec<DatabaseWrite>,
+        shard_idx: usize,
+        trigger: DatabaseWriterFlushTrigger,
+        pressure_stats: Option<&DatabaseWriterPressureStats>,
     ) {
         if writes.is_empty() {
             return;
         }
 
+        let batch_started = std::time::Instant::now();
+        let input_writes = writes.len();
         let db_guard = db.read().await;
         let pool = match db_guard.as_ref() {
             Some(p) => p,
@@ -274,8 +610,28 @@ impl DatabaseWriter {
                     writes.len()
                 );
                 writes.clear();
+                tracing::debug!(
+                    target: "hot::db_writer::timing",
+                    shard_idx,
+                    trigger = trigger.as_str(),
+                    backend = "none",
+                    input_writes,
+                    run_writes = 0usize,
+                    other_writes = 0usize,
+                    elapsed_ms = batch_started.elapsed().as_millis() as u64,
+                    outcome = "no_db",
+                    "TIMING: process_batch"
+                );
+                if let Some(stats) = pressure_stats {
+                    stats.observe_batch(input_writes, 0, 0, 0, elapsed_ms(batch_started.elapsed()));
+                    stats.maybe_log();
+                }
                 return;
             }
+        };
+        let backend = match pool {
+            DatabasePool::Sqlite(_) => "sqlite",
+            DatabasePool::Postgres(_) => "postgres",
         };
 
         // Separate critical run writes from other writes to maintain ordering
@@ -290,19 +646,131 @@ impl DatabaseWriter {
                     | DatabaseWrite::RunCancel { .. }
             )
         });
+        let run_write_count = run_writes.len();
+        let other_write_count = other_writes.len();
 
-        // Process run writes first (flush immediately on receipt)
+        // Process run writes first. If a short successful run has both
+        // run:start and run:stop pending in this shard flush, insert it once
+        // already terminal instead of doing insert+update.
+        let run_write_started = Instant::now();
+        let mut pending_starts: AHashMap<Uuid, (ExecutionContext, chrono::DateTime<chrono::Utc>)> =
+            AHashMap::new();
         for write in run_writes {
-            if let Err(e) = Self::execute_write(pool, &write).await {
-                tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+            match write {
+                DatabaseWrite::RunStart {
+                    execution_context,
+                    event_time,
+                } => {
+                    pending_starts
+                        .insert(execution_context.run_id, (execution_context, event_time));
+                }
+                DatabaseWrite::RunStop {
+                    run_id,
+                    event_time,
+                    result,
+                } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id) {
+                        if let Err(e) = Self::write_run_start_stop(
+                            pool,
+                            &execution_context,
+                            start_time,
+                            event_time,
+                            &result,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                "DatabaseWriter: Coalesced run write failed for {}: {}",
+                                run_id,
+                                e
+                            );
+                        }
+                    } else if let Err(e) =
+                        Self::write_run_stop(pool, run_id, event_time, &result).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::RunFail {
+                    run_id,
+                    event_time,
+                    failure,
+                } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
+                        && let Err(e) =
+                            Self::write_run_start(pool, &execution_context, start_time).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+                    }
+                    if let Err(e) = Self::write_run_fail(pool, run_id, event_time, &failure).await {
+                        tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::RunCancel {
+                    run_id,
+                    event_time,
+                    cancellation,
+                } => {
+                    if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
+                        && let Err(e) =
+                            Self::write_run_start(pool, &execution_context, start_time).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+                    }
+                    if let Err(e) =
+                        Self::write_run_cancel(pool, run_id, event_time, &cancellation).await
+                    {
+                        tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
+                    }
+                }
+                DatabaseWrite::Call { .. } => unreachable!("call writes were partitioned out"),
             }
         }
 
+        for (_, (execution_context, start_time)) in pending_starts {
+            if let Err(e) = Self::write_run_start(pool, &execution_context, start_time).await {
+                tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
+            }
+        }
+        if let Some(stats) = pressure_stats
+            && run_write_count > 0
+        {
+            stats.observe_run_write_ms(elapsed_ms(run_write_started.elapsed()));
+        }
+
+        let mut other_write_errors = 0usize;
+        let mut outcome = "run_writes_only";
+
         // Then process other writes
         if other_writes.is_empty() {
+            let batch_elapsed_ms = elapsed_ms(batch_started.elapsed());
+            tracing::debug!(
+                target: "hot::db_writer::timing",
+                shard_idx,
+                trigger = trigger.as_str(),
+                backend,
+                input_writes,
+                run_writes = run_write_count,
+                other_writes = other_write_count,
+                other_write_errors,
+                elapsed_ms = batch_elapsed_ms,
+                outcome,
+                "TIMING: process_batch"
+            );
+            if let Some(stats) = pressure_stats {
+                stats.observe_batch(
+                    input_writes,
+                    run_write_count,
+                    other_write_count,
+                    other_write_errors,
+                    batch_elapsed_ms,
+                );
+                stats.maybe_log();
+            }
             return;
         }
 
+        let other_write_started = Instant::now();
         match pool {
             DatabasePool::Sqlite(_) => {
                 // SQLite: Process each write sequentially (no transaction batching)
@@ -310,8 +778,14 @@ impl DatabaseWriter {
                 for write in other_writes {
                     if let Err(e) = Self::execute_write(pool, &write).await {
                         tracing::error!("DatabaseWriter: SQLite write failed: {}", e);
+                        other_write_errors += 1;
                     }
                 }
+                outcome = if other_write_errors > 0 {
+                    "best_effort_partial_failure"
+                } else {
+                    "best_effort_ok"
+                };
             }
             DatabasePool::Postgres(pg_pool) => {
                 // PostgreSQL: Use transaction for batch atomicity and performance
@@ -434,6 +908,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                                     "DatabaseWriter: Write failed in transaction: {}",
                                     e
                                 );
+                                other_write_errors += 1;
                                 failed = true;
                                 break; // Stop on first error
                             }
@@ -443,11 +918,17 @@ ON CONFLICT (call_id) DO UPDATE SET
                             // Rollback on failure
                             if let Err(e) = tx.rollback().await {
                                 tracing::error!("DatabaseWriter: Rollback failed: {}", e);
+                                outcome = "rollback_failed";
+                            } else {
+                                outcome = "rolled_back";
                             }
                         } else {
                             // Commit on success
                             if let Err(e) = tx.commit().await {
                                 tracing::error!("DatabaseWriter: Commit failed: {}", e);
+                                outcome = "commit_failed";
+                            } else {
+                                outcome = "committed";
                             }
                         }
                     }
@@ -460,11 +941,44 @@ ON CONFLICT (call_id) DO UPDATE SET
                                     "DatabaseWriter: Write failed (no transaction): {}",
                                     e
                                 );
+                                other_write_errors += 1;
                             }
                         }
+                        outcome = if other_write_errors > 0 {
+                            "fallback_partial_failure"
+                        } else {
+                            "fallback_ok"
+                        };
                     }
                 }
             }
+        }
+        if let Some(stats) = pressure_stats {
+            stats.observe_other_write_ms(elapsed_ms(other_write_started.elapsed()));
+        }
+        let batch_elapsed_ms = elapsed_ms(batch_started.elapsed());
+        tracing::debug!(
+            target: "hot::db_writer::timing",
+            shard_idx,
+            trigger = trigger.as_str(),
+            backend,
+            input_writes,
+            run_writes = run_write_count,
+            other_writes = other_write_count,
+            other_write_errors,
+            elapsed_ms = batch_elapsed_ms,
+            outcome,
+            "TIMING: process_batch"
+        );
+        if let Some(stats) = pressure_stats {
+            stats.observe_batch(
+                input_writes,
+                run_write_count,
+                other_write_count,
+                other_write_errors,
+                batch_elapsed_ms,
+            );
+            stats.maybe_log();
         }
     }
 
@@ -588,7 +1102,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         let mut last_error: Option<sqlx::Error> = None;
 
         for attempt in 0..MAX_RETRIES {
-            let result: Result<(), sqlx::Error> = match pool {
+            let result: Result<u64, sqlx::Error> = match pool {
                 DatabasePool::Postgres(pg_pool) => {
                     sqlx::query(
                         "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type)
@@ -610,7 +1124,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(&ctx.agent_type)
                     .execute(pg_pool)
                     .await
-                    .map(|_| ())
+                    .map(|result| result.rows_affected())
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
                     sqlx::query(
@@ -632,18 +1146,28 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(&ctx.agent_type)
                     .execute(sqlite_pool)
                     .await
-                    .map(|_| ())
+                    .map(|result| result.rows_affected())
                 }
             };
 
             match result {
-                Ok(()) => {
+                Ok(rows_affected) => {
                     if attempt > 0 {
                         tracing::debug!(
                             "DatabaseWriter: run:start for run_id={} succeeded on attempt {}",
                             ctx.run_id,
                             attempt + 1
                         );
+                    }
+                    if rows_affected > 0 {
+                        crate::db::stream::Stream::record_run_started(pool, &ctx.stream_id)
+                            .await
+                            .map_err(|e| {
+                                sqlx::Error::Protocol(format!(
+                                    "Failed to update stream run metrics: {}",
+                                    e
+                                ))
+                            })?;
                     }
                     last_error = None;
                     break;
@@ -678,35 +1202,115 @@ ON CONFLICT (call_id) DO UPDATE SET
             return Err(e);
         }
 
-        // Mark event as handled
-        if let Some(evt_id) = ctx.event_id {
-            match crate::db::Event::get_event(pool, &evt_id).await {
-                Ok(evt) if !evt.handled => {
-                    if let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await {
-                        tracing::error!(
-                            "DatabaseWriter: Failed to mark event {} as handled: {}",
-                            evt_id,
-                            e
-                        );
-                    }
-                }
-                Ok(_) => {} // Already handled
-                Err(e) => {
-                    tracing::error!(
-                        "DatabaseWriter: Failed to get event {} for marking as handled: {}",
-                        evt_id,
-                        e
-                    );
-                }
-            }
+        if let Some(evt_id) = ctx.event_id
+            && let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await
+        {
+            tracing::error!(
+                "DatabaseWriter: Failed to mark event {} as handled: {}",
+                evt_id,
+                e
+            );
         }
 
-        // Update stream metrics
-        crate::db::stream::Stream::update_metrics(pool, &ctx.stream_id)
+        Ok(())
+    }
+
+    async fn write_run_start_stop(
+        pool: &DatabasePool,
+        ctx: &ExecutionContext,
+        start_time: chrono::DateTime<chrono::Utc>,
+        stop_time: chrono::DateTime<chrono::Utc>,
+        result: &Val,
+    ) -> Result<(), sqlx::Error> {
+        let result_json = val_to_jsonb_string(result);
+
+        crate::db::stream::Stream::create_or_get_stream(
+            pool,
+            ctx.stream_id,
+            ctx.env_id.unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| sqlx::Error::Protocol(format!("Failed to create stream: {}", e)))?;
+
+        let rows_affected = match pool {
+            DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)
+                     ON CONFLICT (run_id) DO UPDATE
+                     SET stop_time = EXCLUDED.stop_time,
+                         status_id = EXCLUDED.status_id,
+                         result = EXCLUDED.result
+                     WHERE hot.run.status_id = 1"
+                )
+                .bind(ctx.run_id)
+                .bind(ctx.env_id)
+                .bind(ctx.stream_id)
+                .bind(ctx.build_id)
+                .bind(ctx.run_type_id)
+                .bind(ctx.origin_run_id)
+                .bind(ctx.event_id)
+                .bind(start_time)
+                .bind(stop_time)
+                .bind(2i16)
+                .bind(&result_json)
+                .bind(ctx.user_id)
+                .bind(ctx.retry_attempt)
+                .bind(ctx.access_id)
+                .bind(&ctx.agent_type)
+                .execute(pg_pool)
+                .await?
+                .rows_affected()
+            }
+            DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(ctx.run_id)
+                .bind(ctx.env_id)
+                .bind(ctx.stream_id)
+                .bind(ctx.build_id)
+                .bind(ctx.run_type_id)
+                .bind(ctx.origin_run_id)
+                .bind(ctx.event_id)
+                .bind(start_time)
+                .bind(stop_time)
+                .bind(2i16)
+                .bind(&result_json)
+                .bind(ctx.user_id)
+                .bind(ctx.retry_attempt)
+                .bind(ctx.access_id)
+                .bind(&ctx.agent_type)
+                .execute(sqlite_pool)
+                .await?
+                .rows_affected()
+            }
+        };
+
+        if rows_affected == 0 {
+            Self::write_run_stop(pool, ctx.run_id, stop_time, result).await?;
+        } else {
+            crate::db::stream::Stream::record_run_started_and_finished(
+                pool,
+                &ctx.stream_id,
+                duration_ms_between(start_time, stop_time),
+            )
             .await
             .map_err(|e| {
-                sqlx::Error::Protocol(format!("Failed to update stream metrics: {}", e))
+                sqlx::Error::Protocol(format!("Failed to update stream run metrics: {}", e))
             })?;
+        }
+
+        if let Some(evt_id) = ctx.event_id
+            && let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await
+        {
+            tracing::error!(
+                "DatabaseWriter: Failed to mark event {} as handled: {}",
+                evt_id,
+                e
+            );
+        }
 
         Ok(())
     }
@@ -720,29 +1324,37 @@ ON CONFLICT (call_id) DO UPDATE SET
     ) -> Result<(), sqlx::Error> {
         let result_json = val_to_jsonb_string(result);
 
-        match pool {
+        let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4"
+                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4 AND status_id = $5"
                 )
                 .bind(event_time)
                 .bind(2i16) // succeeded
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(event_time)
                 .bind(2i16) // succeeded
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
+        };
+
+        if rows_affected > 0 {
+            Self::record_run_finished(pool, run_id).await?;
         }
         Ok(())
     }
@@ -761,28 +1373,44 @@ ON CONFLICT (call_id) DO UPDATE SET
         // Store the failure value directly - the status_id already indicates failure
         let result_json = val_to_jsonb_string(failure);
 
-        // Query run to get type, build_id, event_id, env_id, and current retry attempt
+        // Query run to get type, build_id, event_id, env_id, current retry attempt,
+        // and status. Late `run:fail` events from detached timed-out VMs must not
+        // overwrite a terminal run or schedule a duplicate retry.
         let run_info: Option<RunInfo> = match pool {
             DatabasePool::Postgres(pg_pool) => {
-                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt FROM hot.run WHERE run_id = $1")
+                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id FROM hot.run WHERE run_id = $1")
                     .bind(run_id)
                     .fetch_optional(pg_pool)
                     .await?
             }
             DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt FROM run WHERE run_id = ?")
+                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id FROM run WHERE run_id = ?")
                     .bind(run_id)
                     .fetch_optional(sqlite_pool)
                     .await?
             }
         };
 
-        let Some((run_type_id, build_id, event_id, env_id, retry_attempt)) = run_info else {
+        let Some((run_type_id, build_id, event_id, env_id, retry_attempt, status_id)) = run_info
+        else {
             // Run not found - just mark as failed without retry
             tracing::warn!("Run {} not found when processing failure", run_id);
-            return Self::update_run_failed(pool, run_id, event_time, &result_json, None, None)
-                .await;
+            let updated =
+                Self::update_run_failed(pool, run_id, event_time, &result_json, None, None).await?;
+            if updated {
+                Self::record_run_finished(pool, run_id).await?;
+            }
+            return Ok(());
         };
+
+        if status_id != 1 {
+            tracing::debug!(
+                run_id = %run_id,
+                status_id,
+                "Ignoring late run:fail for non-running run"
+            );
+            return Ok(());
+        }
 
         // Look up retry config from handler/schedule metadata based on run type
         let retry_config = match run_type_id {
@@ -827,8 +1455,8 @@ ON CONFLICT (call_id) DO UPDATE SET
 
             match pool {
                 DatabasePool::Postgres(pg_pool) => {
-                    sqlx::query(
-                        "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb, retry_attempt = $4, next_retry_at = $5 WHERE run_id = $6"
+                    let result = sqlx::query(
+                        "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb, retry_attempt = $4, next_retry_at = $5 WHERE run_id = $6 AND status_id = $7"
                     )
                     .bind(event_time)
                     .bind(5i16) // pending_retry
@@ -836,12 +1464,21 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(new_attempt)
                     .bind(next_retry_at)
                     .bind(run_id)
+                    .bind(1i16) // running
                     .execute(pg_pool)
                     .await?;
+                    if result.rows_affected() == 0 {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "Skipped retry scheduling for run that is no longer running"
+                        );
+                    } else {
+                        Self::record_run_finished(pool, run_id).await?;
+                    }
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
-                    sqlx::query(
-                        "UPDATE run SET stop_time = ?, status_id = ?, result = ?, retry_attempt = ?, next_retry_at = ? WHERE run_id = ?",
+                    let result = sqlx::query(
+                        "UPDATE run SET stop_time = ?, status_id = ?, result = ?, retry_attempt = ?, next_retry_at = ? WHERE run_id = ? AND status_id = ?",
                     )
                     .bind(event_time)
                     .bind(5i16) // pending_retry
@@ -849,8 +1486,17 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(new_attempt)
                     .bind(next_retry_at)
                     .bind(run_id)
+                    .bind(1i16) // running
                     .execute(sqlite_pool)
                     .await?;
+                    if result.rows_affected() == 0 {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "Skipped retry scheduling for run that is no longer running"
+                        );
+                    } else {
+                        Self::record_run_finished(pool, run_id).await?;
+                    }
                 }
             }
         } else {
@@ -864,7 +1510,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                 );
             }
 
-            Self::update_run_failed(
+            let updated = Self::update_run_failed(
                 pool,
                 run_id,
                 event_time,
@@ -873,8 +1519,25 @@ ON CONFLICT (call_id) DO UPDATE SET
                 Some(run_type_id),
             )
             .await?;
+            if !updated {
+                tracing::debug!(
+                    run_id = %run_id,
+                    "Skipped run:fail update for run that is no longer running"
+                );
+            } else {
+                Self::record_run_finished(pool, run_id).await?;
+            }
         }
+
         Ok(())
+    }
+
+    async fn record_run_finished(pool: &DatabasePool, run_id: Uuid) -> Result<(), sqlx::Error> {
+        crate::db::stream::Stream::record_run_finished(pool, &run_id)
+            .await
+            .map_err(|e| {
+                sqlx::Error::Protocol(format!("Failed to update stream run metrics: {}", e))
+            })
     }
 
     /// Helper to update run as failed and publish alert
@@ -885,30 +1548,38 @@ ON CONFLICT (call_id) DO UPDATE SET
         result_json: &str,
         env_id: Option<Uuid>,
         run_type_id: Option<i16>,
-    ) -> Result<(), sqlx::Error> {
-        match pool {
+    ) -> Result<bool, sqlx::Error> {
+        let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4"
+                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4 AND status_id = $5"
                 )
                 .bind(event_time)
                 .bind(3i16) // failed
                 .bind(result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(event_time)
                 .bind(3i16) // failed
                 .bind(result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
+        };
+
+        if rows_affected == 0 {
+            return Ok(false);
         }
 
         // Publish run:failed alert if we have env_id
@@ -919,7 +1590,7 @@ ON CONFLICT (call_id) DO UPDATE SET
             Self::publish_run_failed_alert(pool, run_id, env_id, result_json).await;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Publish a run:failed alert (async, doesn't block)
@@ -1162,30 +1833,48 @@ ON CONFLICT (call_id) DO UPDATE SET
             }
         };
 
-        match pool {
+        // Only transition a *running* run to cancelled. A late run:cancel from a
+        // detached, cooperatively-cancelled VM (e.g. one signalled by the worker
+        // run-timeout backstop, which already recorded the run as failed) must not
+        // overwrite a terminal status.
+        let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4"
+                    "UPDATE hot.run SET stop_time = $1, status_id = $2, result = $3::jsonb WHERE run_id = $4 AND status_id = $5"
                 )
                 .bind(event_time)
                 .bind(4i16) // cancelled
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(event_time)
                 .bind(4i16) // cancelled
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(1i16) // running
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
+        };
+
+        if rows_affected == 0 {
+            tracing::debug!(
+                run_id = %run_id,
+                "Ignoring late run:cancel for run that is no longer running"
+            );
+            return Ok(());
         }
+
+        Self::record_run_finished(pool, run_id).await?;
 
         // Publish run:cancelled alert if we have env_id
         // Skip for task-type runs (id=7) — the task worker handles its own task:cancelled alerts

@@ -1,0 +1,43 @@
+::noisy_load::generators ns
+
+// Schedule-driven load generators. Each tick fans out a burst of events so a
+// short `hot dev` session produces a steady, observable stream of runs/tasks.
+
+::event ::hot::event
+
+burst-count: Int 128
+
+// High-volume load: every second, emit independent events. The hard-coded
+// burst pushes event-handler supply well beyond the old ~26 runs/sec ceiling.
+pump-burst meta {schedule: "* * * * * *"}
+fn (event) {
+    sent map(range(0, burst-count), (i) {
+        ::event/send("noisy:burst", {n: i})
+    })
+    length(sent)
+}
+
+// Primary load: every second, emit a burst of `noisy:work` events.
+pump-work meta {schedule: "* * * * * *"}
+fn (event) {
+    sent map(range(0, 12), (i) {
+        ::event/send("noisy:work", {n: i, depth: 0})
+    })
+    length(sent)
+}
+
+// Medium load: every 3 seconds, queue a few code tasks.
+pump-code-tasks meta {schedule: "*/3 * * * * *"}
+fn (event) {
+    sent map(range(0, 3), (i) {
+        ::event/send("noisy:code-task", {n: i})
+    })
+    length(sent)
+}
+
+// Light load: every 15 seconds, queue a container (box) task.
+pump-box-tasks meta {schedule: "*/15 * * * * *"}
+fn (event) {
+    ::event/send("noisy:box-task", {n: 1})
+    "queued-box-task"
+}

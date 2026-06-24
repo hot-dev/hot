@@ -1646,12 +1646,13 @@ impl Run {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 // PostgreSQL: bind serde_json::Value directly for jsonb column
                 sqlx::query(
-                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE run_id = $1",
+                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE run_id = $1 AND status_id = $5",
                 )
                 .bind(run_id)
                 .bind(stop_time)
                 .bind(RunStatus::Failed.as_id())
                 .bind(&result_val)
+                .bind(RunStatus::Running.as_id())
                 .execute(pg_pool)
                 .await?;
             }
@@ -1659,12 +1660,13 @@ impl Run {
                 // SQLite: convert to string since it doesn't have native jsonb
                 let result_json = result_val.to_string();
                 sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE run_id = ? AND status_id = ?",
                 )
                 .bind(stop_time)
                 .bind(RunStatus::Failed.as_id())
                 .bind(&result_json)
                 .bind(run_id)
+                .bind(RunStatus::Running.as_id())
                 .execute(sqlite_pool)
                 .await?;
             }

@@ -1,0 +1,38 @@
+::noisy_load::tasks ns
+
+// Task workloads: a code task (runs on the task worker VM) and a container
+// task (runs via ::hot::box / Docker). Handlers spawn these from events.
+
+::task ::hot::task
+::box ::hot::box
+
+// Code task body — pure compute, runs on the task worker.
+crunch fn (args: Any): Map {
+    n or(args.n, 0)
+    total reduce(range(0, 5000), (acc, i) { add(acc, mul(i, add(n, 1))) }, 0)
+    {
+        n: n,
+        total: total,
+        kind: "code",
+    }
+}
+
+// Spawn a code task per event.
+on-code-task meta {on-event: "noisy:code-task"}
+fn (event) {
+    n or(event.data.n, 0)
+    info ::task/start(::noisy_load::tasks/crunch, {n: n})
+    info.id
+}
+
+// Spawn a short-lived container task per event. Pass a plain map (matching the
+// ffmpeg/whisper/etc. stdlib packages) — `::box/start` coerces it to BoxConf.
+on-box-task meta {on-event: "noisy:box-task"}
+fn (event) {
+    info ::box/start({
+        image: "alpine:latest",
+        cmd: ["sh", "-c", "echo hot-box-task; sleep 1"],
+        size: "nano",
+    })
+    info.id
+}

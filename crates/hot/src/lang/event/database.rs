@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
+type EventWriteAck = oneshot::Sender<Result<(), String>>;
+type EventWrite = (ExecutionContext, Event, Option<EventWriteAck>);
+
 pub struct DatabaseEventPublisher {
     db: Arc<RwLock<Option<DatabasePool>>>,
-    event_sender: mpsc::UnboundedSender<(ExecutionContext, Event, Option<oneshot::Sender<()>>)>,
+    event_sender: mpsc::UnboundedSender<EventWrite>,
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
     /// Flag to suppress errors during shutdown (when channel is expected to be closed)
     shutdown_initiated: Arc<AtomicBool>,
@@ -16,8 +19,7 @@ impl DatabaseEventPublisher {
     /// Create a new DatabaseEventPublisher with an existing database pool (preferred)
     /// This ensures the database connection is ready before events are published
     pub fn new_with_pool(db_pool: DatabasePool) -> Self {
-        let (event_sender, mut event_receiver) =
-            mpsc::unbounded_channel::<(ExecutionContext, Event, Option<oneshot::Sender<()>>)>();
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<EventWrite>();
         let (shutdown_sender, mut shutdown_receiver) =
             mpsc::unbounded_channel::<oneshot::Sender<()>>();
 
@@ -35,10 +37,9 @@ impl DatabaseEventPublisher {
                     event = event_receiver.recv() => {
                         match event {
                             Some((ctx, evt, ack_sender)) => {
-                                processor.process_event(ctx, evt).await;
-                                // Send acknowledgment if requested
+                                let result = processor.process_event(ctx, evt).await;
                                 if let Some(sender) = ack_sender {
-                                    let _ = sender.send(());
+                                    let _ = sender.send(result);
                                 }
                             }
                             None => break, // Channel closed
@@ -48,9 +49,9 @@ impl DatabaseEventPublisher {
                         if let Some(sender) = shutdown {
                             // Process any remaining events
                             while let Ok((ctx, evt, ack_sender)) = event_receiver.try_recv() {
-                                processor.process_event(ctx, evt).await;
+                                let result = processor.process_event(ctx, evt).await;
                                 if let Some(ack) = ack_sender {
-                                    let _ = ack.send(());
+                                    let _ = ack.send(result);
                                 }
                             }
                             // Signal completion
@@ -74,8 +75,7 @@ impl DatabaseEventPublisher {
     /// Create a new DatabaseEventPublisher
     /// Note: Database connection is initialized asynchronously. Use new_with_pool() for synchronous creation.
     pub fn new(db_uri: String) -> Self {
-        let (event_sender, mut event_receiver) =
-            mpsc::unbounded_channel::<(ExecutionContext, Event, Option<oneshot::Sender<()>>)>();
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<EventWrite>();
         let (shutdown_sender, mut shutdown_receiver) =
             mpsc::unbounded_channel::<oneshot::Sender<()>>();
 
@@ -117,10 +117,9 @@ impl DatabaseEventPublisher {
                     event = event_receiver.recv() => {
                         match event {
                             Some((ctx, evt, ack_sender)) => {
-                                processor.process_event(ctx, evt).await;
-                                // Send acknowledgment if requested
+                                let result = processor.process_event(ctx, evt).await;
                                 if let Some(sender) = ack_sender {
-                                    let _ = sender.send(());
+                                    let _ = sender.send(result);
                                 }
                             }
                             None => break, // Channel closed
@@ -130,9 +129,9 @@ impl DatabaseEventPublisher {
                         if let Some(sender) = shutdown {
                             // Process any remaining events
                             while let Ok((ctx, evt, ack_sender)) = event_receiver.try_recv() {
-                                processor.process_event(ctx, evt).await;
+                                let result = processor.process_event(ctx, evt).await;
                                 if let Some(ack) = ack_sender {
-                                    let _ = ack.send(());
+                                    let _ = ack.send(result);
                                 }
                             }
                             // Signal completion
@@ -183,7 +182,7 @@ struct DatabaseEventProcessor {
 
 impl DatabaseEventProcessor {
     /// Process an event with its execution context
-    async fn process_event(&mut self, ctx: ExecutionContext, event: Event) {
+    async fn process_event(&mut self, ctx: ExecutionContext, event: Event) -> Result<(), String> {
         if let Err(e) = self.insert_event(&ctx, &event).await {
             tracing::error!(
                 "DatabaseEventPublisher: Failed to insert event {} (type: {}): {}",
@@ -191,7 +190,9 @@ impl DatabaseEventProcessor {
                 event.event_type,
                 e
             );
+            return Err(e);
         }
+        Ok(())
     }
 
     /// Insert an event into the database
@@ -252,14 +253,13 @@ impl DatabaseEventPublisher {
                 "Failed to send event to database processor - channel closed".to_string()
             })?;
 
-        // Block waiting for acknowledgment (database write complete)
-        // This uses tokio's block_in_place to avoid blocking the async runtime
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                ack_receiver
-                    .await
-                    .map_err(|_| "Database write acknowledgment was dropped".to_string())
-            })
+        // VM code runs in a blocking context, where `Handle::block_on` is the
+        // correct sync-to-async bridge. Do not use `block_in_place` here:
+        // this path is called from Hot VM execution, not from async worker code.
+        tokio::runtime::Handle::current().block_on(async {
+            ack_receiver
+                .await
+                .map_err(|_| "Database write acknowledgment was dropped".to_string())?
         })
     }
 }

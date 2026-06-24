@@ -1,14 +1,35 @@
 use crate::data::serialization::Serialization;
-use crate::val::Val;
+use crate::val::{Val, val};
 use async_trait::async_trait;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 pub mod mem;
 pub mod streams;
+
+static QUEUE_METRICS_ENABLED: AtomicBool = AtomicBool::new(true);
+static QUEUE_WAIT_TARGET_P99_MS: AtomicU64 = AtomicU64::new(1_000);
+
+pub fn set_metrics_enabled(enabled: bool) {
+    QUEUE_METRICS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_wait_target_p99_ms(target_ms: u64) {
+    QUEUE_WAIT_TARGET_P99_MS.store(target_ms, Ordering::Relaxed);
+}
+
+pub(crate) fn queue_timing_enabled() -> bool {
+    QUEUE_METRICS_ENABLED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn queue_wait_target_p99_ms() -> u64 {
+    QUEUE_WAIT_TARGET_P99_MS.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub enum QueueType {
@@ -56,6 +77,33 @@ impl std::fmt::Display for QueueProcessingError {
 }
 
 impl std::error::Error for QueueProcessingError {}
+
+#[derive(Debug)]
+pub struct QueueInfrastructureError {
+    message: String,
+    backoff: Duration,
+}
+
+impl QueueInfrastructureError {
+    pub fn new(message: impl Into<String>, backoff: Duration) -> Self {
+        Self {
+            message: message.into(),
+            backoff,
+        }
+    }
+
+    pub fn backoff(&self) -> Duration {
+        self.backoff
+    }
+}
+
+impl std::fmt::Display for QueueInfrastructureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for QueueInfrastructureError {}
 
 /// Trait for stream-level cleanup operations (consumer pruning, stream trimming).
 /// Not parameterised on item type so callers can clean up heterogeneous queues uniformly.
@@ -216,6 +264,34 @@ pub enum ProcessingQueue<T> {
     Redis(Box<streams::RedisStreamQueue<T>>),
 }
 
+pub enum ProcessingQueueLease<T>
+where
+    T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
+{
+    Memory(mem::MemQueueLease<T>),
+    Redis(Box<streams::RedisQueueLease<T>>),
+}
+
+impl<T> ProcessingQueueLease<T>
+where
+    T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
+{
+    pub async fn process<F, Fut, R>(
+        self,
+        worker: F,
+    ) -> Result<Option<R>, Box<dyn Error + Send + Sync>>
+    where
+        F: FnOnce(T) -> Fut + Send,
+        Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
+        R: Send + Sync,
+    {
+        match self {
+            ProcessingQueueLease::Memory(lease) => lease.process(worker).await,
+            ProcessingQueueLease::Redis(lease) => lease.process(worker).await,
+        }
+    }
+}
+
 impl<T: Clone> Clone for ProcessingQueue<T> {
     fn clone(&self) -> Self {
         match self {
@@ -317,6 +393,29 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
+    /// Configure how many Redis stream entries this handle may claim per read.
+    /// Memory queues ignore this. Keeping this at 1 is useful when local
+    /// execution capacity is 1-per-handle and we do not want to hide backlog in
+    /// Redis PEL or the local prefetch buffer.
+    pub fn with_read_batch_size(self, size: usize) -> Self {
+        match self {
+            ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Redis(q) => {
+                ProcessingQueue::Redis(Box::new((*q).with_read_batch_size(size)))
+            }
+        }
+    }
+
+    /// Configure Redis orphan reclaim idle time. No-op for Memory queues.
+    pub fn with_orphan_idle_ms(self, orphan_idle_ms: u64) -> Self {
+        match self {
+            ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Redis(q) => {
+                ProcessingQueue::Redis(Box::new((*q).with_orphan_idle_ms(orphan_idle_ms)))
+            }
+        }
+    }
+
     /// Fast-forward the consumer group's last-delivered-id past any backlog
     /// older than the configured startup window, so a worker coming back from
     /// a long outage doesn't drain a stale 4-day flood.
@@ -332,6 +431,16 @@ impl<T> ProcessingQueue<T> {
             ProcessingQueue::Memory(_) => Ok(0),
             ProcessingQueue::Redis(q) => q
                 .fast_forward_if_stale()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+        }
+    }
+
+    pub async fn consumer_has_pending(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        match self {
+            ProcessingQueue::Memory(_) => Ok(false),
+            ProcessingQueue::Redis(q) => q
+                .consumer_has_pending()
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
         }
@@ -373,15 +482,39 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Blocking variant of `dequeue_and_work` intended for `tokio::select!` loops.
+    /// Claim one item, parking until work is available.
+    ///
+    /// The returned lease must be processed to completion. Dropping it is only
+    /// a best-effort recovery path: memory queues try to re-enqueue, while
+    /// Redis queues leave the stream entry pending for redelivery.
+    pub async fn claim_blocking(
+        &self,
+    ) -> Result<Option<ProcessingQueueLease<T>>, Box<dyn Error + Send + Sync>>
+    where
+        T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        match self {
+            ProcessingQueue::Memory(q) => Ok(Some(ProcessingQueueLease::Memory(
+                q.claim_blocking().await?,
+            ))),
+            ProcessingQueue::Redis(q) => Ok(q
+                .claim_blocking()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+                .map(|lease| ProcessingQueueLease::Redis(Box::new(lease)))),
+        }
+    }
+
+    /// Blocking variant of `dequeue_and_work`.
     ///
     /// - Memory: parks the future on the underlying channel until a message
     ///   is enqueued (or the channel closes).
     /// - Redis: delegates to `dequeue_and_work`; the internal `XREADGROUP BLOCK`
     ///   provides the natural park time.
     ///
-    /// Use this in worker loops that race multiple queues with shutdown via
-    /// `tokio::select!` to wake instantly on enqueue without polling.
+    /// Do not race this full claim+process future as a losing branch in
+    /// `tokio::select!`; use `claim_blocking` and process the winning lease
+    /// explicitly if the wait must be cancellation-safe.
     pub async fn process_blocking<F, Fut, R>(
         &self,
         worker: F,
@@ -563,6 +696,15 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
 /// When `in_project` is true (hot.hot exists), defaults to "memory" for local event publishing.
 /// When `in_project` is false, defaults to "none" (queue disabled).
 pub fn get_resolved_conf(conf: Val, in_project: bool) -> Val {
+    let default_conf = val!({
+        "event-orphan-idle-ms": 60_000i64,
+        "task-orphan-idle-ms": 120_000i64,
+        "infra-retry-backoff-ms": 1_000i64,
+        "wait-target-p99-ms": 1_000i64,
+        "metrics-enabled": true
+    });
+    let conf = default_conf.merge(&conf);
+
     // Check if user explicitly set a type (from hot.hot or CLI)
     // Empty string means not set, so use context-based default
     let user_type = conf.get_str_or_default("type", "");
@@ -694,23 +836,167 @@ impl RedisQueueAdmin {
         let mut cleared = Vec::new();
 
         for queue_name in queue_names {
-            // Keys to delete: main stream and dead letter stream
-            // Note: With Redis Streams, there's no separate "processing" key -
-            // pending messages are tracked within the stream via consumer groups
-            let keys = vec![queue_name.clone(), format!("{}:deadletter", queue_name)];
-
-            for key in keys {
-                let deleted: i64 = ::redis::cmd("DEL")
-                    .arg(&key)
+            let mut touched_stream = false;
+            for group_name in Self::stream_groups(conn, queue_name)? {
+                Self::ack_all_pending(conn, queue_name, &group_name)?;
+                let _: () = ::redis::cmd("XGROUP")
+                    .arg("SETID")
+                    .arg(queue_name)
+                    .arg(&group_name)
+                    .arg("$")
                     .query(conn)
-                    .map_err(|e| format!("Failed to delete {}: {}", key, e))?;
-                if deleted > 0 {
-                    cleared.push(key);
-                }
+                    .map_err(|e| {
+                        format!(
+                            "Failed to reset consumer group {} on {}: {}",
+                            group_name, queue_name, e
+                        )
+                    })?;
+                touched_stream = true;
+            }
+
+            let trimmed: i64 = ::redis::cmd("XTRIM")
+                .arg(queue_name)
+                .arg("MAXLEN")
+                .arg("=")
+                .arg(0)
+                .query(conn)
+                .unwrap_or(0);
+            if trimmed > 0 {
+                touched_stream = true;
+            }
+            if touched_stream {
+                cleared.push(queue_name.clone());
+            }
+
+            // Dead-letter streams have no consumer groups; deleting them is safe.
+            let deadletter_key = format!("{}:deadletter", queue_name);
+            let deleted: i64 = ::redis::cmd("DEL")
+                .arg(&deadletter_key)
+                .query(conn)
+                .map_err(|e| format!("Failed to delete {}: {}", deadletter_key, e))?;
+            if deleted > 0 {
+                cleared.push(deadletter_key);
             }
         }
 
         Ok(cleared)
+    }
+
+    fn stream_groups(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+    ) -> Result<Vec<String>, String> {
+        let result: ::redis::Value = match ::redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(queue_name)
+            .query(conn)
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("no such key") || msg.contains("ERR no such key") {
+                    return Ok(Vec::new());
+                }
+                return Err(format!(
+                    "Failed to list consumer groups for {}: {}",
+                    queue_name, e
+                ));
+            }
+        };
+
+        let records: Vec<::redis::Value> = ::redis::from_redis_value_ref(&result)
+            .map_err(|e| format!("Failed to parse consumer groups for {}: {}", queue_name, e))?;
+        let mut groups = Vec::new();
+        for record in records {
+            let fields: Vec<::redis::Value> = ::redis::from_redis_value_ref(&record)
+                .map_err(|e| format!("Failed to parse consumer group for {}: {}", queue_name, e))?;
+            let mut iter = fields.iter();
+            while let (Some(key), Some(value)) = (iter.next(), iter.next()) {
+                let key: String = ::redis::from_redis_value_ref(key).unwrap_or_default();
+                if key == "name" {
+                    let group_name: String = ::redis::from_redis_value_ref(value).map_err(|e| {
+                        format!("Failed to parse group name for {}: {}", queue_name, e)
+                    })?;
+                    groups.push(group_name);
+                    break;
+                }
+            }
+        }
+        Ok(groups)
+    }
+
+    fn ack_all_pending(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+        group_name: &str,
+    ) -> Result<usize, String> {
+        let mut total = 0usize;
+        loop {
+            let result: ::redis::Value = ::redis::cmd("XPENDING")
+                .arg(queue_name)
+                .arg(group_name)
+                .arg("-")
+                .arg("+")
+                .arg(100)
+                .query(conn)
+                .map_err(|e| {
+                    format!(
+                        "Failed to list pending messages for {} group {}: {}",
+                        queue_name, group_name, e
+                    )
+                })?;
+            let entries: Vec<::redis::Value> =
+                ::redis::from_redis_value_ref(&result).map_err(|e| {
+                    format!(
+                        "Failed to parse pending messages for {} group {}: {}",
+                        queue_name, group_name, e
+                    )
+                })?;
+            if entries.is_empty() {
+                break;
+            }
+
+            let mut ids = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let fields: Vec<::redis::Value> =
+                    ::redis::from_redis_value_ref(&entry).map_err(|e| {
+                        format!(
+                            "Failed to parse pending message for {} group {}: {}",
+                            queue_name, group_name, e
+                        )
+                    })?;
+                if let Some(id) = fields.first() {
+                    ids.push(::redis::from_redis_value_ref::<String>(id).map_err(|e| {
+                        format!(
+                            "Failed to parse pending message id for {} group {}: {}",
+                            queue_name, group_name, e
+                        )
+                    })?);
+                }
+            }
+
+            if ids.is_empty() {
+                break;
+            }
+            let mut cmd = ::redis::cmd("XACK");
+            cmd.arg(queue_name).arg(group_name);
+            for id in &ids {
+                cmd.arg(id);
+            }
+            let acked: i64 = cmd.query(conn).map_err(|e| {
+                format!(
+                    "Failed to ACK pending messages for {} group {}: {}",
+                    queue_name, group_name, e
+                )
+            })?;
+            total += acked.max(0) as usize;
+
+            if ids.len() < 100 {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     /// Get status of all standard queues

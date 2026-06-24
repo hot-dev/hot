@@ -109,12 +109,10 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         }
     };
 
-    // Publish the alert using the database function
-    // We need to run this asynchronously - use block_on since we're in sync context
-    let result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            crate::db::alert::publish_alert(&db, &org_id, &env_id, &channel, &data).await
-        })
+    // Publish the alert using the database function. Hot VM host functions run
+    // in a blocking context, so use `Handle::block_on` directly.
+    let result = tokio::runtime::Handle::current().block_on(async {
+        crate::db::alert::publish_alert(&db, &org_id, &env_id, &channel, &data).await
     });
 
     match result {

@@ -375,6 +375,7 @@ impl McpTool {
             WHERE p.env_id = ?
               AND p.active = 1
               AND b.deployed = 1
+              AND b.runtime_status = 'ready'
               AND mt.service = ?
             ORDER BY mt.name
             "#,
@@ -402,6 +403,7 @@ impl McpTool {
             WHERE p.env_id = $1
               AND p.active = true
               AND b.deployed = true
+              AND b.runtime_status = 'ready'
               AND mt.service = $2
             ORDER BY mt.name
             "#,
@@ -455,6 +457,7 @@ impl McpTool {
             WHERE p.env_id = ?
               AND p.active = 1
               AND b.deployed = 1
+              AND b.runtime_status = 'ready'
               AND mt.service = ?
               AND mt.name = ?
             LIMIT 1
@@ -486,6 +489,7 @@ impl McpTool {
             WHERE p.env_id = $1
               AND p.active = true
               AND b.deployed = true
+              AND b.runtime_status = 'ready'
               AND mt.service = $2
               AND mt.name = $3
             LIMIT 1
@@ -751,7 +755,7 @@ impl McpTool {
                        FROM mcp_tool mt
                        JOIN build b ON mt.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = true AND b.active = true AND p.env_id = $1
+                       WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.env_id = $1
                        ORDER BY mt.service, mt.name
                        LIMIT $2 OFFSET $3"#
                 )
@@ -771,7 +775,7 @@ impl McpTool {
                        FROM mcp_tool mt
                        JOIN build b ON mt.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = 1 AND b.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.env_id = ?
                        ORDER BY mt.service, mt.name
                        LIMIT ? OFFSET ?"#
                 )
@@ -824,7 +828,7 @@ impl McpTool {
                        FROM mcp_tool mt
                        JOIN build b ON mt.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE p.env_id = $1 AND p.active = true AND b.deployed = true
+                       WHERE p.env_id = $1 AND p.active = true AND b.deployed = true AND b.runtime_status = 'ready'
                        ORDER BY mt.service"#,
                 )
                 .bind(env_id)
@@ -838,7 +842,7 @@ impl McpTool {
                        FROM mcp_tool mt
                        JOIN build b ON mt.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1
+                       WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready'
                        ORDER BY mt.service"#,
                 )
                 .bind(env_id)
@@ -870,7 +874,7 @@ impl McpTool {
                        FROM mcp_tool mt
                        JOIN build b ON mt.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE p.env_id = $1 AND p.active = true AND b.deployed = true
+                       WHERE p.env_id = $1 AND p.active = true AND b.deployed = true AND b.runtime_status = 'ready'
                        GROUP BY mt.service, p.name
                        ORDER BY mt.service, p.name"#,
                 )
@@ -884,7 +888,7 @@ impl McpTool {
                        FROM mcp_tool mt
                        JOIN build b ON mt.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1
+                       WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready'
                        GROUP BY mt.service, p.name
                        ORDER BY mt.service, p.name"#,
                 )

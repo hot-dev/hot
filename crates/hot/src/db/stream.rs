@@ -160,6 +160,176 @@ impl Stream {
         }
     }
 
+    /// Update the stream counters after a successful event insert.
+    pub async fn record_event_inserted(
+        db: &crate::db::DatabasePool,
+        stream_id: &Uuid,
+    ) -> Result<(), StreamError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_events = total_events + 1,
+                        last_activity_at = now()
+                    WHERE stream_id = $1
+                    "#,
+                )
+                .bind(stream_id)
+                .execute(pg_pool)
+                .await?;
+                Ok(())
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_events = total_events + 1,
+                        last_activity_at = datetime('now')
+                    WHERE stream_id = ?
+                    "#,
+                )
+                .bind(stream_id)
+                .execute(sqlite_pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Update the stream counters after a run row is newly inserted.
+    pub async fn record_run_started(
+        db: &crate::db::DatabasePool,
+        stream_id: &Uuid,
+    ) -> Result<(), StreamError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_runs = total_runs + 1,
+                        last_activity_at = now()
+                    WHERE stream_id = $1
+                    "#,
+                )
+                .bind(stream_id)
+                .execute(pg_pool)
+                .await?;
+                Ok(())
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_runs = total_runs + 1,
+                        last_activity_at = datetime('now')
+                    WHERE stream_id = ?
+                    "#,
+                )
+                .bind(stream_id)
+                .execute(sqlite_pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Update the stream counters after a run is inserted already terminal.
+    pub async fn record_run_started_and_finished(
+        db: &crate::db::DatabasePool,
+        stream_id: &Uuid,
+        duration_ms: i64,
+    ) -> Result<(), StreamError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_runs = total_runs + 1,
+                        total_duration_ms = total_duration_ms + $2,
+                        last_activity_at = now()
+                    WHERE stream_id = $1
+                    "#,
+                )
+                .bind(stream_id)
+                .bind(duration_ms.max(0))
+                .execute(pg_pool)
+                .await?;
+                Ok(())
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_runs = total_runs + 1,
+                        total_duration_ms = total_duration_ms + ?,
+                        last_activity_at = datetime('now')
+                    WHERE stream_id = ?
+                    "#,
+                )
+                .bind(duration_ms.max(0))
+                .bind(stream_id)
+                .execute(sqlite_pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Update the stream duration after a running row transitions out of running.
+    pub async fn record_run_finished(
+        db: &crate::db::DatabasePool,
+        run_id: &Uuid,
+    ) -> Result<(), StreamError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream s SET
+                        total_duration_ms = total_duration_ms + COALESCE(
+                            EXTRACT(EPOCH FROM (r.stop_time - r.start_time)) * 1000,
+                            0
+                        )::bigint,
+                        last_activity_at = now()
+                    FROM run r
+                    WHERE r.run_id = $1
+                      AND s.stream_id = r.stream_id
+                    "#,
+                )
+                .bind(run_id)
+                .execute(pg_pool)
+                .await?;
+                Ok(())
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE stream SET
+                        total_duration_ms = total_duration_ms + (
+                            SELECT CAST(COALESCE(
+                                (julianday(stop_time) - julianday(start_time)) * 86400000,
+                                0
+                            ) AS INTEGER)
+                            FROM run
+                            WHERE run_id = ?
+                        ),
+                        last_activity_at = datetime('now')
+                    WHERE stream_id = (
+                        SELECT stream_id
+                        FROM run
+                        WHERE run_id = ?
+                    )
+                    "#,
+                )
+                .bind(run_id)
+                .bind(run_id)
+                .execute(sqlite_pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
     /// Get stream by ID
     pub async fn get_stream(
         db: &crate::db::DatabasePool,
@@ -1016,6 +1186,51 @@ mod tests {
             .await
             .unwrap();
         (db, env_id, stream_id)
+    }
+
+    #[tokio::test]
+    async fn run_metric_helpers_increment_without_recounting() {
+        let (db, env_id, stream_id) = seed_stream().await;
+        let crate::db::DatabasePool::Sqlite(sqlite_pool) = &db else {
+            unreachable!("test_db uses SQLite");
+        };
+        let run_id = Uuid::now_v7();
+        let started_at = Utc::now();
+        let stopped_at = started_at + chrono::Duration::milliseconds(42);
+
+        Stream::record_run_started(&db, &stream_id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, start_time, status_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(run_id)
+        .bind(env_id)
+        .bind(stream_id)
+        .bind(Uuid::now_v7())
+        .bind(1i16)
+        .bind(started_at)
+        .bind(1i16)
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE run SET stop_time = ?, status_id = ? WHERE run_id = ?")
+            .bind(stopped_at)
+            .bind(2i16)
+            .bind(run_id)
+            .execute(sqlite_pool)
+            .await
+            .unwrap();
+        Stream::record_run_finished(&db, &run_id).await.unwrap();
+
+        Stream::record_run_started_and_finished(&db, &stream_id, 10)
+            .await
+            .unwrap();
+
+        let stream = Stream::get_stream(&db, &stream_id).await.unwrap();
+        assert_eq!(stream.total_runs, 2);
+        assert_eq!(stream.total_events, 0);
+        assert_eq!(stream.total_duration_ms, 52);
     }
 
     #[tokio::test]

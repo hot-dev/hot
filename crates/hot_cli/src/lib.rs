@@ -473,13 +473,14 @@ async fn async_main(providers: CliProviders) {
         network_options,
         queue_options,
         worker_options,
+        scheduler_options,
         test_options,
         show_conf_options,
     ): ExtractedOptions = if let Some(ref command) = cli.command {
         extract_options_from_command(command)
     } else {
         // When no command is provided, use the global options from the CLI
-        (cli.global.clone(), None, None, None, None, None, None)
+        (cli.global.clone(), None, None, None, None, None, None, None)
     };
 
     // Always prioritize the main CLI's global options over subcommand global options
@@ -573,6 +574,7 @@ async fn async_main(providers: CliProviders) {
         network_options.as_ref(),
         queue_options.as_ref(),
         worker_options.as_ref(),
+        scheduler_options.as_ref(),
         test_options.as_ref(),
     );
 

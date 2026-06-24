@@ -13,8 +13,8 @@
 //! race that fix doesn't touch:
 //!
 //! 1. Worker pod **A** is mid-processing task `T` (slow container, takes 90s).
-//! 2. Worker pod **B**'s janitor runs `XAUTOCLAIM` after `ORPHAN_IDLE_MS`
-//!    (60s) of PEL idle on `T`'s stream entry.
+//! 2. Worker pod **B**'s janitor runs `XAUTOCLAIM` after
+//!    `queue.task-orphan-idle-ms` of PEL idle on `T`'s stream entry.
 //! 3. PEL ownership of `T`'s stream entry transfers to **B**'s consumer.
 //! 4. **B** reads its PEL via `XREADGROUP ... 0`, gets `T`, processes it.
 //! 5. Now **A** and **B** are both running the same task concurrently —
@@ -67,16 +67,16 @@ use redis::{Client, Cmd, Script};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-/// Default lease TTL. Must comfortably exceed `ORPHAN_IDLE_MS = 60_000`
-/// (defined in `crates/hot/src/queue/streams.rs`) — otherwise a sibling
-/// could legitimately reclaim PEL ownership *and* acquire a fresh lease
-/// while we're still processing. 2 min gives us > 1 min of headroom over
-/// `ORPHAN_IDLE_MS`. Refreshed by the heartbeat well before this fires.
+/// Default lease TTL. `hot_task_worker` validates that
+/// `queue.task-orphan-idle-ms` is at least this long in Redis mode; otherwise
+/// a crashed worker's queue entry could be reclaimed before its task lease has
+/// expired. Refreshed by the heartbeat well before this fires.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(120);
 
 /// How often the heartbeat refreshes the lease TTL.
@@ -182,6 +182,21 @@ impl TaskLeaseGuard {
         Self { inner: None }
     }
 
+    /// Notification fired if the heartbeat observes that this worker no
+    /// longer owns the Redis lease. No-op leases never lose ownership.
+    pub fn lost_notify(&self) -> Option<Arc<Notify>> {
+        self.inner
+            .as_ref()
+            .map(|inner| Arc::clone(&inner.lost_notify))
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.lost.load(Ordering::Acquire))
+            .unwrap_or(false)
+    }
+
     /// Test helper: did we end up with a real (Redis-backed) lease?
     #[cfg(test)]
     pub(crate) fn is_real(&self) -> bool {
@@ -194,6 +209,8 @@ struct TaskLeaseGuardInner {
     token: String,
     backend: Arc<RedisLeaseInner>,
     heartbeat: JoinHandle<()>,
+    lost: Arc<AtomicBool>,
+    lost_notify: Arc<Notify>,
 }
 
 impl Drop for TaskLeaseGuard {
@@ -376,7 +393,15 @@ impl RedisLeaseInner {
         }
         let new = match &self.client {
             RedisLeaseClient::Standalone(c) => {
-                let mc = c.get_multiplexed_async_connection().await?;
+                // Disable redis-rs 1.x's 500ms default response timeout so a
+                // lease `SET NX` / extend script isn't clipped under load and
+                // spuriously deferred (which feeds the queue's retry budget).
+                // See `hot::redis::standalone_async_config` for the rationale.
+                let mc = c
+                    .get_multiplexed_async_connection_with_config(
+                        &hot::redis::standalone_async_config(),
+                    )
+                    .await?;
                 RedisLeaseConn::Standalone(mc)
             }
             RedisLeaseClient::Cluster(c) => {
@@ -528,6 +553,8 @@ impl RedisTaskLease {
         task_id: Uuid,
         token: String,
         ttl: Duration,
+        lost: Arc<AtomicBool>,
+        lost_notify: Arc<Notify>,
     ) -> JoinHandle<()> {
         let interval = inner.heartbeat_interval;
         tokio::spawn(async move {
@@ -558,6 +585,8 @@ impl RedisTaskLease {
                             task_id = %task_id,
                             "Task lease lost during heartbeat — stopping refresh (task may now run concurrently on a sibling)"
                         );
+                        lost.store(true, Ordering::Release);
+                        lost_notify.notify_waiters();
                         return;
                     }
                     Err(e) => {
@@ -609,7 +638,16 @@ impl TaskLease for RedisTaskLease {
         }
 
         let backend = Arc::clone(&self.inner);
-        let heartbeat = Self::spawn_heartbeat(Arc::clone(&self.inner), task_id, token.clone(), ttl);
+        let lost = Arc::new(AtomicBool::new(false));
+        let lost_notify = Arc::new(Notify::new());
+        let heartbeat = Self::spawn_heartbeat(
+            Arc::clone(&self.inner),
+            task_id,
+            token.clone(),
+            ttl,
+            Arc::clone(&lost),
+            Arc::clone(&lost_notify),
+        );
 
         Ok(Some(TaskLeaseGuard {
             inner: Some(TaskLeaseGuardInner {
@@ -617,6 +655,8 @@ impl TaskLease for RedisTaskLease {
                 token,
                 backend,
                 heartbeat,
+                lost,
+                lost_notify,
             }),
         }))
     }
@@ -828,6 +868,40 @@ mod tests {
         }
         cleanup_key(&lease, &task_id).await;
         panic!("re-acquire after holder dropped never succeeded");
+    }
+
+    #[tokio::test]
+    async fn redis_lease_guard_signals_when_heartbeat_loses_ownership() {
+        let Some(client) = redis::Client::open("redis://127.0.0.1/").ok() else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        if client.get_multiplexed_async_connection().await.is_err() {
+            eprintln!("skipping: Redis not available");
+            return;
+        }
+
+        let lease = RedisTaskLease::standalone(client.clone(), "test-lost".to_string())
+            .with_heartbeat_interval(Duration::from_millis(50));
+        let task_id = Uuid::new_v4();
+        cleanup_key(&lease, &task_id).await;
+
+        let guard = lease
+            .try_acquire(task_id, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .expect("first acquire must succeed");
+        let lost_notify = guard
+            .lost_notify()
+            .expect("Redis guard must expose loss notify");
+
+        cleanup_key(&lease, &task_id).await;
+        tokio::time::timeout(Duration::from_secs(2), lost_notify.notified())
+            .await
+            .expect("heartbeat should signal loss after lease key disappears");
+
+        assert!(guard.is_lost());
+        cleanup_key(&lease, &task_id).await;
     }
 
     #[tokio::test]

@@ -453,29 +453,36 @@ pub async fn projects_deploy_build_handler(
         return redirect_to_builds();
     }
 
-    // Mark the build deployed in the database.
-    if let Err(e) = Build::deploy_build(&db, &build_id, &session.current_user_id()).await {
+    if build.is_bundle() {
+        if let Err(e) =
+            Build::request_bundle_deployment(&db, &build_id, &session.current_user_id()).await
+        {
+            tracing::warn!(
+                "UI deploy of build {} failed during request_bundle_deployment: {}",
+                build_id,
+                e
+            );
+            return redirect_to_builds();
+        }
+
+        if let Err(e) = hot::lang::event::enqueue_deployment_message(&conf, build_id).await {
+            let runtime_error = format!("Failed to enqueue deployment message: {e}");
+            let _ = Build::mark_runtime_failed(&db, &build_id, &runtime_error).await;
+            tracing::error!(
+                "UI deploy of build {} marked failed after enqueue deployment message failed: {}",
+                build_id,
+                e
+            );
+        }
+    } else if let Err(e) =
+        Build::activate_build_directly(&db, &build_id, &session.current_user_id()).await
+    {
         tracing::warn!(
-            "UI deploy of build {} failed during deploy_build: {}",
+            "UI deploy of live build {} failed during activate_build_directly: {}",
             build_id,
             e
         );
         return redirect_to_builds();
-    }
-
-    // Enqueue a DeploymentMessage so the worker re-runs the full deploy pipeline
-    // (load_build_manifest_data) — this is what reactivates schedules and
-    // refreshes event handlers / MCP tools / webhooks / agents from the bundle's
-    // manifest.hot. Without this, deploying from the UI after a project
-    // deactivate/reactivate leaves schedules stuck at active = false and
-    // worker-side handler caches stale; the CLI deploy works because the API
-    // handler does this same enqueue.
-    if let Err(e) = hot::lang::event::enqueue_deployment_message(&conf, build_id).await {
-        tracing::error!(
-            "UI deploy of build {} succeeded in DB but failed to enqueue deployment message: {}",
-            build_id,
-            e
-        );
     }
 
     redirect_to_builds()

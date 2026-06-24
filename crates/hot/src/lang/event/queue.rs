@@ -156,11 +156,8 @@ pub async fn enqueue_deployment_message(conf: &Val, build_id: Uuid) -> Result<()
 }
 
 /// On project reactivation, find the latest build for the project and put it
-/// back in the same state a fresh `hot deploy` would: mark it `deployed = true`
-/// in the database and enqueue a `DeploymentMessage` so the worker re-runs
-/// `hot::build::load_build_manifest_data` (which reactivates schedules,
-/// refreshes event handlers / MCP tools / webhooks / agents from `manifest.hot`
-/// and primes worker caches).
+/// back in the same state a fresh `hot deploy` would: bundle builds are queued
+/// for worker preparation/activation, while live builds activate directly.
 ///
 /// This is the inverse of what `Project::toggle_active(active=false)` did:
 /// it had set `deployed = false` on every build and `active = false` on every
@@ -184,11 +181,27 @@ pub async fn enqueue_redeploy_for_project_reactivation(
         return Ok(None);
     };
 
-    crate::db::Build::deploy_build(db, &build.build_id, deploying_user_id)
-        .await
-        .map_err(|e| format!("Failed to mark build deployed during reactivation: {}", e))?;
+    if build.is_bundle() {
+        crate::db::Build::request_bundle_deployment(db, &build.build_id, deploying_user_id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to request bundle redeploy during reactivation: {}",
+                    e
+                )
+            })?;
 
-    enqueue_deployment_message(conf, build.build_id).await?;
+        if let Err(e) = enqueue_deployment_message(conf, build.build_id).await {
+            let runtime_error = format!("Failed to enqueue deployment message: {e}");
+            let _ =
+                crate::db::Build::mark_runtime_failed(db, &build.build_id, &runtime_error).await;
+            return Err(e);
+        }
+    } else {
+        crate::db::Build::activate_build_directly(db, &build.build_id, deploying_user_id)
+            .await
+            .map_err(|e| format!("Failed to activate live build during reactivation: {}", e))?;
+    }
 
     Ok(Some(build.build_id))
 }
@@ -367,14 +380,15 @@ impl From<EventMessage> for Message {
             "head": head_val
         });
 
-        // Convert event message body to Val
+        // Convert event message body to Val. Keep the queued event envelope
+        // intentionally thin: the worker hydrates authoritative event_data
+        // from the database by event_id before routing/execution.
         let body = crate::val!({
             "event": {
                 "event_id": event_msg.body.event.event_id.to_string(),
                 "env_id": event_msg.body.event.env_id.to_string(),
                 "stream_id": event_msg.body.event.stream_id.to_string(),
                 "event_type": event_msg.body.event.event_type,
-                "event_data": event_msg.body.event.event_data,
                 "event_time": event_msg.body.event.event_time.to_rfc3339(),
                 "target_project_id": event_msg.body.event.target_project_id.map(|id| id.to_string()),
                 "target_project_name": event_msg.body.event.target_project_name
@@ -460,10 +474,14 @@ impl TryFrom<Message> for EventMessage {
             .map_err(|e| format!("Invalid stream_id in event: {}", e))?;
 
         let event_type = event_val.get_str("event_type");
-        let event_data = event_val
-            .get("event_data")
-            .ok_or("Missing event_data")?
-            .clone();
+        // New queue messages are thin and omit event_data; older in-flight
+        // messages may still carry it. The worker hydrates from DB before
+        // execution, so a placeholder keeps parsing backward-compatible.
+        let event_data = event_val.get("event_data").unwrap_or_else(|| {
+            crate::val!({
+                "event_id": event_id.to_string(),
+            })
+        });
 
         let event_time_str = event_val.get_str("event_time");
         let event_time = chrono::DateTime::parse_from_rfc3339(&event_time_str)
@@ -1098,11 +1116,127 @@ mod tests {
             Some(Uuid::now_v7()), // build_id
         );
 
-        // This should not panic and should publish to both
-        combined_publisher.publish(&ctx, event);
+        let publisher_for_vm = combined_publisher.clone();
+        tokio::task::spawn_blocking(move || {
+            publisher_for_vm.publish(&ctx, event);
+        })
+        .await
+        .expect("spawn_blocking publisher call should not panic");
 
         // Test shutdown
         assert!(combined_publisher.shutdown().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_queue_and_database_event_publisher_from_spawn_blocking() {
+        let queue_publisher = QueueEventPublisher::new_default();
+        let database_publisher = DatabaseEventPublisher::new("sqlite::memory:".to_string());
+        let combined_publisher =
+            QueueAndDatabaseEventPublisher::new(queue_publisher, database_publisher);
+        let publisher_for_vm = combined_publisher.clone();
+
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "test_combined_event_from_vm".to_string(),
+            crate::val::Val::from("test_data"),
+        );
+        let ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            4,
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+
+        tokio::task::spawn_blocking(move || {
+            publisher_for_vm.publish(&ctx, event);
+        })
+        .await
+        .expect("spawn_blocking publisher call should not panic");
+
+        assert!(combined_publisher.shutdown().await.is_ok());
+    }
+
+    #[test]
+    fn test_event_message_omits_event_data_from_queue_payload() {
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "test_event".to_string(),
+            crate::val!({
+                "large": "payload",
+                "nested": {
+                    "ok": true,
+                    "count": 3,
+                },
+            }),
+        );
+        let ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            4,
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+        let message: Message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: EventMessageBody {
+                event,
+                execution_context: ctx,
+            },
+        }
+        .into();
+
+        let event_val = message.body.get("event").expect("event envelope");
+        assert!(event_val.get("event_id").is_some());
+        assert!(event_val.get("event_data").is_none());
+    }
+
+    #[test]
+    fn test_thin_event_message_roundtrip_uses_placeholder_data() {
+        let event_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let run_id = Uuid::now_v7();
+        let message = Message {
+            id: event_id,
+            head: crate::val!({
+                "__type": "EventMessage",
+                "head": {},
+            }),
+            body: crate::val!({
+                "event": {
+                    "event_id": event_id.to_string(),
+                    "env_id": env_id.to_string(),
+                    "stream_id": stream_id.to_string(),
+                    "event_type": "test_event",
+                    "event_time": chrono::Utc::now().to_rfc3339(),
+                },
+                "execution_context": {
+                    "run_id": run_id.to_string(),
+                    "stream_id": stream_id.to_string(),
+                    "run_type_id": 4,
+                    "env_id": env_id.to_string(),
+                    "retry_attempt": 0,
+                },
+            }),
+        };
+
+        let parsed: EventMessage = message.try_into().unwrap();
+
+        assert_eq!(parsed.body.event.event_id, event_id);
+        assert_eq!(parsed.body.event.env_id, env_id);
+        assert_eq!(parsed.body.event.event_type, "test_event");
+        assert_eq!(
+            parsed.body.event.event_data.get_str("event_id"),
+            event_id.to_string()
+        );
     }
 
     #[test]

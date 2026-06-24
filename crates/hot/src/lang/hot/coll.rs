@@ -1686,6 +1686,7 @@ fn pmap_vec(
 
     // Capture Tokio runtime handle so spawned threads can use async functions
     let tokio_handle = tokio::runtime::Handle::try_current().ok();
+    let host_context = vm.host_context_snapshot();
 
     // Store results with chunk index to preserve order. Each entry is
     // (chunk_idx, values_produced_before_halt, optional halt).
@@ -1709,6 +1710,7 @@ fn pmap_vec(
         let results_clone = results_mutex.clone();
         let error_clone = error_mutex.clone();
         let tokio_handle_clone = tokio_handle.clone();
+        let host_context_clone = host_context.clone();
 
         let handle = thread::spawn(move || {
             // Enter Tokio runtime context so async functions work on spawned threads
@@ -1726,6 +1728,7 @@ fn pmap_vec(
                 core_variables_clone,
                 conf_clone,
             );
+            task_vm.inherit_host_context(&host_context_clone);
 
             // Restore namespace variables
             for (var_name, var_val) in namespace_vars_clone {

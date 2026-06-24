@@ -103,6 +103,27 @@ pub struct CancellationState {
     pub data: Val,
 }
 
+#[derive(Clone)]
+pub(crate) struct VmHostContext {
+    emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
+    execution_context: Option<crate::lang::event::ExecutionContext>,
+    database_pool: Option<Arc<crate::db::DatabasePool>>,
+    file_storage: Option<Arc<dyn crate::file_storage::FileStorage>>,
+    store: Option<Arc<dyn crate::store::Store>>,
+    embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
+    event_publisher: Option<Arc<dyn crate::lang::event::EventPublisher>>,
+    stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
+    task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
+    task_receiver: Option<Arc<parking_lot::Mutex<tokio::sync::mpsc::Receiver<Val>>>>,
+    external_cancel: Option<Arc<AtomicBool>>,
+    task_id: Option<uuid::Uuid>,
+    context_storage: AHashMap<String, Val>,
+    secret_keys: AHashSet<String>,
+    secret_value_hashes: AHashSet<u64>,
+    run_start_time: chrono::DateTime<chrono::Utc>,
+    run_start_instant: std::time::Instant,
+}
+
 /// Thread-safe cancellation state holder
 #[derive(Debug)]
 pub struct VmCancellationState {
@@ -643,6 +664,52 @@ impl VirtualMachine {
         self.embedding_provider.clone()
     }
 
+    /// Inherit host-provided capabilities when a parallel worker VM is forked
+    /// from the parent VM. Parallel branches execute user code in fresh VMs,
+    /// but host-backed functions like `send`, `::hot::task/*`, files, stores,
+    /// and ctx access must see the same runtime services as the parent run.
+    pub(crate) fn host_context_snapshot(&self) -> VmHostContext {
+        VmHostContext {
+            emitter: self.emitter.clone(),
+            execution_context: self.execution_context.clone(),
+            database_pool: self.database_pool.clone(),
+            file_storage: self.file_storage.clone(),
+            store: self.store.clone(),
+            embedding_provider: self.embedding_provider.clone(),
+            event_publisher: self.event_publisher.clone(),
+            stream_publisher: self.stream_publisher.clone(),
+            task_queue: self.task_queue.clone(),
+            task_receiver: self.task_receiver.clone(),
+            external_cancel: self.external_cancel.clone(),
+            task_id: self.task_id,
+            context_storage: self.context_storage.clone(),
+            secret_keys: self.secret_keys.clone(),
+            secret_value_hashes: self.secret_value_hashes.clone(),
+            run_start_time: self.run_start_time,
+            run_start_instant: self.run_start_instant,
+        }
+    }
+
+    pub(crate) fn inherit_host_context(&mut self, context: &VmHostContext) {
+        self.emitter = context.emitter.clone();
+        self.execution_context = context.execution_context.clone();
+        self.database_pool = context.database_pool.clone();
+        self.file_storage = context.file_storage.clone();
+        self.store = context.store.clone();
+        self.embedding_provider = context.embedding_provider.clone();
+        self.event_publisher = context.event_publisher.clone();
+        self.stream_publisher = context.stream_publisher.clone();
+        self.task_queue = context.task_queue.clone();
+        self.task_receiver = context.task_receiver.clone();
+        self.external_cancel = context.external_cancel.clone();
+        self.task_id = context.task_id;
+        self.context_storage = context.context_storage.clone();
+        self.secret_keys = context.secret_keys.clone();
+        self.secret_value_hashes = context.secret_value_hashes.clone();
+        self.run_start_time = context.run_start_time;
+        self.run_start_instant = context.run_start_instant;
+    }
+
     /// Get the thread count for parallel execution
     pub fn get_thread_count(&self) -> usize {
         self.thread_count
@@ -982,6 +1049,24 @@ impl VirtualMachine {
     /// When the flag is set to `true`, the VM will stop at the next check point.
     pub fn set_external_cancel(&mut self, token: Arc<AtomicBool>) {
         self.external_cancel = Some(token);
+    }
+
+    /// Returns `true` if an external cancellation has been requested (worker
+    /// shutdown or run timeout). Host functions that block (e.g. waiting on a
+    /// task or a long sleep) should poll this so they release the VM thread
+    /// promptly instead of pinning it until a natural deadline.
+    pub fn is_cancellation_requested(&self) -> bool {
+        self.external_cancel
+            .as_ref()
+            .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    /// Returns a clone of the external cancellation token, if one is set. Useful
+    /// for blocking host functions that need to poll for cancellation from inside
+    /// an async block without holding a borrow on the VM.
+    pub fn external_cancel_token(&self) -> Option<Arc<AtomicBool>> {
+        self.external_cancel.clone()
     }
 
     /// Set the task ID for checkpoint/restore support.
@@ -8237,6 +8322,7 @@ impl VirtualMachine {
         let core_variables = self.get_core_variables_arc();
         let conf = self.get_conf().clone();
         let shared_failure_state = self.get_failure_state_arc();
+        let host_context = self.host_context_snapshot();
 
         // Track computed variables from previous levels to pass to task VMs
         let mut computed_vars: IndexMap<String, Val> = IndexMap::new();
@@ -8348,135 +8434,172 @@ impl VirtualMachine {
             // (e.g. ::hot::box/run uses Handle::current().block_on())
             let tokio_handle = tokio::runtime::Handle::try_current().ok();
 
-            // Spawn thread for each thunk in this level
-            let mut join_handles = Vec::with_capacity(level_thunks.len());
+            // Bounded worker pool: cap the number of concurrent OS threads to the
+            // VM's `thread_count` rather than spawning one thread per thunk. A
+            // level with hundreds/thousands of variables would otherwise fan out
+            // to that many threads (each building a full VM), starving the host.
+            // Workers pull thunks from a shared queue and each worker also bails
+            // out of pulling new work once another branch has failed, propagating
+            // cancellation/halt without finishing the rest of the level.
+            let total_thunks = level_thunks.len();
+            let worker_count = self.thread_count.max(1).min(total_thunks);
+            let work_queue: StdArc<Mutex<std::collections::VecDeque<(String, Val)>>> =
+                StdArc::new(Mutex::new(level_thunks.into_iter().collect()));
 
-            for (var_name, thunk) in level_thunks {
-                let program_clone = program.clone();
-                let hot_ast_clone = hot_ast.clone();
-                let function_mapping_clone = function_mapping.clone();
-                let core_functions_clone = core_functions.clone();
-                let type_implementations_clone = type_implementations.clone();
-                let core_variables_clone = core_variables.clone();
-                let conf_clone = Some(conf.clone());
-                let namespace_vars_clone = current_namespace_vars.clone();
-                let namespace_clone = main_namespace.clone();
-                let computed_vars_clone = computed_vars_snapshot.clone();
+            let mut join_handles = Vec::with_capacity(worker_count);
+
+            for worker_idx in 0..worker_count {
+                let work_queue = work_queue.clone();
+                let program_tmpl = program.clone();
+                let hot_ast_tmpl = hot_ast.clone();
+                let function_mapping_tmpl = function_mapping.clone();
+                let core_functions_tmpl = core_functions.clone();
+                let type_implementations_tmpl = type_implementations.clone();
+                let core_variables_tmpl = core_variables.clone();
+                let conf_tmpl = conf.clone();
+                let host_context_tmpl = host_context.clone();
+                let namespace_vars_tmpl = current_namespace_vars.clone();
+                let namespace_tmpl = main_namespace.clone();
+                let computed_vars_tmpl = computed_vars_snapshot.clone();
                 let results_clone = results_mutex.clone();
                 let error_clone = error_mutex.clone();
-                let failure_state_clone = shared_failure_state.clone();
+                let failure_state_worker = shared_failure_state.clone();
                 let tokio_handle_clone = tokio_handle.clone();
 
-                let var_name_for_label = var_name.clone();
                 let spawn_result = thread::Builder::new()
-                    .name(format!("parallel-{}", var_name))
+                    .name(format!("parallel-w{}", worker_idx))
                     .spawn(move || {
-                    // Enter Tokio runtime context so async functions (e.g. ::hot::box/run) work
-                    let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
+                        // Enter Tokio runtime context so async functions (e.g.
+                        // ::hot::box/run) work on spawned threads.
+                        let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
 
-                    // Wrap user-code execution in run_user_code so a panic from
-                    // user-supplied Hot code becomes a structured UserCodePanic
-                    // recorded in the shared error slot, rather than killing the
-                    // worker process. Shared mutexes use parking_lot (no poisoning)
-                    // so a panic never leaves them in an unusable state.
-                    let label = format!("parallel-branch:{}", var_name_for_label);
-                    let panic_result = crate::lang::user_code::run_user_code(&label, || {
-                        if failure_state_clone
-                            .failed
-                            .load(std::sync::atomic::Ordering::SeqCst)
-                        {
-                            tracing::trace!(
-                                "VM: Early exit for '{}' due to failure in another thread",
-                                var_name
-                            );
-                            return;
-                        }
-
-                        tracing::trace!(
-                            "VM: Thread starting TRUE execution of thunk for '{}' in namespace '{}'",
-                            var_name,
-                            namespace_clone
-                        );
-
-                        // Create a new VM for this thread
-                        let mut task_vm = VirtualMachine::new(
-                            program_clone,
-                            hot_ast_clone,
-                            function_mapping_clone,
-                            core_functions_clone,
-                            type_implementations_clone,
-                            core_variables_clone,
-                            conf_clone,
-                        );
-
-                        // Share the failure state
-                        task_vm.failure_state = failure_state_clone;
-
-                        // Set the same namespace as the main VM so variable lookups work
-                        task_vm.current_namespace = namespace_clone;
-
-                        // Restore namespace variables so thunks can access outer scope
-                        for (name, val) in namespace_vars_clone {
-                            task_vm.store_variable_public(&name, val).ok();
-                        }
-
-                        // Restore computed variables from previous levels
-                        for (name, val) in computed_vars_clone {
-                            task_vm.store_variable_public(&name, val).ok();
-                        }
-
-                        // Execute the thunk
-                        match task_vm.execute_thunk(&thunk) {
-                            Ok(result) => {
-                                tracing::trace!(
-                                    "VM: Thread completed thunk for '{}' = {:?}",
-                                    var_name,
-                                    result
-                                );
-                                results_clone.lock().insert(var_name, result);
+                        loop {
+                            // Stop claiming new work once any branch has failed so
+                            // the remaining thunks at this level are not started.
+                            if failure_state_worker
+                                .failed
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                break;
                             }
-                            Err(err) => {
-                                tracing::error!(
-                                    "VM: Thread failed executing thunk for '{}': {:?}",
+
+                            let (var_name, thunk) = match work_queue.lock().pop_front() {
+                                Some(item) => item,
+                                None => break,
+                            };
+
+                            // Per-thunk clones for the fresh task VM (Arc clones are
+                            // cheap; the maps mirror the original per-thread cost).
+                            let program_clone = program_tmpl.clone();
+                            let hot_ast_clone = hot_ast_tmpl.clone();
+                            let function_mapping_clone = function_mapping_tmpl.clone();
+                            let core_functions_clone = core_functions_tmpl.clone();
+                            let type_implementations_clone = type_implementations_tmpl.clone();
+                            let core_variables_clone = core_variables_tmpl.clone();
+                            let conf_clone = Some(conf_tmpl.clone());
+                            let namespace_vars_clone = namespace_vars_tmpl.clone();
+                            let namespace_clone = namespace_tmpl.clone();
+                            let computed_vars_clone = computed_vars_tmpl.clone();
+                            let failure_state_clone = failure_state_worker.clone();
+                            let results_clone = results_clone.clone();
+                            let error_clone = error_clone.clone();
+
+                            let var_name_for_label = var_name.clone();
+                            // Wrap user-code execution in run_user_code so a panic
+                            // from user-supplied Hot code becomes a structured
+                            // UserCodePanic recorded in the shared error slot,
+                            // rather than killing the worker process. Shared mutexes
+                            // use parking_lot (no poisoning) so a panic never leaves
+                            // them in an unusable state.
+                            let label = format!("parallel-branch:{}", var_name_for_label);
+                            let panic_result = crate::lang::user_code::run_user_code(&label, || {
+                                tracing::trace!(
+                                    "VM: Worker starting TRUE execution of thunk for '{}' in namespace '{}'",
                                     var_name,
-                                    err
+                                    namespace_clone
+                                );
+
+                                // Create a new VM for this thunk
+                                let mut task_vm = VirtualMachine::new(
+                                    program_clone,
+                                    hot_ast_clone,
+                                    function_mapping_clone,
+                                    core_functions_clone,
+                                    type_implementations_clone,
+                                    core_variables_clone,
+                                    conf_clone,
+                                );
+                                task_vm.inherit_host_context(&host_context_tmpl);
+
+                                // Share the failure state
+                                task_vm.failure_state = failure_state_clone;
+
+                                // Set the same namespace as the main VM so variable lookups work
+                                task_vm.current_namespace = namespace_clone;
+
+                                // Restore namespace variables so thunks can access outer scope
+                                for (name, val) in namespace_vars_clone {
+                                    task_vm.store_variable_public(&name, val).ok();
+                                }
+
+                                // Restore computed variables from previous levels
+                                for (name, val) in computed_vars_clone {
+                                    task_vm.store_variable_public(&name, val).ok();
+                                }
+
+                                // Execute the thunk
+                                match task_vm.execute_thunk(&thunk) {
+                                    Ok(result) => {
+                                        tracing::trace!(
+                                            "VM: Worker completed thunk for '{}' = {:?}",
+                                            var_name,
+                                            result
+                                        );
+                                        results_clone.lock().insert(var_name, result);
+                                    }
+                                    Err(err) => {
+                                        tracing::error!(
+                                            "VM: Worker failed executing thunk for '{}': {:?}",
+                                            var_name,
+                                            err
+                                        );
+                                        let mut error = error_clone.lock();
+                                        if error.is_none() {
+                                            *error = Some(format!(
+                                                "Parallel execution of '{}' failed: {}",
+                                                var_name, err
+                                            ));
+                                        }
+                                    }
+                                }
+                            });
+
+                            // If user code panicked, surface the structured info as
+                            // the branch's error (without re-panicking the thread).
+                            if let Err(panic) = panic_result {
+                                tracing::error!(
+                                    "VM: Parallel branch '{}' panicked: {}",
+                                    var_name_for_label,
+                                    panic.summary()
                                 );
                                 let mut error = error_clone.lock();
                                 if error.is_none() {
                                     *error = Some(format!(
-                                        "Parallel execution of '{}' failed: {}",
-                                        var_name, err
+                                        "Parallel execution of '{}' panicked: {}",
+                                        var_name_for_label, panic
                                     ));
                                 }
                             }
                         }
                     });
 
-                    // If user code panicked, surface the structured info as the
-                    // branch's error (without re-panicking the thread).
-                    if let Err(panic) = panic_result {
-                        tracing::error!(
-                            "VM: Parallel branch '{}' panicked: {}",
-                            var_name_for_label,
-                            panic.summary()
-                        );
-                        let mut error = error_clone.lock();
-                        if error.is_none() {
-                            *error = Some(format!(
-                                "Parallel execution of '{}' panicked: {}",
-                                var_name_for_label, panic
-                            ));
-                        }
-                    }
-                });
-
                 match spawn_result {
                     Ok(handle) => join_handles.push(handle),
                     Err(e) => {
-                        tracing::error!("VM: Failed to spawn parallel thread: {}", e);
+                        tracing::error!("VM: Failed to spawn parallel worker: {}", e);
                         let mut error = error_mutex.lock();
                         if error.is_none() {
-                            *error = Some(format!("Failed to spawn parallel thread: {}", e));
+                            *error = Some(format!("Failed to spawn parallel worker: {}", e));
                         }
                     }
                 }
@@ -9564,6 +9687,12 @@ impl VirtualMachine {
 mod tests {
     use super::*;
     use crate::lang::bytecode::BytecodeProgram;
+    use crate::lang::compiler::Compiler;
+    use crate::lang::event::{Event, EventPublisher, ExecutionContext};
+    use crate::lang::parser::parse_hot;
+    use parking_lot::Mutex;
+    use std::future::Future;
+    use std::pin::Pin;
 
     #[test]
     fn test_vm_basic_execution() {
@@ -9644,5 +9773,81 @@ mod tests {
                 "scalar {scalar:?} must pass through prepare_call_arg unchanged"
             );
         }
+    }
+
+    struct RecordingEventPublisher {
+        event_types: Mutex<Vec<String>>,
+    }
+
+    impl EventPublisher for RecordingEventPublisher {
+        fn publish(&self, _ctx: &ExecutionContext, event: Event) {
+            self.event_types.lock().push(event.event_type);
+        }
+
+        fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn parallel_branches_inherit_event_publisher() {
+        let source = r#"
+            ::test ns
+
+            run fn () {
+                parallel {
+                    a call-lib(::hot::event/send, ["parallel:a", {}])
+                    b call-lib(::hot::event/send, ["parallel:b", {}])
+                }
+            }
+        "#;
+        let mut program = parse_hot(source).expect("test source should parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+
+        let bytecode = compiler.get_program_arc();
+        let recording_publisher = Arc::new(RecordingEventPublisher {
+            event_types: Mutex::new(Vec::new()),
+        });
+        let publisher: Arc<dyn EventPublisher> = recording_publisher.clone();
+        let env_id = uuid::Uuid::now_v7();
+        let stream_id = uuid::Uuid::now_v7();
+        let mut vm = VirtualMachine::new(
+            bytecode,
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        );
+        vm.set_execution_context(ExecutionContext::new(
+            uuid::Uuid::now_v7(),
+            stream_id,
+            4,
+            Some(env_id),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+            Some(uuid::Uuid::now_v7()),
+        ));
+        vm.set_event_publisher(publisher.clone());
+        vm.execute().expect("module init should run");
+
+        let result = vm
+            .call_function_bypassing_unified_lookup("::test/run", &[])
+            .expect("parallel flow should run");
+
+        assert!(
+            !result.to_string().contains("no event publisher configured"),
+            "parallel branch lost event publisher: {result}"
+        );
+        let mut event_types = recording_publisher.event_types.lock().clone();
+        event_types.sort();
+        assert_eq!(
+            event_types,
+            vec!["parallel:a".to_string(), "parallel:b".to_string()]
+        );
     }
 }

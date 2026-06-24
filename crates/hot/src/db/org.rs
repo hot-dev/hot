@@ -1,8 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
+
+use super::entity_cache::EntityCache;
+
+static ORG_CACHE: LazyLock<EntityCache<Uuid, Org>> = LazyLock::new(|| EntityCache::new(1_000));
 
 #[derive(Error, Debug)]
 pub enum OrgError {
@@ -84,26 +89,39 @@ pub struct OrgUserWithRole {
 impl Org {
     /// Get organization by ID
     pub async fn get_org(db: &crate::db::DatabasePool, org_id: &Uuid) -> Result<Org, OrgError> {
-        match db {
+        if let Some(org) = ORG_CACHE.get(org_id) {
+            return Ok(org);
+        }
+
+        let org = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let org = sqlx::query_as::<_, Org>(
+                sqlx::query_as::<_, Org>(
                     "SELECT org_id, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE org_id = $1",
                 )
                 .bind(org_id)
                 .fetch_one(pg_pool)
-                .await?;
-                Ok(org)
+                .await?
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let org = sqlx::query_as::<_, Org>(
+                sqlx::query_as::<_, Org>(
                     "SELECT org_id, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE org_id = ?"
                 )
                 .bind(org_id)
                 .fetch_one(sqlite_pool)
-                .await?;
-                Ok(org)
+                .await?
             }
-        }
+        };
+
+        ORG_CACHE.insert(*org_id, org.clone());
+        Ok(org)
+    }
+
+    pub fn invalidate_org_cache(org_id: &Uuid) {
+        ORG_CACHE.invalidate(org_id);
+    }
+
+    pub fn invalidate_all_org_cache() {
+        ORG_CACHE.clear();
     }
 
     /// Get count of organizations
@@ -167,6 +185,7 @@ impl Org {
                     .await?;
             }
         }
+        Self::invalidate_org_cache(org_id);
         Ok(())
     }
 
@@ -203,6 +222,7 @@ impl Org {
                 .await?;
             }
         }
+        Self::invalidate_org_cache(org_id);
         Ok(())
     }
 
@@ -372,6 +392,7 @@ impl Org {
                     .await?;
             }
         }
+        Self::invalidate_org_cache(org_id);
         Ok(())
     }
 
@@ -415,6 +436,7 @@ impl Org {
                 .await?;
             }
         }
+        Self::invalidate_org_cache(org_id);
         Ok(())
     }
 

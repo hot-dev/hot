@@ -58,22 +58,32 @@ pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
         }
     };
 
-    // Extract sync interval from configuration (default to 30 seconds)
-    let sync_interval_seconds = if conf.get("scheduler").is_some() {
-        Some(
-            conf.get("scheduler")
-                .unwrap()
-                .get_int("sync-interval-seconds") as u64,
-        )
-    } else {
-        None
-    };
+    let scheduler_conf = conf.get("scheduler");
+
+    // Extract scheduler intervals from configuration.
+    let sync_interval_seconds = scheduler_conf.as_ref().map(|scheduler| {
+        scheduler
+            .get_int_or_default("sync-interval-seconds", 30)
+            .max(1) as u64
+    });
+    let retry_interval_seconds = scheduler_conf.as_ref().map(|scheduler| {
+        scheduler
+            .get_int_or_default("retry-interval-seconds", 1)
+            .max(1) as u64
+    });
+    let at_interval_seconds = scheduler_conf.as_ref().map(|scheduler| {
+        scheduler
+            .get_int_or_default("at-interval-seconds", 1)
+            .max(1) as u64
+    });
+    let singleton = scheduler_conf
+        .as_ref()
+        .map(|scheduler| scheduler.get_bool_or_default("singleton", true))
+        .unwrap_or(true);
 
     // Extract backfill setting from configuration (default to false)
-    let backfill_enabled = if conf.get("scheduler").is_some() {
-        conf.get("scheduler")
-            .unwrap()
-            .get_bool_or_default("backfill", false)
+    let backfill_enabled = if let Some(scheduler) = scheduler_conf {
+        scheduler.get_bool_or_default("backfill", false)
     } else {
         false
     };
@@ -88,8 +98,11 @@ pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
             serialization,
             db,
             sync_interval_seconds,
+            retry_interval_seconds,
+            at_interval_seconds,
             backfill_enabled,
             schedule_policy,
+            singleton,
         )
         .await
         {

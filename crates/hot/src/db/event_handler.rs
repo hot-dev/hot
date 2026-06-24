@@ -17,6 +17,7 @@ static EVENT_HANDLER_CACHE: LazyLock<EventHandlerCache> =
 #[derive(Clone)]
 struct CachedEventHandlers {
     handlers: Vec<EventHandler>,
+    runtime_revision: i64,
     cached_at: std::time::Instant,
 }
 
@@ -31,6 +32,8 @@ pub enum EventHandlerError {
     NotFound,
     #[error("Serialization error: {0}")]
     SerializationError(String),
+    #[error("Runtime revision error: {0}")]
+    RuntimeRevision(String),
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -313,18 +316,33 @@ impl EventHandler {
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
         let cache_key = (*env_id, event_type.to_string());
+        let runtime_revision = crate::db::Env::get_runtime_revision(db, env_id)
+            .await
+            .map_err(|e| EventHandlerError::RuntimeRevision(e.to_string()))?;
 
         // Check cache first
-        if let Ok(cache) = EVENT_HANDLER_CACHE.lock()
+        if let Ok(mut cache) = EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get(&cache_key)
         {
+            if cached.runtime_revision == runtime_revision {
+                tracing::debug!(
+                    "✓ Event handlers cache HIT for env={}, type={} revision={} ({} handlers)",
+                    env_id,
+                    event_type,
+                    runtime_revision,
+                    cached.handlers.len()
+                );
+                return Ok(cached.handlers.clone());
+            }
+
             tracing::debug!(
-                "✓ Event handlers cache HIT for env={}, type={} ({} handlers)",
+                "Event handlers cache STALE for env={}, type={} cached_revision={} current_revision={}",
                 env_id,
                 event_type,
-                cached.handlers.len()
+                cached.runtime_revision,
+                runtime_revision
             );
-            return Ok(cached.handlers.clone());
+            cache.remove(&cache_key);
         }
 
         tracing::debug!(
@@ -366,14 +384,16 @@ impl EventHandler {
                 cache_key,
                 CachedEventHandlers {
                     handlers: handlers.clone(),
+                    runtime_revision,
                     cached_at: std::time::Instant::now(),
                 },
             );
             tracing::debug!(
-                "✓ Cached {} event handlers for env={}, type={}",
+                "✓ Cached {} event handlers for env={}, type={} revision={}",
                 handlers.len(),
                 env_id,
-                event_type
+                event_type,
+                runtime_revision
             );
         }
 
@@ -434,6 +454,7 @@ impl EventHandler {
             WHERE p.env_id = ?
               AND p.active = 1
               AND b.deployed = 1
+              AND b.runtime_status = 'ready'
               AND eh.event_type = ?
             ORDER BY eh.ns, eh.var
             "#,
@@ -463,6 +484,7 @@ impl EventHandler {
             WHERE p.env_id = $1
               AND p.active = true
               AND b.deployed = true
+              AND b.runtime_status = 'ready'
               AND eh.event_type = $2
             ORDER BY eh.ns, eh.var
             "#,
@@ -890,7 +912,7 @@ impl EventHandler {
                      FROM event_handler e
                      JOIN build b ON e.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE b.deployed = true AND b.active = true AND p.env_id = $1
+                     WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.env_id = $1
                      ORDER BY p.name, e.event_type, e.ns, e.var
                      LIMIT $2 OFFSET $3"
                 )
@@ -907,7 +929,7 @@ impl EventHandler {
                      FROM event_handler e
                      JOIN build b ON e.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE b.deployed = 1 AND b.active = 1 AND p.env_id = ?
+                     WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.env_id = ?
                      ORDER BY p.name, e.event_type, e.ns, e.var
                      LIMIT ? OFFSET ?"
                 )
@@ -932,7 +954,7 @@ impl EventHandler {
                     "SELECT COUNT(*) FROM event_handler e
                      JOIN build b ON e.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE b.deployed = true AND b.active = true AND p.env_id = $1",
+                     WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.env_id = $1",
                 )
                 .bind(env_id)
                 .fetch_one(pg_pool)
@@ -944,7 +966,7 @@ impl EventHandler {
                     "SELECT COUNT(*) FROM event_handler e
                      JOIN build b ON e.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE b.deployed = 1 AND b.active = 1 AND p.env_id = ?",
+                     WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.env_id = ?",
                 )
                 .bind(env_id)
                 .fetch_one(sqlite_pool)

@@ -164,14 +164,16 @@ impl Event {
     ) -> Result<(), EventError> {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                sqlx::query("UPDATE event SET handled = true WHERE event_id = $1")
-                    .bind(event_id)
-                    .execute(pg_pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE event SET handled = true WHERE event_id = $1 AND handled = false",
+                )
+                .bind(event_id)
+                .execute(pg_pool)
+                .await?;
                 Ok(())
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query("UPDATE event SET handled = 1 WHERE event_id = ?")
+                sqlx::query("UPDATE event SET handled = 1 WHERE event_id = ? AND handled = 0")
                     .bind(event_id)
                     .execute(sqlite_pool)
                     .await?;
@@ -756,8 +758,8 @@ impl Event {
             }
         }
 
-        // Update stream metrics after inserting the event
-        crate::db::stream::Stream::update_metrics(db, stream_id)
+        // A successful insert only changes the event count and activity time.
+        crate::db::stream::Stream::record_event_inserted(db, stream_id)
             .await
             .map_err(|e| {
                 EventError::Database(sqlx::Error::Protocol(format!(

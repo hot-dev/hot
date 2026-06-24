@@ -25,6 +25,11 @@ hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
 
 // Queue Configuration
 hot.queue.type "redis"
+hot.queue.event-orphan-idle-ms Int(::env/get("HOT_QUEUE_EVENT_ORPHAN_IDLE_MS", "60000"))
+hot.queue.task-orphan-idle-ms Int(::env/get("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "120000"))
+hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS", "1000"))
+hot.queue.wait-target-p99-ms Int(::env/get("HOT_QUEUE_WAIT_TARGET_P99_MS", "1000"))
+hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
 
 // Email Configuration
 // The worker sends queued app emails and alert emails.
@@ -41,12 +46,20 @@ hot.email.alerts.from-name ::env/get("HOT_EMAIL_ALERTS_FROM_NAME", "Hot Alerts")
 // Worker Configuration
 hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
 hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "110"))
+hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")
+hot.worker.vm-memory-mb Int(::env/get("HOT_WORKER_VM_MEMORY_MB", "256"))
+hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "512"))
+hot.worker.db-reserved-connections Int(::env/get("HOT_WORKER_DB_RESERVED_CONNECTIONS", "4"))
+hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
+hot.worker.cancel-on-timeout Bool(::env/get("HOT_WORKER_CANCEL_ON_TIMEOUT", "true"))
+hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
+hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
+hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "false"))
+hot.worker.local-write-concurrency Int(::env/get("HOT_WORKER_LOCAL_WRITE_CONCURRENCY", "1"))
+hot.worker.read-batch-size Int(::env/get("HOT_WORKER_READ_BATCH_SIZE", "8"))
 
 // Emitter Configuration (required for runs to be written to database)
 hot.emitter.type "db"
-
-// Task Worker Configuration
-hot.task.max-concurrent Int(::env/get("HOT_TASK_MAX_CONCURRENT", "4"))
 
 // Box (Container) Configuration
 hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "false"))

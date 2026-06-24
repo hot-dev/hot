@@ -366,6 +366,8 @@ impl Task {
         result: Option<&serde_json::Value>,
     ) -> Result<(), TaskError> {
         let now = Utc::now();
+        let queued_id = TaskStatus::Queued.as_id();
+        let running_id = TaskStatus::Running.as_id();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
@@ -374,12 +376,15 @@ impl Task {
                         stop_time = $2,
                         duration_ms = EXTRACT(EPOCH FROM ($2 - start_time)) * 1000,
                         result = $3
-                    WHERE task_id = $4"#,
+                    WHERE task_id = $4
+                      AND task_status_id IN ($5, $6)"#,
                 )
                 .bind(status.as_id())
                 .bind(now)
                 .bind(result)
                 .bind(task_id)
+                .bind(queued_id)
+                .bind(running_id)
                 .execute(pg_pool)
                 .await?;
             }
@@ -391,13 +396,16 @@ impl Task {
                         stop_time = ?,
                         duration_ms = CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER),
                         result = ?
-                    WHERE task_id = ?"#,
+                    WHERE task_id = ?
+                      AND task_status_id IN (?, ?)"#,
                 )
                 .bind(status.as_id())
                 .bind(now)
                 .bind(now)
                 .bind(result_str)
                 .bind(task_id)
+                .bind(queued_id)
+                .bind(running_id)
                 .execute(sqlite_pool)
                 .await?;
             }
@@ -528,6 +536,93 @@ impl Task {
                 Ok(task)
             }
         }
+    }
+
+    /// Get queued tasks old enough that a lost queue entry should be reconciled.
+    /// `next_retry_at` is reused as a throttle so the reconciler does not
+    /// enqueue duplicate copies on every tick while a stale queued task waits.
+    pub async fn get_stale_queued(
+        db: &crate::db::DatabasePool,
+        cutoff: DateTime<Utc>,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<Task>, TaskError> {
+        let queued_id = TaskStatus::Queued.as_id();
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let q = format!(
+                    "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_PG} \
+                     FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     {TASK_ORIGIN_JOIN} \
+                     WHERE t.task_status_id = $1 \
+                       AND t.created_at <= $2 \
+                       AND (t.next_retry_at IS NULL OR t.next_retry_at <= $3) \
+                     ORDER BY t.created_at ASC LIMIT $4"
+                );
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                    .bind(queued_id)
+                    .bind(cutoff)
+                    .bind(now)
+                    .bind(limit)
+                    .fetch_all(pg_pool)
+                    .await?;
+                Ok(tasks)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let q = format!(
+                    "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_SQLITE} \
+                     FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     {TASK_ORIGIN_JOIN} \
+                     WHERE t.task_status_id = ? \
+                       AND t.created_at <= ? \
+                       AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?) \
+                     ORDER BY t.created_at ASC LIMIT ?"
+                );
+                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                    .bind(queued_id)
+                    .bind(cutoff)
+                    .bind(now)
+                    .bind(limit)
+                    .fetch_all(sqlite_pool)
+                    .await?;
+                Ok(tasks)
+            }
+        }
+    }
+
+    /// Defer the next queued-task reconciliation attempt after successfully
+    /// enqueueing a replacement queue entry.
+    pub async fn defer_queued_reconcile(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        next_check_at: DateTime<Utc>,
+    ) -> Result<(), TaskError> {
+        let queued_id = TaskStatus::Queued.as_id();
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE task SET next_retry_at = $1 \
+                     WHERE task_id = $2 AND task_status_id = $3",
+                )
+                .bind(next_check_at)
+                .bind(task_id)
+                .bind(queued_id)
+                .execute(pg_pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE task SET next_retry_at = ? \
+                     WHERE task_id = ? AND task_status_id = ?",
+                )
+                .bind(next_check_at)
+                .bind(task_id)
+                .bind(queued_id)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Get tasks by stream ID, ordered by creation time.
@@ -1688,6 +1783,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_stale_queued_throttles_by_next_retry_at() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+
+        let now = Utc::now();
+        let stale_created_at = now - chrono::Duration::minutes(5);
+        if let crate::db::DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("UPDATE task SET created_at = ? WHERE task_id = ?")
+                .bind(stale_created_at)
+                .bind(task_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+
+        let stale = Task::get_stale_queued(&db, now - chrono::Duration::minutes(1), now, 10)
+            .await
+            .unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].task_id, task_id);
+
+        let next_check_at = now + chrono::Duration::minutes(1);
+        Task::defer_queued_reconcile(&db, &task_id, next_check_at)
+            .await
+            .unwrap();
+        let throttled = Task::get_stale_queued(&db, now - chrono::Duration::minutes(1), now, 10)
+            .await
+            .unwrap();
+        assert!(throttled.is_empty());
+
+        let due_again = Task::get_stale_queued(
+            &db,
+            now - chrono::Duration::minutes(1),
+            now + chrono::Duration::minutes(2),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(due_again.len(), 1);
+        assert_eq!(due_again[0].task_id, task_id);
+    }
+
+    #[tokio::test]
     async fn test_mark_running() {
         let db = crate::db::test_db().await;
         let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
@@ -1735,6 +1879,35 @@ mod tests {
         assert!(task.stop_time.is_some());
         assert!(task.duration_ms.is_some());
         assert!(task.duration_ms.unwrap() >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_complete_does_not_overwrite_terminal_status() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        Task::mark_running(&db, &task_id).await.unwrap();
+
+        let first = serde_json::json!({"output": "done"});
+        Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&first))
+            .await
+            .unwrap();
+
+        let stale = serde_json::json!({"error": "late stale write"});
+        Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&stale))
+            .await
+            .unwrap();
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.status, "completed");
+        assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
+        assert_eq!(task.result.unwrap(), first);
     }
 
     #[tokio::test]

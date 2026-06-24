@@ -34,6 +34,11 @@ hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
 
 // Queue Configuration
 hot.queue.type "redis"
+hot.queue.event-orphan-idle-ms Int(::env/get("HOT_QUEUE_EVENT_ORPHAN_IDLE_MS", "60000"))
+hot.queue.task-orphan-idle-ms Int(::env/get("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "120000"))
+hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS", "1000"))
+hot.queue.wait-target-p99-ms Int(::env/get("HOT_QUEUE_WAIT_TARGET_P99_MS", "1000"))
+hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
 
 // Daemon Mode
 hot.daemon true

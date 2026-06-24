@@ -96,6 +96,10 @@ pub struct BuildResponse {
     pub build_type: String,
     pub deployed: bool,
     pub active: bool,
+    pub runtime_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_error: Option<String>,
+    pub deployment_sequence: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +118,10 @@ pub struct BuildWithProjectResponse {
     pub build_type: String,
     pub deployed: bool,
     pub active: bool,
+    pub runtime_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_error: Option<String>,
+    pub deployment_sequence: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
