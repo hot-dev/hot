@@ -5287,6 +5287,19 @@ pub async fn run_with_components_shared_context(
                                                                             project.env_id,
                                                                             env.org_id);
 
+                                                                        let already_ready = build.deployed
+                                                                            && build.runtime_status == Build::RUNTIME_STATUS_READY;
+                                                                        if already_ready {
+                                                                            debug!("hot.dev: WORKER {} deployment for build {} is already ready and active",
+                                                                                worker_id,
+                                                                                build.build_id);
+                                                                        } else if let Err(e) = Build::mark_runtime_loading(db, &build.build_id).await {
+                                                                            warn!("hot.dev: WORKER {} failed to mark build {} loading: {}",
+                                                                                worker_id,
+                                                                                build.build_id,
+                                                                                e);
+                                                                        }
+
                                                                         // Download the build from storage
                                                                         match hot::storage::build_storage_from_config(&worker_conf_ref).await {
                                                                             Ok(storage) => {
@@ -5390,6 +5403,12 @@ pub async fn run_with_components_shared_context(
                                                                                                     Err(e) => {
                                                                                                         let err_msg = format!("Failed to extract build {}: {}", build.build_id, e);
                                                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                                worker_id,
+                                                                                                                build.build_id,
+                                                                                                                status_err);
+                                                                                                        }
                                                                                                         hot::db::alert::publish_deploy_failed_alert(
                                                                                                             db,
                                                                                                             &env.org_id,
@@ -5416,18 +5435,63 @@ pub async fn run_with_components_shared_context(
                                                                                                     worker_id,
                                                                                                     build.build_id);
 
-                                                                                                // Publish deploy:succeeded alert
-                                                                                                hot::db::alert::publish_deploy_succeeded_alert(
-                                                                                                    db,
-                                                                                                    &env.org_id,
-                                                                                                    &project.env_id,
-                                                                                                    &build.build_id,
-                                                                                                    &project.name,
-                                                                                                ).await;
+                                                                                                let deployment_user_id = build
+                                                                                                    .updated_by_user_id
+                                                                                                    .unwrap_or(build.created_by_user_id);
+                                                                                                match Build::activate_prepared_build(db, &build.build_id, &deployment_user_id).await {
+                                                                                                    Ok(true) => {
+                                                                                                        // Publish deploy:succeeded alert only after the atomic activation flip succeeds.
+                                                                                                        hot::db::alert::publish_deploy_succeeded_alert(
+                                                                                                            db,
+                                                                                                            &env.org_id,
+                                                                                                            &project.env_id,
+                                                                                                            &build.build_id,
+                                                                                                            &project.name,
+                                                                                                        ).await;
+                                                                                                    }
+                                                                                                    Ok(false) => {
+                                                                                                        debug!("hot.dev: WORKER {} skipped activation for stale or inactive build {}",
+                                                                                                            worker_id,
+                                                                                                            build.build_id);
+                                                                                                        if !already_ready
+                                                                                                            && let Err(status_err) = Build::mark_runtime_superseded(db, &build.build_id, "superseded by newer deployment or inactive environment").await
+                                                                                                        {
+                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} superseded: {}",
+                                                                                                                worker_id,
+                                                                                                                build.build_id,
+                                                                                                                status_err);
+                                                                                                        }
+                                                                                                    }
+                                                                                                    Err(e) => {
+                                                                                                        let err_msg = format!("Failed to activate build {}: {}", build.build_id, e);
+                                                                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                                worker_id,
+                                                                                                                build.build_id,
+                                                                                                                status_err);
+                                                                                                        }
+                                                                                                        hot::db::alert::publish_deploy_failed_alert(
+                                                                                                            db,
+                                                                                                            &env.org_id,
+                                                                                                            &project.env_id,
+                                                                                                            &build.build_id,
+                                                                                                            &project.name,
+                                                                                                            &err_msg,
+                                                                                                        ).await;
+                                                                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                                                    }
+                                                                                                }
                                                                                             }
                                                                                             Err(e) => {
                                                                                                 let err_msg = format!("Failed to load handlers and schedules for build {}: {}", build.build_id, e);
                                                                                                 error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                        worker_id,
+                                                                                                        build.build_id,
+                                                                                                        status_err);
+                                                                                                }
                                                                                                 hot::db::alert::publish_deploy_failed_alert(
                                                                                                     db,
                                                                                                     &env.org_id,
@@ -5443,6 +5507,12 @@ pub async fn run_with_components_shared_context(
                                                                                     Err(e) => {
                                                                                         let err_msg = format!("Failed to retrieve build {} from storage: {}", build.build_id, e);
                                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                worker_id,
+                                                                                                build.build_id,
+                                                                                                status_err);
+                                                                                        }
                                                                                         hot::db::alert::publish_deploy_failed_alert(
                                                                                             db,
                                                                                             &env.org_id,
@@ -5458,6 +5528,12 @@ pub async fn run_with_components_shared_context(
                                                                             Err(e) => {
                                                                                 let err_msg = format!("Failed to create build storage: {}", e);
                                                                                 error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                        worker_id,
+                                                                                        build.build_id,
+                                                                                        status_err);
+                                                                                }
                                                                                 hot::db::alert::publish_deploy_failed_alert(
                                                                                     db,
                                                                                     &env.org_id,

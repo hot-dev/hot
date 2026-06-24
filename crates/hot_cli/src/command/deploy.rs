@@ -59,7 +59,12 @@ async fn handle_auto_deploy(
                     deployed_build.build_type
                 );
 
-                match hot::db::Build::deploy_build(db, &build_result.build.build_id, &user_id).await
+                match hot::db::Build::activate_build_directly(
+                    db,
+                    &build_result.build.build_id,
+                    &user_id,
+                )
+                .await
                 {
                     Ok(_) => {
                         info!("Successfully deployed live build");
@@ -75,7 +80,13 @@ async fn handle_auto_deploy(
             // No deployed build - auto-deploy the live build
             info!("No build currently deployed, deploying live build...");
 
-            match hot::db::Build::deploy_build(db, &build_result.build.build_id, &user_id).await {
+            match hot::db::Build::activate_build_directly(
+                db,
+                &build_result.build.build_id,
+                &user_id,
+            )
+            .await
+            {
                 Ok(_) => {
                     info!("Successfully deployed live build");
                 }
@@ -362,6 +373,8 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
         #[allow(dead_code)]
         build_id: String,
         build_type: String,
+        deployed: bool,
+        runtime_status: String,
         hash: String,
         size: i64,
     }
@@ -384,8 +397,13 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
 
     match result {
         Ok(response) => {
-            println!("✓ Successfully deployed build {}", build_uuid);
+            if response.data.deployed {
+                println!("✓ Successfully deployed build {}", build_uuid);
+            } else {
+                println!("✓ Accepted deployment for build {}", build_uuid);
+            }
             println!("  Build type: {}", response.data.build_type);
+            println!("  Runtime status: {}", response.data.runtime_status);
             println!("  Hash: {}", response.data.hash);
             println!("  Size: {} bytes", response.data.size);
             Ok(())
@@ -450,8 +468,13 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
                 );
                 let response: ApiResponse<BuildResponse> = api.post(&deploy_path).await?;
 
-                println!("✓ Successfully deployed build {}", remote_build_id);
+                if response.data.deployed {
+                    println!("✓ Successfully deployed build {}", remote_build_id);
+                } else {
+                    println!("✓ Accepted deployment for build {}", remote_build_id);
+                }
                 println!("  Build type: {}", response.data.build_type);
+                println!("  Runtime status: {}", response.data.runtime_status);
                 println!("  Hash: {}", response.data.hash);
                 println!("  Size: {} bytes", response.data.size);
                 Ok(())
@@ -491,8 +514,13 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
                 );
                 let response: ApiResponse<BuildResponse> = api.post(&deploy_path).await?;
 
-                println!("✓ Successfully deployed build {}", remote_build_id);
+                if response.data.deployed {
+                    println!("✓ Successfully deployed build {}", remote_build_id);
+                } else {
+                    println!("✓ Accepted deployment for build {}", remote_build_id);
+                }
                 println!("  Build type: {}", response.data.build_type);
+                println!("  Runtime status: {}", response.data.runtime_status);
                 println!("  Hash: {}", response.data.hash);
                 println!("  Size: {} bytes", response.data.size);
                 Ok(())
@@ -529,14 +557,21 @@ async fn deploy_via_api_only(build_uuid: Uuid, conf: &Val) -> Result<(), String>
         #[allow(dead_code)]
         build_id: String,
         build_type: String,
+        deployed: bool,
+        runtime_status: String,
         hash: String,
         size: i64,
     }
 
     let response: ApiResponse<BuildResponse> = api.post(&path).await?;
 
-    println!("✓ Successfully deployed build {}", build_uuid);
+    if response.data.deployed {
+        println!("✓ Successfully deployed build {}", build_uuid);
+    } else {
+        println!("✓ Accepted deployment for build {}", build_uuid);
+    }
     println!("  Build type: {}", response.data.build_type);
+    println!("  Runtime status: {}", response.data.runtime_status);
     println!("  Hash: {}", response.data.hash);
     println!("  Size: {} bytes", response.data.size);
     Ok(())
@@ -927,34 +962,37 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
         .await?;
     }
 
-    // Deploy the build
-    if let Err(e) = hot::db::Build::deploy_build(&db, &build_uuid, &deploying_user_id).await {
-        return Err(format!("Failed to deploy build: {}", e));
-    }
-
-    println!("✓ Successfully deployed build: {}", build_uuid);
-    println!("  Build type: {}", build.build_type);
-    println!("  Build hash: {}", build.hash);
-    println!("  Build size: {} bytes", build.size);
     if build.is_bundle() {
-        println!("  Bundle build is now active - events will be processed from this build");
+        hot::db::Build::request_bundle_deployment(&db, &build_uuid, &deploying_user_id)
+            .await
+            .map_err(|e| format!("Failed to request bundle deployment: {}", e))?;
+
+        println!("✓ Accepted bundle deployment: {}", build_uuid);
+        println!("  Build type: {}", build.build_type);
+        println!("  Build hash: {}", build.hash);
+        println!("  Build size: {} bytes", build.size);
+        println!("  Bundle will become active after worker preparation completes");
     } else {
+        hot::db::Build::activate_build_directly(&db, &build_uuid, &deploying_user_id)
+            .await
+            .map_err(|e| format!("Failed to deploy live build: {}", e))?;
+
+        println!("✓ Successfully deployed build: {}", build_uuid);
+        println!("  Build type: {}", build.build_type);
+        println!("  Build hash: {}", build.hash);
+        println!("  Build size: {} bytes", build.size);
         println!("  Live build is now active - events will be processed from current source");
     }
 
-    // Enqueue a DeploymentMessage so the worker re-runs the full deploy
-    // pipeline (load_build_manifest_data) and reactivates schedules / refreshes
-    // event handlers / MCP tools / webhooks / agents from the bundle's
-    // manifest.hot. Without this, flipping `build.deployed = true` is not
-    // enough — the API deploy path enqueues this same message, and the local
-    // path needs to do the same to stay consistent (this is what made
-    // deactivate/reactivate followed by `hot deploy --local` leave schedules
-    // stuck deactivated).
-    if let Err(e) = hot::lang::event::enqueue_deployment_message(conf, build_uuid).await {
-        eprintln!(
-            "  Warning: build marked deployed in DB but failed to enqueue deployment message: {}",
-            e
-        );
+    if build.is_bundle() {
+        // Enqueue a DeploymentMessage so the worker prepares the bundle, loads
+        // manifest runtime data, and performs final activation atomically.
+        if let Err(e) = hot::lang::event::enqueue_deployment_message(conf, build_uuid).await {
+            eprintln!(
+                "  Warning: bundle deployment requested but failed to enqueue worker message: {}",
+                e
+            );
+        }
     }
 
     Ok(())

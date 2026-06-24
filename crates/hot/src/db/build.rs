@@ -536,8 +536,205 @@ impl Build {
         }
     }
 
-    /// Deploy a build (sets it to deployed and all other builds in the same bundle to not deployed)
-    pub async fn deploy_build(
+    /// Request deployment for a bundle build without making it runtime-visible yet.
+    ///
+    /// This increments the project-scoped deployment sequence, attaches that sequence
+    /// to the candidate build, and leaves the currently deployed build active until a
+    /// worker successfully prepares and activates the candidate.
+    pub async fn request_bundle_deployment(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        requested_by_user_id: &Uuid,
+    ) -> Result<(), BuildError> {
+        let build = Self::get_build(db, build_id).await?;
+        if !build.is_bundle() {
+            return Self::activate_build_directly(db, build_id, requested_by_user_id).await;
+        }
+
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                let deployment_sequence: i64 = sqlx::query_scalar(
+                    "UPDATE project SET deployment_sequence = deployment_sequence + 1, updated_at = NOW(), updated_by_user_id = $2 WHERE project_id = $1 RETURNING deployment_sequence"
+                )
+                .bind(build.project_id)
+                .bind(requested_by_user_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE build SET deployed = false, runtime_status = 'pending', runtime_ready_at = NULL, runtime_error = NULL, deployment_sequence = $2, updated_at = NOW(), updated_by_user_id = $3 WHERE build_id = $1"
+                )
+                .bind(build_id)
+                .bind(deployment_sequence)
+                .bind(requested_by_user_id)
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
+                sqlx::query(
+                    "UPDATE project SET deployment_sequence = deployment_sequence + 1, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ?"
+                )
+                .bind(requested_by_user_id)
+                .bind(build.project_id)
+                .execute(&mut *tx)
+                .await?;
+
+                let deployment_sequence: i64 = sqlx::query_scalar(
+                    "SELECT deployment_sequence FROM project WHERE project_id = ?",
+                )
+                .bind(build.project_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE build SET deployed = 0, runtime_status = 'pending', runtime_ready_at = NULL, runtime_error = NULL, deployment_sequence = ?, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE build_id = ?"
+                )
+                .bind(deployment_sequence)
+                .bind(requested_by_user_id)
+                .bind(build_id)
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+            }
+        }
+
+        Self::invalidate_build_cache(build_id);
+        Ok(())
+    }
+
+    /// Activate a prepared bundle candidate if it is still the latest requested
+    /// deployment for its project.
+    pub async fn activate_prepared_build(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        activated_by_user_id: &Uuid,
+    ) -> Result<bool, BuildError> {
+        let build = Self::get_build(db, build_id).await?;
+        if build.deployed && build.runtime_status == Self::RUNTIME_STATUS_READY {
+            return Ok(false);
+        }
+
+        let env_id = Self::get_env_id_for_build(db, build_id).await?;
+
+        let activated = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+
+                let current_sequence: i64 = sqlx::query_scalar(
+                    "SELECT deployment_sequence FROM project WHERE project_id = $1 AND active = true"
+                )
+                .bind(build.project_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => BuildError::NotFound,
+                    _ => BuildError::Database(e),
+                })?;
+
+                let env_active: bool =
+                    sqlx::query_scalar("SELECT active FROM env WHERE env_id = $1")
+                        .bind(env_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if !env_active || build.deployment_sequence != current_sequence {
+                    tx.commit().await?;
+                    return Ok(false);
+                }
+
+                sqlx::query(
+                    "UPDATE build SET deployed = false, updated_at = NOW(), updated_by_user_id = $2 WHERE project_id = $1"
+                )
+                .bind(build.project_id)
+                .bind(activated_by_user_id)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE build SET deployed = true, runtime_status = 'ready', runtime_ready_at = NOW(), runtime_error = NULL, updated_at = NOW(), updated_by_user_id = $2 WHERE build_id = $1"
+                )
+                .bind(build_id)
+                .bind(activated_by_user_id)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE env SET runtime_revision = runtime_revision + 1, updated_at = NOW(), updated_by_user_id = $2 WHERE env_id = $1"
+                )
+                .bind(env_id)
+                .bind(activated_by_user_id)
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+                true
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
+
+                let current_sequence: i64 = sqlx::query_scalar(
+                    "SELECT deployment_sequence FROM project WHERE project_id = ? AND active = 1",
+                )
+                .bind(build.project_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => BuildError::NotFound,
+                    _ => BuildError::Database(e),
+                })?;
+
+                let env_active: bool =
+                    sqlx::query_scalar("SELECT active FROM env WHERE env_id = ?")
+                        .bind(env_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if !env_active || build.deployment_sequence != current_sequence {
+                    tx.commit().await?;
+                    return Ok(false);
+                }
+
+                sqlx::query(
+                    "UPDATE build SET deployed = 0, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ?"
+                )
+                .bind(activated_by_user_id)
+                .bind(build.project_id)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE build SET deployed = 1, runtime_status = 'ready', runtime_ready_at = CURRENT_TIMESTAMP, runtime_error = NULL, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE build_id = ?"
+                )
+                .bind(activated_by_user_id)
+                .bind(build_id)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE env SET runtime_revision = runtime_revision + 1, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE env_id = ?"
+                )
+                .bind(activated_by_user_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+                true
+            }
+        };
+
+        crate::db::event_handler::EventHandler::invalidate_event_handler_cache_for_env(&env_id);
+        Self::invalidate_all_build_cache();
+        Ok(activated)
+    }
+
+    /// Directly activate a build. This is appropriate for live/local builds that
+    /// are already prepared in-process. Bundle deploys should use
+    /// `request_bundle_deployment` followed by worker-side `activate_prepared_build`.
+    pub async fn activate_build_directly(
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
         deployed_by_user_id: &Uuid,
@@ -647,6 +844,17 @@ impl Build {
         Self::invalidate_all_build_cache();
 
         Ok(())
+    }
+
+    /// Backward-compatible direct activation wrapper. Prefer
+    /// `request_bundle_deployment` for bundle deploy paths and
+    /// `activate_build_directly` for live deploy paths.
+    pub async fn deploy_build(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        deployed_by_user_id: &Uuid,
+    ) -> Result<(), BuildError> {
+        Self::activate_build_directly(db, build_id, deployed_by_user_id).await
     }
 
     pub async fn mark_runtime_loading(
@@ -1018,6 +1226,95 @@ mod tests {
         assert_eq!(env_revision, 1);
         assert!(build.runtime_ready_at.is_some());
         assert!(build.runtime_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bundle_deploy_request_keeps_existing_build_active_until_activation() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (env_id, project_id) = insert_test_project(&db, &user_id).await;
+        let old_build_id = insert_test_build(&db, &project_id, &user_id).await;
+        let new_build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        Build::activate_build_directly(&db, &old_build_id, &user_id)
+            .await
+            .unwrap();
+        Build::request_bundle_deployment(&db, &new_build_id, &user_id)
+            .await
+            .unwrap();
+
+        let old_build = Build::get_build(&db, &old_build_id).await.unwrap();
+        let new_build = Build::get_build(&db, &new_build_id).await.unwrap();
+        let project_sequence = crate::db::Project::get_deployment_sequence(&db, &project_id)
+            .await
+            .unwrap();
+        let env_revision = crate::db::Env::get_runtime_revision(&db, &env_id)
+            .await
+            .unwrap();
+
+        assert!(old_build.deployed);
+        assert!(!new_build.deployed);
+        assert_eq!(new_build.runtime_status, Build::RUNTIME_STATUS_PENDING);
+        assert_eq!(new_build.deployment_sequence, project_sequence);
+        assert_eq!(project_sequence, 2);
+        assert_eq!(env_revision, 1);
+
+        let activated = Build::activate_prepared_build(&db, &new_build_id, &user_id)
+            .await
+            .unwrap();
+        let old_build = Build::get_build(&db, &old_build_id).await.unwrap();
+        let new_build = Build::get_build(&db, &new_build_id).await.unwrap();
+        let env_revision = crate::db::Env::get_runtime_revision(&db, &env_id)
+            .await
+            .unwrap();
+
+        assert!(activated);
+        assert!(!old_build.deployed);
+        assert!(new_build.deployed);
+        assert_eq!(new_build.runtime_status, Build::RUNTIME_STATUS_READY);
+        assert_eq!(env_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn test_stale_bundle_candidate_cannot_activate_over_newer_request() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let active_build_id = insert_test_build(&db, &project_id, &user_id).await;
+        let stale_build_id = insert_test_build(&db, &project_id, &user_id).await;
+        let newest_build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        Build::activate_build_directly(&db, &active_build_id, &user_id)
+            .await
+            .unwrap();
+        Build::request_bundle_deployment(&db, &stale_build_id, &user_id)
+            .await
+            .unwrap();
+        Build::request_bundle_deployment(&db, &newest_build_id, &user_id)
+            .await
+            .unwrap();
+
+        let activated_stale = Build::activate_prepared_build(&db, &stale_build_id, &user_id)
+            .await
+            .unwrap();
+        assert!(!activated_stale);
+        assert!(
+            Build::get_build(&db, &active_build_id)
+                .await
+                .unwrap()
+                .deployed
+        );
+
+        let activated_newest = Build::activate_prepared_build(&db, &newest_build_id, &user_id)
+            .await
+            .unwrap();
+        assert!(activated_newest);
+        assert!(
+            Build::get_build(&db, &newest_build_id)
+                .await
+                .unwrap()
+                .deployed
+        );
     }
 
     #[tokio::test]

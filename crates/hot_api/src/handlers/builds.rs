@@ -61,6 +61,9 @@ pub async fn list_builds(
             build_type: b.build_type,
             deployed: b.deployed,
             active: b.active,
+            runtime_status: b.runtime_status,
+            runtime_error: b.runtime_error,
+            deployment_sequence: b.deployment_sequence,
             created_at: b.created_at,
             updated_at: b.updated_at,
             storage_path: b.storage_path,
@@ -129,6 +132,9 @@ pub async fn list_builds_by_env(
             build_type: build.build_type,
             deployed: build.deployed,
             active: build.active,
+            runtime_status: build.runtime_status,
+            runtime_error: build.runtime_error,
+            deployment_sequence: build.deployment_sequence,
             created_at: build.created_at,
             updated_at: build.updated_at,
             storage_path: build.storage_path,
@@ -183,6 +189,9 @@ pub async fn get_build(
         build_type: build.build_type,
         deployed: build.deployed,
         active: build.active,
+        runtime_status: build.runtime_status,
+        runtime_error: build.runtime_error,
+        deployment_sequence: build.deployment_sequence,
         created_at: build.created_at,
         updated_at: build.updated_at,
         storage_path: build.storage_path,
@@ -222,6 +231,9 @@ pub async fn get_deployed_build(
         build_type: build.build_type,
         deployed: build.deployed,
         active: build.active,
+        runtime_status: build.runtime_status,
+        runtime_error: build.runtime_error,
+        deployment_sequence: build.deployment_sequence,
         created_at: build.created_at,
         updated_at: build.updated_at,
         storage_path: build.storage_path,
@@ -261,6 +273,9 @@ pub async fn get_live_build(
         build_type: build.build_type,
         deployed: build.deployed,
         active: build.active,
+        runtime_status: build.runtime_status,
+        runtime_error: build.runtime_error,
+        deployment_sequence: build.deployment_sequence,
         created_at: build.created_at,
         updated_at: build.updated_at,
         storage_path: build.storage_path,
@@ -372,32 +387,45 @@ pub async fn deploy_build(
         );
     }
 
-    // Deploy the build (mark as deployed)
-    Build::deploy_build(&db, &build_id, &api_key.created_by_user_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&e.to_string())),
-            )
-        })?;
+    if build.is_bundle() {
+        Build::request_bundle_deployment(&db, &build_id, &api_key.created_by_user_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&e.to_string())),
+                )
+            })?;
+    } else {
+        Build::activate_build_directly(&db, &build_id, &api_key.created_by_user_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&e.to_string())),
+                )
+            })?;
+    }
 
-    // Enqueue deployment message so the worker re-runs the full deploy pipeline
-    // (re-derives event handlers, schedules, MCP tools, webhooks, agents from the
-    // bundle's manifest.hot via load_build_manifest_data).
-    hot::lang::event::enqueue_deployment_message(&_conf, build_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&e)),
-            )
-        })?;
+    if build.is_bundle() {
+        // Enqueue deployment message so a worker prepares the bundle and performs
+        // final activation after manifest/runtime data has loaded.
+        hot::lang::event::enqueue_deployment_message(&_conf, build_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&e)),
+                )
+            })?;
 
-    tracing::info!(
-        "Build {} deployed and queued for processing by worker",
-        build_id
-    );
+        tracing::info!(
+            "Bundle build {} accepted and queued for worker activation",
+            build_id
+        );
+    } else {
+        tracing::info!("Live build {} activated directly", build_id);
+    }
 
     // Get the updated build
     let deployed_build = Build::get_build(&db, &build_id).await.map_err(|e| {
@@ -415,6 +443,9 @@ pub async fn deploy_build(
         build_type: deployed_build.build_type,
         deployed: deployed_build.deployed,
         active: deployed_build.active,
+        runtime_status: deployed_build.runtime_status,
+        runtime_error: deployed_build.runtime_error,
+        deployment_sequence: deployed_build.deployment_sequence,
         created_at: deployed_build.created_at,
         updated_at: deployed_build.updated_at,
         storage_path: deployed_build.storage_path,

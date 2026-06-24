@@ -156,11 +156,8 @@ pub async fn enqueue_deployment_message(conf: &Val, build_id: Uuid) -> Result<()
 }
 
 /// On project reactivation, find the latest build for the project and put it
-/// back in the same state a fresh `hot deploy` would: mark it `deployed = true`
-/// in the database and enqueue a `DeploymentMessage` so the worker re-runs
-/// `hot::build::load_build_manifest_data` (which reactivates schedules,
-/// refreshes event handlers / MCP tools / webhooks / agents from `manifest.hot`
-/// and primes worker caches).
+/// back in the same state a fresh `hot deploy` would: bundle builds are queued
+/// for worker preparation/activation, while live builds activate directly.
 ///
 /// This is the inverse of what `Project::toggle_active(active=false)` did:
 /// it had set `deployed = false` on every build and `active = false` on every
@@ -184,11 +181,22 @@ pub async fn enqueue_redeploy_for_project_reactivation(
         return Ok(None);
     };
 
-    crate::db::Build::deploy_build(db, &build.build_id, deploying_user_id)
-        .await
-        .map_err(|e| format!("Failed to mark build deployed during reactivation: {}", e))?;
+    if build.is_bundle() {
+        crate::db::Build::request_bundle_deployment(db, &build.build_id, deploying_user_id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to request bundle redeploy during reactivation: {}",
+                    e
+                )
+            })?;
 
-    enqueue_deployment_message(conf, build.build_id).await?;
+        enqueue_deployment_message(conf, build.build_id).await?;
+    } else {
+        crate::db::Build::activate_build_directly(db, &build.build_id, deploying_user_id)
+            .await
+            .map_err(|e| format!("Failed to activate live build during reactivation: {}", e))?;
+    }
 
     Ok(Some(build.build_id))
 }
