@@ -949,6 +949,7 @@ impl OrgUsageStats {
              JOIN env e ON p.env_id = e.env_id
              WHERE s.active = true
                AND b.deployed = true
+               AND b.runtime_status = 'ready'
                AND b.active = true
                AND p.active = true
                AND e.active = true
@@ -1073,6 +1074,7 @@ impl OrgUsageStats {
              JOIN env e ON p.env_id = e.env_id
              WHERE s.active = 1
                AND b.deployed = 1
+               AND b.runtime_status = 'ready'
                AND b.active = 1
                AND p.active = 1
                AND e.active = 1

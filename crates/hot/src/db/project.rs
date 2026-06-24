@@ -665,7 +665,7 @@ impl Project {
                     format!(
                         "SELECT COUNT(*) FROM {} t \
                          JOIN build b ON t.build_id = b.build_id \
-                         WHERE b.project_id = ? AND b.deployed = 1",
+                         WHERE b.project_id = ? AND b.deployed = 1 AND b.runtime_status = 'ready'",
                         table
                     )
                 };
@@ -697,7 +697,7 @@ impl Project {
                     format!(
                         "SELECT COUNT(*) FROM {} t \
                          JOIN build b ON t.build_id = b.build_id \
-                         WHERE b.project_id = $1 AND b.deployed = true",
+                         WHERE b.project_id = $1 AND b.deployed = true AND b.runtime_status = 'ready'",
                         table
                     )
                 };

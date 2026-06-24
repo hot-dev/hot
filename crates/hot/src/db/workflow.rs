@@ -98,7 +98,7 @@ impl Workflow {
                        FROM workflow w
                        JOIN build b ON w.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1
+                       WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
                        ORDER BY w.namespace, w.type_name"#,
                 )
                 .bind(env_id)
@@ -115,7 +115,7 @@ impl Workflow {
                        FROM workflow w
                        JOIN build b ON w.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
                        ORDER BY w.namespace, w.type_name"#,
                 )
                 .bind(env_id)
@@ -491,7 +491,7 @@ impl Workflow {
                        FROM workflow w
                        JOIN build b ON w.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1
+                       WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
                          AND w.namespace = $2 AND w.type_name = $3
                        LIMIT 1"#,
                 )
@@ -511,7 +511,7 @@ impl Workflow {
                        FROM workflow w
                        JOIN build b ON w.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
                          AND w.namespace = ? AND w.type_name = ?
                        LIMIT 1"#,
                 )

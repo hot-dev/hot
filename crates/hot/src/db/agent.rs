@@ -100,7 +100,7 @@ impl Agent {
                        FROM agent a
                        JOIN build b ON a.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1
+                       WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
                        ORDER BY a.namespace, a.type_name"#,
                 )
                 .bind(env_id)
@@ -117,7 +117,7 @@ impl Agent {
                        FROM agent a
                        JOIN build b ON a.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
                        ORDER BY a.namespace, a.type_name"#,
                 )
                 .bind(env_id)
@@ -502,7 +502,7 @@ impl Agent {
                        FROM agent a
                        JOIN build b ON a.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1
+                       WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
                          AND a.namespace = $2 AND a.type_name = $3
                        LIMIT 1"#,
             )
@@ -520,7 +520,7 @@ impl Agent {
                        FROM agent a
                        JOIN build b ON a.build_id = b.build_id
                        JOIN project p ON b.project_id = p.project_id
-                       WHERE b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
                          AND a.namespace = ? AND a.type_name = ?
                        LIMIT 1"#,
             )
@@ -734,7 +734,7 @@ impl AgentStats {
                            AND r.agent_type = a.namespace || '/' || a.type_name
                            AND r.start_time >= NOW() - make_interval(hours => $2)
                        ) stats ON true
-                       WHERE b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1
+                       WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
                        ORDER BY COALESCE(stats.total_runs, 0) DESC"#,
                 )
                 .bind(env_id)
@@ -763,7 +763,7 @@ impl AgentStats {
                            AND r.start_time >= datetime('now', '-' || ? || ' hours')
                          GROUP BY r.agent_type
                        ) stats ON stats.agent_type = a.namespace || '/' || a.type_name
-                       WHERE b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
                        ORDER BY COALESCE(stats.total_runs, 0) DESC"#,
                 )
                 .bind(env_id)

@@ -1489,7 +1489,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true AND b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1
+                     WHERE s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
                      ORDER BY p.name, s.cron, s.ns, s.var
                      LIMIT $2 OFFSET $3"
                 )
@@ -1506,7 +1506,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1 AND b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                     WHERE s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
                      ORDER BY p.name, s.cron, s.ns, s.var
                      LIMIT ? OFFSET ?"
                 )
@@ -1531,7 +1531,7 @@ impl Schedule {
                     "SELECT COUNT(*) FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true AND b.deployed = true AND b.active = true AND p.active = true AND p.env_id = $1"
+                     WHERE s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1"
                 )
                 .bind(env_id)
                 .fetch_one(pg_pool)
@@ -1543,7 +1543,7 @@ impl Schedule {
                     "SELECT COUNT(*) FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1 AND b.deployed = 1 AND b.active = 1 AND p.active = 1 AND p.env_id = ?",
+                     WHERE s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?",
                 )
                 .bind(env_id)
                 .fetch_one(sqlite_pool)
@@ -1567,6 +1567,7 @@ impl Schedule {
                      JOIN env e ON p.env_id = e.env_id
                      WHERE s.active = true
                        AND b.deployed = true
+                       AND b.runtime_status = 'ready'
                        AND b.active = true
                        AND p.active = true
                        AND e.active = true
@@ -1585,6 +1586,7 @@ impl Schedule {
                      JOIN env e ON p.env_id = e.env_id
                      WHERE s.active = 1
                        AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
                        AND b.active = 1
                        AND p.active = 1
                        AND e.active = 1
@@ -1609,6 +1611,7 @@ impl Schedule {
                      JOIN build b ON s.build_id = b.build_id
                      WHERE s.active = true
                        AND b.deployed = true
+                       AND b.runtime_status = 'ready'
                        AND b.active = true
                        AND b.project_id = $1",
                 )
@@ -1623,6 +1626,7 @@ impl Schedule {
                      JOIN build b ON s.build_id = b.build_id
                      WHERE s.active = 1
                        AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
                        AND b.active = 1
                        AND b.project_id = ?",
                 )
@@ -1698,7 +1702,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true AND b.deployed = true AND b.active = true AND p.active = true
+                     WHERE s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
                      ORDER BY s.cron, s.ns, s.var
                      LIMIT $1 OFFSET $2"
                 )
@@ -1714,7 +1718,7 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1 AND b.deployed = 1 AND b.active = 1 AND p.active = 1
+                     WHERE s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
                      ORDER BY s.cron, s.ns, s.var
                      LIMIT ? OFFSET ?"
                 )
@@ -1747,6 +1751,7 @@ impl Schedule {
                      JOIN project p ON b.project_id = p.project_id
                      WHERE s.active = true
                        AND b.deployed = true
+                       AND b.runtime_status = 'ready'
                        AND b.active = true
                        AND p.active = true
                        AND s.cron LIKE $1
@@ -1769,6 +1774,7 @@ impl Schedule {
                      JOIN project p ON b.project_id = p.project_id
                      WHERE s.active = 1
                        AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
                        AND b.active = 1
                        AND p.active = 1
                        AND s.cron LIKE ?
