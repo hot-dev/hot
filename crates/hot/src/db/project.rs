@@ -33,6 +33,7 @@ pub struct Project {
     pub updated_by_user_id: Option<Uuid>,
     pub active_toggle_at: Option<DateTime<Utc>>,
     pub active_toggle_by_user_id: Option<Uuid>,
+    pub deployment_sequence: i64,
 }
 
 impl Project {
@@ -64,6 +65,66 @@ impl Project {
         PROJECT_CACHE.clear();
     }
 
+    pub async fn get_deployment_sequence(
+        db: &crate::db::DatabasePool,
+        project_id: &Uuid,
+    ) -> Result<i64, ProjectError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let sequence = sqlx::query_scalar(
+                    "SELECT deployment_sequence FROM project WHERE project_id = $1",
+                )
+                .bind(project_id)
+                .fetch_one(pg_pool)
+                .await?;
+                Ok(sequence)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let sequence = sqlx::query_scalar(
+                    "SELECT deployment_sequence FROM project WHERE project_id = ?",
+                )
+                .bind(project_id)
+                .fetch_one(sqlite_pool)
+                .await?;
+                Ok(sequence)
+            }
+        }
+    }
+
+    pub async fn bump_deployment_sequence(
+        db: &crate::db::DatabasePool,
+        project_id: &Uuid,
+        updated_by_user_id: &Uuid,
+    ) -> Result<i64, ProjectError> {
+        let sequence = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_scalar(
+                    "UPDATE project SET deployment_sequence = deployment_sequence + 1, updated_at = NOW(), updated_by_user_id = $2 WHERE project_id = $1 RETURNING deployment_sequence"
+                )
+                .bind(project_id)
+                .bind(updated_by_user_id)
+                .fetch_one(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE project SET deployment_sequence = deployment_sequence + 1, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ?"
+                )
+                .bind(updated_by_user_id)
+                .bind(project_id)
+                .execute(sqlite_pool)
+                .await?;
+
+                sqlx::query_scalar("SELECT deployment_sequence FROM project WHERE project_id = ?")
+                    .bind(project_id)
+                    .fetch_one(sqlite_pool)
+                    .await?
+            }
+        };
+        Self::invalidate_project_cache(project_id);
+        Ok(sequence)
+    }
+
     async fn get_project_sqlite(
         db: &Pool<Sqlite>,
         project_id: &Uuid,
@@ -71,7 +132,8 @@ impl Project {
         let row = sqlx::query_as::<_, Project>(
             r#"
             SELECT project_id, env_id, name, active, created_by_user_id, created_at, updated_at,
-                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
             FROM project
             WHERE project_id = ? AND active = 1
             "#,
@@ -91,7 +153,8 @@ impl Project {
             r#"
             SELECT project_id, env_id, name, active,
                    created_by_user_id, created_at, updated_at,
-                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
             FROM project
             WHERE project_id = $1 AND active = true
             "#,
@@ -127,7 +190,8 @@ impl Project {
         let row = sqlx::query_as::<_, Project>(
             r#"
             SELECT project_id, env_id, name, active, created_by_user_id, created_at, updated_at,
-                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
             FROM project
             WHERE env_id = ? AND name = ?
             "#,
@@ -149,7 +213,8 @@ impl Project {
             r#"
             SELECT project_id, env_id, name, active,
                    created_by_user_id, created_at, updated_at,
-                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
             FROM project
             WHERE env_id = $1 AND name = $2
             "#,
@@ -234,7 +299,8 @@ impl Project {
         let rows = sqlx::query_as::<_, Project>(
             r#"
             SELECT project_id, env_id, name, active, created_by_user_id, created_at, updated_at,
-                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
             FROM project
             WHERE env_id = ?
             ORDER BY active DESC, created_at DESC
@@ -263,7 +329,8 @@ impl Project {
             r#"
             SELECT project_id, env_id, name, active,
                    created_by_user_id, created_at, updated_at,
-                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
             FROM project
             WHERE env_id = $1
             ORDER BY active DESC, created_at DESC
