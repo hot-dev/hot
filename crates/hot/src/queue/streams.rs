@@ -1803,7 +1803,22 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         }
         cmd.arg("STREAMS").arg(&self.stream_name).arg(id_arg);
 
-        let result = conn.cmd(&cmd.clone()).await?;
+        let result = match conn.cmd(&cmd.clone()).await {
+            Ok(result) => result,
+            Err(StreamsQueueError::RedisError(e)) if e.contains("NOGROUP") => {
+                // `hot queue clear` deletes Redis stream keys, which also
+                // deletes consumer groups. Long-lived workers keep queue
+                // handles, so recover by recreating the group and retrying
+                // the read once.
+                self.consumer_group_ensured
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.ensure_consumer_group().await?;
+                let mut guard = self.get_connection().await?;
+                let conn = guard.as_mut().unwrap();
+                conn.cmd(&cmd.clone()).await?
+            }
+            Err(e) => return Err(e),
+        };
         Ok(parse_stream_messages(&result)
             .into_iter()
             .map(|(msg_id, payload)| PrefetchedMessage {

@@ -58,7 +58,8 @@ hot.emitter.type "db"
 hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
 
 hot.queue.type ::env/get("HOT_QUEUE_TYPE", "memory")
-hot.serialization.type "zstdjson"
+hot.queue.metrics-enabled Bool(::env/get("HOT_QUEUE_METRICS_ENABLED", "true"))
+hot.serialization.type ::env/get("HOT_SERIALIZATION_TYPE", "zstdjson")
 
 hot.scheduler.backfill false
 hot.scheduler.sync-interval-seconds 10

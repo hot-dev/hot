@@ -836,23 +836,167 @@ impl RedisQueueAdmin {
         let mut cleared = Vec::new();
 
         for queue_name in queue_names {
-            // Keys to delete: main stream and dead letter stream
-            // Note: With Redis Streams, there's no separate "processing" key -
-            // pending messages are tracked within the stream via consumer groups
-            let keys = vec![queue_name.clone(), format!("{}:deadletter", queue_name)];
-
-            for key in keys {
-                let deleted: i64 = ::redis::cmd("DEL")
-                    .arg(&key)
+            let mut touched_stream = false;
+            for group_name in Self::stream_groups(conn, queue_name)? {
+                Self::ack_all_pending(conn, queue_name, &group_name)?;
+                let _: () = ::redis::cmd("XGROUP")
+                    .arg("SETID")
+                    .arg(queue_name)
+                    .arg(&group_name)
+                    .arg("$")
                     .query(conn)
-                    .map_err(|e| format!("Failed to delete {}: {}", key, e))?;
-                if deleted > 0 {
-                    cleared.push(key);
-                }
+                    .map_err(|e| {
+                        format!(
+                            "Failed to reset consumer group {} on {}: {}",
+                            group_name, queue_name, e
+                        )
+                    })?;
+                touched_stream = true;
+            }
+
+            let trimmed: i64 = ::redis::cmd("XTRIM")
+                .arg(queue_name)
+                .arg("MAXLEN")
+                .arg("=")
+                .arg(0)
+                .query(conn)
+                .unwrap_or(0);
+            if trimmed > 0 {
+                touched_stream = true;
+            }
+            if touched_stream {
+                cleared.push(queue_name.clone());
+            }
+
+            // Dead-letter streams have no consumer groups; deleting them is safe.
+            let deadletter_key = format!("{}:deadletter", queue_name);
+            let deleted: i64 = ::redis::cmd("DEL")
+                .arg(&deadletter_key)
+                .query(conn)
+                .map_err(|e| format!("Failed to delete {}: {}", deadletter_key, e))?;
+            if deleted > 0 {
+                cleared.push(deadletter_key);
             }
         }
 
         Ok(cleared)
+    }
+
+    fn stream_groups(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+    ) -> Result<Vec<String>, String> {
+        let result: ::redis::Value = match ::redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(queue_name)
+            .query(conn)
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("no such key") || msg.contains("ERR no such key") {
+                    return Ok(Vec::new());
+                }
+                return Err(format!(
+                    "Failed to list consumer groups for {}: {}",
+                    queue_name, e
+                ));
+            }
+        };
+
+        let records: Vec<::redis::Value> = ::redis::from_redis_value_ref(&result)
+            .map_err(|e| format!("Failed to parse consumer groups for {}: {}", queue_name, e))?;
+        let mut groups = Vec::new();
+        for record in records {
+            let fields: Vec<::redis::Value> = ::redis::from_redis_value_ref(&record)
+                .map_err(|e| format!("Failed to parse consumer group for {}: {}", queue_name, e))?;
+            let mut iter = fields.iter();
+            while let (Some(key), Some(value)) = (iter.next(), iter.next()) {
+                let key: String = ::redis::from_redis_value_ref(key).unwrap_or_default();
+                if key == "name" {
+                    let group_name: String = ::redis::from_redis_value_ref(value).map_err(|e| {
+                        format!("Failed to parse group name for {}: {}", queue_name, e)
+                    })?;
+                    groups.push(group_name);
+                    break;
+                }
+            }
+        }
+        Ok(groups)
+    }
+
+    fn ack_all_pending(
+        conn: &mut dyn ::redis::ConnectionLike,
+        queue_name: &str,
+        group_name: &str,
+    ) -> Result<usize, String> {
+        let mut total = 0usize;
+        loop {
+            let result: ::redis::Value = ::redis::cmd("XPENDING")
+                .arg(queue_name)
+                .arg(group_name)
+                .arg("-")
+                .arg("+")
+                .arg(100)
+                .query(conn)
+                .map_err(|e| {
+                    format!(
+                        "Failed to list pending messages for {} group {}: {}",
+                        queue_name, group_name, e
+                    )
+                })?;
+            let entries: Vec<::redis::Value> =
+                ::redis::from_redis_value_ref(&result).map_err(|e| {
+                    format!(
+                        "Failed to parse pending messages for {} group {}: {}",
+                        queue_name, group_name, e
+                    )
+                })?;
+            if entries.is_empty() {
+                break;
+            }
+
+            let mut ids = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let fields: Vec<::redis::Value> =
+                    ::redis::from_redis_value_ref(&entry).map_err(|e| {
+                        format!(
+                            "Failed to parse pending message for {} group {}: {}",
+                            queue_name, group_name, e
+                        )
+                    })?;
+                if let Some(id) = fields.first() {
+                    ids.push(::redis::from_redis_value_ref::<String>(id).map_err(|e| {
+                        format!(
+                            "Failed to parse pending message id for {} group {}: {}",
+                            queue_name, group_name, e
+                        )
+                    })?);
+                }
+            }
+
+            if ids.is_empty() {
+                break;
+            }
+            let mut cmd = ::redis::cmd("XACK");
+            cmd.arg(queue_name).arg(group_name);
+            for id in &ids {
+                cmd.arg(id);
+            }
+            let acked: i64 = cmd.query(conn).map_err(|e| {
+                format!(
+                    "Failed to ACK pending messages for {} group {}: {}",
+                    queue_name, group_name, e
+                )
+            })?;
+            total += acked.max(0) as usize;
+
+            if ids.len() < 100 {
+                break;
+            }
+        }
+
+        Ok(total)
     }
 
     /// Get status of all standard queues

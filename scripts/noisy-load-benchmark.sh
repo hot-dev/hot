@@ -38,11 +38,16 @@ WORKER_THREADS_MATRIX="${WORKER_THREADS_MATRIX:-4}"
 TASK_CONCURRENCY_MATRIX="${TASK_CONCURRENCY_MATRIX:-4}"
 BACKENDS="${BACKENDS:-sqlite pg-valkey}"
 BINARIES="${BINARIES:-system final}"
+DEPLOY_MODE_MATRIX="${DEPLOY_MODE_MATRIX:-live}"
 HOT_FINAL_BIN="${HOT_FINAL_BIN:-target/release/hot}"
 BUILD_RELEASE="${BUILD_RELEASE:-auto}"
 KEEP_CONTAINERS="${KEEP_CONTAINERS:-1}"
 HOT_WORKER_READ_BATCH_SIZE="${HOT_WORKER_READ_BATCH_SIZE:-8}"
 HOT_DB_WRITER_SHARDS="${HOT_DB_WRITER_SHARDS:-4}"
+HOT_LOG_LEVEL_OVERRIDE="${HOT_LOG_LEVEL_OVERRIDE:-}"
+DEPLOY_READY_TIMEOUT_SECONDS="${DEPLOY_READY_TIMEOUT_SECONDS:-60}"
+DEPLOY_SCHEDULER_CUTOVER_TIMEOUT_SECONDS="${DEPLOY_SCHEDULER_CUTOVER_TIMEOUT_SECONDS:-30}"
+DEPLOY_SETTLE_SECONDS="${DEPLOY_SETTLE_SECONDS:-15}"
 
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -190,27 +195,162 @@ stop_hot_dev() {
     wait "$pid" || true
 }
 
-run_hot_dev() {
+binary_for_label() {
     local label="$1"
-    local backend="$2"
-    local worker_threads="$3"
-    local task_concurrency="$4"
-    local run_dir="$5"
-    local log_file="$run_dir/hot-dev.log"
-
-    local -a cmd
     case "$label" in
         system)
-            cmd=(hot dev)
+            echo hot
             ;;
         final)
-            cmd=("$HOT_FINAL_BIN" dev)
+            echo "$HOT_FINAL_BIN"
             ;;
         *)
             echo "Error: unknown binary label '$label'" >&2
             exit 1
             ;;
     esac
+}
+
+run_with_backend_env() {
+    local backend="$1"
+    shift
+
+    if [[ "$backend" == "sqlite" ]]; then
+        env -u HOT_DB_URI -u HOT_REDIS_URI -u HOT_QUEUE_TYPE \
+            HOT_BOX_ENABLED="$HOT_BOX_ENABLED" \
+            HOT_ENGINE_THREADS="$HOT_ENGINE_THREADS" \
+            HOT_WORKER_READ_BATCH_SIZE="$HOT_WORKER_READ_BATCH_SIZE" \
+            HOT_DB_WRITER_SHARDS="$HOT_DB_WRITER_SHARDS" \
+            "$@"
+    else
+        env \
+            HOT_DB_URI="$DB_URI" \
+            HOT_REDIS_URI="$VALKEY_URI" \
+            HOT_QUEUE_TYPE="redis" \
+            HOT_SERIALIZATION_TYPE="json" \
+            HOT_BOX_ENABLED="$HOT_BOX_ENABLED" \
+            HOT_ENGINE_THREADS="$HOT_ENGINE_THREADS" \
+            HOT_WORKER_READ_BATCH_SIZE="$HOT_WORKER_READ_BATCH_SIZE" \
+            HOT_DB_WRITER_SHARDS="$HOT_DB_WRITER_SHARDS" \
+            "$@"
+    fi
+}
+
+wait_for_log_line() {
+    local pid="$1"
+    local log_file="$2"
+    local pattern="$3"
+    local label="$4"
+    local elapsed=0
+
+    while [[ "$elapsed" -lt "$DEPLOY_READY_TIMEOUT_SECONDS" ]]; do
+        if ! kill -0 "$pid" >/dev/null 2>&1; then
+            wait "$pid" || true
+            echo "hot dev exited before $label; see $log_file" >&2
+            return 1
+        fi
+        if [[ -f "$log_file" ]] && rg -q "$pattern" "$log_file"; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "Timed out waiting for $label in $log_file" >&2
+    return 1
+}
+
+wait_for_bundle_scheduler_cutover() {
+    local pid="$1"
+    local log_file="$2"
+    local live_build_id="$3"
+    local elapsed=0
+
+    if [[ -z "$live_build_id" ]]; then
+        echo "Could not determine initial live build id; using settle delay only" >&2
+        return 0
+    fi
+
+    while [[ "$elapsed" -lt "$DEPLOY_SCHEDULER_CUTOVER_TIMEOUT_SECONDS" ]]; do
+        if ! kill -0 "$pid" >/dev/null 2>&1; then
+            wait "$pid" || true
+            echo "hot dev exited before scheduler cutover; see $log_file" >&2
+            return 1
+        fi
+        if [[ -f "$log_file" ]] \
+            && rg -q "SCHEDULER removed job .* from build ${live_build_id}|SCHEDULER sync complete.*Removed: [1-9]" "$log_file"; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "Timed out waiting for scheduler cutover from live build $live_build_id; using settle delay" >&2
+    return 0
+}
+
+deploy_bundle_locally() {
+    local label="$1"
+    local backend="$2"
+    local run_dir="$3"
+    local log_file="$run_dir/local-deploy.log"
+    local build_id_file="$run_dir/local-deploy-build-id.txt"
+    local bin
+    bin="$(binary_for_label "$label")"
+
+    echo "Deploying bundle locally for $label on $backend"
+    local -a deploy_cmd
+    deploy_cmd=("$bin" deploy --local)
+    if [[ "$backend" == "pg-valkey" ]]; then
+        deploy_cmd+=(--db.uri "$DB_URI")
+    fi
+
+    (
+        cd "$NOISY_DIR"
+        run_with_backend_env "$backend" "${deploy_cmd[@]}"
+    ) > "$log_file" 2>&1
+
+    sed -n 's/^✓ Successfully deployed build: //p' "$log_file" | sed -n '1p' > "$build_id_file"
+    if [[ ! -s "$build_id_file" ]]; then
+        echo "Could not determine deployed bundle build id; see $log_file" >&2
+        return 1
+    fi
+}
+
+clear_queues_for_benchmark_window() {
+    local label="$1"
+    local backend="$2"
+    local run_dir="$3"
+    local log_file="$run_dir/queue-clear.log"
+    local bin
+    bin="$(binary_for_label "$label")"
+
+    (
+        cd "$NOISY_DIR"
+        run_with_backend_env "$backend" "$bin" queue clear
+    ) > "$log_file" 2>&1
+}
+
+mark_benchmark_window_start() {
+    local run_dir="$1"
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$run_dir/benchmark-started-at.txt"
+}
+
+run_hot_dev() {
+    local label="$1"
+    local backend="$2"
+    local worker_threads="$3"
+    local task_concurrency="$4"
+    local run_dir="$5"
+    local deploy_mode="$6"
+    local log_file="$run_dir/hot-dev.log"
+
+    local -a cmd
+    cmd=("$(binary_for_label "$label")" dev)
+
+    if [[ -n "$HOT_LOG_LEVEL_OVERRIDE" ]]; then
+        cmd+=(--log.level "$HOT_LOG_LEVEL_OVERRIDE")
+    fi
 
     if [[ "$backend" == "pg-valkey" ]]; then
         cmd+=(
@@ -221,7 +361,7 @@ run_hot_dev() {
         )
     fi
 
-    echo "Running $label on $backend (workers=$worker_threads, tasks=$task_concurrency)"
+    echo "Running $label on $backend (deploy=$deploy_mode, workers=$worker_threads, tasks=$task_concurrency)"
     (
         cd "$NOISY_DIR"
         rm -rf .hot
@@ -251,6 +391,23 @@ run_hot_dev() {
     ) > "$log_file" 2>&1 &
 
     local pid=$!
+    if [[ "$deploy_mode" == "bundle" ]]; then
+        wait_for_log_line "$pid" "$log_file" "Live build ready" "live build readiness"
+        local live_build_id
+        live_build_id="$(sed -n "s/.*Live build created for project '.*': build_id=//p" "$log_file" | sed -n '1p')"
+        deploy_bundle_locally "$label" "$backend" "$run_dir"
+        local deployed_build_id
+        deployed_build_id="$(sed -n '1p' "$run_dir/local-deploy-build-id.txt")"
+        wait_for_log_line "$pid" "$log_file" "Extracted bundle ${deployed_build_id}|Bundle ${deployed_build_id} pre-compiled successfully|successfully loaded handlers and schedules for build ${deployed_build_id}" "bundle deployment processing"
+        wait_for_bundle_scheduler_cutover "$pid" "$log_file" "$live_build_id"
+        sleep "$DEPLOY_SETTLE_SECONDS"
+        if [[ "$backend" == "pg-valkey" ]]; then
+            clear_queues_for_benchmark_window "$label" "$backend" "$run_dir"
+        fi
+    fi
+
+    mark_benchmark_window_start "$run_dir"
+
     local elapsed=0
     while [[ "$elapsed" -lt "$DURATION_SECONDS" ]]; do
         if ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -343,34 +500,48 @@ analyze_pg_valkey() {
     require_cmd psql
     local run_dir="$1"
     local metrics="$run_dir/metrics.tsv"
+    local benchmark_started_at=""
+    local run_where=""
+    local event_where=""
+    local task_where=""
+    local queue_wait_where="where r.start_time is not null"
+
+    if [[ -s "$run_dir/benchmark-started-at.txt" ]]; then
+        benchmark_started_at="$(sed -n '1p' "$run_dir/benchmark-started-at.txt")"
+        run_where="where start_time >= timestamptz '$benchmark_started_at'"
+        event_where="where created_at >= timestamptz '$benchmark_started_at'"
+        task_where="where created_at >= timestamptz '$benchmark_started_at'"
+        queue_wait_where="where r.start_time is not null and r.start_time >= timestamptz '$benchmark_started_at'"
+    fi
 
     psql_query "
-select 'runs_total', count(*) from hot.run;
-select 'runs_per_sec', round(count(*) / ${DURATION_SECONDS}.0, 2) from hot.run;
-select 'runs_succeeded', count(*) from hot.run where status_id = 2;
-select 'runs_non_terminal_or_failed', count(*) from hot.run where status_id not in (2);
-select 'events_total', count(*) from hot.event;
-select 'events_unhandled', count(*) from hot.event where handled = false;
-select 'tasks_total', count(*) from hot.task;
+select 'runs_total', count(*) from hot.run $run_where;
+select 'runs_per_sec', round(count(*) / ${DURATION_SECONDS}.0, 2) from hot.run $run_where;
+select 'runs_succeeded', count(*) from hot.run ${run_where:-where true} and status_id = 2;
+select 'runs_non_terminal_or_failed', count(*) from hot.run ${run_where:-where true} and status_id not in (2);
+select 'events_total', count(*) from hot.event $event_where;
+select 'events_unhandled', count(*) from hot.event ${event_where:-where true} and handled = false;
+select 'tasks_total', count(*) from hot.task $task_where;
 select 'tasks_by_status', string_agg(status_name || ':' || status_count, ',' order by status_name)
 from (
     select coalesce(ts.name, t.task_status_id::text) as status_name, count(*)::text as status_count
     from hot.task t
     left join hot.task_status ts on ts.task_status_id = t.task_status_id
+    $task_where
     group by status_name
 ) statuses;
 select 'run_ms_avg', coalesce(round(avg(extract(epoch from (stop_time - start_time)) * 1000)::numeric, 2)::text, '0')
-from hot.run where stop_time is not null;
+from hot.run ${run_where:-where true} and stop_time is not null;
 select 'run_ms_p95', coalesce(round((percentile_cont(0.95) within group (
     order by extract(epoch from (stop_time - start_time)) * 1000
 ))::numeric, 2)::text, '0')
-from hot.run where stop_time is not null;
+from hot.run ${run_where:-where true} and stop_time is not null;
 select 'queue_wait_ms_p95', coalesce(round((percentile_cont(0.95) within group (
     order by extract(epoch from (r.start_time - e.created_at)) * 1000
 ))::numeric, 2)::text, '0')
 from hot.run r
 join hot.event e on e.event_id = r.event_id
-where r.start_time is not null;
+$queue_wait_where;
 " | tee "$metrics"
 
     {
@@ -417,7 +588,8 @@ run_case() {
     local label="$2"
     local worker_threads="$3"
     local task_concurrency="$4"
-    local run_name="${backend}-${label}-w${worker_threads}-t${task_concurrency}"
+    local deploy_mode="$5"
+    local run_name="${backend}-${label}-${deploy_mode}-w${worker_threads}-t${task_concurrency}"
     local run_dir="$RUN_ROOT/$run_name"
     mkdir -p "$run_dir"
 
@@ -425,7 +597,7 @@ run_case() {
         reset_pg_valkey
     fi
 
-    run_hot_dev "$label" "$backend" "$worker_threads" "$task_concurrency" "$run_dir"
+    run_hot_dev "$label" "$backend" "$worker_threads" "$task_concurrency" "$run_dir" "$deploy_mode"
 
     if [[ "$backend" == "sqlite" ]]; then
         analyze_sqlite "$run_dir"
@@ -444,9 +616,13 @@ trap cleanup_containers EXIT
 echo "Noisy-load benchmark output: $RUN_ROOT"
 echo "Backends: $BACKENDS"
 echo "Binaries: $BINARIES"
+echo "Deploy modes: $DEPLOY_MODE_MATRIX"
 echo "Worker threads: $WORKER_THREADS_MATRIX"
 echo "Task concurrency: $TASK_CONCURRENCY_MATRIX"
 echo "Duration seconds: $DURATION_SECONDS"
+if [[ -n "$HOT_LOG_LEVEL_OVERRIDE" ]]; then
+    echo "Log level override: $HOT_LOG_LEVEL_OVERRIDE"
+fi
 
 for backend in $BACKENDS; do
     case "$backend" in
@@ -458,9 +634,19 @@ for backend in $BACKENDS; do
     esac
 
     for label in $BINARIES; do
-        for worker_threads in $WORKER_THREADS_MATRIX; do
-            for task_concurrency in $TASK_CONCURRENCY_MATRIX; do
-                run_case "$backend" "$label" "$worker_threads" "$task_concurrency"
+        for deploy_mode in $DEPLOY_MODE_MATRIX; do
+            case "$deploy_mode" in
+                live|bundle) ;;
+                *)
+                    echo "Error: unsupported deploy mode '$deploy_mode' (expected live or bundle)" >&2
+                    exit 1
+                    ;;
+            esac
+
+            for worker_threads in $WORKER_THREADS_MATRIX; do
+                for task_concurrency in $TASK_CONCURRENCY_MATRIX; do
+                    run_case "$backend" "$label" "$worker_threads" "$task_concurrency" "$deploy_mode"
+                done
             done
         done
     done
