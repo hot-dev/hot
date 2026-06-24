@@ -1069,14 +1069,6 @@ fn validate_bundle_runtime_compatibility(bundle_engine_version: &str) -> Result<
         ));
     }
 
-    if bundle_version.patch != runtime_version_core.patch {
-        tracing::warn!(
-            "Bundle engine patch version {} differs from runtime {}; allowing deployment",
-            bundle_engine_version,
-            runtime_version
-        );
-    }
-
     Ok(())
 }
 
