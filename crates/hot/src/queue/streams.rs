@@ -24,7 +24,8 @@ use std::error::Error;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -290,6 +291,134 @@ fn stream_message_age_ms(msg_id: &str) -> u64 {
         .max(0) as u64
 }
 
+struct RedisQueueDrainStats {
+    last_log_at: StdMutex<Instant>,
+    refill_calls: AtomicU64,
+    refill_buffer_hits: AtomicU64,
+    refill_lock_wait_ms: AtomicU64,
+    pending_reads: AtomicU64,
+    pending_read_ms: AtomicU64,
+    pending_messages: AtomicU64,
+    pending_buffered: AtomicU64,
+    pending_filtered_inflight: AtomicU64,
+    pending_all_inflight: AtomicU64,
+    fresh_reads: AtomicU64,
+    fresh_read_ms: AtomicU64,
+    fresh_messages: AtomicU64,
+    fresh_empty: AtomicU64,
+    nogroup_recoveries: AtomicU64,
+    claims: AtomicU64,
+    claim_none: AtomicU64,
+    max_prefetch_depth: AtomicU64,
+    max_in_flight: AtomicU64,
+}
+
+impl RedisQueueDrainStats {
+    fn new() -> Self {
+        Self {
+            last_log_at: StdMutex::new(Instant::now()),
+            refill_calls: AtomicU64::new(0),
+            refill_buffer_hits: AtomicU64::new(0),
+            refill_lock_wait_ms: AtomicU64::new(0),
+            pending_reads: AtomicU64::new(0),
+            pending_read_ms: AtomicU64::new(0),
+            pending_messages: AtomicU64::new(0),
+            pending_buffered: AtomicU64::new(0),
+            pending_filtered_inflight: AtomicU64::new(0),
+            pending_all_inflight: AtomicU64::new(0),
+            fresh_reads: AtomicU64::new(0),
+            fresh_read_ms: AtomicU64::new(0),
+            fresh_messages: AtomicU64::new(0),
+            fresh_empty: AtomicU64::new(0),
+            nogroup_recoveries: AtomicU64::new(0),
+            claims: AtomicU64::new(0),
+            claim_none: AtomicU64::new(0),
+            max_prefetch_depth: AtomicU64::new(0),
+            max_in_flight: AtomicU64::new(0),
+        }
+    }
+
+    fn observe_prefetch_depth(&self, depth: usize) {
+        self.max_prefetch_depth
+            .fetch_max(depth as u64, Ordering::Relaxed);
+    }
+
+    fn observe_in_flight_depth(&self, depth: usize) {
+        self.max_in_flight
+            .fetch_max(depth as u64, Ordering::Relaxed);
+    }
+
+    fn maybe_log(&self, stream_name: &str, consumer_name: &str, read_batch_size: usize) {
+        if !queue_timing_enabled() {
+            return;
+        }
+
+        let Ok(mut last_log_at) = self.last_log_at.try_lock() else {
+            return;
+        };
+        let elapsed = last_log_at.elapsed();
+        if elapsed < Duration::from_secs(5) {
+            return;
+        }
+        *last_log_at = Instant::now();
+
+        let refill_calls = self.refill_calls.swap(0, Ordering::Relaxed);
+        let refill_buffer_hits = self.refill_buffer_hits.swap(0, Ordering::Relaxed);
+        let refill_lock_wait_ms = self.refill_lock_wait_ms.swap(0, Ordering::Relaxed);
+        let pending_reads = self.pending_reads.swap(0, Ordering::Relaxed);
+        let pending_read_ms = self.pending_read_ms.swap(0, Ordering::Relaxed);
+        let pending_messages = self.pending_messages.swap(0, Ordering::Relaxed);
+        let pending_buffered = self.pending_buffered.swap(0, Ordering::Relaxed);
+        let pending_filtered_inflight = self.pending_filtered_inflight.swap(0, Ordering::Relaxed);
+        let pending_all_inflight = self.pending_all_inflight.swap(0, Ordering::Relaxed);
+        let fresh_reads = self.fresh_reads.swap(0, Ordering::Relaxed);
+        let fresh_read_ms = self.fresh_read_ms.swap(0, Ordering::Relaxed);
+        let fresh_messages = self.fresh_messages.swap(0, Ordering::Relaxed);
+        let fresh_empty = self.fresh_empty.swap(0, Ordering::Relaxed);
+        let nogroup_recoveries = self.nogroup_recoveries.swap(0, Ordering::Relaxed);
+        let claims = self.claims.swap(0, Ordering::Relaxed);
+        let claim_none = self.claim_none.swap(0, Ordering::Relaxed);
+        let max_prefetch_depth = self.max_prefetch_depth.swap(0, Ordering::Relaxed);
+        let max_in_flight = self.max_in_flight.swap(0, Ordering::Relaxed);
+
+        if claims == 0
+            && pending_messages == 0
+            && fresh_messages == 0
+            && pending_all_inflight == 0
+            && nogroup_recoveries == 0
+        {
+            return;
+        }
+
+        tracing::info!(
+            target: "hot::queue::drain",
+            queue = %stream_name,
+            consumer = %consumer_name,
+            read_batch_size = read_batch_size,
+            interval_ms = duration_ms(elapsed),
+            refill_calls = refill_calls,
+            refill_buffer_hits = refill_buffer_hits,
+            refill_lock_wait_ms = refill_lock_wait_ms,
+            pending_reads = pending_reads,
+            pending_read_ms = pending_read_ms,
+            pending_messages = pending_messages,
+            pending_buffered = pending_buffered,
+            pending_filtered_inflight = pending_filtered_inflight,
+            pending_all_inflight = pending_all_inflight,
+            fresh_reads = fresh_reads,
+            fresh_read_ms = fresh_read_ms,
+            fresh_messages = fresh_messages,
+            fresh_empty = fresh_empty,
+            nogroup_recoveries = nogroup_recoveries,
+            claims = claims,
+            claim_none = claim_none,
+            max_prefetch_depth = max_prefetch_depth,
+            max_in_flight = max_in_flight,
+            "redis queue drain stats"
+        );
+    }
+}
+
 /// Redis Streams queue implementation.
 ///
 /// Each clone gets its own cached connection (per-worker connection). This
@@ -344,6 +473,7 @@ pub struct RedisStreamQueue<T> {
     ///
     /// `None` preserves the historical "consume from beginning" behavior.
     startup_window_ms: Option<u64>,
+    drain_stats: Arc<RedisQueueDrainStats>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -370,6 +500,7 @@ impl<T> Clone for RedisStreamQueue<T> {
             read_batch_size: self.read_batch_size,
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
+            drain_stats: Arc::new(RedisQueueDrainStats::new()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -405,6 +536,7 @@ impl<T> RedisStreamQueue<T> {
             read_batch_size: READ_BATCH_SIZE,
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
+            drain_stats: Arc::new(RedisQueueDrainStats::new()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -438,6 +570,7 @@ impl<T> RedisStreamQueue<T> {
             read_batch_size: READ_BATCH_SIZE,
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
+            drain_stats: Arc::new(RedisQueueDrainStats::new()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -485,6 +618,7 @@ impl<T> RedisStreamQueue<T> {
             read_batch_size: self.read_batch_size,
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
+            drain_stats: Arc::clone(&self.drain_stats),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -1706,6 +1840,9 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
     /// (`>`) read blocks inside Redis; pending (`0`) reads are always
     /// non-blocking. The pending read happens first to keep retries snappy.
     async fn refill_prefetch(&self, block_ms: u64) -> Result<bool, StreamsQueueError> {
+        self.drain_stats
+            .refill_calls
+            .fetch_add(1, Ordering::Relaxed);
         // Serialize concurrent refills against the *same* RedisStreamQueue
         // instance. Without this lock, multiple `process_blocking` futures
         // sharing the same `Arc<RedisStreamQueue>` would each fire an
@@ -1714,7 +1851,12 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // yet), `extend` them all into the prefetch buffer, and proceed
         // to execute every PEL entry N times in parallel. See the
         // `refill_lock` field doc for the long-form rationale.
+        let refill_lock_wait_started = Instant::now();
         let _refill_guard = self.refill_lock.lock().await;
+        self.drain_stats.refill_lock_wait_ms.fetch_add(
+            duration_ms(refill_lock_wait_started.elapsed()),
+            Ordering::Relaxed,
+        );
 
         // Re-check the buffer under the refill lock. If a sibling refill
         // landed while we were waiting, we have nothing to do — let the
@@ -1723,6 +1865,15 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         {
             let buf = self.prefetched.lock().await;
             if !buf.is_empty() {
+                self.drain_stats
+                    .refill_buffer_hits
+                    .fetch_add(1, Ordering::Relaxed);
+                self.drain_stats.observe_prefetch_depth(buf.len());
+                self.drain_stats.maybe_log(
+                    &self.stream_name,
+                    &self.consumer_name,
+                    self.read_batch_size,
+                );
                 return Ok(true);
             }
         }
@@ -1735,27 +1886,56 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // while an earlier batch is still being processed — would
         // re-buffer the same un-ACKed entries and the next worker would
         // execute them a second time.
+        self.drain_stats
+            .pending_reads
+            .fetch_add(1, Ordering::Relaxed);
+        let pending_read_started = Instant::now();
         let pending = self
             .read_batch_with(FetchSource::Pending, self.read_batch_size, 0)
             .await?;
+        self.drain_stats.pending_read_ms.fetch_add(
+            duration_ms(pending_read_started.elapsed()),
+            Ordering::Relaxed,
+        );
+        let mut pending_all_inflight = false;
         if !pending.is_empty() {
+            let pending_count = pending.len();
             let in_flight = self.in_flight.lock().await;
+            self.drain_stats.observe_in_flight_depth(in_flight.len());
             let filtered: Vec<PrefetchedMessage> = pending
                 .into_iter()
                 .filter(|m| !in_flight.contains(&m.msg_id))
                 .collect();
             drop(in_flight);
+            self.drain_stats
+                .pending_messages
+                .fetch_add(pending_count as u64, Ordering::Relaxed);
+            self.drain_stats.pending_filtered_inflight.fetch_add(
+                pending_count.saturating_sub(filtered.len()) as u64,
+                Ordering::Relaxed,
+            );
             if !filtered.is_empty() {
+                self.drain_stats
+                    .pending_buffered
+                    .fetch_add(filtered.len() as u64, Ordering::Relaxed);
                 let mut buf = self.prefetched.lock().await;
                 buf.extend(filtered);
+                self.drain_stats.observe_prefetch_depth(buf.len());
+                self.drain_stats.maybe_log(
+                    &self.stream_name,
+                    &self.consumer_name,
+                    self.read_batch_size,
+                );
                 return Ok(true);
             }
             // Every entry the PEL handed back is currently being processed
-            // by a sibling worker. Treat as "no work right now" — the
-            // caller will get None and the outer loop will park briefly
-            // before retrying. This matches the behavior the caller sees
-            // for an empty stream.
-            return Ok(false);
+            // by a sibling worker. Keep going to the fresh read below so a
+            // full in-flight PEL does not starve new backlog or spin on
+            // repeated non-blocking pending reads.
+            self.drain_stats
+                .pending_all_inflight
+                .fetch_add(1, Ordering::Relaxed);
+            pending_all_inflight = true;
         }
 
         // No pending → try fresh, optionally blocking. We hold the refill
@@ -1763,14 +1943,32 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // N parallel waiters would each park inside Redis on their own
         // XREADGROUP > and wake together when *any* message arrives,
         // re-creating the original duplication on the new-message path.
+        let fresh_block_ms = if pending_all_inflight { 0 } else { block_ms };
+        self.drain_stats.fresh_reads.fetch_add(1, Ordering::Relaxed);
+        let fresh_read_started = Instant::now();
         let fresh = self
-            .read_batch_with(FetchSource::Fresh, self.read_batch_size, block_ms)
+            .read_batch_with(FetchSource::Fresh, self.read_batch_size, fresh_block_ms)
             .await?;
+        self.drain_stats
+            .fresh_read_ms
+            .fetch_add(duration_ms(fresh_read_started.elapsed()), Ordering::Relaxed);
         if fresh.is_empty() {
+            self.drain_stats.fresh_empty.fetch_add(1, Ordering::Relaxed);
+            self.drain_stats.maybe_log(
+                &self.stream_name,
+                &self.consumer_name,
+                self.read_batch_size,
+            );
             return Ok(false);
         }
+        self.drain_stats
+            .fresh_messages
+            .fetch_add(fresh.len() as u64, Ordering::Relaxed);
         let mut buf = self.prefetched.lock().await;
         buf.extend(fresh);
+        self.drain_stats.observe_prefetch_depth(buf.len());
+        self.drain_stats
+            .maybe_log(&self.stream_name, &self.consumer_name, self.read_batch_size);
         Ok(true)
     }
 
@@ -1812,6 +2010,9 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 // the read once.
                 self.consumer_group_ensured
                     .store(false, std::sync::atomic::Ordering::Release);
+                self.drain_stats
+                    .nogroup_recoveries
+                    .fetch_add(1, Ordering::Relaxed);
                 self.ensure_consumer_group().await?;
                 let mut guard = self.get_connection().await?;
                 let conn = guard.as_mut().unwrap();
@@ -1870,12 +2071,27 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             Some(m) => m,
             None => {
                 if !self.refill_prefetch(block_ms).await? {
+                    self.drain_stats.claim_none.fetch_add(1, Ordering::Relaxed);
+                    self.drain_stats.maybe_log(
+                        &self.stream_name,
+                        &self.consumer_name,
+                        self.read_batch_size,
+                    );
                     return Ok(None);
                 }
                 let mut buf = self.prefetched.lock().await;
+                self.drain_stats.observe_prefetch_depth(buf.len());
                 match buf.pop_front() {
                     Some(m) => m,
-                    None => return Ok(None),
+                    None => {
+                        self.drain_stats.claim_none.fetch_add(1, Ordering::Relaxed);
+                        self.drain_stats.maybe_log(
+                            &self.stream_name,
+                            &self.consumer_name,
+                            self.read_batch_size,
+                        );
+                        return Ok(None);
+                    }
                 }
             }
         };
@@ -1883,7 +2099,13 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // Mark this message as in-flight so any concurrent refill that
         // re-reads our PEL while we're still processing won't see it as fresh
         // work and re-buffer it for a sibling worker.
-        self.in_flight.lock().await.insert(msg_id.clone());
+        let mut in_flight = self.in_flight.lock().await;
+        in_flight.insert(msg_id.clone());
+        self.drain_stats.observe_in_flight_depth(in_flight.len());
+        drop(in_flight);
+        self.drain_stats.claims.fetch_add(1, Ordering::Relaxed);
+        self.drain_stats
+            .maybe_log(&self.stream_name, &self.consumer_name, self.read_batch_size);
 
         Ok(Some(RedisQueueLease {
             queue: self.clone_for_lease(),
@@ -2492,6 +2714,45 @@ mod tests {
             .unwrap();
         assert!(res.is_none());
 
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_in_flight_pending_does_not_starve_fresh_claims() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_inflight_pending_fresh_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_read_batch_size(1);
+
+        queue.enqueue(1).await.unwrap();
+        let first_lease = queue
+            .claim_now()
+            .await
+            .unwrap()
+            .expect("first message should be claimed");
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            1,
+            "first lease should be pending while it remains in-flight"
+        );
+
+        queue.enqueue(2).await.unwrap();
+        let second_lease = queue
+            .claim_now()
+            .await
+            .unwrap()
+            .expect("fresh message should be claimed despite in-flight pending entry");
+        let got = second_lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got, Some(2));
+
+        drop(first_lease);
         cleanup(&client, &queue_name).await;
     }
 

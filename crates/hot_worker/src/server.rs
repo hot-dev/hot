@@ -30,6 +30,7 @@ enum ClaimedWorkerQueue {
 
 const WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 const LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 5;
+const WORKER_HANDOFF_WAIT_LOG_MS: u64 = 100;
 
 fn worker_queue_claimer_count(include_notifications: bool) -> usize {
     if include_notifications { 4 } else { 2 }
@@ -37,6 +38,10 @@ fn worker_queue_claimer_count(include_notifications: bool) -> usize {
 
 fn worker_handoff_capacity(worker_count: usize) -> usize {
     worker_count.max(1)
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn worker_shutdown_drain_timeout(is_local_dev: bool) -> tokio::time::Duration {
@@ -121,6 +126,7 @@ fn spawn_worker_queue_claimer(
     claimed_tx: mpsc::Sender<ClaimedWorkerQueue>,
     mut shutdown_rx: watch::Receiver<bool>,
     wrap: fn(ProcessingQueueLease<Message>) -> ClaimedWorkerQueue,
+    queue_metrics_enabled: bool,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
         info!("hot.dev: WORKER {} claimer started", queue_name);
@@ -177,6 +183,7 @@ fn spawn_worker_queue_claimer(
                 }
             };
 
+            let handoff_started = std::time::Instant::now();
             tokio::select! {
                 biased;
 
@@ -191,6 +198,16 @@ fn spawn_worker_queue_claimer(
                     continue;
                 }
                 send_result = claimed_tx.send(wrap(lease)) => {
+                    let handoff_wait_ms = duration_ms(handoff_started.elapsed());
+                    if queue_metrics_enabled && handoff_wait_ms >= WORKER_HANDOFF_WAIT_LOG_MS {
+                        tracing::info!(
+                            target: "hot::queue::handoff",
+                            queue = queue_name,
+                            handoff_wait_ms = handoff_wait_ms,
+                            threshold_ms = WORKER_HANDOFF_WAIT_LOG_MS,
+                            "worker queue claimer handoff waited"
+                        );
+                    }
                     if send_result.is_err() {
                         debug!(
                             "hot.dev: WORKER {} claimer stopping because executors are gone",
@@ -4582,6 +4599,7 @@ pub async fn run_with_components_shared_context(
         request_claimed_tx.clone(),
         shutdown_rx.clone(),
         ClaimedWorkerQueue::Request,
+        queue_metrics_enabled,
     ));
     worker_handles.push(spawn_worker_queue_claimer(
         "hot:event",
@@ -4591,6 +4609,7 @@ pub async fn run_with_components_shared_context(
         event_claimed_tx.clone(),
         shutdown_rx.clone(),
         ClaimedWorkerQueue::Event,
+        queue_metrics_enabled,
     ));
     if db.is_some() {
         worker_handles.push(spawn_worker_queue_claimer(
@@ -4601,6 +4620,7 @@ pub async fn run_with_components_shared_context(
             notification_claimed_tx.clone(),
             shutdown_rx.clone(),
             ClaimedWorkerQueue::Alert,
+            queue_metrics_enabled,
         ));
         worker_handles.push(spawn_worker_queue_claimer(
             "hot:email",
@@ -4610,6 +4630,7 @@ pub async fn run_with_components_shared_context(
             notification_claimed_tx.clone(),
             shutdown_rx.clone(),
             ClaimedWorkerQueue::Email,
+            queue_metrics_enabled,
         ));
     }
     drop(request_claimed_tx);
@@ -6141,6 +6162,7 @@ mod tests {
             claimed_tx,
             shutdown_rx,
             ClaimedWorkerQueue::Request,
+            false,
         );
 
         let claimed = tokio::time::timeout(tokio::time::Duration::from_secs(1), claimed_rx.recv())
@@ -6188,6 +6210,7 @@ mod tests {
             claimed_tx,
             shutdown_rx,
             ClaimedWorkerQueue::Request,
+            false,
         );
 
         // With a channel capacity of 1 and no executor draining, the claimer
