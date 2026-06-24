@@ -410,14 +410,14 @@ pub async fn deploy_build(
     if build.is_bundle() {
         // Enqueue deployment message so a worker prepares the bundle and performs
         // final activation after manifest/runtime data has loaded.
-        hot::lang::event::enqueue_deployment_message(&_conf, build_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::internal_error(&e)),
-                )
-            })?;
+        if let Err(e) = hot::lang::event::enqueue_deployment_message(&_conf, build_id).await {
+            let runtime_error = format!("Failed to enqueue deployment message: {e}");
+            let _ = Build::mark_runtime_failed(&db, &build_id, &runtime_error).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e)),
+            ));
+        }
 
         tracing::info!(
             "Bundle build {} accepted and queued for worker activation",

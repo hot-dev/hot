@@ -563,6 +563,15 @@ impl Build {
                 .await?;
 
                 sqlx::query(
+                    "UPDATE build SET runtime_status = 'superseded', runtime_error = 'superseded by newer deployment', updated_at = NOW(), updated_by_user_id = $3 WHERE project_id = $1 AND build_id != $2 AND runtime_status IN ('pending', 'loading')"
+                )
+                .bind(build.project_id)
+                .bind(build_id)
+                .bind(requested_by_user_id)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
                     "UPDATE build SET deployed = false, runtime_status = 'pending', runtime_ready_at = NULL, runtime_error = NULL, deployment_sequence = $2, updated_at = NOW(), updated_by_user_id = $3 WHERE build_id = $1"
                 )
                 .bind(build_id)
@@ -588,6 +597,15 @@ impl Build {
                 )
                 .bind(build.project_id)
                 .fetch_one(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE build SET runtime_status = 'superseded', runtime_error = 'superseded by newer deployment', updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ? AND build_id != ? AND runtime_status IN ('pending', 'loading')"
+                )
+                .bind(requested_by_user_id)
+                .bind(build.project_id)
+                .bind(build_id)
+                .execute(&mut *tx)
                 .await?;
 
                 sqlx::query(
@@ -876,14 +894,40 @@ impl Build {
         build_id: &Uuid,
         runtime_error: &str,
     ) -> Result<(), BuildError> {
+        let sanitized_error = Self::sanitize_runtime_error(runtime_error);
         Self::mark_runtime_status(
             db,
             build_id,
             Self::RUNTIME_STATUS_FAILED,
-            Some(runtime_error),
+            Some(&sanitized_error),
             false,
         )
         .await
+    }
+
+    fn sanitize_runtime_error(runtime_error: &str) -> String {
+        let lower = runtime_error.to_ascii_lowercase();
+        let classified = if lower.contains("failed to create build storage") {
+            Some("Build storage could not be initialized")
+        } else if lower.contains("failed to retrieve build") {
+            Some("Build artifact could not be retrieved from storage")
+        } else if lower.contains("failed to extract build") {
+            Some("Build artifact could not be extracted")
+        } else if lower.contains("failed to load handlers and schedules") {
+            Some("Build manifest data could not be loaded")
+        } else if lower.contains("failed to activate build") {
+            Some("Build could not be activated")
+        } else {
+            None
+        };
+
+        classified.map(ToString::to_string).unwrap_or_else(|| {
+            runtime_error
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(512)
+                .collect()
+        })
     }
 
     pub async fn mark_runtime_superseded(
@@ -1301,6 +1345,13 @@ mod tests {
             .await
             .unwrap();
 
+        let stale_build = Build::get_build(&db, &stale_build_id).await.unwrap();
+        assert_eq!(stale_build.runtime_status, Build::RUNTIME_STATUS_SUPERSEDED);
+        assert_eq!(
+            stale_build.runtime_error.as_deref(),
+            Some("superseded by newer deployment")
+        );
+
         let activated_stale = Build::activate_prepared_build(&db, &stale_build_id, &user_id)
             .await
             .unwrap();
@@ -1343,6 +1394,19 @@ mod tests {
         let build = Build::get_build(&db, &build_id).await.unwrap();
         assert_eq!(build.runtime_status, Build::RUNTIME_STATUS_FAILED);
         assert_eq!(build.runtime_error.as_deref(), Some("classified failure"));
+
+        Build::mark_runtime_failed(
+            &db,
+            &build_id,
+            "Failed to retrieve build 123 from storage: /private/tmp/secret-token",
+        )
+        .await
+        .unwrap();
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        assert_eq!(
+            build.runtime_error.as_deref(),
+            Some("Build artifact could not be retrieved from storage")
+        );
 
         Build::mark_runtime_superseded(&db, &build_id, "superseded")
             .await

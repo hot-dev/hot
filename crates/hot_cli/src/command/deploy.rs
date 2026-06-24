@@ -988,8 +988,10 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
         // Enqueue a DeploymentMessage so the worker prepares the bundle, loads
         // manifest runtime data, and performs final activation atomically.
         if let Err(e) = hot::lang::event::enqueue_deployment_message(conf, build_uuid).await {
+            let runtime_error = format!("Failed to enqueue deployment message: {e}");
+            let _ = hot::db::Build::mark_runtime_failed(&db, &build_uuid, &runtime_error).await;
             eprintln!(
-                "  Warning: bundle deployment requested but failed to enqueue worker message: {}",
+                "  Warning: bundle deployment marked failed because worker message enqueue failed: {}",
                 e
             );
         }

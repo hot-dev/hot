@@ -63,8 +63,6 @@ fn worker_infrastructure_retry_error(message: impl Into<String>, backoff_ms: u64
     ))
 }
 
-const DEPLOYMENT_READINESS_RETRY_WINDOW_SECONDS: i64 = 30;
-
 fn validate_worker_semantics_conf(conf: &Val) -> Result<(), WorkerError> {
     let event_ordering = conf.get_str_or_default("worker.event-ordering", "current");
     if event_ordering != "current" {
@@ -1001,20 +999,21 @@ async fn should_defer_missing_event_handlers(
             worker_infrastructure_retry_error(err_msg, infra_retry_backoff_ms)
         })?;
 
-    let cutoff =
-        chrono::Utc::now() - chrono::Duration::seconds(DEPLOYMENT_READINESS_RETRY_WINDOW_SECONDS);
-    let recent_deployed_build = builds
-        .iter()
-        .any(|build| build.deployed && (build.updated_at >= cutoff || build.created_at >= cutoff));
+    let deployment_in_progress = builds.iter().any(|build| {
+        build.is_bundle()
+            && build.deployment_sequence > 0
+            && (build.runtime_status == Build::RUNTIME_STATUS_PENDING
+                || build.runtime_status == Build::RUNTIME_STATUS_LOADING)
+    });
 
-    if recent_deployed_build {
+    if deployment_in_progress {
         debug!(
-            "hot.dev: WORKER {} deferring event '{}' while recent deployment readiness settles",
+            "hot.dev: WORKER {} deferring event '{}' while bundle deployment preparation is in progress",
             worker_id, event_type
         );
     }
 
-    Ok(recent_deployed_build)
+    Ok(deployment_in_progress)
 }
 
 async fn process_alert_delivery_message(
@@ -5166,9 +5165,12 @@ pub async fn run_with_components_shared_context(
                                                                     }
                                                                 };
 
-                                                                // Skip if build is no longer deployed (deactivated while event was in queue)
-                                                                if !handler_build.deployed {
-                                                                    warn!("hot.dev: WORKER {} skipping handler {}/{} - build {} is no longer deployed",
+                                                                // Skip if build is no longer runtime-visible (deactivated or superseded while event was in queue).
+                                                                if !handler_build.deployed
+                                                                    || handler_build.runtime_status
+                                                                        != Build::RUNTIME_STATUS_READY
+                                                                {
+                                                                    warn!("hot.dev: WORKER {} skipping handler {}/{} - build {} is not deployed and ready",
                                                                         worker_id, event_handler.ns, event_handler.var, handler_build.build_id);
                                                                     continue;
                                                                 }

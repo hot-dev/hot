@@ -466,8 +466,10 @@ pub async fn projects_deploy_build_handler(
         }
 
         if let Err(e) = hot::lang::event::enqueue_deployment_message(&conf, build_id).await {
+            let runtime_error = format!("Failed to enqueue deployment message: {e}");
+            let _ = Build::mark_runtime_failed(&db, &build_id, &runtime_error).await;
             tracing::error!(
-                "UI deploy of build {} requested in DB but failed to enqueue deployment message: {}",
+                "UI deploy of build {} marked failed after enqueue deployment message failed: {}",
                 build_id,
                 e
             );

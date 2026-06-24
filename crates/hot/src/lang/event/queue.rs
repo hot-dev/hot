@@ -191,7 +191,12 @@ pub async fn enqueue_redeploy_for_project_reactivation(
                 )
             })?;
 
-        enqueue_deployment_message(conf, build.build_id).await?;
+        if let Err(e) = enqueue_deployment_message(conf, build.build_id).await {
+            let runtime_error = format!("Failed to enqueue deployment message: {e}");
+            let _ =
+                crate::db::Build::mark_runtime_failed(db, &build.build_id, &runtime_error).await;
+            return Err(e);
+        }
     } else {
         crate::db::Build::activate_build_directly(db, &build.build_id, deploying_user_id)
             .await
