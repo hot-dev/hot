@@ -310,7 +310,10 @@ deploy_bundle_locally() {
         run_with_backend_env "$backend" "${deploy_cmd[@]}"
     ) > "$log_file" 2>&1
 
-    sed -n 's/^✓ Successfully deployed build: //p' "$log_file" | sed -n '1p' > "$build_id_file"
+    sed -n \
+        -e 's/^✓ Successfully deployed build: //p' \
+        -e 's/^✓ Accepted bundle deployment: //p' \
+        "$log_file" | sed -n '1p' > "$build_id_file"
     if [[ ! -s "$build_id_file" ]]; then
         echo "Could not determine deployed bundle build id; see $log_file" >&2
         return 1
