@@ -516,27 +516,30 @@ impl Engine {
         embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
         external_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<crate::val::Val, String> {
+        let timing_id = execution_context
+            .as_ref()
+            .map(|ctx| ctx.run_id.as_simple().to_string())
+            .unwrap_or_else(|| function_name.to_string());
+        let total_started = std::time::Instant::now();
         tracing::debug!(
             "Calling function '{}' directly with {} args (skipping parsing entirely!)",
             function_name,
             args.len()
         );
 
-        // Use cached registries and program directly (no extension needed)
-        let function_mapping = Arc::new(cached.function_mapping.clone());
-        let core_functions = Arc::new(cached.core_functions.clone());
-        let type_implementations = Arc::new(cached.type_implementations.clone());
-        let program = Arc::new(cached.program.clone());
+        let cached_artifacts_started = std::time::Instant::now();
+        // Use runtime-ready shared artifacts directly (no extension needed).
+        let function_mapping = Arc::clone(&cached.runtime_function_mapping);
+        let core_functions = Arc::clone(&cached.runtime_core_functions);
+        let type_implementations = Arc::clone(&cached.runtime_type_implementations);
+        let program = Arc::clone(&cached.runtime_program);
         let instruction_count = program.entry_point.len();
-
-        // Use the pre-built HotAst from cache
-        let hot_ast = Arc::new(cached.hot_ast.clone());
-
-        // Extract core variables from the cached AST (critical for resolving types like Null, Vec, etc.)
-        let core_variables = Arc::new(
-            crate::lang::compiler::core_registry::extract_core_variables_from_ast(
-                &cached.ast_program,
-            ),
+        let hot_ast = Arc::clone(&cached.runtime_hot_ast);
+        let core_variables = Arc::clone(&cached.runtime_core_variables);
+        tracing::debug!(
+            "TIMING [{}]: vm_cached_artifacts_setup: {:?}",
+            timing_id,
+            cached_artifacts_started.elapsed()
         );
 
         tracing::debug!(
@@ -547,6 +550,7 @@ impl Engine {
         );
 
         // Create VM with the cached program
+        let vm_create_started = std::time::Instant::now();
         let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
             program,
             Some(hot_ast),
@@ -559,7 +563,13 @@ impl Engine {
         if let Some(token) = external_cancel {
             vm.set_external_cancel(token);
         }
+        tracing::debug!(
+            "TIMING [{}]: vm_create: {:?}",
+            timing_id,
+            vm_create_started.elapsed()
+        );
 
+        let vm_services_started = std::time::Instant::now();
         // Set context storage, database, event publisher, and stream publisher BEFORE initialization
         // (these don't trigger run recording)
         if let Some(context_storage) = context_storage {
@@ -567,14 +577,12 @@ impl Engine {
         }
 
         // Extract ctx requirements via call graph and apply defaults + secret keys
-        let ctx_requirements =
-            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                &cached.ast_program,
-            );
-        for (key, default_val) in ctx_requirements.all_defaults() {
-            vm.context_storage.entry(key).or_insert(default_val);
+        for (key, default_val) in cached.runtime_ctx_defaults.iter() {
+            vm.context_storage
+                .entry(key.clone())
+                .or_insert_with(|| default_val.clone());
         }
-        vm.secret_keys = ctx_requirements.all_secret_keys();
+        vm.secret_keys = cached.runtime_secret_keys.as_ref().clone();
         vm.sync_secret_keys_to_execution_context();
 
         if let Some(db_pool) = database_pool {
@@ -598,6 +606,11 @@ impl Engine {
         if let Some(ep) = embedding_provider {
             vm.set_embedding_provider(ep);
         }
+        tracing::debug!(
+            "TIMING [{}]: vm_services_setup: {:?}",
+            timing_id,
+            vm_services_started.elapsed()
+        );
 
         // Install tool/skill spec registries from the cached bytecode
         // BEFORE module-init runs. Module-level statements like
@@ -607,8 +620,14 @@ impl Engine {
         // hits in fresh worker processes (and zip-build deployments)
         // would error out with
         // `no schema registered for '...'`.
+        let registry_started = std::time::Instant::now();
         crate::lang::hot::internal_mcp::set_registry(cached.tool_specs.clone());
         crate::lang::hot::internal_skill::set_registry(cached.skill_specs.clone());
+        tracing::debug!(
+            "TIMING [{}]: vm_registry_install: {:?}",
+            timing_id,
+            registry_started.elapsed()
+        );
 
         // Initialize global state WITHOUT emitter (don't record initialization as a run)
         if instruction_count > 0 {
@@ -616,8 +635,14 @@ impl Engine {
                 "Initializing program state ({} instructions) without run recording",
                 instruction_count
             );
+            let module_init_started = std::time::Instant::now();
             vm.execute()
                 .map_err(|e| format!("Failed to initialize program: {}", e))?;
+            tracing::debug!(
+                "TIMING [{}]: vm_module_init_execute: {:?}",
+                timing_id,
+                module_init_started.elapsed()
+            );
         }
 
         // NOW set up emitter and execution context for the function call
@@ -625,6 +650,7 @@ impl Engine {
         let emitter_for_run = emitter.clone();
         let execution_context_for_run = execution_context.clone();
 
+        let run_context_started = std::time::Instant::now();
         if let Some(ref em) = emitter {
             vm.set_emitter(Arc::clone(em));
         }
@@ -635,6 +661,11 @@ impl Engine {
         // Sync secret keys to execution context NOW that it's been set
         // (the earlier sync_secret_keys_to_execution_context call happened before ctx was set)
         vm.sync_secret_keys_to_execution_context();
+        tracing::debug!(
+            "TIMING [{}]: vm_run_context_setup: {:?}",
+            timing_id,
+            run_context_started.elapsed()
+        );
 
         // Call the function directly - this is the actual "run" we want to record
         tracing::debug!(
@@ -650,13 +681,26 @@ impl Engine {
                 "Engine: Emitting run:start for direct function call run_id={}",
                 execution_context.run_id
             );
+            let run_start_emit_started = std::time::Instant::now();
             let start_event = crate::lang::emitter::EngineEvent::run_start(execution_context);
             emitter.emit(start_event);
+            tracing::debug!(
+                "TIMING [{}]: vm_run_start_emit: {:?}",
+                timing_id,
+                run_start_emit_started.elapsed()
+            );
         }
 
+        let function_call_started = std::time::Instant::now();
         let result = vm.call_function_bypassing_unified_lookup(function_name, args);
+        tracing::debug!(
+            "TIMING [{}]: vm_function_call: {:?}",
+            timing_id,
+            function_call_started.elapsed()
+        );
 
         // Emit run:stop, run:fail, or run:cancel manually based on result and VM state
+        let terminal_emit_started = std::time::Instant::now();
         match &result {
             Ok(result_val) => {
                 if vm.has_failed() {
@@ -803,11 +847,27 @@ impl Engine {
                 }
             }
         }
+        tracing::debug!(
+            "TIMING [{}]: vm_terminal_emit: {:?}",
+            timing_id,
+            terminal_emit_started.elapsed()
+        );
 
+        let final_result_started = std::time::Instant::now();
         let final_result =
             result.map_err(|e| format!("Failed to call function '{}': {}", function_name, e))?;
+        tracing::debug!(
+            "TIMING [{}]: vm_final_result: {:?}",
+            timing_id,
+            final_result_started.elapsed()
+        );
 
         tracing::debug!("Direct function call completed successfully (no parsing overhead!)");
+        tracing::debug!(
+            "TIMING [{}]: call_function_with_cached_bytecode_internal_total: {:?}",
+            timing_id,
+            total_started.elapsed()
+        );
         Ok(final_result)
     }
 
@@ -836,17 +896,13 @@ impl Engine {
         task_id: Option<uuid::Uuid>,
     ) -> Result<crate::val::Val, String> {
         // Build VM identically to the base method
-        let function_mapping = Arc::new(cached.function_mapping.clone());
-        let core_functions = Arc::new(cached.core_functions.clone());
-        let type_implementations = Arc::new(cached.type_implementations.clone());
-        let program = Arc::new(cached.program.clone());
+        let function_mapping = Arc::clone(&cached.runtime_function_mapping);
+        let core_functions = Arc::clone(&cached.runtime_core_functions);
+        let type_implementations = Arc::clone(&cached.runtime_type_implementations);
+        let program = Arc::clone(&cached.runtime_program);
         let instruction_count = program.entry_point.len();
-        let hot_ast = Arc::new(cached.hot_ast.clone());
-        let core_variables = Arc::new(
-            crate::lang::compiler::core_registry::extract_core_variables_from_ast(
-                &cached.ast_program,
-            ),
-        );
+        let hot_ast = Arc::clone(&cached.runtime_hot_ast);
+        let core_variables = Arc::clone(&cached.runtime_core_variables);
 
         let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
             program,
@@ -862,14 +918,12 @@ impl Engine {
             vm.context_storage = context_storage;
         }
 
-        let ctx_requirements =
-            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                &cached.ast_program,
-            );
-        for (key, default_val) in ctx_requirements.all_defaults() {
-            vm.context_storage.entry(key).or_insert(default_val);
+        for (key, default_val) in cached.runtime_ctx_defaults.iter() {
+            vm.context_storage
+                .entry(key.clone())
+                .or_insert_with(|| default_val.clone());
         }
-        vm.secret_keys = ctx_requirements.all_secret_keys();
+        vm.secret_keys = cached.runtime_secret_keys.as_ref().clone();
         vm.sync_secret_keys_to_execution_context();
 
         if let Some(db_pool) = database_pool {
@@ -1231,16 +1285,18 @@ impl Engine {
         let tool_specs = spec_compiler.build_tool_specs(&artifacts.ast_program);
         let skill_specs = spec_compiler.build_skill_specs(&artifacts.ast_program);
 
-        Arc::new(crate::lang::cache::bytecode_cache::CachedBytecode {
-            program: artifacts.program,
+        Arc::new(crate::lang::cache::bytecode_cache::CachedBytecode::new(
             metadata,
-            function_mapping: artifacts.function_mapping,
-            core_functions: artifacts.core_functions,
-            type_implementations: artifacts.type_implementations,
-            ast_program: artifacts.ast_program,
-            hot_ast: artifacts.hot_ast,
-            tool_specs,
-            skill_specs,
-        })
+            crate::lang::cache::bytecode_cache::CachedBytecodeArtifacts {
+                program: artifacts.program,
+                function_mapping: artifacts.function_mapping,
+                core_functions: artifacts.core_functions,
+                type_implementations: artifacts.type_implementations,
+                ast_program: artifacts.ast_program,
+                hot_ast: artifacts.hot_ast,
+                tool_specs,
+                skill_specs,
+            },
+        ))
     }
 }

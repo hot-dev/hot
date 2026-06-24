@@ -5,7 +5,8 @@
 
 use crate::hasher::{CacheKeyBuilder, CacheType, HotHasher};
 use crate::lang::bytecode::BytecodeProgram;
-use ahash::AHashMap;
+use crate::lang::compiler::core_registry::CoreVariableRegistry;
+use ahash::{AHashMap, AHashSet};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,79 @@ pub struct CachedBytecode {
     /// annotations. Installed into the global skill-spec registry
     /// whenever this cached bytecode is loaded for execution.
     pub skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry,
+    /// Shared runtime program for VM creation without cloning bytecode.
+    pub runtime_program: Arc<BytecodeProgram>,
+    /// Shared function name to ID mapping for VM creation.
+    pub runtime_function_mapping: Arc<indexmap::IndexMap<String, u32>>,
+    /// Shared core functions registry for VM creation.
+    pub runtime_core_functions: Arc<indexmap::IndexMap<String, u32>>,
+    /// Shared type implementations mapping for VM creation.
+    pub runtime_type_implementations: Arc<indexmap::IndexMap<(String, String), String>>,
+    /// Shared pre-built HotAst for VM creation.
+    pub runtime_hot_ast: Arc<crate::lang::ast::HotAst>,
+    /// Shared core variable registry extracted once from the cached AST.
+    pub runtime_core_variables: Arc<CoreVariableRegistry>,
+    /// Context default values extracted once from the cached AST call graph.
+    pub runtime_ctx_defaults: Arc<AHashMap<String, crate::val::Val>>,
+    /// Secret context keys extracted once from the cached AST call graph.
+    pub runtime_secret_keys: Arc<AHashSet<String>>,
+}
+
+pub struct CachedBytecodeArtifacts {
+    pub program: BytecodeProgram,
+    pub function_mapping: indexmap::IndexMap<String, u32>,
+    pub core_functions: indexmap::IndexMap<String, u32>,
+    pub type_implementations: indexmap::IndexMap<(String, String), String>,
+    pub ast_program: crate::lang::ast::Program,
+    pub hot_ast: crate::lang::ast::HotAst,
+    pub tool_specs: crate::lang::hot::internal_mcp::ToolSchemaRegistry,
+    pub skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry,
+}
+
+impl CachedBytecode {
+    /// Build cached bytecode plus runtime-ready shared artifacts.
+    pub fn new(metadata: CacheMetadata, artifacts: CachedBytecodeArtifacts) -> Self {
+        let CachedBytecodeArtifacts {
+            program,
+            function_mapping,
+            core_functions,
+            type_implementations,
+            ast_program,
+            hot_ast,
+            tool_specs,
+            skill_specs,
+        } = artifacts;
+
+        let runtime_core_variables = Arc::new(
+            crate::lang::compiler::core_registry::extract_core_variables_from_ast(&ast_program),
+        );
+        let ctx_requirements =
+            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
+                &ast_program,
+            );
+        let runtime_ctx_defaults = Arc::new(ctx_requirements.all_defaults());
+        let runtime_secret_keys = Arc::new(ctx_requirements.all_secret_keys());
+
+        Self {
+            runtime_program: Arc::new(program.clone()),
+            runtime_function_mapping: Arc::new(function_mapping.clone()),
+            runtime_core_functions: Arc::new(core_functions.clone()),
+            runtime_type_implementations: Arc::new(type_implementations.clone()),
+            runtime_hot_ast: Arc::new(hot_ast.clone()),
+            runtime_core_variables,
+            runtime_ctx_defaults,
+            runtime_secret_keys,
+            program,
+            metadata,
+            function_mapping,
+            core_functions,
+            type_implementations,
+            ast_program,
+            hot_ast,
+            tool_specs,
+            skill_specs,
+        }
+    }
 }
 
 /// In-memory cache entry with access tracking for LRU
@@ -375,17 +449,19 @@ impl BytecodeCache {
             .map_err(|e| format!("Failed to deserialize skill_specs: {}", e))?
             .unwrap_or_default();
 
-        let cached_bytecode = Arc::new(CachedBytecode {
-            program,
+        let cached_bytecode = Arc::new(CachedBytecode::new(
             metadata,
-            function_mapping,
-            core_functions,
-            type_implementations,
-            ast_program,
-            hot_ast,
-            tool_specs,
-            skill_specs,
-        });
+            CachedBytecodeArtifacts {
+                program,
+                function_mapping,
+                core_functions,
+                type_implementations,
+                ast_program,
+                hot_ast,
+                tool_specs,
+                skill_specs,
+            },
+        ));
 
         // Store in memory cache for next time
         self.store_in_memory(cache_key, Arc::clone(&cached_bytecode));
@@ -528,17 +604,19 @@ impl BytecodeCache {
         );
 
         // Also store in memory cache
-        let cached_bytecode = Arc::new(CachedBytecode {
-            program: program.clone(),
+        let cached_bytecode = Arc::new(CachedBytecode::new(
             metadata,
-            function_mapping: function_mapping.clone(),
-            core_functions: core_functions.clone(),
-            type_implementations: type_implementations.clone(),
-            ast_program: ast_program.clone(),
-            hot_ast: hot_ast.clone(),
-            tool_specs: tool_specs.clone(),
-            skill_specs: skill_specs.clone(),
-        });
+            CachedBytecodeArtifacts {
+                program: program.clone(),
+                function_mapping: function_mapping.clone(),
+                core_functions: core_functions.clone(),
+                type_implementations: type_implementations.clone(),
+                ast_program: ast_program.clone(),
+                hot_ast: hot_ast.clone(),
+                tool_specs: tool_specs.clone(),
+                skill_specs: skill_specs.clone(),
+            },
+        ));
         self.store_in_memory(cache_key, cached_bytecode);
 
         Ok(())

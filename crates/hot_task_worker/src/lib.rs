@@ -283,16 +283,19 @@ fn validate_task_orphan_idle_ms(
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_task_fairness_conf(&config.worker_conf)?;
-    hot::queue::set_metrics_enabled(
-        config
-            .worker_conf
-            .get_bool_or_default("queue.metrics-enabled", true),
-    );
-    hot::queue::set_wait_target_p99_ms(
-        config
-            .worker_conf
-            .get_int_or_default("queue.wait-target-p99-ms", 1_000)
-            .max(1) as u64,
+    let queue_metrics_enabled = config
+        .worker_conf
+        .get_bool_or_default("queue.metrics-enabled", true);
+    let queue_wait_target_p99_ms = config
+        .worker_conf
+        .get_int_or_default("queue.wait-target-p99-ms", 1_000)
+        .max(1) as u64;
+    hot::queue::set_metrics_enabled(queue_metrics_enabled);
+    hot::queue::set_wait_target_p99_ms(queue_wait_target_p99_ms);
+    tracing::info!(
+        "hot_task_worker queue metrics configured (metrics_enabled={}, wait_target_p99_ms={})",
+        queue_metrics_enabled,
+        queue_wait_target_p99_ms,
     );
 
     let requested_code_max = config.code_max_concurrent.max(1);

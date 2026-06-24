@@ -35,6 +35,29 @@ const POSTGRES_BATCH_SIZE: usize = 100;
 /// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id)
 type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16, i16);
 
+#[derive(Clone, Copy, Debug)]
+enum DatabaseWriterFlushTrigger {
+    AutoRunWrite,
+    BatchSize,
+    ChannelEmpty,
+    ExplicitFlush,
+    ChannelClosed,
+    Shutdown,
+}
+
+impl DatabaseWriterFlushTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            DatabaseWriterFlushTrigger::AutoRunWrite => "auto_run_write",
+            DatabaseWriterFlushTrigger::BatchSize => "batch_size",
+            DatabaseWriterFlushTrigger::ChannelEmpty => "channel_empty",
+            DatabaseWriterFlushTrigger::ExplicitFlush => "explicit_flush",
+            DatabaseWriterFlushTrigger::ChannelClosed => "channel_closed",
+            DatabaseWriterFlushTrigger::Shutdown => "shutdown",
+        }
+    }
+}
+
 /// All possible database write operations
 #[derive(Debug, Clone)]
 pub enum DatabaseWrite {
@@ -169,15 +192,29 @@ impl DatabaseWriter {
                                         || write_receiver.is_empty();
 
                                     if should_flush {
+                                        let trigger = if has_run_write {
+                                            DatabaseWriterFlushTrigger::AutoRunWrite
+                                        } else if pending_writes.len() >= POSTGRES_BATCH_SIZE {
+                                            DatabaseWriterFlushTrigger::BatchSize
+                                        } else {
+                                            DatabaseWriterFlushTrigger::ChannelEmpty
+                                        };
                                         tracing::debug!(
                                             shard_idx,
                                             pending = pending_writes.len(),
                                             has_run_write,
                                             batch_size = pending_writes.len() >= POSTGRES_BATCH_SIZE,
                                             channel_empty = write_receiver.is_empty(),
+                                            trigger = trigger.as_str(),
                                             "DatabaseWriter shard flushing writes"
                                         );
-                                        Self::process_batch(&db, &mut pending_writes).await;
+                                        Self::process_batch(
+                                            &db,
+                                            &mut pending_writes,
+                                            shard_idx,
+                                            trigger,
+                                        )
+                                        .await;
                                     }
                                 }
                                 None => {
@@ -187,7 +224,13 @@ impl DatabaseWriter {
                                         "DatabaseWriter shard write channel closed"
                                     );
                                     if !pending_writes.is_empty() {
-                                        Self::process_batch(&db, &mut pending_writes).await;
+                                        Self::process_batch(
+                                            &db,
+                                            &mut pending_writes,
+                                            shard_idx,
+                                            DatabaseWriterFlushTrigger::ChannelClosed,
+                                        )
+                                        .await;
                                     }
                                     if let Some(sender) = shutdown_receiver.recv().await {
                                         let _ = sender.send(());
@@ -209,7 +252,13 @@ impl DatabaseWriter {
                                         pending = pending_writes.len(),
                                         "DatabaseWriter shard flushing pending writes on explicit request"
                                     );
-                                    Self::process_batch(&db, &mut pending_writes).await;
+                                    Self::process_batch(
+                                        &db,
+                                        &mut pending_writes,
+                                        shard_idx,
+                                        DatabaseWriterFlushTrigger::ExplicitFlush,
+                                    )
+                                    .await;
                                 }
 
                                 let _ = ack_sender.send(());
@@ -228,7 +277,13 @@ impl DatabaseWriter {
                                         pending = pending_writes.len(),
                                         "DatabaseWriter shard flushing pending writes before shutdown"
                                     );
-                                    Self::process_batch(&db, &mut pending_writes).await;
+                                    Self::process_batch(
+                                        &db,
+                                        &mut pending_writes,
+                                        shard_idx,
+                                        DatabaseWriterFlushTrigger::Shutdown,
+                                    )
+                                    .await;
                                 }
 
                                 let _ = sender.send(());
@@ -355,11 +410,15 @@ impl DatabaseWriter {
     async fn process_batch(
         db: &Arc<RwLock<Option<DatabasePool>>>,
         writes: &mut Vec<DatabaseWrite>,
+        shard_idx: usize,
+        trigger: DatabaseWriterFlushTrigger,
     ) {
         if writes.is_empty() {
             return;
         }
 
+        let batch_started = std::time::Instant::now();
+        let input_writes = writes.len();
         let db_guard = db.read().await;
         let pool = match db_guard.as_ref() {
             Some(p) => p,
@@ -369,8 +428,24 @@ impl DatabaseWriter {
                     writes.len()
                 );
                 writes.clear();
+                tracing::debug!(
+                    target: "hot::db_writer::timing",
+                    shard_idx,
+                    trigger = trigger.as_str(),
+                    backend = "none",
+                    input_writes,
+                    run_writes = 0usize,
+                    other_writes = 0usize,
+                    elapsed_ms = batch_started.elapsed().as_millis() as u64,
+                    outcome = "no_db",
+                    "TIMING: process_batch"
+                );
                 return;
             }
+        };
+        let backend = match pool {
+            DatabasePool::Sqlite(_) => "sqlite",
+            DatabasePool::Postgres(_) => "postgres",
         };
 
         // Separate critical run writes from other writes to maintain ordering
@@ -385,6 +460,8 @@ impl DatabaseWriter {
                     | DatabaseWrite::RunCancel { .. }
             )
         });
+        let run_write_count = run_writes.len();
+        let other_write_count = other_writes.len();
 
         // Process run writes first. If a short successful run has both
         // run:start and run:stop pending in this shard flush, insert it once
@@ -469,8 +546,24 @@ impl DatabaseWriter {
             }
         }
 
+        let mut other_write_errors = 0usize;
+        let mut outcome = "run_writes_only";
+
         // Then process other writes
         if other_writes.is_empty() {
+            tracing::debug!(
+                target: "hot::db_writer::timing",
+                shard_idx,
+                trigger = trigger.as_str(),
+                backend,
+                input_writes,
+                run_writes = run_write_count,
+                other_writes = other_write_count,
+                other_write_errors,
+                elapsed_ms = batch_started.elapsed().as_millis() as u64,
+                outcome,
+                "TIMING: process_batch"
+            );
             return;
         }
 
@@ -481,8 +574,14 @@ impl DatabaseWriter {
                 for write in other_writes {
                     if let Err(e) = Self::execute_write(pool, &write).await {
                         tracing::error!("DatabaseWriter: SQLite write failed: {}", e);
+                        other_write_errors += 1;
                     }
                 }
+                outcome = if other_write_errors > 0 {
+                    "best_effort_partial_failure"
+                } else {
+                    "best_effort_ok"
+                };
             }
             DatabasePool::Postgres(pg_pool) => {
                 // PostgreSQL: Use transaction for batch atomicity and performance
@@ -605,6 +704,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                                     "DatabaseWriter: Write failed in transaction: {}",
                                     e
                                 );
+                                other_write_errors += 1;
                                 failed = true;
                                 break; // Stop on first error
                             }
@@ -614,11 +714,17 @@ ON CONFLICT (call_id) DO UPDATE SET
                             // Rollback on failure
                             if let Err(e) = tx.rollback().await {
                                 tracing::error!("DatabaseWriter: Rollback failed: {}", e);
+                                outcome = "rollback_failed";
+                            } else {
+                                outcome = "rolled_back";
                             }
                         } else {
                             // Commit on success
                             if let Err(e) = tx.commit().await {
                                 tracing::error!("DatabaseWriter: Commit failed: {}", e);
+                                outcome = "commit_failed";
+                            } else {
+                                outcome = "committed";
                             }
                         }
                     }
@@ -631,12 +737,31 @@ ON CONFLICT (call_id) DO UPDATE SET
                                     "DatabaseWriter: Write failed (no transaction): {}",
                                     e
                                 );
+                                other_write_errors += 1;
                             }
                         }
+                        outcome = if other_write_errors > 0 {
+                            "fallback_partial_failure"
+                        } else {
+                            "fallback_ok"
+                        };
                     }
                 }
             }
         }
+        tracing::debug!(
+            target: "hot::db_writer::timing",
+            shard_idx,
+            trigger = trigger.as_str(),
+            backend,
+            input_writes,
+            run_writes = run_write_count,
+            other_writes = other_write_count,
+            other_write_errors,
+            elapsed_ms = batch_started.elapsed().as_millis() as u64,
+            outcome,
+            "TIMING: process_batch"
+        );
     }
 
     /// Execute a single write operation

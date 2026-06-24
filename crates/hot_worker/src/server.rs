@@ -3009,11 +3009,17 @@ async fn execute_single_event_handler(
         let external_cancel = external_cancel.clone();
 
         let panic_label = format!("worker:{}", function_name);
+        let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             let spawn_entered = std::time::Instant::now();
             debug!(
                 "TIMING [{}]: spawn_blocking entered",
                 run_id_for_timing.as_simple()
+            );
+            debug!(
+                "TIMING [{}]: spawn_blocking_queue_wait: {:?}",
+                run_id_for_timing.as_simple(),
+                spawn_entered.duration_since(spawn_scheduled)
             );
 
             // Wrap all user-code execution in run_user_code so any panic from
@@ -3034,6 +3040,7 @@ async fn execute_single_event_handler(
                         "✓ Calling function with cached bytecode for project '{}' (no parsing!)",
                         project_name
                     );
+                    let call_started = std::time::Instant::now();
                     let result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
                         &function_name,
                         std::slice::from_ref(&event_object),
@@ -3052,6 +3059,11 @@ async fn execute_single_event_handler(
                         external_cancel.clone(),
                     );
                     debug!(
+                        "TIMING [{}]: call_function_with_cached_bytecode: {:?}",
+                        run_id_for_timing.as_simple(),
+                        call_started.elapsed()
+                    );
+                    debug!(
                         "TIMING [{}]: function execution complete (total spawn_blocking: {:?})",
                         run_id_for_timing.as_simple(),
                         spawn_entered.elapsed()
@@ -3066,165 +3078,207 @@ async fn execute_single_event_handler(
 
                     // In-process lock (prevents thread races)
                     let compilation_lock = cache_for_locking.get_compilation_lock(&cache_key);
+                    let lock_wait_started = std::time::Instant::now();
                     let _compilation_guard = compilation_lock.lock();
+                    debug!(
+                        "TIMING [{}]: bytecode_lock_wait: {:?}",
+                        run_id_for_timing.as_simple(),
+                        lock_wait_started.elapsed()
+                    );
 
                     // Re-check cache after acquiring in-process lock (another thread may have just finished)
-                    if !cache_key.is_empty()
-                        && cache_for_locking.exists(&cache_key)
-                        && let Ok(cached) = cache_for_locking.load(&cache_key)
-                    {
+                    let reload_started = std::time::Instant::now();
+                    let cached_after_lock =
+                        if !cache_key.is_empty() && cache_for_locking.exists(&cache_key) {
+                            cache_for_locking.load(&cache_key).ok()
+                        } else {
+                            None
+                        };
+                    debug!(
+                        "TIMING [{}]: bytecode_reload_after_lock: {:?}",
+                        run_id_for_timing.as_simple(),
+                        reload_started.elapsed()
+                    );
+                    let cached_result = if let Some(cached) = cached_after_lock {
                         debug!(
                             "✓ Bytecode cache populated by another thread for '{}' while waiting",
                             project_name
                         );
-                        return hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                            &function_name,
-                            std::slice::from_ref(&event_object),
-                            cached,
-                            Some(&worker_conf),
-                            emitter_for_events.clone(),
-                            Some(execution_context_for_events.clone()),
-                            event_publisher.clone(),
-                            context_storage,
-                            Some(Arc::new(db.clone())),
-                            stream_publisher.clone(),
-                            Some(task_queue.clone()),
-                            file_storage.clone(),
-                            store.clone(),
-                            embedding_provider.clone(),
-                            external_cancel.clone(),
-                        );
-                    }
-
-                    // Cross-process file lock (prevents process races)
-                    let mut file_lock = cache_for_locking.acquire_file_lock(&cache_key).ok();
-                    let _file_lock_guard =
-                        file_lock.as_mut().and_then(|lock| lock.try_write().ok());
-
-                    // Re-check cache after acquiring file lock (another process may have just finished)
-                    if !cache_key.is_empty()
-                        && cache_for_locking.exists(&cache_key)
-                        && let Ok(cached) = cache_for_locking.load(&cache_key)
-                    {
-                        debug!(
-                            "✓ Bytecode cache populated by another process for '{}' while waiting",
-                            project_name
-                        );
-                        return hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                            &function_name,
-                            std::slice::from_ref(&event_object),
-                            cached,
-                            Some(&worker_conf),
-                            emitter_for_events.clone(),
-                            Some(execution_context_for_events.clone()),
-                            event_publisher.clone(),
-                            context_storage,
-                            Some(Arc::new(db.clone())),
-                            stream_publisher.clone(),
-                            Some(task_queue.clone()),
-                            file_storage.clone(),
-                            store.clone(),
-                            embedding_provider.clone(),
-                            external_cancel.clone(),
-                        );
-                    }
-
-                    debug!("Compiling project from source for '{}'", project_name);
-
-                    // Compile the project sources ONLY (no function call code to parse!)
-                    // Don't pass emitter/execution_context here - we're just compiling, not recording a run
-                    // The run will be recorded when we call the function via call_function_with_cached_bytecode
-                    //
-                    // IMPORTANT: For bundle builds, pass None for project_name to skip global dependency
-                    // resolution in the engine. Bundle builds have dependencies pre-bundled in hot/pkg/
-                    // which is already included in src_paths. Passing project_name would cause the engine
-                    // to also load dependencies from the global cache, causing double-loading or version
-                    // mismatches.
-                    let compile_project_name: Option<&str> = if is_bundle_build {
-                        None
+                        Ok(cached)
                     } else {
-                        Some(&project_name)
-                    };
-                    let compile_result = hot::lang::engine::Engine::compile_project_for_cache(
-                        &src_paths,
-                        Some(&worker_conf),
-                        compile_project_name,
-                        None, // No emitter during compilation
-                        None, // No execution_context during compilation
-                        event_publisher.clone(),
-                        context_storage.clone(),
-                        Some(Arc::new(db.clone())),
-                        stream_publisher.clone(),
-                    );
+                        // Cross-process file lock (prevents process races)
+                        let file_lock_wait_started = std::time::Instant::now();
+                        let mut file_lock = cache_for_locking.acquire_file_lock(&cache_key).ok();
+                        let _file_lock_guard =
+                            file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+                        debug!(
+                            "TIMING [{}]: bytecode_file_lock_wait: {:?}",
+                            run_id_for_timing.as_simple(),
+                            file_lock_wait_started.elapsed()
+                        );
 
-                    match compile_result {
-                        Ok((_init_result, artifacts)) => {
-                            // Save to cache before calling function
-                            // Use bundle-specific cache for bundle builds, shared cache otherwise
-                            if !cache_key.is_empty() && !file_hashes.is_empty() {
-                                let metadata =
-                                    hot::lang::cache::bytecode_cache::create_cache_metadata(
-                                        &project_name,
-                                        file_hashes.clone(),
-                                        cache_key.clone(),
-                                    );
+                        // Re-check cache after acquiring file lock (another process may have just finished)
+                        let reload_started = std::time::Instant::now();
+                        let cached_after_file_lock =
+                            if !cache_key.is_empty() && cache_for_locking.exists(&cache_key) {
+                                cache_for_locking.load(&cache_key).ok()
+                            } else {
+                                None
+                            };
+                        debug!(
+                            "TIMING [{}]: bytecode_reload_after_file_lock: {:?}",
+                            run_id_for_timing.as_simple(),
+                            reload_started.elapsed()
+                        );
+                        if let Some(cached) = cached_after_file_lock {
+                            debug!(
+                                "✓ Bytecode cache populated by another process for '{}' while waiting",
+                                project_name
+                            );
+                            Ok(cached)
+                        } else {
+                            debug!("Compiling project from source for '{}'", project_name);
 
-                                let cache_for_save =
-                                    hot::lang::cache::bytecode_cache::BytecodeCache::new(
-                                        effective_cache_dir.clone(),
-                                    );
-                                // Bake tool/skill spec registries into the on-disk
-                                // cache so that fresh worker processes (and zip
-                                // builds) can serve `::hot::internal::mcp/schema-from-fn`
-                                // without recompiling.
-                                let spec_compiler = hot::lang::compiler::Compiler::new();
-                                let tool_specs =
-                                    spec_compiler.build_tool_specs(&artifacts.ast_program);
-                                let skill_specs =
-                                    spec_compiler.build_skill_specs(&artifacts.ast_program);
-                                if let Err(e) = cache_for_save.save(
-                                    &cache_key,
-                                    &artifacts.program,
-                                    metadata,
-                                    &artifacts.function_mapping,
-                                    &artifacts.core_functions,
-                                    &artifacts.type_implementations,
-                                    &artifacts.ast_program,
-                                    &artifacts.hot_ast,
-                                    &tool_specs,
-                                    &skill_specs,
-                                ) {
-                                    tracing::warn!("Failed to save bytecode cache: {}", e);
-                                } else {
+                            // Compile the project sources ONLY (no function call code to parse!)
+                            // Don't pass emitter/execution_context here - we're just compiling, not recording a run
+                            // The run will be recorded when we call the function via call_function_with_cached_bytecode
+                            //
+                            // IMPORTANT: For bundle builds, pass None for project_name to skip global dependency
+                            // resolution in the engine. Bundle builds have dependencies pre-bundled in hot/pkg/
+                            // which is already included in src_paths. Passing project_name would cause the engine
+                            // to also load dependencies from the global cache, causing double-loading or version
+                            // mismatches.
+                            let compile_project_name: Option<&str> = if is_bundle_build {
+                                None
+                            } else {
+                                Some(&project_name)
+                            };
+                            let compile_started = std::time::Instant::now();
+                            let compile_result =
+                                hot::lang::engine::Engine::compile_project_for_cache(
+                                    &src_paths,
+                                    Some(&worker_conf),
+                                    compile_project_name,
+                                    None, // No emitter during compilation
+                                    None, // No execution_context during compilation
+                                    event_publisher.clone(),
+                                    context_storage.clone(),
+                                    Some(Arc::new(db.clone())),
+                                    stream_publisher.clone(),
+                                );
+                            debug!(
+                                "TIMING [{}]: compile_project_for_cache: {:?}",
+                                run_id_for_timing.as_simple(),
+                                compile_started.elapsed()
+                            );
+
+                            match compile_result {
+                                Ok((_init_result, artifacts)) => {
+                                    // Save to cache before calling function
+                                    // Use bundle-specific cache for bundle builds, shared cache otherwise
+                                    if !cache_key.is_empty() && !file_hashes.is_empty() {
+                                        let metadata =
+                                            hot::lang::cache::bytecode_cache::create_cache_metadata(
+                                                &project_name,
+                                                file_hashes.clone(),
+                                                cache_key.clone(),
+                                            );
+
+                                        let cache_for_save =
+                                            hot::lang::cache::bytecode_cache::BytecodeCache::new(
+                                                effective_cache_dir.clone(),
+                                            );
+                                        // Bake tool/skill spec registries into the on-disk
+                                        // cache so that fresh worker processes (and zip
+                                        // builds) can serve `::hot::internal::mcp/schema-from-fn`
+                                        // without recompiling.
+                                        let spec_compiler = hot::lang::compiler::Compiler::new();
+                                        let tool_specs =
+                                            spec_compiler.build_tool_specs(&artifacts.ast_program);
+                                        let skill_specs =
+                                            spec_compiler.build_skill_specs(&artifacts.ast_program);
+                                        let cache_save_started = std::time::Instant::now();
+                                        if let Err(e) = cache_for_save.save(
+                                            &cache_key,
+                                            &artifacts.program,
+                                            metadata,
+                                            &artifacts.function_mapping,
+                                            &artifacts.core_functions,
+                                            &artifacts.type_implementations,
+                                            &artifacts.ast_program,
+                                            &artifacts.hot_ast,
+                                            &tool_specs,
+                                            &skill_specs,
+                                        ) {
+                                            tracing::warn!("Failed to save bytecode cache: {}", e);
+                                        } else {
+                                            debug!(
+                                                "✓ Saved bytecode cache for project '{}' (key: {}) with {} functions",
+                                                project_name,
+                                                &cache_key[..12.min(cache_key.len())],
+                                                artifacts.function_mapping.len(),
+                                            );
+                                        }
+                                        debug!(
+                                            "TIMING [{}]: bytecode_cache_save: {:?}",
+                                            run_id_for_timing.as_simple(),
+                                            cache_save_started.elapsed()
+                                        );
+                                    }
+
+                                    // Convert artifacts to cached bytecode before releasing
+                                    // the compile lock; handler execution happens below.
+                                    let artifacts_convert_started = std::time::Instant::now();
+                                    let cached =
+                                        hot::lang::engine::Engine::artifacts_to_cached_bytecode(
+                                            artifacts,
+                                        );
                                     debug!(
-                                        "✓ Saved bytecode cache for project '{}' (key: {}) with {} functions",
-                                        project_name,
-                                        &cache_key[..12.min(cache_key.len())],
-                                        artifacts.function_mapping.len(),
+                                        "TIMING [{}]: artifacts_to_cached_bytecode: {:?}",
+                                        run_id_for_timing.as_simple(),
+                                        artifacts_convert_started.elapsed()
                                     );
+                                    Ok(cached)
                                 }
+                                Err(e) => Err(e),
                             }
+                        }
+                    };
 
-                            // Convert artifacts to cached bytecode and call function directly
-                            let cached =
-                                hot::lang::engine::Engine::artifacts_to_cached_bytecode(artifacts);
-                            hot::lang::engine::Engine::call_function_with_cached_bytecode(
-                                &function_name,
-                                std::slice::from_ref(&event_object),
-                                cached,
-                                Some(&worker_conf),
-                                emitter_for_events.clone(),
-                                Some(execution_context_for_events.clone()),
-                                event_publisher.clone(),
-                                context_storage,
-                                Some(Arc::new(db.clone())),
-                                stream_publisher.clone(),
-                                Some(task_queue.clone()),
-                                file_storage.clone(),
-                                store.clone(),
-                                embedding_provider.clone(),
-                                external_cancel.clone(),
-                            )
+                    drop(_compilation_guard);
+
+                    match cached_result {
+                        Ok(cached) => {
+                            let call_started = std::time::Instant::now();
+                            let result =
+                                hot::lang::engine::Engine::call_function_with_cached_bytecode(
+                                    &function_name,
+                                    std::slice::from_ref(&event_object),
+                                    cached,
+                                    Some(&worker_conf),
+                                    emitter_for_events.clone(),
+                                    Some(execution_context_for_events.clone()),
+                                    event_publisher.clone(),
+                                    context_storage,
+                                    Some(Arc::new(db.clone())),
+                                    stream_publisher.clone(),
+                                    Some(task_queue.clone()),
+                                    file_storage.clone(),
+                                    store.clone(),
+                                    embedding_provider.clone(),
+                                    external_cancel.clone(),
+                                );
+                            debug!(
+                                "TIMING [{}]: call_function_with_cached_bytecode: {:?}",
+                                run_id_for_timing.as_simple(),
+                                call_started.elapsed()
+                            );
+                            debug!(
+                                "TIMING [{}]: function execution complete (total spawn_blocking: {:?})",
+                                run_id_for_timing.as_simple(),
+                                spawn_entered.elapsed()
+                            );
+                            result
                         }
                         Err(e) => Err(e),
                     }
@@ -3254,9 +3308,10 @@ async fn execute_single_event_handler(
     } else {
         run_timeout
     };
+    let vm_wait_started = std::time::Instant::now();
     let result = tokio::select! {
         joined = handle => {
-            joined
+            let joined_result = joined
                 .map_err(|e| format!("Blocking task failed: {}", e))?
                 .unwrap_or_else(|panic| {
                     tracing::error!(
@@ -3267,7 +3322,13 @@ async fn execute_single_event_handler(
                         panic.message,
                     );
                     Err(format!("Event handler panicked: {}", panic.summary()))
-                })
+                });
+            debug!(
+                "TIMING [{}]: vm_spawn_blocking_wait: {:?}",
+                run_id.as_simple(),
+                vm_wait_started.elapsed()
+            );
+            joined_result
         }
         _ = tokio::time::sleep(hard_timeout) => {
             if let Some(timer) = &cancel_timer {
@@ -3300,9 +3361,15 @@ async fn execute_single_event_handler(
                     &execution_context_for_events,
                     failure,
                 ));
+                let flush_started = std::time::Instant::now();
                 if let Err(e) = em.flush_run(run_id).await {
                     error!("Failed to flush timeout failure for run {}: {}", run_id, e);
                 }
+                debug!(
+                    "TIMING [{}]: timeout_flush_run: {:?}",
+                    run_id.as_simple(),
+                    flush_started.elapsed()
+                );
             } else if let Err(e) = hot::db::Run::fail_run(db, &run_id, &timeout_error).await {
                 error!("Failed to mark run {} as timed out: {}", run_id, e);
             }
@@ -3356,10 +3423,16 @@ async fn execute_single_event_handler(
 
     // Flush emitter to ensure run is written to database BEFORE publishing stream event
     // This guarantees the SSE handler can query the run from the database
-    if let Some(ref em) = emitter
-        && let Err(e) = em.flush_run(run_id).await
-    {
-        tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+    if let Some(ref em) = emitter {
+        let flush_started = std::time::Instant::now();
+        if let Err(e) = em.flush_run(run_id).await {
+            tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+        }
+        debug!(
+            "TIMING [{}]: flush_run: {:?}",
+            run_id.as_simple(),
+            flush_started.elapsed()
+        );
     }
 
     // Publish stream event for real-time SSE updates (fire-and-forget)
@@ -3597,11 +3670,15 @@ pub async fn run_with_components_shared_context(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: WORKER starting");
     validate_worker_semantics_conf(&worker_conf)?;
-    hot::queue::set_metrics_enabled(worker_conf.get_bool_or_default("queue.metrics-enabled", true));
-    hot::queue::set_wait_target_p99_ms(
-        worker_conf
-            .get_int_or_default("queue.wait-target-p99-ms", 1_000)
-            .max(1) as u64,
+    let queue_metrics_enabled = worker_conf.get_bool_or_default("queue.metrics-enabled", true);
+    let queue_wait_target_p99_ms = worker_conf
+        .get_int_or_default("queue.wait-target-p99-ms", 1_000)
+        .max(1) as u64;
+    hot::queue::set_metrics_enabled(queue_metrics_enabled);
+    hot::queue::set_wait_target_p99_ms(queue_wait_target_p99_ms);
+    info!(
+        "hot.dev: WORKER queue metrics configured (metrics_enabled={}, wait_target_p99_ms={})",
+        queue_metrics_enabled, queue_wait_target_p99_ms,
     );
     let queue_orphan_idle_ms = worker_conf
         .get_int_or_default("queue.event-orphan-idle-ms", 60_000)
