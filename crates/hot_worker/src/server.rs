@@ -63,6 +63,8 @@ fn worker_infrastructure_retry_error(message: impl Into<String>, backoff_ms: u64
     ))
 }
 
+const DEPLOYMENT_READINESS_RETRY_WINDOW_SECONDS: i64 = 30;
+
 fn validate_worker_semantics_conf(conf: &Val) -> Result<(), WorkerError> {
     let event_ordering = conf.get_str_or_default("worker.event-ordering", "current");
     if event_ordering != "current" {
@@ -979,6 +981,40 @@ async fn hydrate_event_message_from_db(
         },
         ..event_message
     })
+}
+
+async fn should_defer_missing_event_handlers(
+    worker_id: usize,
+    db: &DatabasePool,
+    env_id: &Uuid,
+    event_type: &str,
+    infra_retry_backoff_ms: u64,
+) -> Result<bool, WorkerError> {
+    let builds = Build::get_builds_by_env(db, env_id, Some(8), None)
+        .await
+        .map_err(|e| {
+            let err_msg = format!(
+                "Failed to inspect deployed builds before handling missing event handlers for '{}': {}",
+                event_type, e
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            worker_infrastructure_retry_error(err_msg, infra_retry_backoff_ms)
+        })?;
+
+    let cutoff =
+        chrono::Utc::now() - chrono::Duration::seconds(DEPLOYMENT_READINESS_RETRY_WINDOW_SECONDS);
+    let recent_deployed_build = builds
+        .iter()
+        .any(|build| build.deployed && (build.updated_at >= cutoff || build.created_at >= cutoff));
+
+    if recent_deployed_build {
+        debug!(
+            "hot.dev: WORKER {} deferring event '{}' while recent deployment readiness settles",
+            worker_id, event_type
+        );
+    }
+
+    Ok(recent_deployed_build)
 }
 
 async fn process_alert_delivery_message(
@@ -4987,6 +5023,18 @@ pub async fn run_with_components_shared_context(
                                                     Ok(all_handlers) => {
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
+                                                            if should_defer_missing_event_handlers(
+                                                                worker_id,
+                                                                db,
+                                                                &env_id,
+                                                                &event_message.body.event.event_type,
+                                                                infra_retry_backoff_ms,
+                                                            ).await? {
+                                                                return Err(worker_infrastructure_retry_error(
+                                                                    err_msg,
+                                                                    infra_retry_backoff_ms,
+                                                                ));
+                                                            }
                                                             debug!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                         }
@@ -5083,6 +5131,18 @@ pub async fn run_with_components_shared_context(
 
                                                         if handlers_to_execute.is_empty() {
                                                             let err_msg = format!("No handlers to execute for event type '{}'", event_message.body.event.event_type);
+                                                            if should_defer_missing_event_handlers(
+                                                                worker_id,
+                                                                db,
+                                                                &env_id,
+                                                                &event_message.body.event.event_type,
+                                                                infra_retry_backoff_ms,
+                                                            ).await? {
+                                                                return Err(worker_infrastructure_retry_error(
+                                                                    err_msg,
+                                                                    infra_retry_backoff_ms,
+                                                                ));
+                                                            }
                                                             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                         }

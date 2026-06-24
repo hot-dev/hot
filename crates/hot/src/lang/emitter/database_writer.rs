@@ -11,7 +11,11 @@ use crate::lang::emitter::postgres_safety::{sanitize_json_for_jsonb, sanitize_te
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
 use ahash::AHashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Instant;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
@@ -41,6 +45,154 @@ const POSTGRES_BATCH_SIZE: usize = 100;
 
 /// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id)
 type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16, i16);
+
+fn elapsed_ms(elapsed: std::time::Duration) -> u64 {
+    elapsed.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn atomic_max(cell: &AtomicU64, value: u64) {
+    let mut current = cell.load(Ordering::Relaxed);
+    while value > current {
+        match cell.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
+struct DatabaseWriterPressureStats {
+    enqueued: AtomicU64,
+    enqueued_run: AtomicU64,
+    enqueued_call: AtomicU64,
+    batches: AtomicU64,
+    input_writes: AtomicU64,
+    run_writes: AtomicU64,
+    other_writes: AtomicU64,
+    other_write_errors: AtomicU64,
+    batch_ms: AtomicU64,
+    max_batch_ms: AtomicU64,
+    run_write_ms: AtomicU64,
+    max_run_write_ms: AtomicU64,
+    other_write_ms: AtomicU64,
+    max_other_write_ms: AtomicU64,
+    max_local_pending: AtomicU64,
+    last_log_at: StdMutex<Instant>,
+}
+
+impl DatabaseWriterPressureStats {
+    fn new() -> Self {
+        Self {
+            enqueued: AtomicU64::new(0),
+            enqueued_run: AtomicU64::new(0),
+            enqueued_call: AtomicU64::new(0),
+            batches: AtomicU64::new(0),
+            input_writes: AtomicU64::new(0),
+            run_writes: AtomicU64::new(0),
+            other_writes: AtomicU64::new(0),
+            other_write_errors: AtomicU64::new(0),
+            batch_ms: AtomicU64::new(0),
+            max_batch_ms: AtomicU64::new(0),
+            run_write_ms: AtomicU64::new(0),
+            max_run_write_ms: AtomicU64::new(0),
+            other_write_ms: AtomicU64::new(0),
+            max_other_write_ms: AtomicU64::new(0),
+            max_local_pending: AtomicU64::new(0),
+            last_log_at: StdMutex::new(Instant::now()),
+        }
+    }
+
+    fn observe_enqueued(&self, write: &DatabaseWrite) {
+        self.enqueued.fetch_add(1, Ordering::Relaxed);
+        if matches!(
+            write,
+            DatabaseWrite::RunStart { .. }
+                | DatabaseWrite::RunStop { .. }
+                | DatabaseWrite::RunFail { .. }
+                | DatabaseWrite::RunCancel { .. }
+        ) {
+            self.enqueued_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.enqueued_call.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn observe_local_pending(&self, pending: usize) {
+        atomic_max(&self.max_local_pending, pending as u64);
+    }
+
+    fn observe_batch(
+        &self,
+        input_writes: usize,
+        run_writes: usize,
+        other_writes: usize,
+        other_write_errors: usize,
+        elapsed_ms: u64,
+    ) {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        self.input_writes
+            .fetch_add(input_writes as u64, Ordering::Relaxed);
+        self.run_writes
+            .fetch_add(run_writes as u64, Ordering::Relaxed);
+        self.other_writes
+            .fetch_add(other_writes as u64, Ordering::Relaxed);
+        self.other_write_errors
+            .fetch_add(other_write_errors as u64, Ordering::Relaxed);
+        self.batch_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        atomic_max(&self.max_batch_ms, elapsed_ms);
+    }
+
+    fn observe_run_write_ms(&self, elapsed_ms: u64) {
+        self.run_write_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        atomic_max(&self.max_run_write_ms, elapsed_ms);
+    }
+
+    fn observe_other_write_ms(&self, elapsed_ms: u64) {
+        self.other_write_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+        atomic_max(&self.max_other_write_ms, elapsed_ms);
+    }
+
+    fn maybe_log(&self) {
+        let Ok(mut last_log_at) = self.last_log_at.try_lock() else {
+            return;
+        };
+        if last_log_at.elapsed() < std::time::Duration::from_secs(5) {
+            return;
+        }
+        *last_log_at = Instant::now();
+
+        let batches = self.batches.load(Ordering::Relaxed);
+        let input_writes = self.input_writes.load(Ordering::Relaxed);
+        if batches == 0 && input_writes == 0 {
+            return;
+        }
+
+        let batch_ms = self.batch_ms.load(Ordering::Relaxed);
+        let run_writes = self.run_writes.load(Ordering::Relaxed);
+        let run_write_ms = self.run_write_ms.load(Ordering::Relaxed);
+        let other_writes = self.other_writes.load(Ordering::Relaxed);
+        let other_write_ms = self.other_write_ms.load(Ordering::Relaxed);
+
+        tracing::info!(
+            target: "hot::db_writer::pressure",
+            enqueued = self.enqueued.load(Ordering::Relaxed),
+            enqueued_run = self.enqueued_run.load(Ordering::Relaxed),
+            enqueued_call = self.enqueued_call.load(Ordering::Relaxed),
+            batches,
+            input_writes,
+            run_writes,
+            other_writes,
+            other_write_errors = self.other_write_errors.load(Ordering::Relaxed),
+            avg_batch_ms = batch_ms.checked_div(batches).unwrap_or(0),
+            max_batch_ms = self.max_batch_ms.load(Ordering::Relaxed),
+            avg_run_write_ms = run_write_ms.checked_div(run_writes).unwrap_or(0),
+            max_run_write_ms = self.max_run_write_ms.load(Ordering::Relaxed),
+            avg_other_write_ms = other_write_ms.checked_div(other_writes).unwrap_or(0),
+            max_other_write_ms = self.max_other_write_ms.load(Ordering::Relaxed),
+            max_local_pending = self.max_local_pending.load(Ordering::Relaxed),
+            "DatabaseWriter pressure"
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum DatabaseWriterFlushTrigger {
@@ -141,6 +293,7 @@ struct DatabaseWriterShard {
 #[derive(Clone)]
 pub struct DatabaseWriter {
     shards: Arc<Vec<DatabaseWriterShard>>,
+    pressure_stats: Option<Arc<DatabaseWriterPressureStats>>,
 }
 
 impl DatabaseWriter {
@@ -148,6 +301,7 @@ impl DatabaseWriter {
     pub fn new(db: Arc<RwLock<Option<DatabasePool>>>) -> Self {
         let shard_count = Self::shard_count_for_db(&db);
         let mut shards = Vec::with_capacity(shard_count);
+        let pressure_stats = Self::pressure_stats_from_env();
 
         for shard_idx in 0..shard_count {
             let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<DatabaseWrite>();
@@ -156,6 +310,7 @@ impl DatabaseWriter {
             let (shutdown_sender, mut shutdown_receiver) =
                 mpsc::unbounded_channel::<oneshot::Sender<()>>();
             let db = Arc::clone(&db);
+            let pressure_stats_for_task = pressure_stats.clone();
 
             // Spawn the dedicated writer shard task.
             tokio::spawn(async move {
@@ -174,6 +329,9 @@ impl DatabaseWriter {
                             match write {
                                 Some(w) => {
                                     pending_writes.push(w);
+                                    if let Some(stats) = pressure_stats_for_task.as_deref() {
+                                        stats.observe_local_pending(pending_writes.len());
+                                    }
 
                                     // Check for backpressure
                                     if pending_writes.len() > BACKPRESSURE_THRESHOLD
@@ -220,6 +378,7 @@ impl DatabaseWriter {
                                             &mut pending_writes,
                                             shard_idx,
                                             trigger,
+                                            pressure_stats_for_task.as_deref(),
                                         )
                                         .await;
                                     }
@@ -236,6 +395,7 @@ impl DatabaseWriter {
                                             &mut pending_writes,
                                             shard_idx,
                                             DatabaseWriterFlushTrigger::ChannelClosed,
+                                            pressure_stats_for_task.as_deref(),
                                         )
                                         .await;
                                     }
@@ -264,6 +424,7 @@ impl DatabaseWriter {
                                         &mut pending_writes,
                                         shard_idx,
                                         DatabaseWriterFlushTrigger::ExplicitFlush,
+                                        pressure_stats_for_task.as_deref(),
                                     )
                                     .await;
                                 }
@@ -289,6 +450,7 @@ impl DatabaseWriter {
                                         &mut pending_writes,
                                         shard_idx,
                                         DatabaseWriterFlushTrigger::Shutdown,
+                                        pressure_stats_for_task.as_deref(),
                                     )
                                     .await;
                                 }
@@ -312,11 +474,15 @@ impl DatabaseWriter {
 
         Self {
             shards: Arc::new(shards),
+            pressure_stats,
         }
     }
 
     /// Send a write operation to the database writer (never blocks)
     pub fn write(&self, write: DatabaseWrite) {
+        if let Some(stats) = &self.pressure_stats {
+            stats.observe_enqueued(&write);
+        }
         let shard = self.shard_for_run(write.run_id());
         if shard.write_sender.send(write).is_err() {
             tracing::error!("DatabaseWriter: Failed to send write - writer task has shut down");
@@ -396,6 +562,14 @@ impl DatabaseWriter {
         }
     }
 
+    fn pressure_stats_from_env() -> Option<Arc<DatabaseWriterPressureStats>> {
+        let enabled = std::env::var("HOT_DB_WRITER_METRICS_ENABLED")
+            .ok()
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        enabled.then(|| Arc::new(DatabaseWriterPressureStats::new()))
+    }
+
     fn shard_for_run(&self, run_id: Uuid) -> &DatabaseWriterShard {
         let bytes = run_id.as_bytes();
         let hash = u64::from_be_bytes([
@@ -419,6 +593,7 @@ impl DatabaseWriter {
         writes: &mut Vec<DatabaseWrite>,
         shard_idx: usize,
         trigger: DatabaseWriterFlushTrigger,
+        pressure_stats: Option<&DatabaseWriterPressureStats>,
     ) {
         if writes.is_empty() {
             return;
@@ -447,6 +622,10 @@ impl DatabaseWriter {
                     outcome = "no_db",
                     "TIMING: process_batch"
                 );
+                if let Some(stats) = pressure_stats {
+                    stats.observe_batch(input_writes, 0, 0, 0, elapsed_ms(batch_started.elapsed()));
+                    stats.maybe_log();
+                }
                 return;
             }
         };
@@ -473,6 +652,7 @@ impl DatabaseWriter {
         // Process run writes first. If a short successful run has both
         // run:start and run:stop pending in this shard flush, insert it once
         // already terminal instead of doing insert+update.
+        let run_write_started = Instant::now();
         let mut pending_starts: AHashMap<Uuid, (ExecutionContext, chrono::DateTime<chrono::Utc>)> =
             AHashMap::new();
         for write in run_writes {
@@ -552,12 +732,18 @@ impl DatabaseWriter {
                 tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
             }
         }
+        if let Some(stats) = pressure_stats
+            && run_write_count > 0
+        {
+            stats.observe_run_write_ms(elapsed_ms(run_write_started.elapsed()));
+        }
 
         let mut other_write_errors = 0usize;
         let mut outcome = "run_writes_only";
 
         // Then process other writes
         if other_writes.is_empty() {
+            let batch_elapsed_ms = elapsed_ms(batch_started.elapsed());
             tracing::debug!(
                 target: "hot::db_writer::timing",
                 shard_idx,
@@ -567,13 +753,24 @@ impl DatabaseWriter {
                 run_writes = run_write_count,
                 other_writes = other_write_count,
                 other_write_errors,
-                elapsed_ms = batch_started.elapsed().as_millis() as u64,
+                elapsed_ms = batch_elapsed_ms,
                 outcome,
                 "TIMING: process_batch"
             );
+            if let Some(stats) = pressure_stats {
+                stats.observe_batch(
+                    input_writes,
+                    run_write_count,
+                    other_write_count,
+                    other_write_errors,
+                    batch_elapsed_ms,
+                );
+                stats.maybe_log();
+            }
             return;
         }
 
+        let other_write_started = Instant::now();
         match pool {
             DatabasePool::Sqlite(_) => {
                 // SQLite: Process each write sequentially (no transaction batching)
@@ -756,6 +953,10 @@ ON CONFLICT (call_id) DO UPDATE SET
                 }
             }
         }
+        if let Some(stats) = pressure_stats {
+            stats.observe_other_write_ms(elapsed_ms(other_write_started.elapsed()));
+        }
+        let batch_elapsed_ms = elapsed_ms(batch_started.elapsed());
         tracing::debug!(
             target: "hot::db_writer::timing",
             shard_idx,
@@ -765,10 +966,20 @@ ON CONFLICT (call_id) DO UPDATE SET
             run_writes = run_write_count,
             other_writes = other_write_count,
             other_write_errors,
-            elapsed_ms = batch_started.elapsed().as_millis() as u64,
+            elapsed_ms = batch_elapsed_ms,
             outcome,
             "TIMING: process_batch"
         );
+        if let Some(stats) = pressure_stats {
+            stats.observe_batch(
+                input_writes,
+                run_write_count,
+                other_write_count,
+                other_write_errors,
+                batch_elapsed_ms,
+            );
+            stats.maybe_log();
+        }
     }
 
     /// Execute a single write operation
