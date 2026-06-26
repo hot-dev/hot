@@ -251,6 +251,93 @@ pub enum DatabasePool {
     Postgres(Pool<Postgres>),
 }
 
+/// A held cross-process coordination lock returned by [`try_acquire_advisory_lock`].
+///
+/// On Postgres this owns the session connection that holds a `pg_advisory_lock`;
+/// the lock is released when [`AdvisoryLock::release`] is called (or when the
+/// connection is dropped / the session ends). On SQLite there is no fleet to
+/// coordinate, so the lock is a no-op marker that simply lets the caller proceed.
+pub enum AdvisoryLock {
+    Postgres {
+        conn: Option<sqlx::pool::PoolConnection<Postgres>>,
+        lock_id: i64,
+    },
+    /// SQLite (local, single process): no coordination needed, caller proceeds.
+    NotRequired,
+}
+
+impl AdvisoryLock {
+    /// Explicitly release the lock. Prefer calling this as soon as the guarded
+    /// critical section completes so the pooled connection is returned promptly
+    /// rather than held for the lifetime of the process.
+    pub async fn release(mut self) {
+        let AdvisoryLock::Postgres { conn, lock_id } = &mut self else {
+            return;
+        };
+        let Some(mut conn) = conn.take() else {
+            return;
+        };
+
+        if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(*lock_id)
+            .execute(&mut *conn)
+            .await
+        {
+            tracing::warn!(lock_id = *lock_id, "failed to release advisory lock: {e}");
+            conn.close_on_drop();
+        }
+    }
+}
+
+impl Drop for AdvisoryLock {
+    fn drop(&mut self) {
+        if let AdvisoryLock::Postgres { conn, .. } = self
+            && let Some(conn) = conn
+        {
+            // Session-level advisory locks are held by the underlying Postgres
+            // session. If a guard is dropped before explicit unlock (for example
+            // task cancellation), do not return that session to the pool still
+            // holding the lock.
+            conn.close_on_drop();
+        }
+    }
+}
+
+/// Try to acquire a session-scoped Postgres advisory lock without blocking.
+///
+/// Returns:
+/// - `Ok(Some(lock))` when this process now holds the lock (or no coordination
+///   is needed on SQLite). The caller owns the guarded critical section and
+///   should call [`AdvisoryLock::release`] when done.
+/// - `Ok(None)` when another holder currently owns the lock; the caller should
+///   skip the guarded work.
+///
+/// Use this to elect a single owner for fleet-wide actions (e.g. database
+/// mutations that would otherwise be performed redundantly by every worker).
+pub async fn try_acquire_advisory_lock(
+    db: &DatabasePool,
+    lock_id: i64,
+) -> Result<Option<AdvisoryLock>, sqlx::Error> {
+    match db {
+        DatabasePool::Postgres(pool) => {
+            let mut conn = pool.acquire().await?;
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(lock_id)
+                .fetch_one(&mut *conn)
+                .await?;
+            if acquired {
+                Ok(Some(AdvisoryLock::Postgres {
+                    conn: Some(conn),
+                    lock_id,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        DatabasePool::Sqlite(_) => Ok(Some(AdvisoryLock::NotRequired)),
+    }
+}
+
 impl DatabaseType {
     pub fn from_uri(uri: &str) -> Result<Self, DatabaseError> {
         if uri.starts_with("sqlite:") {
