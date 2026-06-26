@@ -234,6 +234,148 @@ impl Build {
         }
     }
 
+    /// Bundle builds that are currently runtime-visible and that this worker
+    /// process should prepare in its own local extraction/cache directory.
+    ///
+    /// Every worker process has its own on-disk `.hot/run` cache, so each must
+    /// warm these independently after a (re)start: the database can report a
+    /// build as `ready` while this particular process has nothing on disk yet.
+    /// This query is read-only and is therefore safe to run on every worker.
+    pub async fn get_ready_bundle_runtime_builds(
+        db: &crate::db::DatabasePool,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = true
+                       AND e.active = true
+                       AND b.active = true
+                       AND b.build_type_id = $1
+                       AND b.deployed = true
+                       AND b.runtime_status = 'ready'
+                     ORDER BY p.updated_at DESC, b.updated_at DESC
+                     LIMIT $2",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = 1
+                       AND e.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = ?
+                       AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
+                     ORDER BY p.updated_at DESC, b.updated_at DESC
+                     LIMIT ?",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(builds)
+    }
+
+    /// Bundle deployments that were requested but never reached `ready` for an
+    /// active project that currently has no ready deployed build.
+    ///
+    /// These are deployments interrupted by a prior worker rollout (left in
+    /// `pending`/`loading`/`failed`). Recovering them re-prepares the runtime
+    /// and activates the build so the project comes back online without a manual
+    /// redeploy. Because recovery mutates the database (manifest reload +
+    /// activation), callers MUST run it under a single-owner guard (advisory
+    /// lock) rather than letting every worker do it concurrently.
+    ///
+    /// We only ever resume the exact build the user requested for deployment
+    /// (`p.deployment_sequence > 0 AND b.deployment_sequence = p.deployment_sequence`),
+    /// never a build that was merely uploaded but never deployed.
+    pub async fn get_recoverable_bundle_deployments(
+        db: &crate::db::DatabasePool,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = true
+                       AND e.active = true
+                       AND b.active = true
+                       AND b.build_type_id = $1
+                       AND b.runtime_status IN ('pending', 'loading', 'failed')
+                       AND p.deployment_sequence > 0
+                       AND b.deployment_sequence = p.deployment_sequence
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM build ready
+                         WHERE ready.project_id = p.project_id
+                           AND ready.active = true
+                           AND ready.deployed = true
+                           AND ready.runtime_status = 'ready'
+                       )
+                     ORDER BY b.deployment_sequence DESC, b.updated_at DESC
+                     LIMIT $2",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = 1
+                       AND e.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = ?
+                       AND b.runtime_status IN ('pending', 'loading', 'failed')
+                       AND p.deployment_sequence > 0
+                       AND b.deployment_sequence = p.deployment_sequence
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM build ready
+                         WHERE ready.project_id = p.project_id
+                           AND ready.active = 1
+                           AND ready.deployed = 1
+                           AND ready.runtime_status = 'ready'
+                       )
+                     ORDER BY b.deployment_sequence DESC, b.updated_at DESC
+                     LIMIT ?",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(builds)
+    }
+
     /// Get count of builds by project ID
     pub async fn get_count_by_project(
         db: &crate::db::DatabasePool,
@@ -1520,5 +1662,129 @@ mod tests {
             .unwrap();
         assert_eq!(builds.len(), 1);
         assert_eq!(builds[0].build_id, build_id);
+    }
+
+    fn build_ids(builds: &[Build]) -> Vec<Uuid> {
+        builds.iter().map(|b| b.build_id).collect()
+    }
+
+    #[tokio::test]
+    async fn test_ready_bundle_runtime_builds_lists_deployed_ready() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        // Freshly uploaded build: not ready, and not recoverable (sequence 0).
+        assert!(
+            Build::get_ready_bundle_runtime_builds(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        Build::deploy_build(&db, &build_id, &user_id).await.unwrap();
+
+        let ready = Build::get_ready_bundle_runtime_builds(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&ready), vec![build_id]);
+
+        // A ready, deployed build is never a recovery candidate.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_bundle_deployments_includes_interrupted_request() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        // A requested-but-never-activated deployment is what a worker rollout can
+        // leave behind. It must be recoverable, but never appears in the ready set.
+        Build::request_bundle_deployment(&db, &build_id, &user_id)
+            .await
+            .unwrap();
+
+        let recoverable = Build::get_recoverable_bundle_deployments(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&recoverable), vec![build_id]);
+        assert!(
+            Build::get_ready_bundle_runtime_builds(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A build that failed to compile under a prior worker is still recoverable
+        // (a newer worker may compile it successfully).
+        Build::mark_runtime_failed(&db, &build_id, "compile failed")
+            .await
+            .unwrap();
+        let recoverable = Build::get_recoverable_bundle_deployments(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&recoverable), vec![build_id]);
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_excludes_uploaded_but_never_deployed_build() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let _build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        // Pending, but the user never requested deployment (project + build stay at
+        // sequence 0), so we must not auto-deploy it on worker startup.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_excludes_project_with_active_ready_build() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let old_build_id = insert_test_build(&db, &project_id, &user_id).await;
+        let new_build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        Build::activate_build_directly(&db, &old_build_id, &user_id)
+            .await
+            .unwrap();
+        Build::request_bundle_deployment(&db, &new_build_id, &user_id)
+            .await
+            .unwrap();
+
+        // The project is still served by the old ready build, so the pending new
+        // build must not be recovered out from under it.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Only the still-serving build is warmed.
+        let ready = Build::get_ready_bundle_runtime_builds(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&ready), vec![old_build_id]);
     }
 }

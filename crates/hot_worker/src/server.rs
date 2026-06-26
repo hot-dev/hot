@@ -1394,6 +1394,449 @@ fn recompile_bundle_cache(
     }
 }
 
+struct PreparedBundleRuntime {
+    extract_dir: PathBuf,
+    build_data: Option<Vec<u8>>,
+}
+
+fn bundle_source_paths(extracted_path: &std::path::Path) -> Result<Vec<String>, String> {
+    let build_src_path = extracted_path.join("hot/src");
+    if !build_src_path.exists() {
+        return Err(format!(
+            "Bundle source path {} does not exist",
+            build_src_path.display()
+        ));
+    }
+
+    let build_pkg_path = extracted_path.join("hot/pkg");
+    let mut paths = vec![build_src_path.to_string_lossy().to_string()];
+    if build_pkg_path.exists() {
+        paths.push(build_pkg_path.to_string_lossy().to_string());
+    }
+    Ok(paths)
+}
+
+fn clear_bundle_bytecode_cache(bundle_cache_dir: &std::path::Path) {
+    if bundle_cache_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(bundle_cache_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.to_string_lossy().ends_with(".bc.zst") {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!("Failed to remove stale bundle cache file {:?}: {}", path, e);
+                } else {
+                    tracing::debug!("Removed stale bundle cache file {:?}", path);
+                }
+            }
+        }
+    }
+}
+
+async fn compile_bundle_cache(
+    extracted_path: PathBuf,
+    manifest: hot::bundle::BundleManifest,
+) -> Result<(), String> {
+    // Bytecode compilation is CPU-bound. Run it on the blocking pool so it does
+    // not stall the async runtime (and event consumption) during startup warm-up.
+    tokio::task::spawn_blocking(move || {
+        let paths = bundle_source_paths(&extracted_path)?;
+        let bundle_cache_dir = extracted_path.join(".hot").join("cache");
+        std::fs::create_dir_all(&bundle_cache_dir).map_err(|e| {
+            format!(
+                "Failed to create bundle cache directory {}: {}",
+                bundle_cache_dir.display(),
+                e
+            )
+        })?;
+        clear_bundle_bytecode_cache(&bundle_cache_dir);
+
+        let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
+        hot::lang::engine::Engine::compile_to_cache(
+            &paths,
+            &bundle_cache,
+            &manifest.bundle_name,
+            manifest.cache_key.as_deref(),
+            Some(manifest.file_hashes.clone()),
+            None, // Bundle builds have deps pre-bundled
+        )
+        .map_err(|e| {
+            format!(
+                "Failed to compile bundle '{}' bytecode cache: {}",
+                manifest.bundle_name, e
+            )
+        })
+    })
+    .await
+    .map_err(|e| format!("Bundle compile task panicked or was cancelled: {e}"))?
+}
+
+async fn retrieve_build_data(
+    build: &Build,
+    project: &Project,
+    env: &Env,
+    worker_conf: &Val,
+) -> Result<Vec<u8>, String> {
+    let storage = hot::storage::build_storage_from_config(worker_conf)
+        .await
+        .map_err(|e| format!("Failed to create build storage: {}", e))?;
+
+    storage
+        .retrieve_build(&build.build_id, &env.org_id, &project.env_id)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to retrieve build {} from storage: {}",
+                build.build_id, e
+            )
+        })
+}
+
+async fn prepare_bundle_runtime(
+    build: &Build,
+    project: &Project,
+    env: &Env,
+    worker_conf: &Val,
+    build_path_cache: &Arc<BuildPathCache>,
+    include_build_data: bool,
+) -> Result<PreparedBundleRuntime, String> {
+    if !build.is_bundle() {
+        return Err(format!("Build {} is not a bundle build", build.build_id));
+    }
+
+    let mut build_data = None;
+    let mut existing_path = get_bundle_extracted_path(build, build_path_cache).await;
+
+    if existing_path.is_none() {
+        let extraction_lock = build_path_cache.get_extraction_lock(&build.build_id);
+        let _lock_guard = extraction_lock.lock().await;
+
+        existing_path = get_bundle_extracted_path(build, build_path_cache).await;
+        if existing_path.is_none() {
+            let extract_dir =
+                std::path::PathBuf::from(format!(".hot/run/build-{}", build.build_id.as_simple()));
+            let mut file_lock = BuildPathCache::acquire_file_lock(&build.build_id).ok();
+            let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+
+            if BuildPathCache::is_extraction_complete(&extract_dir) {
+                let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
+                compile_bundle_cache(extract_dir.clone(), manifest).await?;
+                build_path_cache.insert(build.build_id, extract_dir.clone());
+                existing_path = Some(extract_dir);
+            } else {
+                let data = retrieve_build_data(build, project, env, worker_conf).await?;
+                hot::bundle::extract_bundle_from_bytes(&data, &extract_dir).map_err(|e| {
+                    format!(
+                        "Failed to extract build {} to {}: {}",
+                        build.build_id,
+                        extract_dir.display(),
+                        e
+                    )
+                })?;
+
+                let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
+                compile_bundle_cache(extract_dir.clone(), manifest).await?;
+                BuildPathCache::mark_extraction_complete(&extract_dir);
+                build_path_cache.insert(build.build_id, extract_dir.clone());
+                existing_path = Some(extract_dir);
+                build_data = Some(data);
+            }
+        }
+    }
+
+    if include_build_data && build_data.is_none() {
+        build_data = Some(retrieve_build_data(build, project, env, worker_conf).await?);
+    }
+
+    let extract_dir = existing_path.ok_or_else(|| {
+        format!(
+            "Build {} did not produce a prepared extraction path",
+            build.build_id
+        )
+    })?;
+
+    Ok(PreparedBundleRuntime {
+        extract_dir,
+        build_data,
+    })
+}
+
+/// Advisory lock id electing a single worker to perform startup deployment
+/// recovery (the DB-mutating manifest reload + activation). Warm-up of the
+/// local cache is read-only and always runs on every worker regardless of this
+/// lock, because each worker process has its own on-disk extraction cache.
+const WORKER_RUNTIME_REPAIR_LOCK_ID: i64 = 4_849_672_113_600_037;
+
+async fn startup_repair_and_warm_bundle_runtimes(
+    db: &DatabasePool,
+    worker_conf: &Val,
+    build_path_cache: &Arc<BuildPathCache>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let limit = worker_conf
+        .get_int_or_default("worker.startup-runtime-build-limit", 1_000)
+        .max(1);
+
+    if *shutdown_rx.borrow() {
+        debug!("hot.dev: WORKER startup runtime repair skipped during shutdown");
+        return;
+    }
+
+    // Phase 1 (every worker): warm this process's local cache for builds the
+    // database already considers ready. This is read-only and must run on each
+    // worker because the on-disk extraction/bytecode cache is per-process.
+    tokio::select! {
+        _ = warm_ready_bundle_runtimes(db, worker_conf, build_path_cache, limit) => {}
+        changed = shutdown_rx.changed() => {
+            if changed.is_err() || *shutdown_rx.borrow() {
+                info!("hot.dev: WORKER startup warm-up stopped for shutdown");
+                return;
+            }
+        }
+    }
+
+    if *shutdown_rx.borrow() {
+        info!("hot.dev: WORKER startup recovery skipped for shutdown");
+        return;
+    }
+
+    // Phase 2 (single elected worker): recover deployments interrupted by a
+    // prior worker rollout. This mutates the database (manifest reload +
+    // activation), so we elect one owner via an advisory lock to avoid every
+    // worker performing the same churn concurrently.
+    match hot::db::try_acquire_advisory_lock(db, WORKER_RUNTIME_REPAIR_LOCK_ID).await {
+        Ok(Some(lock)) => {
+            if *shutdown_rx.borrow() {
+                info!("hot.dev: WORKER startup recovery skipped for shutdown");
+                lock.release().await;
+                return;
+            }
+
+            tokio::select! {
+                _ = recover_interrupted_bundle_deployments(db, worker_conf, build_path_cache, limit) => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        info!("hot.dev: WORKER startup recovery stopped for shutdown");
+                    }
+                }
+            }
+            lock.release().await;
+        }
+        Ok(None) => {
+            debug!(
+                "hot.dev: WORKER startup deployment recovery skipped (another worker holds the repair lock)"
+            );
+        }
+        Err(e) => {
+            warn!(
+                "hot.dev: WORKER startup deployment recovery skipped (could not acquire repair lock): {}",
+                e
+            );
+        }
+    }
+}
+
+/// Resolve the owning project and env for a build, mapping lookup errors to a
+/// human-readable string for log lines.
+async fn resolve_build_project_env(
+    db: &DatabasePool,
+    build: &Build,
+) -> Result<(Project, Env), String> {
+    let project = Project::get_project(db, &build.project_id)
+        .await
+        .map_err(|e| format!("project lookup failed: {e}"))?;
+    let env = Env::get_env(db, &project.env_id)
+        .await
+        .map_err(|e| format!("env lookup failed: {e}"))?;
+    Ok((project, env))
+}
+
+/// Warm this worker process's local extraction/bytecode cache for every build
+/// the database already reports as ready. Read-only; safe to run on all workers.
+async fn warm_ready_bundle_runtimes(
+    db: &DatabasePool,
+    worker_conf: &Val,
+    build_path_cache: &Arc<BuildPathCache>,
+    limit: i64,
+) {
+    let builds = match Build::get_ready_bundle_runtime_builds(db, limit).await {
+        Ok(builds) => builds,
+        Err(e) => {
+            warn!(
+                "hot.dev: WORKER startup warm-up could not list ready builds: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    if builds.is_empty() {
+        debug!("hot.dev: WORKER startup warm-up found no ready bundle builds");
+        return;
+    }
+
+    info!(
+        "hot.dev: WORKER startup warm-up preparing {} ready bundle build(s)",
+        builds.len()
+    );
+
+    let mut prepared_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for build in builds {
+        let (project, env) = match resolve_build_project_env(db, &build).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup warm-up skipped build {}: {}",
+                    build.build_id, e
+                );
+                continue;
+            }
+        };
+
+        match prepare_bundle_runtime(&build, &project, &env, worker_conf, build_path_cache, false)
+            .await
+        {
+            Ok(_) => prepared_count += 1,
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup warm-up failed to prepare build {} (project {}): {}",
+                    build.build_id, project.name, e
+                );
+            }
+        }
+    }
+
+    info!(
+        "hot.dev: WORKER startup warm-up finished (prepared={}, failed={})",
+        prepared_count, failed_count
+    );
+}
+
+/// Re-prepare and activate bundle deployments left interrupted (pending/loading/
+/// failed with no ready build) by a prior worker rollout. Mutates the database,
+/// so callers MUST run this under [`WORKER_RUNTIME_REPAIR_LOCK_ID`].
+async fn recover_interrupted_bundle_deployments(
+    db: &DatabasePool,
+    worker_conf: &Val,
+    build_path_cache: &Arc<BuildPathCache>,
+    limit: i64,
+) {
+    let builds = match Build::get_recoverable_bundle_deployments(db, limit).await {
+        Ok(builds) => builds,
+        Err(e) => {
+            warn!(
+                "hot.dev: WORKER startup recovery could not list interrupted deployments: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    if builds.is_empty() {
+        debug!("hot.dev: WORKER startup recovery found no interrupted bundle deployments");
+        return;
+    }
+
+    info!(
+        "hot.dev: WORKER startup recovery preparing {} interrupted bundle deployment(s)",
+        builds.len()
+    );
+
+    let mut repaired_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for build in builds {
+        let (project, env) = match resolve_build_project_env(db, &build).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup recovery skipped build {}: {}",
+                    build.build_id, e
+                );
+                continue;
+            }
+        };
+
+        let prepared = match prepare_bundle_runtime(
+            &build,
+            &project,
+            &env,
+            worker_conf,
+            build_path_cache,
+            true,
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup recovery failed to prepare build {} (project {}): {}",
+                    build.build_id, project.name, e
+                );
+                continue;
+            }
+        };
+
+        let Some(build_data) = prepared.build_data.as_deref() else {
+            failed_count += 1;
+            warn!(
+                "hot.dev: WORKER startup recovery could not activate build {}: missing build data",
+                build.build_id
+            );
+            continue;
+        };
+
+        if let Err(e) =
+            hot::build::load_build_manifest_data(db, &build.build_id, &project.env_id, build_data)
+                .await
+        {
+            failed_count += 1;
+            warn!(
+                "hot.dev: WORKER startup recovery could not load manifest for build {}: {}",
+                build.build_id, e
+            );
+            continue;
+        }
+
+        let deployment_user_id = build.updated_by_user_id.unwrap_or(build.created_by_user_id);
+        match Build::activate_prepared_build(db, &build.build_id, &deployment_user_id).await {
+            Ok(true) => {
+                repaired_count += 1;
+                info!(
+                    "hot.dev: WORKER startup recovery activated build {} for project {} from {}",
+                    build.build_id,
+                    project.name,
+                    prepared.extract_dir.display()
+                );
+            }
+            Ok(false) => {
+                debug!(
+                    "hot.dev: WORKER startup recovery skipped activation for build {} (already ready, stale, or inactive)",
+                    build.build_id
+                );
+            }
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup recovery could not activate build {}: {}",
+                    build.build_id, e
+                );
+            }
+        }
+    }
+
+    info!(
+        "hot.dev: WORKER startup recovery finished (repaired={}, failed={})",
+        repaired_count, failed_count
+    );
+}
+
 /// Recompile a live build's bytecode cache
 /// Returns true if recompilation succeeded
 fn recompile_live_build_cache(
@@ -1765,32 +2208,33 @@ async fn find_build_for_function(
                                                             bundle_cache_dir,
                                                         );
 
-                                                    if let Err(e) =
-                                                        hot::lang::engine::Engine::compile_to_cache(
-                                                            &paths,
-                                                            &bundle_cache,
-                                                            &manifest.bundle_name,
-                                                            manifest.cache_key.as_deref(),
-                                                            Some(manifest.file_hashes.clone()),
-                                                            None, // Bundle builds have deps pre-bundled
-                                                        )
-                                                    {
-                                                        tracing::warn!(
-                                                            "ROUTING: Failed to pre-compile bundle {}: {}",
-                                                            build.build_id,
-                                                            e
-                                                        );
+                                                    match hot::lang::engine::Engine::compile_to_cache(
+                                                        &paths,
+                                                        &bundle_cache,
+                                                        &manifest.bundle_name,
+                                                        manifest.cache_key.as_deref(),
+                                                        Some(manifest.file_hashes.clone()),
+                                                        None, // Bundle builds have deps pre-bundled
+                                                    ) {
+                                                        Ok(()) => {
+                                                            // Mark extraction complete only after bytecode is ready.
+                                                            BuildPathCache::mark_extraction_complete(
+                                                                &extract_dir,
+                                                            );
+                                                            build_path_cache.insert(
+                                                                build.build_id,
+                                                                extract_dir.clone(),
+                                                            );
+                                                            extracted_path = Some(extract_dir);
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                "ROUTING: Failed to pre-compile bundle {}: {}",
+                                                                build.build_id,
+                                                                e
+                                                            );
+                                                        }
                                                     }
-
-                                                    // Mark extraction complete
-                                                    BuildPathCache::mark_extraction_complete(
-                                                        &extract_dir,
-                                                    );
-                                                    build_path_cache.insert(
-                                                        build.build_id,
-                                                        extract_dir.clone(),
-                                                    );
-                                                    extracted_path = Some(extract_dir);
                                                 }
                                             }
                                             Err(e) => {
@@ -2500,44 +2944,56 @@ async fn execute_single_event_handler(
                                                     "Pre-compiling bundle {} to generate bytecode cache",
                                                     build.build_id
                                                 );
-                                                if let Err(e) =
-                                                    hot::lang::engine::Engine::compile_to_cache(
-                                                        &paths,
-                                                        &bundle_cache,
-                                                        &project_name,
-                                                        cache_key.as_deref(),
-                                                        file_hashes,
-                                                        None, // Bundle builds have deps pre-bundled
-                                                    )
-                                                {
-                                                    warn!(
-                                                        "Failed to pre-compile bundle {}: {}",
-                                                        build.build_id, e
-                                                    );
-                                                } else {
-                                                    info!(
-                                                        "Bundle {} pre-compiled successfully",
-                                                        build.build_id
-                                                    );
+                                                match hot::lang::engine::Engine::compile_to_cache(
+                                                    &paths,
+                                                    &bundle_cache,
+                                                    &project_name,
+                                                    cache_key.as_deref(),
+                                                    file_hashes,
+                                                    None, // Bundle builds have deps pre-bundled
+                                                ) {
+                                                    Ok(()) => {
+                                                        info!(
+                                                            "Bundle {} pre-compiled successfully",
+                                                            build.build_id
+                                                        );
+
+                                                        // Mark extraction complete AFTER bytecode is generated.
+                                                        // This ensures routing won't find the bundle until it's fully ready.
+                                                        BuildPathCache::mark_extraction_complete(
+                                                            &extract_dir,
+                                                        );
+
+                                                        // Store in cache for future use
+                                                        build_path_cache.insert(
+                                                            build.build_id,
+                                                            extract_dir.clone(),
+                                                        );
+
+                                                        (
+                                                            paths,
+                                                            true,
+                                                            Some(extract_dir.clone()),
+                                                            manifest.ok(),
+                                                        )
+                                                        // This is a bundle build
+                                                    }
+                                                    Err(e) => {
+                                                        error!(
+                                                            "Failed to pre-compile bundle {}: {}. Falling back to config paths",
+                                                            build.build_id, e
+                                                        );
+                                                        (
+                                                            hot::project::get_project_src_paths(
+                                                                worker_conf,
+                                                                &project.name,
+                                                            ),
+                                                            false,
+                                                            None,
+                                                            None,
+                                                        )
+                                                    }
                                                 }
-
-                                                // Mark extraction complete AFTER bytecode is generated
-                                                // This ensures routing won't find the bundle until it's fully ready
-                                                BuildPathCache::mark_extraction_complete(
-                                                    &extract_dir,
-                                                );
-
-                                                // Store in cache for future use
-                                                build_path_cache
-                                                    .insert(build.build_id, extract_dir.clone());
-
-                                                (
-                                                    paths,
-                                                    true,
-                                                    Some(extract_dir.clone()),
-                                                    manifest.ok(),
-                                                )
-                                                // This is a bundle build
                                             }
                                             Err(e) => {
                                                 error!(
@@ -3628,7 +4084,9 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "event-ordering": "current",
         "handler-concurrency": "serial",
         "shared-process": false,
-        "local-write-concurrency": 1i64
+        "local-write-concurrency": 1i64,
+        "startup-runtime-build-limit": 1_000i64,
+        "startup-runtime-repair": true
     });
 
     // Merge with provided conf (the provided conf will override defaults)
@@ -4478,6 +4936,24 @@ pub async fn run_with_components_shared_context(
 
     // Channel to signal workers to shutdown
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    if let Some(ref db_pool) = db
+        && worker_conf.get_bool_or_default("worker.startup-runtime-repair", true)
+    {
+        let startup_db = db_pool.clone();
+        let startup_worker_conf = worker_conf.clone();
+        let startup_build_path_cache = build_path_cache.clone();
+        let startup_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            startup_repair_and_warm_bundle_runtimes(
+                &startup_db,
+                &startup_worker_conf,
+                &startup_build_path_cache,
+                startup_shutdown_rx,
+            )
+            .await;
+        });
+    }
 
     // Spawn a single per-process janitor task that performs two periodic
     // maintenance jobs against all queues:
@@ -5383,7 +5859,7 @@ pub async fn run_with_components_shared_context(
 
                                                                                                         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
                                                                                                         info!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
-                                                                                                        if let Err(e) = hot::lang::engine::Engine::compile_to_cache(
+                                                                                                        match hot::lang::engine::Engine::compile_to_cache(
                                                                                                             &paths,
                                                                                                             &bundle_cache,
                                                                                                             &proj_name,
@@ -5391,16 +5867,35 @@ pub async fn run_with_components_shared_context(
                                                                                                             file_hashes,
                                                                                                             None, // Bundle builds have deps pre-bundled
                                                                                                         ) {
-                                                                                                            warn!("Failed to pre-compile bundle {}: {}", build.build_id, e);
-                                                                                                        } else {
-                                                                                                            info!("Bundle {} pre-compiled successfully", build.build_id);
+                                                                                                            Ok(()) => {
+                                                                                                                info!("Bundle {} pre-compiled successfully", build.build_id);
+
+                                                                                                                // Mark extraction complete AFTER bytecode is ready
+                                                                                                                BuildPathCache::mark_extraction_complete(&extract_dir);
+
+                                                                                                                // Store the extracted path in the cache
+                                                                                                                build_path_cache_ref.insert(build.build_id, extract_dir);
+                                                                                                            }
+                                                                                                            Err(e) => {
+                                                                                                                let err_msg = format!("Failed to pre-compile bundle {}: {}", build.build_id, e);
+                                                                                                                error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                                        worker_id,
+                                                                                                                        build.build_id,
+                                                                                                                        status_err);
+                                                                                                                }
+                                                                                                                hot::db::alert::publish_deploy_failed_alert(
+                                                                                                                    db,
+                                                                                                                    &env.org_id,
+                                                                                                                    &project.env_id,
+                                                                                                                    &build.build_id,
+                                                                                                                    &project.name,
+                                                                                                                    &err_msg,
+                                                                                                                ).await;
+                                                                                                                return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                                                            }
                                                                                                         }
-
-                                                                                                        // Mark extraction complete AFTER bytecode is ready
-                                                                                                        BuildPathCache::mark_extraction_complete(&extract_dir);
-
-                                                                                                        // Store the extracted path in the cache
-                                                                                                        build_path_cache_ref.insert(build.build_id, extract_dir);
                                                                                                     }
                                                                                                     Err(e) => {
                                                                                                         let err_msg = format!("Failed to extract build {}: {}", build.build_id, e);
