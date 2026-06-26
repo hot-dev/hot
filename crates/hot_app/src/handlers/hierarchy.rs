@@ -139,7 +139,7 @@ pub async fn get_hierarchy_handler(
                 }
             };
 
-            tracing::info!(
+            tracing::debug!(
                 "Built hierarchy for run {}: {} calls (status: {})",
                 run_id,
                 hierarchy.total_calls,

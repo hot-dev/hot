@@ -96,11 +96,11 @@ async fn acquire_scheduler_singleton_guard(
                         .into(),
                 );
             }
-            info!("hot.dev: SCHEDULER acquired Postgres singleton lock");
+            debug!("hot.dev: SCHEDULER acquired Postgres singleton lock");
             Ok(Some(SchedulerSingletonGuard::Postgres { _conn: conn }))
         }
         DatabasePool::Sqlite(_) => {
-            info!("hot.dev: SCHEDULER singleton lock is best-effort for SQLite local development");
+            debug!("hot.dev: SCHEDULER singleton lock is best-effort for SQLite local development");
             Ok(None)
         }
     }
@@ -325,7 +325,7 @@ pub async fn run(
             loop {
                 tokio::select! {
                     _ = maint_timer.tick() => {
-                        info!("hot.dev: SCHEDULER enqueuing daily maintenance task");
+                        debug!("hot.dev: SCHEDULER enqueuing daily maintenance task");
                         let msg = if is_local_dev() {
                             hot::lang::event::MaintenanceMessage::daily_core_tasks()
                         } else {
@@ -505,7 +505,7 @@ async fn sync_with_database(
             format_duration(now - last_sync)
         );
     } else {
-        info!("hot.dev: SCHEDULER first sync - no previous sync time found");
+        debug!("hot.dev: SCHEDULER first sync - no previous sync time found");
     }
 
     // Get all schedules for deployed builds
@@ -573,13 +573,13 @@ async fn sync_with_database(
             {
                 // Log what changed
                 if existing_job.build_id != schedule.build_id {
-                    info!(
+                    debug!(
                         "hot.dev: SCHEDULER schedule {} moved from build {} to build {}",
                         existing_job.schedule_id, existing_job.build_id, schedule.build_id
                     );
                 }
                 if existing_job.cron != schedule.cron {
-                    info!(
+                    debug!(
                         "hot.dev: SCHEDULER schedule {} cron changed from '{}' to '{}'",
                         existing_job.schedule_id, existing_job.cron, schedule.cron
                     );
@@ -600,7 +600,7 @@ async fn sync_with_database(
                     Ok(job_info) => {
                         jobs_map.insert(schedule.schedule_id, job_info);
                         updated_count += 1;
-                        info!(
+                        debug!(
                             "hot.dev: SCHEDULER updated job for schedule {} ({}:{}) on build {}",
                             schedule.schedule_id, schedule.ns, schedule.var, schedule.build_id
                         );
@@ -660,7 +660,7 @@ async fn sync_with_database(
                 );
             }
 
-            info!(
+            debug!(
                 "hot.dev: SCHEDULER removed job for schedule {} ({}/{}) from build {}",
                 job_info.schedule_id, job_info.ns, job_info.var, job_info.build_id
             );

@@ -223,7 +223,7 @@ pub fn reserve_vsock_port(preferred: u32) -> Result<ReservedVsockPort, std::io::
         let alt = 9200 + ((preferred - 9200 + i) & 0xFFFF);
         match VsockListener::bind(VsockAddr::new(libc::VMADDR_CID_ANY, alt)) {
             Ok(listener) => {
-                tracing::info!(
+                tracing::debug!(
                     original = preferred,
                     actual = alt,
                     "vsock bound to alternative port"

@@ -318,7 +318,7 @@ pub async fn deploy_build(
     // Validate ctx requirements for bundle builds before deploying
     if build.is_bundle() {
         let org_id = super::get_org_id_for_env(&db, &api_key.env_id).await?;
-        tracing::info!(
+        tracing::debug!(
             "Validating ctx requirements for build {} before deploy",
             build_id
         );
@@ -346,7 +346,7 @@ pub async fn deploy_build(
                 Json(ApiErrorResponse::bad_request(&e)),
             ));
         }
-        tracing::info!("Ctx requirements validation passed for build {}", build_id);
+        tracing::debug!("Ctx requirements validation passed for build {}", build_id);
 
         if let Err(e) = hot::build::validate_box_requirements_for_deploy(
             &db,
@@ -363,7 +363,7 @@ pub async fn deploy_build(
                 Json(ApiErrorResponse::bad_request(&e)),
             ));
         }
-        tracing::info!("Box requirements validation passed for build {}", build_id);
+        tracing::debug!("Box requirements validation passed for build {}", build_id);
 
         if let Err(e) = hot::build::validate_schedule_requirements_for_deploy(
             &db,
@@ -381,7 +381,7 @@ pub async fn deploy_build(
                 Json(ApiErrorResponse::bad_request(&e)),
             ));
         }
-        tracing::info!(
+        tracing::debug!(
             "Schedule requirements validation passed for build {}",
             build_id
         );
@@ -651,7 +651,7 @@ pub async fn upload_build(
                 .unwrap_or(false);
 
             if file_exists_in_storage {
-                tracing::info!(
+                tracing::debug!(
                     "Build {} already exists for project {} (in DB and storage), returning existing build (idempotent upload)",
                     build_id,
                     project.name
@@ -679,7 +679,7 @@ pub async fn upload_build(
                 ));
             } else {
                 // Build record exists but file is missing from storage - store the file
-                tracing::info!(
+                tracing::debug!(
                     "Build {} exists in DB but not in storage for project {}, storing file",
                     build_id,
                     project.name

@@ -1163,7 +1163,7 @@ impl Engine {
         manifest_file_hashes: Option<Vec<crate::lang::cache::bytecode_cache::FileHash>>,
         conf: Option<&crate::val::Val>,
     ) -> Result<(), String> {
-        tracing::info!(
+        tracing::debug!(
             "Pre-compiling {} source paths to cache for project '{}'",
             src_paths.len(),
             project_name
@@ -1251,7 +1251,7 @@ impl Engine {
             &skill_specs,
         )?;
 
-        tracing::info!(
+        tracing::debug!(
             "Pre-compiled bytecode saved to cache with key {}",
             &cache_key[..12.min(cache_key.len())]
         );

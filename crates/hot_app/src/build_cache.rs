@@ -162,7 +162,7 @@ impl BuildDocsCache {
                 return Ok(cached.clone());
             }
         } else {
-            tracing::info!(
+            tracing::debug!(
                 "Live docs for '{}' are stale (build hash changed), regenerating",
                 project_name
             );
@@ -186,7 +186,7 @@ impl BuildDocsCache {
             };
 
             if disk_is_stale {
-                tracing::info!(
+                tracing::debug!(
                     "Live docs disk cache for '{}' is stale (disk hash {:?} != build hash {}), regenerating",
                     project_name,
                     disk_hash,
@@ -194,7 +194,7 @@ impl BuildDocsCache {
                 );
                 self.invalidate_live_disk_cache(&project_name).await;
             } else {
-                tracing::info!(
+                tracing::debug!(
                     "Live docs cache hit (disk) for '{}' - {} project ns, {} deps",
                     project_name,
                     cached.project_docs.namespaces.len(),
@@ -221,7 +221,7 @@ impl BuildDocsCache {
                     // Build changed while generating -- update the hash so when
                     // the current generation finishes, the next page visit will
                     // detect staleness and re-trigger generation with the new build.
-                    tracing::info!(
+                    tracing::debug!(
                         "Live docs for '{}' are being generated but build has changed, \
                          will regenerate after current generation completes",
                         project_name
@@ -257,7 +257,7 @@ impl BuildDocsCache {
         }
 
         // Spawn background task to generate docs
-        tracing::info!(
+        tracing::debug!(
             "Live docs for '{}' not cached, generating in background (refresh page in a few seconds)",
             project_name
         );
@@ -281,7 +281,7 @@ impl BuildDocsCache {
                     generating.remove(&project_name_clone);
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     "Live docs for '{}' fully generated in {:.2}s",
                     project_name_clone,
                     start.elapsed().as_secs_f64()
@@ -413,7 +413,7 @@ impl BuildDocsCache {
 
         // Step 1: Generate and cache project docs first (faster)
         // Use spawn_blocking for CPU-bound doc generation
-        tracing::info!(
+        tracing::debug!(
             "Generating project docs for '{}' from {:?}",
             project_name,
             src_paths
@@ -429,7 +429,7 @@ impl BuildDocsCache {
 
         let project_docs = match project_docs_result {
             Ok(Ok(docs)) => {
-                tracing::info!(
+                tracing::debug!(
                     "Project docs for '{}' generated in {:.2}s ({} namespaces)",
                     project_name,
                     project_start.elapsed().as_secs_f64(),
@@ -497,7 +497,7 @@ impl BuildDocsCache {
             Ok(Ok(docs)) => {
                 // Use the package's canonical name from its metadata (e.g., "hot.dev/hot-std")
                 let canonical_name = docs.meta.name.clone();
-                tracing::info!(
+                tracing::debug!(
                     "hot-std docs generated in {:.2}s ({} namespaces)",
                     hot_std_start.elapsed().as_secs_f64(),
                     docs.namespaces.len()
@@ -555,7 +555,7 @@ impl BuildDocsCache {
                 Ok(Ok(docs)) => {
                     // Use the package's canonical name from its metadata (e.g., "hot.dev/anthropic")
                     let canonical_name = docs.meta.name.clone();
-                    tracing::info!(
+                    tracing::debug!(
                         "Dependency docs for '{}' generated in {:.2}s ({} namespaces)",
                         canonical_name,
                         dep_start.elapsed().as_secs_f64(),
@@ -595,7 +595,7 @@ impl BuildDocsCache {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "All docs for '{}' complete: {} project namespaces, {} dependencies",
             project_name,
             project_docs.namespaces.len(),
@@ -954,7 +954,7 @@ impl BuildDocsCache {
             }
         }
 
-        tracing::info!("Build docs cache cleared");
+        tracing::debug!("Build docs cache cleared");
     }
 
     /// Invalidate cache for a specific build

@@ -129,7 +129,7 @@ fn spawn_worker_queue_claimer(
     queue_metrics_enabled: bool,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
-        info!("hot.dev: WORKER {} claimer started", queue_name);
+        debug!("hot.dev: WORKER {} claimer started", queue_name);
 
         loop {
             if *shutdown_rx.borrow() {
@@ -787,7 +787,7 @@ fn create_emitter(
     // Get emitter type
     let emitter_type = emitter_conf.get_str("type");
 
-    tracing::info!(
+    tracing::debug!(
         "create_emitter: emitter_conf={:?}, emitter_type='{}'",
         emitter_conf,
         emitter_type
@@ -808,14 +808,14 @@ fn create_emitter(
     // Create the base emitter and wrap with filtering based on type
     match emitter_type.as_str() {
         "console" => {
-            tracing::info!("create_emitter: creating console emitter");
+            tracing::debug!("create_emitter: creating console emitter");
             let console_emitter = ConsoleEngineEventEmitter::new();
             let filtered_emitter =
                 hot::lang::emitter::FilteredEmitter::new(console_emitter, filter_conf.as_ref())?;
             Ok(Some(std::sync::Arc::new(filtered_emitter)))
         }
         "db" => {
-            tracing::info!("create_emitter: creating db emitter");
+            tracing::debug!("create_emitter: creating db emitter");
             // Use existing database pool instead of creating a new one
             // Note: stream_data is no longer persisted to DB - delivered via Redis Streams only
             let db_emitter = DatabaseEngineEventEmitter::new_with_pool(db_pool.clone());
@@ -1320,7 +1320,7 @@ fn recompile_bundle_cache(
     extracted_path: &std::path::Path,
     manifest: &hot::bundle::BundleManifest,
 ) -> bool {
-    tracing::info!(
+    tracing::debug!(
         "ROUTING: Recompiling bundle cache for '{}' due to version mismatch",
         manifest.bundle_name
     );
@@ -1377,7 +1377,7 @@ fn recompile_bundle_cache(
         None, // Bundle builds have deps pre-bundled
     ) {
         Ok(()) => {
-            tracing::info!(
+            tracing::debug!(
                 "ROUTING: Bundle '{}' recompiled successfully",
                 manifest.bundle_name
             );
@@ -1896,7 +1896,7 @@ fn recompile_live_build_cache(
     file_hashes: &[hot::lang::cache::bytecode_cache::FileHash],
     conf: Option<&hot::val::Val>,
 ) -> bool {
-    tracing::info!(
+    tracing::debug!(
         "ROUTING: Recompiling live build cache for '{}' (key={})",
         project_name,
         &cache_key[..12.min(cache_key.len())]
@@ -1918,7 +1918,7 @@ fn recompile_live_build_cache(
         conf, // Pass config for live build dependency resolution
     ) {
         Ok(()) => {
-            tracing::info!(
+            tracing::debug!(
                 "ROUTING: Live build '{}' recompiled successfully",
                 project_name
             );
@@ -2108,7 +2108,7 @@ async fn find_build_for_function(
 
                 // If bundle not extracted, try to extract it on demand
                 if extracted_path.is_none() {
-                    tracing::info!(
+                    tracing::debug!(
                         "ROUTING: Bundle build {} (project {}) not extracted yet, extracting on demand...",
                         build.build_id,
                         project.name
@@ -2137,7 +2137,7 @@ async fn find_build_for_function(
                     .await
                     {
                         Ok(prepared) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 "ROUTING: Prepared bundle {} at {:?}",
                                 build.build_id,
                                 prepared.extract_dir
@@ -2197,7 +2197,7 @@ async fn find_build_for_function(
                                 } else {
                                     "cache not found"
                                 };
-                                tracing::info!(
+                                tracing::debug!(
                                     "ROUTING: Bundle build {} cache needs compilation ({}), compiling...",
                                     build.build_id,
                                     reason
@@ -2325,7 +2325,7 @@ async fn find_build_for_function(
                     } else {
                         "cache not found"
                     };
-                    tracing::info!(
+                    tracing::debug!(
                         "ROUTING: Live build {} cache needs compilation ({}), compiling...",
                         build.build_id,
                         reason
@@ -2837,7 +2837,7 @@ async fn execute_single_event_handler(
                                                         }
                                                     };
 
-                                                info!(
+                                                debug!(
                                                     "Pre-compiling bundle {} to generate bytecode cache",
                                                     build.build_id
                                                 );
@@ -2850,7 +2850,7 @@ async fn execute_single_event_handler(
                                                     None, // Bundle builds have deps pre-bundled
                                                 ) {
                                                     Ok(()) => {
-                                                        info!(
+                                                        debug!(
                                                             "Bundle {} pre-compiled successfully",
                                                             build.build_id
                                                         );
@@ -5052,7 +5052,7 @@ pub async fn run_with_components_shared_context(
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
                 let worker_id = worker_count;
-                info!("hot.dev: WORKER notification executor started");
+                debug!("hot.dev: WORKER notification executor started");
 
                 loop {
                     let claimed_queue = {
@@ -5134,7 +5134,7 @@ pub async fn run_with_components_shared_context(
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
                 let worker_id = 0usize;
-                info!("hot.dev: WORKER request executor started");
+                debug!("hot.dev: WORKER request executor started");
 
                 loop {
                     let claimed_queue = {
@@ -5173,7 +5173,7 @@ pub async fn run_with_components_shared_context(
                                         },
                                     )?;
 
-                                    info!(
+                                    debug!(
                                         "hot.dev: WORKER {} received request from hot:request queue: id={} head={:?} body={}",
                                         worker_id,
                                         request_msg.id,
@@ -5191,18 +5191,18 @@ pub async fn run_with_components_shared_context(
                                     response_queue.enqueue(response_message).await.map_err(|e| {
                                         let error_msg =
                                             format!("Failed to send response message: {}", e);
-                                        info!("hot.dev: WORKER {} {}", worker_id, error_msg);
+                                        warn!("hot.dev: WORKER {} {}", worker_id, error_msg);
                                         Box::new(std::io::Error::other(error_msg))
                                             as Box<dyn std::error::Error + Send + Sync>
                                     })?;
 
-                                    info!(
+                                    debug!(
                                         "hot.dev: WORKER {} sent response to hot:response queue",
                                         worker_id
                                     );
                                 }
                                 _ => {
-                                    info!(
+                                    warn!(
                                         "hot.dev: WORKER {} received unknown message type '{}' on request queue",
                                         worker_id, msg_type
                                     );
@@ -5215,7 +5215,7 @@ pub async fn run_with_components_shared_context(
                     {
                         Ok(Some(_)) | Ok(None) => {}
                         Err(e) => {
-                            info!(
+                            warn!(
                                 "hot.dev: WORKER {} error processing request message: {}",
                                 worker_id, e
                             );
@@ -5273,7 +5273,7 @@ pub async fn run_with_components_shared_context(
 
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
-                info!("hot.dev: WORKER {} started", worker_id);
+                debug!("hot.dev: WORKER {} started", worker_id);
 
                 loop {
                     let claimed_queue = {
@@ -5755,7 +5755,7 @@ pub async fn run_with_components_shared_context(
                                                                                                             }
 
                                                                                                         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-                                                                                                        info!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
+                                                                                                        debug!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
                                                                                                         match hot::lang::engine::Engine::compile_to_cache(
                                                                                                             &paths,
                                                                                                             &bundle_cache,
@@ -5765,7 +5765,7 @@ pub async fn run_with_components_shared_context(
                                                                                                             None, // Bundle builds have deps pre-bundled
                                                                                                         ) {
                                                                                                             Ok(()) => {
-                                                                                                                info!("Bundle {} pre-compiled successfully", build.build_id);
+                                                                                                                debug!("Bundle {} pre-compiled successfully", build.build_id);
 
                                                                                                                 // Mark extraction complete AFTER bytecode is ready
                                                                                                                 BuildPathCache::mark_extraction_complete(&extract_dir);
@@ -5974,7 +5974,7 @@ pub async fn run_with_components_shared_context(
                                             let maint_message: hot::lang::event::MaintenanceMessage = message.try_into()
                                                 .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
 
-                                            info!("hot.dev: WORKER {} received maintenance task: id={} tasks={:?}",
+                                            debug!("hot.dev: WORKER {} received maintenance task: id={} tasks={:?}",
                                                 worker_id,
                                                 maint_message.id,
                                                 maint_message.body.tasks);
@@ -5986,7 +5986,7 @@ pub async fn run_with_components_shared_context(
                                                             match hot::db::session::Session::cleanup_expired(db).await {
                                                                 Ok(count) => {
                                                                     if count > 0 {
-                                                                        info!("hot.dev: WORKER {} maintenance: cleaned up {} expired sessions", worker_id, count);
+                                                                        debug!("hot.dev: WORKER {} maintenance: cleaned up {} expired sessions", worker_id, count);
                                                                     }
                                                                 }
                                                                 Err(e) => {
@@ -5998,7 +5998,7 @@ pub async fn run_with_components_shared_context(
                                                             match hot::db::Schedule::delete_old_inactive_schedules(db, 30).await {
                                                                 Ok(count) => {
                                                                     if count > 0 {
-                                                                        info!("hot.dev: WORKER {} maintenance: cleaned up {} inactive schedules", worker_id, count);
+                                                                        debug!("hot.dev: WORKER {} maintenance: cleaned up {} inactive schedules", worker_id, count);
                                                                     }
                                                                 }
                                                                 Err(e) => {
@@ -6016,7 +6016,7 @@ pub async fn run_with_components_shared_context(
                                                             match hot::db::domain::Domain::list_unverified(db).await {
                                                                 Ok(domains) => {
                                                                     if !domains.is_empty() {
-                                                                        info!("hot.dev: WORKER {} maintenance: checking {} unverified domains", worker_id, domains.len());
+                                                                        debug!("hot.dev: WORKER {} maintenance: checking {} unverified domains", worker_id, domains.len());
                                                                     }
                                                                     for domain in &domains {
                                                                         if let Some(arn) = &domain.certificate_ref {
@@ -6293,7 +6293,7 @@ pub async fn run_with_components_shared_context(
                                             }
                                         },
                                         _ => {
-                                            info!("hot.dev: WORKER {} received unknown message type '{}' on event queue", worker_id, msg_type);
+                                            warn!("hot.dev: WORKER {} received unknown message type '{}' on event queue", worker_id, msg_type);
                                         }
                                     }
 

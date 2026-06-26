@@ -425,7 +425,7 @@ pub async fn github_callback_handler(
     } else if let Some(matched) =
         resolve_invite_email(invite_email.as_deref(), &user_info.verified_emails)
     {
-        tracing::info!("GitHub OAuth email resolved via invite match: {}", matched);
+        tracing::debug!("GitHub OAuth email resolved via invite match: {}", matched);
         matched
     } else if user_info.verified_emails.len() > 1 {
         // Ambiguous: let the user pick. Stash the OAuth result in a signed,
@@ -593,7 +593,7 @@ async fn handle_oauth_user(
         let user = User::get_user(db, &auth.user_id)
             .await
             .map_err(|e| format!("Failed to load user for OAuth login: {}", e))?;
-        tracing::info!(
+        tracing::debug!(
             "User {} logged in with {} (matched by provider_user_id)",
             user.email,
             provider
@@ -608,7 +608,7 @@ async fn handle_oauth_user(
             match UserAuth::get_user_auth(db, provider, email).await {
                 Ok(_) => {
                     // OAuth already linked, just log them in
-                    tracing::info!("User {} logged in with {}", email, provider);
+                    tracing::debug!("User {} logged in with {}", email, provider);
                     Ok((user, false))
                 }
                 Err(_) => {
@@ -631,7 +631,7 @@ async fn handle_oauth_user(
                     .await
                     .map_err(|e| format!("Failed to link OAuth provider: {}", e))?;
 
-                    tracing::info!("Linked {} OAuth to existing user {}", provider, email);
+                    tracing::debug!("Linked {} OAuth to existing user {}", provider, email);
                     Ok((user, false))
                 }
             }
@@ -684,7 +684,7 @@ async fn handle_oauth_user(
                 .await
                 .map_err(|e| format!("Failed to get created user: {}", e))?;
 
-            tracing::info!("Created new user {} via {} OAuth", email, provider);
+            tracing::debug!("Created new user {} via {} OAuth", email, provider);
             Ok((user, true))
         }
     }
