@@ -5,7 +5,7 @@ use std::path::Path;
 
 use hot::stream::{StreamPubSub, StreamPubSubType};
 use hot::val::Val;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::Env;
 use crate::build_info;
@@ -160,7 +160,7 @@ pub(crate) async fn run_dev(
         // In-memory mode requires shared pub/sub instance
         match StreamPubSub::new(StreamPubSubType::Memory, None, false) {
             Ok(pubsub) => {
-                info!("hot.dev: Created shared in-memory stream pub/sub for API, APP, and Worker");
+                debug!("hot.dev: Created shared in-memory stream pub/sub for API, APP, and Worker");
                 Some(std::sync::Arc::new(pubsub))
             }
             Err(e) => {

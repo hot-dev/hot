@@ -432,7 +432,7 @@ pub async fn authenticate_user(
         }
     };
 
-    tracing::info!("Authentication successful for email: {}", email);
+    tracing::debug!("Authentication successful for email: {}", email);
     Ok(user)
 }
 

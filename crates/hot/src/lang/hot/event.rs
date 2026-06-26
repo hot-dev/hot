@@ -89,7 +89,7 @@ pub fn send_event(
                     );
 
                     // Publish the event with context
-                    tracing::info!(
+                    tracing::debug!(
                         "send_event: publishing event type='{}' to queue (event_id={}, target_project={:?})",
                         event.event_type,
                         event.event_id,

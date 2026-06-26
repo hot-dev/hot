@@ -129,7 +129,7 @@ fn spawn_worker_queue_claimer(
     queue_metrics_enabled: bool,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
-        info!("hot.dev: WORKER {} claimer started", queue_name);
+        debug!("hot.dev: WORKER {} claimer started", queue_name);
 
         loop {
             if *shutdown_rx.borrow() {
@@ -787,7 +787,7 @@ fn create_emitter(
     // Get emitter type
     let emitter_type = emitter_conf.get_str("type");
 
-    tracing::info!(
+    tracing::debug!(
         "create_emitter: emitter_conf={:?}, emitter_type='{}'",
         emitter_conf,
         emitter_type
@@ -808,14 +808,14 @@ fn create_emitter(
     // Create the base emitter and wrap with filtering based on type
     match emitter_type.as_str() {
         "console" => {
-            tracing::info!("create_emitter: creating console emitter");
+            tracing::debug!("create_emitter: creating console emitter");
             let console_emitter = ConsoleEngineEventEmitter::new();
             let filtered_emitter =
                 hot::lang::emitter::FilteredEmitter::new(console_emitter, filter_conf.as_ref())?;
             Ok(Some(std::sync::Arc::new(filtered_emitter)))
         }
         "db" => {
-            tracing::info!("create_emitter: creating db emitter");
+            tracing::debug!("create_emitter: creating db emitter");
             // Use existing database pool instead of creating a new one
             // Note: stream_data is no longer persisted to DB - delivered via Redis Streams only
             let db_emitter = DatabaseEngineEventEmitter::new_with_pool(db_pool.clone());
@@ -1320,7 +1320,7 @@ fn recompile_bundle_cache(
     extracted_path: &std::path::Path,
     manifest: &hot::bundle::BundleManifest,
 ) -> bool {
-    tracing::info!(
+    tracing::debug!(
         "ROUTING: Recompiling bundle cache for '{}' due to version mismatch",
         manifest.bundle_name
     );
@@ -1377,7 +1377,7 @@ fn recompile_bundle_cache(
         None, // Bundle builds have deps pre-bundled
     ) {
         Ok(()) => {
-            tracing::info!(
+            tracing::debug!(
                 "ROUTING: Bundle '{}' recompiled successfully",
                 manifest.bundle_name
             );
@@ -1397,6 +1397,56 @@ fn recompile_bundle_cache(
 struct PreparedBundleRuntime {
     extract_dir: PathBuf,
     build_data: Option<Vec<u8>>,
+}
+
+fn bundle_extract_dir(build_id: &Uuid) -> PathBuf {
+    PathBuf::from(format!(".hot/run/build-{}", build_id.simple()))
+}
+
+fn bundle_bytecode_ready(extracted_path: &std::path::Path) -> bool {
+    let cache_dir = extracted_path.join(".hot").join("cache");
+    cache_dir.exists()
+        && std::fs::read_dir(&cache_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| entry.path().to_string_lossy().ends_with(".bc.zst"))
+            })
+            .unwrap_or(false)
+}
+
+fn get_completed_bundle_extracted_path(
+    build: &Build,
+    build_path_cache: &Arc<BuildPathCache>,
+) -> Option<PathBuf> {
+    if let Some(path) = build_path_cache.get(&build.build_id) {
+        if BuildPathCache::is_extraction_complete(&path) && bundle_bytecode_ready(&path) {
+            tracing::debug!(
+                "ROUTING: Bundle {} found in memory cache at {:?}",
+                build.build_id,
+                path
+            );
+            return Some(path);
+        }
+
+        tracing::debug!(
+            "ROUTING: Bundle {} in memory cache but bytecode not ready, removing",
+            build.build_id
+        );
+        build_path_cache.remove(&build.build_id);
+    }
+
+    let extract_dir = bundle_extract_dir(&build.build_id);
+    if BuildPathCache::is_extraction_complete(&extract_dir) && bundle_bytecode_ready(&extract_dir) {
+        tracing::debug!(
+            "ROUTING: Bundle {} found on disk with bytecode, adding to cache",
+            build.build_id
+        );
+        build_path_cache.insert(build.build_id, extract_dir.clone());
+        return Some(extract_dir);
+    }
+
+    None
 }
 
 fn bundle_source_paths(extracted_path: &std::path::Path) -> Result<Vec<String>, String> {
@@ -1511,10 +1561,9 @@ async fn prepare_bundle_runtime(
         let extraction_lock = build_path_cache.get_extraction_lock(&build.build_id);
         let _lock_guard = extraction_lock.lock().await;
 
-        existing_path = get_bundle_extracted_path(build, build_path_cache).await;
+        existing_path = get_completed_bundle_extracted_path(build, build_path_cache);
         if existing_path.is_none() {
-            let extract_dir =
-                std::path::PathBuf::from(format!(".hot/run/build-{}", build.build_id.as_simple()));
+            let extract_dir = bundle_extract_dir(&build.build_id);
             let mut file_lock = BuildPathCache::acquire_file_lock(&build.build_id).ok();
             let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
 
@@ -1847,7 +1896,7 @@ fn recompile_live_build_cache(
     file_hashes: &[hot::lang::cache::bytecode_cache::FileHash],
     conf: Option<&hot::val::Val>,
 ) -> bool {
-    tracing::info!(
+    tracing::debug!(
         "ROUTING: Recompiling live build cache for '{}' (key={})",
         project_name,
         &cache_key[..12.min(cache_key.len())]
@@ -1869,7 +1918,7 @@ fn recompile_live_build_cache(
         conf, // Pass config for live build dependency resolution
     ) {
         Ok(()) => {
-            tracing::info!(
+            tracing::debug!(
                 "ROUTING: Live build '{}' recompiled successfully",
                 project_name
             );
@@ -1945,42 +1994,12 @@ async fn get_bundle_extracted_path(
     build: &Build,
     build_path_cache: &Arc<BuildPathCache>,
 ) -> Option<std::path::PathBuf> {
-    // Helper to check if bytecode cache is ready
-    let bytecode_ready = |dir: &std::path::Path| -> bool {
-        let cache_dir = dir.join(".hot").join("cache");
-        cache_dir.exists()
-            && std::fs::read_dir(&cache_dir)
-                .map(|mut d| d.next().is_some())
-                .unwrap_or(false)
-    };
-
-    // First check in-memory cache
-    if let Some(path) = build_path_cache.get(&build.build_id) {
-        let cache_dir = path.join(".hot").join("cache");
-        if cache_dir.exists()
-            && std::fs::read_dir(&cache_dir)
-                .map(|mut d| d.next().is_some())
-                .unwrap_or(false)
-        {
-            tracing::debug!(
-                "ROUTING: Bundle {} found in memory cache at {:?}",
-                build.build_id,
-                path
-            );
-            return Some(path);
-        } else {
-            // Cache not ready - remove from memory cache
-            tracing::debug!(
-                "ROUTING: Bundle {} in memory cache but bytecode not ready, removing",
-                build.build_id
-            );
-            build_path_cache.remove(&build.build_id);
-        }
+    if let Some(path) = get_completed_bundle_extracted_path(build, build_path_cache) {
+        return Some(path);
     }
 
     // Check disk
-    let extract_dir =
-        std::path::PathBuf::from(format!(".hot/run/build-{}", build.build_id.simple()));
+    let extract_dir = bundle_extract_dir(&build.build_id);
     tracing::debug!(
         "ROUTING: Checking for extracted bundle at {:?} (exists={})",
         extract_dir,
@@ -1988,44 +2007,35 @@ async fn get_bundle_extracted_path(
     );
 
     if BuildPathCache::is_extraction_complete(&extract_dir) {
-        if bytecode_ready(&extract_dir) {
-            tracing::debug!(
-                "ROUTING: Bundle {} found on disk with bytecode, adding to cache",
-                build.build_id
-            );
-            build_path_cache.insert(build.build_id, extract_dir.clone());
-            return Some(extract_dir);
-        } else {
-            // Extraction complete but bytecode not ready - wait on extraction lock
-            tracing::debug!(
-                "ROUTING: Bundle {} extracted but bytecode not ready, waiting for lock",
-                build.build_id
-            );
-            let extraction_lock = build_path_cache.get_extraction_lock(&build.build_id);
-            match tokio::time::timeout(std::time::Duration::from_secs(5), extraction_lock.lock())
-                .await
-            {
-                Ok(_guard) => {
-                    if bytecode_ready(&extract_dir) {
-                        tracing::debug!(
-                            "ROUTING: Bundle {} bytecode ready after lock wait",
-                            build.build_id
-                        );
-                        build_path_cache.insert(build.build_id, extract_dir.clone());
-                        return Some(extract_dir);
-                    } else {
-                        tracing::warn!(
-                            "ROUTING: Bundle {} bytecode still not ready after lock wait",
-                            build.build_id
-                        );
-                    }
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "ROUTING: Bundle {} timed out waiting for extraction lock",
+        // Extraction is marked complete but bytecode is missing, likely because
+        // compilation is in progress or a prior compile failed. Wait for any
+        // active extractor/compiler, then re-check without recursively waiting.
+        tracing::debug!(
+            "ROUTING: Bundle {} extracted but bytecode not ready, waiting for lock",
+            build.build_id
+        );
+        let extraction_lock = build_path_cache.get_extraction_lock(&build.build_id);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), extraction_lock.lock()).await
+        {
+            Ok(_guard) => {
+                if let Some(path) = get_completed_bundle_extracted_path(build, build_path_cache) {
+                    tracing::debug!(
+                        "ROUTING: Bundle {} bytecode ready after lock wait",
                         build.build_id
                     );
+                    return Some(path);
                 }
+
+                tracing::warn!(
+                    "ROUTING: Bundle {} bytecode still not ready after lock wait",
+                    build.build_id
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ROUTING: Bundle {} timed out waiting for extraction lock",
+                    build.build_id
+                );
             }
         }
     } else if extract_dir.exists() {
@@ -2038,21 +2048,18 @@ async fn get_bundle_extracted_path(
         match tokio::time::timeout(std::time::Duration::from_secs(5), extraction_lock.lock()).await
         {
             Ok(_guard) => {
-                if BuildPathCache::is_extraction_complete(&extract_dir)
-                    && bytecode_ready(&extract_dir)
-                {
+                if let Some(path) = get_completed_bundle_extracted_path(build, build_path_cache) {
                     tracing::debug!(
                         "ROUTING: Bundle {} ready after waiting for extraction",
                         build.build_id
                     );
-                    build_path_cache.insert(build.build_id, extract_dir.clone());
-                    return Some(extract_dir);
-                } else {
-                    tracing::warn!(
-                        "ROUTING: Bundle {} still not ready after waiting",
-                        build.build_id
-                    );
+                    return Some(path);
                 }
+
+                tracing::warn!(
+                    "ROUTING: Bundle {} still not ready after waiting",
+                    build.build_id
+                );
             }
             Err(_) => {
                 tracing::warn!(
@@ -2065,7 +2072,6 @@ async fn get_bundle_extracted_path(
 
     None
 }
-
 /// Find the build that contains a specific function (for hot:call routing)
 /// Returns routing result with the selected build and whether tie-breaker was used.
 /// Uses target_project_id as tie-breaker when multiple builds have the same function.
@@ -2102,13 +2108,12 @@ async fn find_build_for_function(
 
                 // If bundle not extracted, try to extract it on demand
                 if extracted_path.is_none() {
-                    tracing::info!(
+                    tracing::debug!(
                         "ROUTING: Bundle build {} (project {}) not extracted yet, extracting on demand...",
                         build.build_id,
                         project.name
                     );
 
-                    // Get environment for storage retrieval
                     let env = match hot::db::Env::get_env(db, &project.env_id).await {
                         Ok(env) => env,
                         Err(e) => {
@@ -2121,144 +2126,27 @@ async fn find_build_for_function(
                         }
                     };
 
-                    // Try to retrieve and extract the build
-                    match hot::storage::build_storage_from_config(worker_conf).await {
-                        Ok(storage) => {
-                            match storage
-                                .retrieve_build(&build.build_id, &env.org_id, &project.env_id)
-                                .await
-                            {
-                                Ok(build_data) => {
-                                    let extract_dir = std::path::PathBuf::from(format!(
-                                        ".hot/run/build-{}",
-                                        build.build_id.simple()
-                                    ));
-
-                                    // Use extraction lock to prevent race conditions
-                                    let extraction_lock =
-                                        build_path_cache.get_extraction_lock(&build.build_id);
-                                    let _lock_guard = extraction_lock.lock().await;
-
-                                    // Double-check after acquiring lock
-                                    if let Some(path) =
-                                        get_bundle_extracted_path(&build, build_path_cache).await
-                                    {
-                                        tracing::debug!(
-                                            "ROUTING: Bundle {} was extracted by another task while waiting for lock",
-                                            build.build_id
-                                        );
-                                        extracted_path = Some(path);
-                                    } else {
-                                        // Extract the bundle
-                                        match hot::bundle::extract_bundle_from_bytes(
-                                            &build_data,
-                                            &extract_dir,
-                                        ) {
-                                            Ok(()) => {
-                                                tracing::info!(
-                                                    "ROUTING: Extracted bundle {} to {:?}",
-                                                    build.build_id,
-                                                    extract_dir
-                                                );
-
-                                                // Read manifest for cache key
-                                                if let Ok(manifest) =
-                                                    hot::bundle::read_bundle_manifest(&extract_dir)
-                                                {
-                                                    // Clear any stale embedded cache
-                                                    let bundle_cache_dir =
-                                                        extract_dir.join(".hot").join("cache");
-                                                    if bundle_cache_dir.exists()
-                                                        && let Ok(entries) =
-                                                            std::fs::read_dir(&bundle_cache_dir)
-                                                    {
-                                                        for entry in entries.flatten() {
-                                                            let path = entry.path();
-                                                            if path
-                                                                .to_string_lossy()
-                                                                .ends_with(".bc.zst")
-                                                            {
-                                                                let _ = std::fs::remove_file(&path);
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // Pre-compile bytecode
-                                                    let build_src_path =
-                                                        extract_dir.join("hot/src");
-                                                    let build_pkg_path =
-                                                        extract_dir.join("hot/pkg");
-                                                    let mut paths = vec![
-                                                        build_src_path
-                                                            .to_string_lossy()
-                                                            .to_string(),
-                                                    ];
-                                                    if build_pkg_path.exists() {
-                                                        paths.push(
-                                                            build_pkg_path
-                                                                .to_string_lossy()
-                                                                .to_string(),
-                                                        );
-                                                    }
-
-                                                    let _ =
-                                                        std::fs::create_dir_all(&bundle_cache_dir);
-                                                    let bundle_cache =
-                                                        hot::lang::cache::bytecode_cache::BytecodeCache::new(
-                                                            bundle_cache_dir,
-                                                        );
-
-                                                    match hot::lang::engine::Engine::compile_to_cache(
-                                                        &paths,
-                                                        &bundle_cache,
-                                                        &manifest.bundle_name,
-                                                        manifest.cache_key.as_deref(),
-                                                        Some(manifest.file_hashes.clone()),
-                                                        None, // Bundle builds have deps pre-bundled
-                                                    ) {
-                                                        Ok(()) => {
-                                                            // Mark extraction complete only after bytecode is ready.
-                                                            BuildPathCache::mark_extraction_complete(
-                                                                &extract_dir,
-                                                            );
-                                                            build_path_cache.insert(
-                                                                build.build_id,
-                                                                extract_dir.clone(),
-                                                            );
-                                                            extracted_path = Some(extract_dir);
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::warn!(
-                                                                "ROUTING: Failed to pre-compile bundle {}: {}",
-                                                                build.build_id,
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "ROUTING: Failed to extract bundle {}: {}",
-                                                    build.build_id,
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "ROUTING: Failed to retrieve bundle {} from storage: {}",
-                                        build.build_id,
-                                        e
-                                    );
-                                }
-                            }
+                    match prepare_bundle_runtime(
+                        &build,
+                        &project,
+                        &env,
+                        worker_conf,
+                        build_path_cache,
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(prepared) => {
+                            tracing::debug!(
+                                "ROUTING: Prepared bundle {} at {:?}",
+                                build.build_id,
+                                prepared.extract_dir
+                            );
+                            extracted_path = Some(prepared.extract_dir);
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "ROUTING: Failed to create storage for bundle {} extraction: {}",
+                                "ROUTING: Failed to prepare bundle {} on demand: {}",
                                 build.build_id,
                                 e
                             );
@@ -2309,7 +2197,7 @@ async fn find_build_for_function(
                                 } else {
                                     "cache not found"
                                 };
-                                tracing::info!(
+                                tracing::debug!(
                                     "ROUTING: Bundle build {} cache needs compilation ({}), compiling...",
                                     build.build_id,
                                     reason
@@ -2437,7 +2325,7 @@ async fn find_build_for_function(
                     } else {
                         "cache not found"
                     };
-                    tracing::info!(
+                    tracing::debug!(
                         "ROUTING: Live build {} cache needs compilation ({}), compiling...",
                         build.build_id,
                         reason
@@ -2753,10 +2641,18 @@ async fn execute_single_event_handler(
     // Otherwise fall back to the config paths
     // Also track if this is a bundle build so we skip global dependency resolution
     // and use the bundle's own cache directory
-    let (src_paths, is_bundle_build, bundle_extract_path, bundle_manifest) = if let Some(
-        extracted_path,
-    ) =
-        build_path_cache.get(&build.build_id)
+    let (src_paths, is_bundle_build, bundle_extract_path, bundle_manifest) = if build.is_live() {
+        // Live builds (including local dev) always execute from configured
+        // project source paths. Do not attempt bundle storage/extraction for
+        // these builds; storage may not exist in local dev.
+        (
+            hot::project::get_project_src_paths(worker_conf, &project.name),
+            false,
+            None,
+            None,
+        )
+    } else if let Some(extracted_path) =
+        get_completed_bundle_extracted_path(build, &build_path_cache)
     {
         // Use extracted build path - source files are in hot/src, dependencies in hot/pkg
         let build_src_path = extracted_path.join("hot/src");
@@ -2790,7 +2686,8 @@ async fn execute_single_event_handler(
         let _lock_guard = extraction_lock.lock().await;
 
         // Double-check in-memory cache after acquiring lock (another thread may have just finished)
-        if let Some(extracted_path) = build_path_cache.get(&build.build_id) {
+        if let Some(extracted_path) = get_completed_bundle_extracted_path(build, &build_path_cache)
+        {
             debug!(
                 "Build {} was extracted by another thread while waiting for lock",
                 build.build_id
@@ -2940,7 +2837,7 @@ async fn execute_single_event_handler(
                                                         }
                                                     };
 
-                                                info!(
+                                                debug!(
                                                     "Pre-compiling bundle {} to generate bytecode cache",
                                                     build.build_id
                                                 );
@@ -2953,7 +2850,7 @@ async fn execute_single_event_handler(
                                                     None, // Bundle builds have deps pre-bundled
                                                 ) {
                                                     Ok(()) => {
-                                                        info!(
+                                                        debug!(
                                                             "Bundle {} pre-compiled successfully",
                                                             build.build_id
                                                         );
@@ -5155,7 +5052,7 @@ pub async fn run_with_components_shared_context(
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
                 let worker_id = worker_count;
-                info!("hot.dev: WORKER notification executor started");
+                debug!("hot.dev: WORKER notification executor started");
 
                 loop {
                     let claimed_queue = {
@@ -5237,7 +5134,7 @@ pub async fn run_with_components_shared_context(
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
                 let worker_id = 0usize;
-                info!("hot.dev: WORKER request executor started");
+                debug!("hot.dev: WORKER request executor started");
 
                 loop {
                     let claimed_queue = {
@@ -5276,7 +5173,7 @@ pub async fn run_with_components_shared_context(
                                         },
                                     )?;
 
-                                    info!(
+                                    debug!(
                                         "hot.dev: WORKER {} received request from hot:request queue: id={} head={:?} body={}",
                                         worker_id,
                                         request_msg.id,
@@ -5294,18 +5191,18 @@ pub async fn run_with_components_shared_context(
                                     response_queue.enqueue(response_message).await.map_err(|e| {
                                         let error_msg =
                                             format!("Failed to send response message: {}", e);
-                                        info!("hot.dev: WORKER {} {}", worker_id, error_msg);
+                                        warn!("hot.dev: WORKER {} {}", worker_id, error_msg);
                                         Box::new(std::io::Error::other(error_msg))
                                             as Box<dyn std::error::Error + Send + Sync>
                                     })?;
 
-                                    info!(
+                                    debug!(
                                         "hot.dev: WORKER {} sent response to hot:response queue",
                                         worker_id
                                     );
                                 }
                                 _ => {
-                                    info!(
+                                    warn!(
                                         "hot.dev: WORKER {} received unknown message type '{}' on request queue",
                                         worker_id, msg_type
                                     );
@@ -5318,7 +5215,7 @@ pub async fn run_with_components_shared_context(
                     {
                         Ok(Some(_)) | Ok(None) => {}
                         Err(e) => {
-                            info!(
+                            warn!(
                                 "hot.dev: WORKER {} error processing request message: {}",
                                 worker_id, e
                             );
@@ -5376,7 +5273,7 @@ pub async fn run_with_components_shared_context(
 
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
-                info!("hot.dev: WORKER {} started", worker_id);
+                debug!("hot.dev: WORKER {} started", worker_id);
 
                 loop {
                     let claimed_queue = {
@@ -5858,7 +5755,7 @@ pub async fn run_with_components_shared_context(
                                                                                                             }
 
                                                                                                         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-                                                                                                        info!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
+                                                                                                        debug!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
                                                                                                         match hot::lang::engine::Engine::compile_to_cache(
                                                                                                             &paths,
                                                                                                             &bundle_cache,
@@ -5868,7 +5765,7 @@ pub async fn run_with_components_shared_context(
                                                                                                             None, // Bundle builds have deps pre-bundled
                                                                                                         ) {
                                                                                                             Ok(()) => {
-                                                                                                                info!("Bundle {} pre-compiled successfully", build.build_id);
+                                                                                                                debug!("Bundle {} pre-compiled successfully", build.build_id);
 
                                                                                                                 // Mark extraction complete AFTER bytecode is ready
                                                                                                                 BuildPathCache::mark_extraction_complete(&extract_dir);
@@ -6077,7 +5974,7 @@ pub async fn run_with_components_shared_context(
                                             let maint_message: hot::lang::event::MaintenanceMessage = message.try_into()
                                                 .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>)?;
 
-                                            info!("hot.dev: WORKER {} received maintenance task: id={} tasks={:?}",
+                                            debug!("hot.dev: WORKER {} received maintenance task: id={} tasks={:?}",
                                                 worker_id,
                                                 maint_message.id,
                                                 maint_message.body.tasks);
@@ -6089,7 +5986,7 @@ pub async fn run_with_components_shared_context(
                                                             match hot::db::session::Session::cleanup_expired(db).await {
                                                                 Ok(count) => {
                                                                     if count > 0 {
-                                                                        info!("hot.dev: WORKER {} maintenance: cleaned up {} expired sessions", worker_id, count);
+                                                                        debug!("hot.dev: WORKER {} maintenance: cleaned up {} expired sessions", worker_id, count);
                                                                     }
                                                                 }
                                                                 Err(e) => {
@@ -6101,7 +5998,7 @@ pub async fn run_with_components_shared_context(
                                                             match hot::db::Schedule::delete_old_inactive_schedules(db, 30).await {
                                                                 Ok(count) => {
                                                                     if count > 0 {
-                                                                        info!("hot.dev: WORKER {} maintenance: cleaned up {} inactive schedules", worker_id, count);
+                                                                        debug!("hot.dev: WORKER {} maintenance: cleaned up {} inactive schedules", worker_id, count);
                                                                     }
                                                                 }
                                                                 Err(e) => {
@@ -6119,7 +6016,7 @@ pub async fn run_with_components_shared_context(
                                                             match hot::db::domain::Domain::list_unverified(db).await {
                                                                 Ok(domains) => {
                                                                     if !domains.is_empty() {
-                                                                        info!("hot.dev: WORKER {} maintenance: checking {} unverified domains", worker_id, domains.len());
+                                                                        debug!("hot.dev: WORKER {} maintenance: checking {} unverified domains", worker_id, domains.len());
                                                                     }
                                                                     for domain in &domains {
                                                                         if let Some(arn) = &domain.certificate_ref {
@@ -6396,7 +6293,7 @@ pub async fn run_with_components_shared_context(
                                             }
                                         },
                                         _ => {
-                                            info!("hot.dev: WORKER {} received unknown message type '{}' on event queue", worker_id, msg_type);
+                                            warn!("hot.dev: WORKER {} received unknown message type '{}' on event queue", worker_id, msg_type);
                                         }
                                     }
 

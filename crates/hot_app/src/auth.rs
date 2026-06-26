@@ -685,7 +685,7 @@ pub async fn session_middleware(
                             time::Duration::days(365),
                         ));
                         cookies_changed = true;
-                        tracing::info!(
+                        tracing::debug!(
                             "Updated org_id cookie to {} after fallback",
                             current_org.org_id
                         );
@@ -703,7 +703,7 @@ pub async fn session_middleware(
                             time::Duration::days(365),
                         ));
                         cookies_changed = true;
-                        tracing::info!(
+                        tracing::debug!(
                             "Updated env_id cookie to {} after fallback",
                             current_env.env_id
                         );
@@ -764,7 +764,7 @@ pub async fn session_middleware(
                             .await
                             {
                                 Ok(updated_cookies) => {
-                                    tracing::info!("Set default org/env cookies for auto-login");
+                                    tracing::debug!("Set default org/env cookies for auto-login");
                                     updated_cookies
                                 }
                                 Err(e) => {

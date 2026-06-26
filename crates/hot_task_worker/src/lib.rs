@@ -1231,7 +1231,7 @@ async fn reconcile_queued_tasks(
                         "Queued-task reconciler enqueued task but failed to defer next check: {}", e,
                     );
                 }
-                tracing::info!(
+                tracing::debug!(
                     task_id = %task_id,
                     "Queued-task reconciler re-enqueued stale queued task"
                 );
@@ -1329,13 +1329,13 @@ async fn maybe_retry_zombie_task(
             if let Err(e) = tq.enqueue(retry_request).await {
                 tracing::error!(new_task_id = %new_task_id, "Failed to enqueue zombie retry: {}", e);
             } else {
-                tracing::info!(new_task_id = %new_task_id, attempt = next_attempt, "Zombie retry enqueued after delay");
+                tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Zombie retry enqueued after delay");
             }
         });
     } else if let Err(e) = task_queue.enqueue(retry_request).await {
         tracing::error!(new_task_id = %new_task_id, "Failed to enqueue zombie retry: {}", e);
     } else {
-        tracing::info!(new_task_id = %new_task_id, attempt = next_attempt, "Zombie retry enqueued immediately");
+        tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Zombie retry enqueued immediately");
     }
 }
 
@@ -2222,7 +2222,7 @@ async fn process_container_task(
                 container_path,
                 mode,
             ));
-            tracing::info!(
+            tracing::debug!(
                 task_id = %task_id,
                 container = %container_path,
                 resource = %resource_path,
@@ -2672,7 +2672,7 @@ async fn process_container_task(
                 check_cus_thresholds(&db, org_id, env_id, &usage_stats_cache).await;
             }
 
-            tracing::info!(
+            tracing::debug!(
                 task_id = %task_id,
                 image = %image,
                 exit_code = output.exit_code,
@@ -3629,13 +3629,13 @@ async fn maybe_retry_task(
             if let Err(e) = tq.enqueue(retry_request).await {
                 tracing::error!(new_task_id = %new_task_id, "Failed to enqueue retry task: {}", e);
             } else {
-                tracing::info!(new_task_id = %new_task_id, attempt = next_attempt, "Retry task enqueued after delay");
+                tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Retry task enqueued after delay");
             }
         });
     } else if let Err(e) = task_queue.enqueue(retry_request).await {
         tracing::error!(new_task_id = %new_task_id, "Failed to enqueue retry task: {}", e);
     } else {
-        tracing::info!(new_task_id = %new_task_id, attempt = next_attempt, "Retry task enqueued immediately");
+        tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Retry task enqueued immediately");
     }
 }
 
@@ -3687,7 +3687,7 @@ fn load_bytecode_live(
     project: &hot::db::Project,
     conf: &Val,
 ) -> Result<Arc<CachedBytecode>, String> {
-    tracing::info!(build_id = %build_id, project = %project.name, "Bytecode cache miss — compiling live build from source");
+    tracing::debug!(build_id = %build_id, project = %project.name, "Bytecode cache miss — compiling live build from source");
 
     let src_paths = hot::project::get_project_src_paths(conf, &project.name);
     if src_paths.is_empty() {
@@ -3780,7 +3780,7 @@ async fn load_bytecode_bundle(
     db: &DatabasePool,
     conf: &Val,
 ) -> Result<Arc<CachedBytecode>, String> {
-    tracing::info!(build_id = %build_id, "Bytecode cache miss — fetching bundle build from storage");
+    tracing::debug!(build_id = %build_id, "Bytecode cache miss — fetching bundle build from storage");
 
     let env = hot::db::Env::get_env(db, &project.env_id)
         .await
@@ -3951,7 +3951,7 @@ async fn adopt_orphaned_containers(
         let task_id = match task_id_str.as_deref().and_then(|s| Uuid::parse_str(s).ok()) {
             Some(id) => id,
             None => {
-                tracing::info!(
+                tracing::debug!(
                     container_id = %container_id,
                     "Orphaned container has no task-id label, removing"
                 );
@@ -3963,7 +3963,7 @@ async fn adopt_orphaned_containers(
         let task = match Task::get(db, &task_id).await {
             Ok(t) => t,
             Err(_) => {
-                tracing::info!(
+                tracing::debug!(
                     task_id = %task_id,
                     container_id = %container_id,
                     "Orphaned container's task not found in DB, removing"
@@ -3976,7 +3976,7 @@ async fn adopt_orphaned_containers(
         let is_running_in_db = task.task_status_id == TaskStatus::Running.as_id();
 
         if !is_running_in_db {
-            tracing::info!(
+            tracing::debug!(
                 task_id = %task_id,
                 container_id = %container_id,
                 status = %task.status,
@@ -3990,7 +3990,7 @@ async fn adopt_orphaned_containers(
         match executor.inspect_status(&container_id).await {
             Ok(None) => {
                 // Container is still running — adopt it
-                tracing::info!(
+                tracing::debug!(
                     task_id = %task_id,
                     container_id = %container_id,
                     "Adopting running container (updating worker_id)"
@@ -4002,7 +4002,7 @@ async fn adopt_orphaned_containers(
             }
             Ok(Some(exit_code)) => {
                 // Container stopped — complete the task
-                tracing::info!(
+                tracing::debug!(
                     task_id = %task_id,
                     container_id = %container_id,
                     exit_code,
@@ -4130,7 +4130,7 @@ async fn cleanup_kata_orphans(
         {
             Some(id) => id,
             None => {
-                tracing::info!(
+                tracing::debug!(
                     container_id = %container_id,
                     "kata.orphans.cleanup: container had no hot.dev/task-id label"
                 );
@@ -4141,7 +4141,7 @@ async fn cleanup_kata_orphans(
         let task = match Task::get(db, &task_id).await {
             Ok(t) => t,
             Err(e) => {
-                tracing::info!(
+                tracing::debug!(
                     task_id = %task_id,
                     container_id = %container_id,
                     "kata.orphans.cleanup: task not in DB ({})", e
@@ -4151,7 +4151,7 @@ async fn cleanup_kata_orphans(
         };
 
         if task.task_status_id != TaskStatus::Running.as_id() {
-            tracing::info!(
+            tracing::debug!(
                 task_id = %task_id,
                 container_id = %container_id,
                 status = %task.status,
@@ -4213,7 +4213,7 @@ async fn monitor_adopted_container(
 
     loop {
         if coordinator.is_shutting_down() {
-            tracing::info!(
+            tracing::debug!(
                 task_id = %task_id,
                 container_id = %container_id,
                 "Stopping adopted container monitor (shutdown)"
@@ -4260,7 +4260,7 @@ async fn monitor_adopted_container(
                     maybe_retry_zombie_task(db, &task, task_queue).await;
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     task_id = %task_id,
                     container_id = %container_id,
                     exit_code,

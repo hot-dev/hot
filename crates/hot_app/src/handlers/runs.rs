@@ -42,7 +42,7 @@ pub async fn runs_list_handler(
 
     // Get env ID for filtering runs (use current env)
     let env_id = session.current_env_id();
-    tracing::info!(
+    tracing::debug!(
         "🔍 runs_list_handler: env_id={:?}, user_id={}, current_org={:?}",
         env_id,
         session.current_user_id(),
@@ -222,14 +222,14 @@ pub async fn run_detail_handler(
                 stream_graph::FocusElement::Run(run.run_id),
             )
             .await;
-            tracing::info!(
+            tracing::debug!(
                 "🔍 Graph data generated: nodes={}, edges={}",
                 graph_data.nodes.len(),
                 graph_data.edges.len()
             );
             let graph_data_json =
                 serde_json::to_string(&graph_data).unwrap_or_else(|_| "{}".to_string());
-            tracing::info!("Graph data JSON length: {}", graph_data_json.len());
+            tracing::debug!("Graph data JSON length: {}", graph_data_json.len());
 
             // Convert run to display format with timezone-aware formatting
             let run_display = Some(templates::RunDisplay::from_with_timezone(

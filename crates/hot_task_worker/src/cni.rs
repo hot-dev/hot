@@ -93,7 +93,7 @@ pub async fn ensure_iptables() {
             "MASQUERADE",
         ])
         .await;
-        tracing::info!("cni.iptables: added MASQUERADE rule for {SUBNET}");
+        tracing::debug!("cni.iptables: added MASQUERADE rule for {SUBNET}");
     }
 
     // FORWARD: allow outbound traffic from kata-br0 (policy is DROP by default
@@ -173,7 +173,7 @@ pub async fn ensure_iptables() {
             let _ = run_iptables(add).await;
         }
     }
-    tracing::info!("cni.iptables: FORWARD rules ensured for {BRIDGE_NAME}");
+    tracing::debug!("cni.iptables: FORWARD rules ensured for {BRIDGE_NAME}");
 }
 
 /// Write a resolv.conf on the HOST for Kata VMs to bind-mount.
@@ -215,7 +215,7 @@ pub async fn write_resolv_conf() {
     match output {
         Ok(child) => match write_stdin_and_wait(child, &content).await {
             Ok(o) if o.status.success() => {
-                tracing::info!(path = RESOLV_CONF_HOST_PATH, "cni.resolv: written");
+                tracing::debug!(path = RESOLV_CONF_HOST_PATH, "cni.resolv: written");
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
@@ -389,15 +389,15 @@ pub async fn cleanup_stale() {
             continue;
         }
 
-        tracing::info!(netns = name, "cni.cleanup: removing stale netns");
+        tracing::debug!(netns = name, "cni.cleanup: removing stale netns");
         teardown(name).await;
         count += 1;
     }
 
     if count > 0 {
-        tracing::info!(count, "cni.cleanup: removed stale netns entries");
+        tracing::debug!(count, "cni.cleanup: removed stale netns entries");
     } else {
-        tracing::info!("cni.cleanup: no stale netns entries found");
+        tracing::debug!("cni.cleanup: no stale netns entries found");
     }
 }
 

@@ -1615,7 +1615,7 @@ impl BuildFetcher for LocalBuildFetcher {
 
         let bundle_cache_dir = extract_path.join(".hot").join("cache");
         let bundle_cache = crate::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-        tracing::info!(
+        tracing::debug!(
             "Pre-compiling bundle {} to generate bytecode cache",
             build.build_id
         );

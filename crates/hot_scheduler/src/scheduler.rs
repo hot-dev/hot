@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Type alias for the complex async task function
@@ -63,7 +63,7 @@ impl JobScheduler {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut jobs = self.jobs.write().await;
         if jobs.remove(job_id).is_some() {
-            info!("Removed job {}", job_id);
+            debug!("Removed job {}", job_id);
             Ok(())
         } else {
             warn!("Job {} not found for removal", job_id);
@@ -114,7 +114,7 @@ impl JobScheduler {
                 sleep(Duration::from_secs(1)).await;
             }
 
-            info!("Custom scheduler stopped");
+            debug!("Custom scheduler stopped");
         });
 
         let mut scheduler_handle = self.scheduler_handle.write().await;
@@ -134,7 +134,7 @@ impl JobScheduler {
         let mut handle_guard = self.scheduler_handle.write().await;
         if let Some(handle) = handle_guard.take() {
             handle.abort();
-            info!("Scheduler shutdown complete");
+            debug!("Scheduler shutdown complete");
         }
 
         Ok(())

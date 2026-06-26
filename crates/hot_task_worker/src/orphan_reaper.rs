@@ -123,7 +123,7 @@ async fn reap_inner() {
             "orphan_reaper: pass complete"
         );
     } else {
-        tracing::info!("orphan_reaper: no orphan kata/qemu processes found");
+        tracing::debug!("orphan_reaper: no orphan kata/qemu processes found");
     }
 }
 

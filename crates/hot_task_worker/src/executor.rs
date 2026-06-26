@@ -674,7 +674,7 @@ mod docker {
                 .await
                 .map_err(|e| ExecutorError::Start(e.to_string()))?;
 
-            tracing::info!(
+            tracing::debug!(
                 trace_id = trace_id,
                 container_id = %container_id,
                 image = %image,
@@ -906,7 +906,7 @@ mod docker {
 
                     self.docker.remove_container(&container_id, None).await.ok();
 
-                    tracing::info!(
+                    tracing::debug!(
                         trace_id = trace_id,
                         container_id = %container_id,
                         image = %image,
@@ -1054,7 +1054,7 @@ mod kata {
                 );
                 match snapshots.list(req).await {
                     Ok(_) => {
-                        tracing::info!("kata.containerd.ready after {attempt} attempt(s)");
+                        tracing::debug!("kata.containerd.ready after {attempt} attempt(s)");
                         break;
                     }
                     Err(e) if attempt == max_attempts => {
@@ -1083,7 +1083,7 @@ mod kata {
             // get correct DNS (the rootfs may have stale DNS from the build env).
             crate::cni::write_resolv_conf().await;
 
-            tracing::info!(vmm = %vmm, "kata.executor.initialized");
+            tracing::debug!(vmm = %vmm, "kata.executor.initialized");
 
             Ok(Self {
                 channel,
@@ -1284,7 +1284,7 @@ mod kata {
             let mut netns_path = if needs_network {
                 match crate::cni::setup(&container_id).await {
                     Ok(path) => {
-                        tracing::info!(
+                        tracing::debug!(
                             trace_id = trace_id,
                             container_id = %container_id,
                             netns = %path,
@@ -1389,7 +1389,7 @@ mod kata {
                                 crate::cni::teardown(&container_id).await;
                                 match crate::cni::setup(&container_id).await {
                                     Ok(path) => {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             container_id = %container_id,
                                             attempt = attempt,
                                             netns = %path,
@@ -1504,7 +1504,7 @@ mod kata {
 
             let exec_start = Instant::now();
 
-            tracing::info!(
+            tracing::debug!(
                 trace_id = trace_id,
                 container_id = %container_id,
                 "kata.container.started"
@@ -1588,7 +1588,7 @@ mod kata {
 
             let oom_killed = exit_code == 137;
 
-            tracing::info!(
+            tracing::debug!(
                 trace_id = trace_id,
                 container_id = %container_id,
                 exit_code = exit_code,
