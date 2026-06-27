@@ -141,7 +141,7 @@ impl Stream {
                         total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = ?),
                         total_events = (SELECT COUNT(*) FROM event WHERE stream_id = ?),
                         total_duration_ms = (
-                            SELECT CAST(COALESCE(SUM((julianday(stop_time) - julianday(start_time)) * 86400000), 0) AS INTEGER)
+                            SELECT CAST(ROUND(COALESCE(SUM((julianday(stop_time) - julianday(start_time)) * 86400000), 0)) AS INTEGER)
                             FROM run
                             WHERE stream_id = ? AND stop_time IS NOT NULL
                         ),
@@ -306,10 +306,10 @@ impl Stream {
                     r#"
                     UPDATE stream SET
                         total_duration_ms = total_duration_ms + (
-                            SELECT CAST(COALESCE(
+                            SELECT CAST(ROUND(COALESCE(
                                 (julianday(stop_time) - julianday(start_time)) * 86400000,
                                 0
-                            ) AS INTEGER)
+                            )) AS INTEGER)
                             FROM run
                             WHERE run_id = ?
                         ),
