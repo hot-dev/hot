@@ -8,6 +8,8 @@ use super::entity_cache::EntityCache;
 
 static BUILD_CACHE: LazyLock<EntityCache<Uuid, Build>> = LazyLock::new(|| EntityCache::new(2_000));
 
+type ManifestVersions = (Option<String>, Option<String>);
+
 #[derive(Error, Debug)]
 pub enum BuildError {
     #[error("Database error: {0}")]
@@ -38,6 +40,10 @@ pub struct Build {
     pub runtime_ready_at: Option<DateTime<Utc>>,
     pub runtime_error: Option<String>,
     pub deployment_sequence: i64,
+    #[sqlx(default)]
+    pub engine_version: Option<String>,
+    #[sqlx(default)]
+    pub hot_std_version: Option<String>,
 }
 
 impl Build {
@@ -46,6 +52,24 @@ impl Build {
     pub const RUNTIME_STATUS_READY: &'static str = "ready";
     pub const RUNTIME_STATUS_FAILED: &'static str = "failed";
     pub const RUNTIME_STATUS_SUPERSEDED: &'static str = "superseded";
+
+    pub fn runtime_version_warning(&self) -> Option<crate::version::RuntimeVersionWarning> {
+        if !self.is_bundle() {
+            return None;
+        }
+
+        crate::version::check_runtime_version_compatibility(
+            self.engine_version.as_deref(),
+            self.hot_std_version.as_deref(),
+            crate::version::current_runtime_version(),
+        )
+        .warning
+    }
+
+    pub fn runtime_version_warning_message(&self) -> Option<String> {
+        self.runtime_version_warning()
+            .map(|warning| warning.message)
+    }
 
     /// Get build by ID
     pub async fn get_build(
@@ -99,6 +123,72 @@ impl Build {
 
     pub fn invalidate_all_build_cache() {
         BUILD_CACHE.clear();
+    }
+
+    fn manifest_version_columns_missing(error: &sqlx::Error) -> bool {
+        let sqlx::Error::Database(db_error) = error else {
+            return false;
+        };
+        if db_error.code().as_deref() == Some("42703") {
+            return true;
+        }
+        let message = db_error.message();
+        (message.contains("engine_version") || message.contains("hot_std_version"))
+            && (message.contains("no such column") || message.contains("does not exist"))
+    }
+
+    pub fn manifest_version_metadata_unavailable(error: &BuildError) -> bool {
+        matches!(error, BuildError::Database(e) if Self::manifest_version_columns_missing(e))
+    }
+
+    /// Best-effort metadata hydration for app/API display paths.
+    ///
+    /// The broad build fetch methods intentionally do not select these columns:
+    /// workers, schedulers, and task workers must stay compatible during the
+    /// short rollout window before the app has applied the migration.
+    pub async fn hydrate_manifest_versions(
+        db: &crate::db::DatabasePool,
+        build: &mut Build,
+    ) -> Result<(), BuildError> {
+        let result: Result<Option<ManifestVersions>, sqlx::Error> = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as(
+                    "SELECT engine_version, hot_std_version FROM build WHERE build_id = $1",
+                )
+                .bind(build.build_id)
+                .fetch_optional(pg_pool)
+                .await
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as(
+                    "SELECT engine_version, hot_std_version FROM build WHERE build_id = ?",
+                )
+                .bind(build.build_id)
+                .fetch_optional(sqlite_pool)
+                .await
+            }
+        };
+
+        match result {
+            Ok(Some((engine_version, hot_std_version))) => {
+                build.engine_version = engine_version;
+                build.hot_std_version = hot_std_version;
+                Ok(())
+            }
+            Ok(None) => Err(BuildError::NotFound),
+            Err(e) if Self::manifest_version_columns_missing(&e) => Ok(()),
+            Err(e) => Err(BuildError::Database(e)),
+        }
+    }
+
+    pub async fn hydrate_manifest_versions_for_builds(
+        db: &crate::db::DatabasePool,
+        builds: &mut [Build],
+    ) -> Result<(), BuildError> {
+        for build in builds {
+            Self::hydrate_manifest_versions(db, build).await?;
+        }
+        Ok(())
     }
 
     /// Get builds by project ID
@@ -374,6 +464,167 @@ impl Build {
             }
         };
         Ok(builds)
+    }
+
+    /// Deployed bundle builds whose manifest version metadata has not yet been
+    /// copied from the stored bundle artifact into the database.
+    pub async fn get_deployed_bundle_builds_missing_versions(
+        db: &crate::db::DatabasePool,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = true
+                       AND e.active = true
+                       AND b.active = true
+                       AND b.build_type_id = $1
+                       AND b.deployed = true
+                       AND b.runtime_status = 'ready'
+                       AND (b.engine_version IS NULL OR b.hot_std_version IS NULL)
+                     ORDER BY b.updated_at DESC
+                     LIMIT $2",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = 1
+                       AND e.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = ?
+                       AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
+                       AND (b.engine_version IS NULL OR b.hot_std_version IS NULL)
+                     ORDER BY b.updated_at DESC
+                     LIMIT ?",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(builds)
+    }
+
+    pub async fn get_deployed_ready_bundle_builds_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+        project_id: Option<&Uuid>,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let project_clause = if project_id.is_some() {
+                    " AND b.project_id = $3"
+                } else {
+                    ""
+                };
+                let sql = format!(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     WHERE p.env_id = $1
+                       AND p.active = true
+                       AND b.active = true
+                       AND b.build_type_id = {}
+                       AND b.deployed = true
+                       AND b.runtime_status = 'ready'
+                       {}
+                     ORDER BY b.updated_at DESC
+                     LIMIT $2",
+                    Self::BUILD_TYPE_BUNDLE,
+                    project_clause
+                );
+                let mut query = sqlx::query_as::<_, Build>(sqlx::AssertSqlSafe(sql.as_str()))
+                    .bind(env_id)
+                    .bind(limit);
+                if let Some(project_id) = project_id {
+                    query = query.bind(project_id);
+                }
+                query.fetch_all(pg_pool).await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let project_clause = if project_id.is_some() {
+                    " AND b.project_id = ?"
+                } else {
+                    ""
+                };
+                let sql = format!(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     WHERE p.env_id = ?
+                       AND p.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = {}
+                       AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
+                       {}
+                     ORDER BY b.updated_at DESC
+                     LIMIT ?",
+                    Self::BUILD_TYPE_BUNDLE,
+                    project_clause
+                );
+                let mut query =
+                    sqlx::query_as::<_, Build>(sqlx::AssertSqlSafe(sql.as_str())).bind(env_id);
+                if let Some(project_id) = project_id {
+                    query = query.bind(project_id);
+                }
+                query.bind(limit).fetch_all(sqlite_pool).await?
+            }
+        };
+        Ok(builds)
+    }
+
+    pub async fn update_manifest_versions(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        engine_version: Option<&str>,
+        hot_std_version: Option<&str>,
+    ) -> Result<(), BuildError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE build SET engine_version = $2, hot_std_version = $3, updated_at = NOW() WHERE build_id = $1",
+                )
+                .bind(build_id)
+                .bind(engine_version)
+                .bind(hot_std_version)
+                .execute(pg_pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE build SET engine_version = ?, hot_std_version = ?, updated_at = CURRENT_TIMESTAMP WHERE build_id = ?",
+                )
+                .bind(engine_version)
+                .bind(hot_std_version)
+                .bind(build_id)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
+        Self::invalidate_build_cache(build_id);
+        Ok(())
     }
 
     /// Get count of builds by project ID

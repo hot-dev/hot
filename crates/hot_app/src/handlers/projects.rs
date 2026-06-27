@@ -374,7 +374,8 @@ pub async fn projects_builds_handler(
         }
     };
 
-    let builds = match Build::get_builds_by_project(&db, &project.project_id, None, None).await {
+    let mut builds = match Build::get_builds_by_project(&db, &project.project_id, None, None).await
+    {
         Ok(builds) => builds,
         Err(e) => {
             tracing::error!(
@@ -390,6 +391,23 @@ pub async fn projects_builds_handler(
             return Html(template.render().unwrap());
         }
     };
+    if let Err(e) = Build::hydrate_manifest_versions_for_builds(&db, &mut builds).await {
+        tracing::warn!(
+            "Could not load build manifest version metadata for project {}: {}",
+            project.project_id,
+            e
+        );
+    }
+
+    let deploy_warning = params
+        .get("deployed")
+        .and_then(|build_id| Uuid::parse_str(build_id).ok())
+        .and_then(|build_id| {
+            builds
+                .iter()
+                .find(|build| build.build_id == build_id)
+                .and_then(Build::runtime_version_warning_message)
+        });
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(
@@ -411,6 +429,7 @@ pub async fn projects_builds_handler(
         ),
         project,
         builds,
+        deploy_warning,
     };
 
     Html(template.render().unwrap())
@@ -485,7 +504,29 @@ pub async fn projects_deploy_build_handler(
         return redirect_to_builds();
     }
 
-    redirect_to_builds()
+    let mut warning_build = build.clone();
+    if let Err(e) = Build::hydrate_manifest_versions(&db, &mut warning_build).await {
+        tracing::warn!(
+            "Could not load manifest version metadata for deployed build {}: {}",
+            build_id,
+            e
+        );
+    }
+
+    if let Some(warning) = warning_build.runtime_version_warning_message() {
+        tracing::warn!(
+            "UI deploy of build {} has runtime version warning: {}",
+            build_id,
+            warning
+        );
+        Redirect::to(&format!(
+            "/projects/{}/builds?deployed={}",
+            project_name, build_id
+        ))
+        .into_response()
+    } else {
+        redirect_to_builds()
+    }
 }
 
 pub async fn projects_toggle_active_handler(

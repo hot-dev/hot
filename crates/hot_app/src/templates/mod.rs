@@ -2586,6 +2586,7 @@ pub struct ProjectsBuilds<'a> {
     pub page_context: PrivatePageContext,
     pub project: hot::db::project::Project,
     pub builds: Vec<hot::db::build::Build>,
+    pub deploy_warning: Option<String>,
 }
 
 #[derive(Template)]

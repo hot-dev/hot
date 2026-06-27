@@ -3,7 +3,7 @@ use ahash::AHashMap;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Json};
 use chrono::{DateTime, Utc};
-use hot::db::{DatabasePool, Event, Run, Stream};
+use hot::db::{Build, DatabasePool, Event, Run, Stream};
 use serde::{Deserialize, Serialize};
 use sqlx;
 use std::sync::Arc;
@@ -263,6 +263,9 @@ pub struct StreamMetrics {
     tasks_completed: i64,
     tasks_failed: i64,
     total_cus: i64,
+    build_version_warning_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_version_warning_url: Option<String>,
 }
 
 pub async fn stream_metrics_handler(
@@ -292,6 +295,32 @@ pub async fn stream_metrics_handler(
         "P90D" => Some(90),
         "all" => None,
         _ => Some(1),
+    };
+
+    let build_version_warning_count = match Build::get_deployed_ready_bundle_builds_by_env(
+        &db,
+        &env_id,
+        project_id.as_ref(),
+        1_000,
+    )
+    .await
+    {
+        Ok(builds) => builds
+            .iter()
+            .filter(|build| build.runtime_version_warning().is_some())
+            .count(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to get deployed bundle builds for version warning count: {}",
+                e
+            );
+            0
+        }
+    };
+    let build_version_warning_url = if build_version_warning_count > 0 {
+        Some("/projects".to_string())
+    } else {
+        None
     };
 
     match db.as_ref() {
@@ -443,6 +472,8 @@ pub async fn stream_metrics_handler(
                 tasks_completed,
                 tasks_failed,
                 total_cus,
+                build_version_warning_count,
+                build_version_warning_url: build_version_warning_url.clone(),
             })
             .into_response()
         }
@@ -590,6 +621,8 @@ pub async fn stream_metrics_handler(
                 tasks_completed,
                 tasks_failed,
                 total_cus,
+                build_version_warning_count,
+                build_version_warning_url,
             })
             .into_response()
         }
