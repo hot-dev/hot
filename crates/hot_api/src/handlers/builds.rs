@@ -12,7 +12,7 @@ use hot::val::Val;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use super::{ListQueryParams, get_and_verify_project};
+use super::{ListQueryParams, get_and_ensure_active_project, get_and_verify_project};
 use crate::ApiStateData;
 use crate::auth::AuthContext;
 use crate::models::*;
@@ -318,7 +318,7 @@ pub async fn deploy_build(
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can deploy builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get the build and verify it belongs to this project
     let build = Build::get_build(&db, &build_id)
@@ -492,7 +492,7 @@ pub async fn upload_build(
 > {
     super::require_api_key(&auth, "Only API keys can upload builds.")?;
 
-    let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
+    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
 
     let mut build_file_data: Option<Vec<u8>> = None;
     let mut provided_hash: Option<String> = None;

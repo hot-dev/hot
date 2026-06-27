@@ -121,7 +121,7 @@ pub async fn create_project(
 
     let project_id = Uuid::now_v7();
 
-    Project::insert_project(
+    let project = Project::insert_or_get_project(
         &db,
         &project_id,
         &api_key.env_id,
@@ -130,13 +130,6 @@ pub async fn create_project(
     )
     .await
     .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        )
-    })?;
-
-    let project = Project::get_project(&db, &project_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiErrorResponse::internal_error(&e.to_string())),
