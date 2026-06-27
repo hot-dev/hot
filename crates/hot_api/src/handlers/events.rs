@@ -60,7 +60,7 @@ fn get_event_queue(
         )
         .map_err(|e| format!("Failed to create event queue: {}", e))?;
 
-        tracing::info!(
+        tracing::debug!(
             "API events: initialized shared event queue (type: {})",
             queue_type_str
         );

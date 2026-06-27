@@ -8,6 +8,8 @@ use super::entity_cache::EntityCache;
 
 static BUILD_CACHE: LazyLock<EntityCache<Uuid, Build>> = LazyLock::new(|| EntityCache::new(2_000));
 
+type ManifestVersions = (Option<String>, Option<String>);
+
 #[derive(Error, Debug)]
 pub enum BuildError {
     #[error("Database error: {0}")]
@@ -38,6 +40,10 @@ pub struct Build {
     pub runtime_ready_at: Option<DateTime<Utc>>,
     pub runtime_error: Option<String>,
     pub deployment_sequence: i64,
+    #[sqlx(default)]
+    pub engine_version: Option<String>,
+    #[sqlx(default)]
+    pub hot_std_version: Option<String>,
 }
 
 impl Build {
@@ -46,6 +52,56 @@ impl Build {
     pub const RUNTIME_STATUS_READY: &'static str = "ready";
     pub const RUNTIME_STATUS_FAILED: &'static str = "failed";
     pub const RUNTIME_STATUS_SUPERSEDED: &'static str = "superseded";
+
+    pub fn runtime_version_warning(&self) -> Option<crate::version::RuntimeVersionWarning> {
+        if !self.is_bundle() {
+            return None;
+        }
+
+        crate::version::check_runtime_version_compatibility(
+            self.engine_version.as_deref(),
+            self.hot_std_version.as_deref(),
+            crate::version::current_runtime_version(),
+        )
+        .warning
+    }
+
+    pub fn runtime_version_warning_message(&self) -> Option<String> {
+        self.runtime_version_warning()
+            .map(|warning| warning.message)
+    }
+
+    pub fn runtime_version_error_message(&self) -> Option<String> {
+        if !self.is_bundle() {
+            return None;
+        }
+
+        crate::version::check_runtime_version_compatibility(
+            self.engine_version.as_deref(),
+            self.hot_std_version.as_deref(),
+            crate::version::current_runtime_version(),
+        )
+        .error
+        .map(|error| format!("Build is incompatible with this Hot runtime: {error}"))
+    }
+
+    /// Error message to show for a failed build.
+    ///
+    /// Prefer the error recorded at failure time (already sanitized on write, so
+    /// it reflects what the runtime that processed the build actually observed).
+    /// Fall back to a freshly derived version-incompatibility message only when
+    /// no error was recorded or when older records have only the generic
+    /// manifest-load failure.
+    pub fn runtime_display_error_message(&self) -> Option<String> {
+        let version_error = self.runtime_version_error_message();
+        match self.runtime_error.as_deref() {
+            Some("Build manifest data could not be loaded") => {
+                version_error.or_else(|| self.runtime_error.clone())
+            }
+            Some(runtime_error) => Some(runtime_error.to_string()),
+            None => version_error,
+        }
+    }
 
     /// Get build by ID
     pub async fn get_build(
@@ -99,6 +155,72 @@ impl Build {
 
     pub fn invalidate_all_build_cache() {
         BUILD_CACHE.clear();
+    }
+
+    fn manifest_version_columns_missing(error: &sqlx::Error) -> bool {
+        let sqlx::Error::Database(db_error) = error else {
+            return false;
+        };
+        if db_error.code().as_deref() == Some("42703") {
+            return true;
+        }
+        let message = db_error.message();
+        (message.contains("engine_version") || message.contains("hot_std_version"))
+            && (message.contains("no such column") || message.contains("does not exist"))
+    }
+
+    pub fn manifest_version_metadata_unavailable(error: &BuildError) -> bool {
+        matches!(error, BuildError::Database(e) if Self::manifest_version_columns_missing(e))
+    }
+
+    /// Best-effort metadata hydration for app/API display paths.
+    ///
+    /// The broad build fetch methods intentionally do not select these columns:
+    /// workers, schedulers, and task workers must stay compatible during the
+    /// short rollout window before the app has applied the migration.
+    pub async fn hydrate_manifest_versions(
+        db: &crate::db::DatabasePool,
+        build: &mut Build,
+    ) -> Result<(), BuildError> {
+        let result: Result<Option<ManifestVersions>, sqlx::Error> = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as(
+                    "SELECT engine_version, hot_std_version FROM build WHERE build_id = $1",
+                )
+                .bind(build.build_id)
+                .fetch_optional(pg_pool)
+                .await
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as(
+                    "SELECT engine_version, hot_std_version FROM build WHERE build_id = ?",
+                )
+                .bind(build.build_id)
+                .fetch_optional(sqlite_pool)
+                .await
+            }
+        };
+
+        match result {
+            Ok(Some((engine_version, hot_std_version))) => {
+                build.engine_version = engine_version;
+                build.hot_std_version = hot_std_version;
+                Ok(())
+            }
+            Ok(None) => Err(BuildError::NotFound),
+            Err(e) if Self::manifest_version_columns_missing(&e) => Ok(()),
+            Err(e) => Err(BuildError::Database(e)),
+        }
+    }
+
+    pub async fn hydrate_manifest_versions_for_builds(
+        db: &crate::db::DatabasePool,
+        builds: &mut [Build],
+    ) -> Result<(), BuildError> {
+        for build in builds {
+            Self::hydrate_manifest_versions(db, build).await?;
+        }
+        Ok(())
     }
 
     /// Get builds by project ID
@@ -232,6 +354,309 @@ impl Build {
                 Ok(count)
             }
         }
+    }
+
+    /// Bundle builds that are currently runtime-visible and that this worker
+    /// process should prepare in its own local extraction/cache directory.
+    ///
+    /// Every worker process has its own on-disk `.hot/run` cache, so each must
+    /// warm these independently after a (re)start: the database can report a
+    /// build as `ready` while this particular process has nothing on disk yet.
+    /// This query is read-only and is therefore safe to run on every worker.
+    pub async fn get_ready_bundle_runtime_builds(
+        db: &crate::db::DatabasePool,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = true
+                       AND e.active = true
+                       AND b.active = true
+                       AND b.build_type_id = $1
+                       AND b.deployed = true
+                       AND b.runtime_status = 'ready'
+                     ORDER BY p.updated_at DESC, b.updated_at DESC
+                     LIMIT $2",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = 1
+                       AND e.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = ?
+                       AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
+                     ORDER BY p.updated_at DESC, b.updated_at DESC
+                     LIMIT ?",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(builds)
+    }
+
+    /// Bundle deployments that were requested but never reached `ready` for an
+    /// active project that currently has no ready deployed build.
+    ///
+    /// These are deployments interrupted by a prior worker rollout (left in
+    /// `pending`/`loading`/`failed`). Recovering them re-prepares the runtime
+    /// and activates the build so the project comes back online without a manual
+    /// redeploy. Because recovery mutates the database (manifest reload +
+    /// activation), callers MUST run it under a single-owner guard (advisory
+    /// lock) rather than letting every worker do it concurrently.
+    ///
+    /// We only ever resume the exact build the user requested for deployment
+    /// (`p.deployment_sequence > 0 AND b.deployment_sequence = p.deployment_sequence`),
+    /// never a build that was merely uploaded but never deployed.
+    pub async fn get_recoverable_bundle_deployments(
+        db: &crate::db::DatabasePool,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = true
+                       AND e.active = true
+                       AND b.active = true
+                       AND b.build_type_id = $1
+                       AND b.runtime_status IN ('pending', 'loading', 'failed')
+                       AND p.deployment_sequence > 0
+                       AND b.deployment_sequence = p.deployment_sequence
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM build ready
+                         WHERE ready.project_id = p.project_id
+                           AND ready.active = true
+                           AND ready.deployed = true
+                           AND ready.runtime_status = 'ready'
+                       )
+                     ORDER BY b.deployment_sequence DESC, b.updated_at DESC
+                     LIMIT $2",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = 1
+                       AND e.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = ?
+                       AND b.runtime_status IN ('pending', 'loading', 'failed')
+                       AND p.deployment_sequence > 0
+                       AND b.deployment_sequence = p.deployment_sequence
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM build ready
+                         WHERE ready.project_id = p.project_id
+                           AND ready.active = 1
+                           AND ready.deployed = 1
+                           AND ready.runtime_status = 'ready'
+                       )
+                     ORDER BY b.deployment_sequence DESC, b.updated_at DESC
+                     LIMIT ?",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(builds)
+    }
+
+    /// Deployed bundle builds whose manifest version metadata has not yet been
+    /// copied from the stored bundle artifact into the database.
+    pub async fn get_deployed_bundle_builds_missing_versions(
+        db: &crate::db::DatabasePool,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = true
+                       AND e.active = true
+                       AND b.active = true
+                       AND b.build_type_id = $1
+                       AND b.deployed = true
+                       AND b.runtime_status = 'ready'
+                       AND (b.engine_version IS NULL OR b.hot_std_version IS NULL)
+                     ORDER BY b.updated_at DESC
+                     LIMIT $2",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     JOIN env e ON p.env_id = e.env_id
+                     WHERE p.active = 1
+                       AND e.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = ?
+                       AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
+                       AND (b.engine_version IS NULL OR b.hot_std_version IS NULL)
+                     ORDER BY b.updated_at DESC
+                     LIMIT ?",
+                )
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .bind(limit)
+                .fetch_all(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(builds)
+    }
+
+    pub async fn get_deployed_ready_bundle_builds_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+        project_id: Option<&Uuid>,
+        limit: i64,
+    ) -> Result<Vec<Build>, BuildError> {
+        let limit = limit.max(1);
+        let builds = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let project_clause = if project_id.is_some() {
+                    " AND b.project_id = $3"
+                } else {
+                    ""
+                };
+                let sql = format!(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     WHERE p.env_id = $1
+                       AND p.active = true
+                       AND b.active = true
+                       AND b.build_type_id = {}
+                       AND b.deployed = true
+                       AND b.runtime_status = 'ready'
+                       {}
+                     ORDER BY b.updated_at DESC
+                     LIMIT $2",
+                    Self::BUILD_TYPE_BUNDLE,
+                    project_clause
+                );
+                let mut query = sqlx::query_as::<_, Build>(sqlx::AssertSqlSafe(sql.as_str()))
+                    .bind(env_id)
+                    .bind(limit);
+                if let Some(project_id) = project_id {
+                    query = query.bind(project_id);
+                }
+                query.fetch_all(pg_pool).await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let project_clause = if project_id.is_some() {
+                    " AND b.project_id = ?"
+                } else {
+                    ""
+                };
+                let sql = format!(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
+                     FROM build b
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id
+                     JOIN project p ON b.project_id = p.project_id
+                     WHERE p.env_id = ?
+                       AND p.active = 1
+                       AND b.active = 1
+                       AND b.build_type_id = {}
+                       AND b.deployed = 1
+                       AND b.runtime_status = 'ready'
+                       {}
+                     ORDER BY b.updated_at DESC
+                     LIMIT ?",
+                    Self::BUILD_TYPE_BUNDLE,
+                    project_clause
+                );
+                let mut query =
+                    sqlx::query_as::<_, Build>(sqlx::AssertSqlSafe(sql.as_str())).bind(env_id);
+                if let Some(project_id) = project_id {
+                    query = query.bind(project_id);
+                }
+                query.bind(limit).fetch_all(sqlite_pool).await?
+            }
+        };
+        Ok(builds)
+    }
+
+    pub async fn update_manifest_versions(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        engine_version: Option<&str>,
+        hot_std_version: Option<&str>,
+    ) -> Result<(), BuildError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE build SET engine_version = $2, hot_std_version = $3, updated_at = NOW() WHERE build_id = $1",
+                )
+                .bind(build_id)
+                .bind(engine_version)
+                .bind(hot_std_version)
+                .execute(pg_pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE build SET engine_version = ?, hot_std_version = ?, updated_at = CURRENT_TIMESTAMP WHERE build_id = ?",
+                )
+                .bind(engine_version)
+                .bind(hot_std_version)
+                .bind(build_id)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
+        Self::invalidate_build_cache(build_id);
+        Ok(())
     }
 
     /// Get count of builds by project ID
@@ -908,26 +1333,31 @@ impl Build {
     fn sanitize_runtime_error(runtime_error: &str) -> String {
         let lower = runtime_error.to_ascii_lowercase();
         let classified = if lower.contains("failed to create build storage") {
-            Some("Build storage could not be initialized")
+            Some("Build storage could not be initialized".to_string())
         } else if lower.contains("failed to retrieve build") {
-            Some("Build artifact could not be retrieved from storage")
+            Some("Build artifact could not be retrieved from storage".to_string())
         } else if lower.contains("failed to extract build") {
-            Some("Build artifact could not be extracted")
+            Some("Build artifact could not be extracted".to_string())
+        } else if let Some((_, details)) = runtime_error.split_once(" is incompatible: ") {
+            Some(format!(
+                "Build is incompatible with this Hot runtime: {details}"
+            ))
+        } else if lower.contains("runtime must be greater than or equal to the build version") {
+            Some(runtime_error.to_string())
         } else if lower.contains("failed to load handlers and schedules") {
-            Some("Build manifest data could not be loaded")
+            Some("Build manifest data could not be loaded".to_string())
         } else if lower.contains("failed to activate build") {
-            Some("Build could not be activated")
+            Some("Build could not be activated".to_string())
         } else {
             None
         };
 
-        classified.map(ToString::to_string).unwrap_or_else(|| {
-            runtime_error
-                .chars()
-                .filter(|ch| !ch.is_control())
-                .take(512)
-                .collect()
-        })
+        classified
+            .unwrap_or_else(|| runtime_error.to_string())
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(512)
+            .collect()
     }
 
     pub async fn mark_runtime_superseded(
@@ -1240,6 +1670,62 @@ mod tests {
         build_id
     }
 
+    #[test]
+    fn sanitize_runtime_error_preserves_version_incompatibility() {
+        let build_id = Uuid::now_v7();
+        let error = format!(
+            "Failed to load handlers and schedules for build {build_id}: Build {build_id} is incompatible: Bundle engine version 2.4.4 is incompatible with runtime 2.4.3; runtime must be greater than or equal to the build version"
+        );
+
+        assert_eq!(
+            Build::sanitize_runtime_error(&error),
+            "Build is incompatible with this Hot runtime: Bundle engine version 2.4.4 is incompatible with runtime 2.4.3; runtime must be greater than or equal to the build version"
+        );
+    }
+
+    #[test]
+    fn runtime_display_error_replaces_generic_manifest_error_with_version_error() {
+        let now = Utc::now();
+        let runtime_version = crate::version::current_runtime_version();
+        let runtime_major = runtime_version
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u64>().ok())
+            .unwrap_or(0);
+        let incompatible_version = format!("{}.0.0", runtime_major + 1);
+        let build = Build {
+            build_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            hash: "test-hash".to_string(),
+            size: 1024,
+            build_type_id: Build::BUILD_TYPE_BUNDLE,
+            build_type: "bundle".to_string(),
+            deployed: false,
+            active: true,
+            created_by_user_id: Uuid::now_v7(),
+            created_at: now,
+            updated_at: now,
+            updated_by_user_id: None,
+            active_toggle_at: None,
+            active_toggle_by_user_id: None,
+            storage_path: None,
+            storage_backend: None,
+            runtime_status: Build::RUNTIME_STATUS_FAILED.to_string(),
+            runtime_ready_at: None,
+            runtime_error: Some("Build manifest data could not be loaded".to_string()),
+            deployment_sequence: 0,
+            engine_version: Some(incompatible_version.clone()),
+            hot_std_version: Some(incompatible_version.clone()),
+        };
+
+        assert_eq!(
+            build.runtime_display_error_message(),
+            Some(format!(
+                "Build is incompatible with this Hot runtime: Bundle engine version {incompatible_version} is incompatible with runtime {runtime_version}; major versions must match"
+            ))
+        );
+    }
+
     #[tokio::test]
     async fn test_build_runtime_readiness_defaults_and_deploy_metadata() {
         let db = test_db().await;
@@ -1520,5 +2006,129 @@ mod tests {
             .unwrap();
         assert_eq!(builds.len(), 1);
         assert_eq!(builds[0].build_id, build_id);
+    }
+
+    fn build_ids(builds: &[Build]) -> Vec<Uuid> {
+        builds.iter().map(|b| b.build_id).collect()
+    }
+
+    #[tokio::test]
+    async fn test_ready_bundle_runtime_builds_lists_deployed_ready() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        // Freshly uploaded build: not ready, and not recoverable (sequence 0).
+        assert!(
+            Build::get_ready_bundle_runtime_builds(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        Build::deploy_build(&db, &build_id, &user_id).await.unwrap();
+
+        let ready = Build::get_ready_bundle_runtime_builds(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&ready), vec![build_id]);
+
+        // A ready, deployed build is never a recovery candidate.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_bundle_deployments_includes_interrupted_request() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        // A requested-but-never-activated deployment is what a worker rollout can
+        // leave behind. It must be recoverable, but never appears in the ready set.
+        Build::request_bundle_deployment(&db, &build_id, &user_id)
+            .await
+            .unwrap();
+
+        let recoverable = Build::get_recoverable_bundle_deployments(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&recoverable), vec![build_id]);
+        assert!(
+            Build::get_ready_bundle_runtime_builds(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A build that failed to compile under a prior worker is still recoverable
+        // (a newer worker may compile it successfully).
+        Build::mark_runtime_failed(&db, &build_id, "compile failed")
+            .await
+            .unwrap();
+        let recoverable = Build::get_recoverable_bundle_deployments(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&recoverable), vec![build_id]);
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_excludes_uploaded_but_never_deployed_build() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let _build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        // Pending, but the user never requested deployment (project + build stay at
+        // sequence 0), so we must not auto-deploy it on worker startup.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_excludes_project_with_active_ready_build() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let old_build_id = insert_test_build(&db, &project_id, &user_id).await;
+        let new_build_id = insert_test_build(&db, &project_id, &user_id).await;
+
+        Build::activate_build_directly(&db, &old_build_id, &user_id)
+            .await
+            .unwrap();
+        Build::request_bundle_deployment(&db, &new_build_id, &user_id)
+            .await
+            .unwrap();
+
+        // The project is still served by the old ready build, so the pending new
+        // build must not be recovered out from under it.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Only the still-serving build is warmed.
+        let ready = Build::get_ready_bundle_runtime_builds(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&ready), vec![old_build_id]);
     }
 }

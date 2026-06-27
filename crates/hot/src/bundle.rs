@@ -1007,34 +1007,6 @@ pub struct BundleManifest {
     pub cache_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SemverCore {
-    major: u64,
-    minor: u64,
-    patch: u64,
-}
-
-fn parse_semver_core(version: &str) -> Option<SemverCore> {
-    let core = version
-        .split_once(['-', '+'])
-        .map(|(core, _)| core)
-        .unwrap_or(version);
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-
-    if parts.next().is_some() {
-        return None;
-    }
-
-    Some(SemverCore {
-        major,
-        minor,
-        patch,
-    })
-}
-
 fn validate_bundle_runtime_compatibility(bundle_engine_version: &str) -> Result<(), String> {
     if bundle_engine_version.is_empty() {
         tracing::warn!(
@@ -1043,30 +1015,19 @@ fn validate_bundle_runtime_compatibility(bundle_engine_version: &str) -> Result<
         return Ok(());
     }
 
-    let runtime_version = crate::build_info::VERSION;
-    let Some(bundle_version) = parse_semver_core(bundle_engine_version) else {
-        tracing::warn!(
-            "Bundle manifest engine_version '{}' is not semantic; allowing deployment",
-            bundle_engine_version
-        );
-        return Ok(());
-    };
-    let Some(runtime_version_core) = parse_semver_core(runtime_version) else {
-        tracing::warn!(
-            "Runtime version '{}' is not semantic; allowing bundle version '{}'",
-            runtime_version,
-            bundle_engine_version
-        );
-        return Ok(());
-    };
-
-    if bundle_version.major != runtime_version_core.major
-        || bundle_version.minor != runtime_version_core.minor
-    {
-        return Err(format!(
-            "Bundle engine version {} is incompatible with runtime {}; major/minor versions must match",
-            bundle_engine_version, runtime_version
-        ));
+    let compatibility = crate::version::check_runtime_version_compatibility(
+        Some(bundle_engine_version),
+        None,
+        crate::version::current_runtime_version(),
+    );
+    if !compatibility.compatible {
+        return Err(compatibility.error.unwrap_or_else(|| {
+            format!(
+                "Bundle engine version {} is incompatible with runtime {}",
+                bundle_engine_version,
+                crate::version::current_runtime_version()
+            )
+        }));
     }
 
     Ok(())
@@ -1483,28 +1444,6 @@ mod tests {
         } else {
             panic!("manifest should be a map");
         }
-    }
-
-    #[test]
-    fn test_bundle_runtime_compatibility_allows_same_and_patch_versions() {
-        let runtime = parse_semver_core(crate::build_info::VERSION)
-            .expect("runtime version should be semantic");
-        let same_minor_next_patch =
-            format!("{}.{}.{}", runtime.major, runtime.minor, runtime.patch + 1);
-
-        assert!(validate_bundle_runtime_compatibility(crate::build_info::VERSION).is_ok());
-        assert!(validate_bundle_runtime_compatibility(&same_minor_next_patch).is_ok());
-    }
-
-    #[test]
-    fn test_bundle_runtime_compatibility_rejects_major_minor_mismatch() {
-        let runtime = parse_semver_core(crate::build_info::VERSION)
-            .expect("runtime version should be semantic");
-        let next_minor = format!("{}.{}.0", runtime.major, runtime.minor + 1);
-        let next_major = format!("{}.0.0", runtime.major + 1);
-
-        assert!(validate_bundle_runtime_compatibility(&next_minor).is_err());
-        assert!(validate_bundle_runtime_compatibility(&next_major).is_err());
     }
 
     #[test]

@@ -108,6 +108,17 @@ meta ["test"] fn () {
     assert(contains(js, "setTimeout(r,50)"), "should embed delay")
 }
 
+test-parallel-script-builders-resolve-chrome-args
+meta ["test"] fn () {
+    results parallel {
+        page build-scrape-script(TEST_URL, "load", 0, null)
+        shot build-screenshot-script(TEST_URL, "/tmp/out.png", 1280, 720, false, "png", null, "load", 0)
+    }
+
+    assert(contains(results.page, "--no-sandbox"), "scrape script should include chrome args")
+    assert(contains(results.shot, "--disable-setuid-sandbox"), "screenshot script should include chrome args")
+}
+
 // ============================================================================
 // Type construction
 // ============================================================================

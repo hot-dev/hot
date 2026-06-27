@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use super::{DatabaseError, DatabasePool};
@@ -206,7 +206,7 @@ impl Call {
         let mut total_deleted: i64 = 0;
         let mut last_logged: i64 = 0;
 
-        info!(
+        debug!(
             "hot.dev: call retention cleanup starting (>{} days, batch_size={})",
             days, batch_size
         );

@@ -43,6 +43,17 @@
                 </div>
                 {% endif %}
 
+                {% if let Some(warning) = deploy_warning %}
+                <div class="mb-6 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 p-4">
+                    <div class="flex">
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-yellow-800 dark:text-yellow-200">Build deployed with version warning</h3>
+                            <p class="mt-1 text-sm text-yellow-700 dark:text-yellow-300">{{ warning }}</p>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <!-- Builds list -->
                 <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
                     {% if builds.is_empty() %}
@@ -55,6 +66,14 @@
                             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No builds found for this project.</p>
                         </div>
                     {% else %}
+                        {% for build in builds %}
+                            {% if build.runtime_status == "failed" %}
+                                {% if let Some(runtime_error) = build.runtime_display_error_message() %}
+                                    <script type="text/plain" id="build-runtime-error-{{ build.build_id }}">{{ runtime_error|escape }}</script>
+                                {% endif %}
+                            {% endif %}
+                        {% endfor %}
+
                         <!-- Desktop Table View -->
                         <div class="hidden md:block overflow-x-auto">
                             <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
@@ -129,10 +148,27 @@
                                                     {{ build.runtime_status }}
                                                 </span>
                                             {% endif %}
-                                            {% if build.runtime_error.is_some() && build.runtime_status == "failed" %}
-                                                <div class="mt-1 max-w-48 truncate text-[11px] text-red-600 dark:text-red-300" title="{{ build.runtime_error.as_deref().unwrap_or("") }}">
-                                                    {{ build.runtime_error.as_deref().unwrap_or("") }}
+                                            {% if let Some(warning) = build.runtime_version_warning_message() %}
+                                                <div class="mt-1">
+                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300" title="{{ warning }}">
+                                                        Version drift
+                                                    </span>
                                                 </div>
+                                                <div class="mt-1 max-w-64 whitespace-normal text-[11px] text-yellow-700 dark:text-yellow-300" title="{{ warning }}">
+                                                    {{ warning }}
+                                                </div>
+                                            {% endif %}
+                                            {% if build.runtime_status == "failed" %}
+                                                {% if let Some(runtime_error) = build.runtime_display_error_message() %}
+                                                <div class="mt-1 flex max-w-xs items-start gap-1 text-[11px] text-red-600 dark:text-red-300" title="{{ runtime_error }}">
+                                                    <span class="min-w-0 truncate">{{ runtime_error|truncate(length=96) }}</span>
+                                                    <button type="button" onclick="openPlainTextModalFromScript('build-runtime-error-{{ build.build_id }}', 'Runtime Error')" class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0" title="View full runtime error" aria-label="View full runtime error">
+                                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                                {% endif %}
                                             {% endif %}
                                         </td>
                                         <td class="px-3 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
@@ -225,9 +261,25 @@
                                     </div>
                                 </div>
 
-                                {% if build.runtime_error.is_some() && build.runtime_status == "failed" %}
+                                {% if build.runtime_status == "failed" %}
+                                {% if let Some(runtime_error) = build.runtime_display_error_message() %}
                                 <div class="mb-3 rounded-md bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-                                    {{ build.runtime_error.as_deref().unwrap_or("") }}
+                                    <div class="flex items-start gap-2">
+                                        <span class="min-w-0 flex-1">{{ runtime_error|truncate(length=140) }}</span>
+                                        <button type="button" onclick="openPlainTextModalFromScript('build-runtime-error-{{ build.build_id }}', 'Runtime Error')" class="text-red-400 hover:text-red-600 dark:text-red-300 dark:hover:text-red-100 transition-colors p-0.5 flex-shrink-0" title="View full runtime error" aria-label="View full runtime error">
+                                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                {% endif %}
+                                {% endif %}
+
+                                {% if let Some(warning) = build.runtime_version_warning_message() %}
+                                <div class="mb-3 rounded-md bg-yellow-50 dark:bg-yellow-900/20 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-300">
+                                    <div class="font-medium">Version drift</div>
+                                    <div class="mt-1">{{ warning }}</div>
                                 </div>
                                 {% endif %}
 

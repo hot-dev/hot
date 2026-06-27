@@ -395,7 +395,8 @@ function updateHeroMetricsUI(streamData) {
     const bannerTotalEvents = streamData.total_events ?? 0;
     const bannerHandledEvents = streamData.handled_events ?? 0;
     const bannerUnhandled = Math.max(0, bannerTotalEvents - bannerHandledEvents);
-    const bannerTotal = bannerFailedRuns + bannerFailedTasks + bannerUnhandled;
+    const bannerBuildVersionWarnings = streamData.build_version_warning_count ?? 0;
+    const bannerTotal = bannerFailedRuns + bannerFailedTasks + bannerUnhandled + bannerBuildVersionWarnings;
 
     const issuesBanner = document.getElementById('issues-banner');
     if (issuesBanner) {
@@ -420,6 +421,13 @@ function updateHeroMetricsUI(streamData) {
         bannerUnhandledEl.classList.toggle('hidden', bannerUnhandled === 0);
         bannerUnhandledEl.classList.toggle('inline-flex', bannerUnhandled > 0);
         bannerUnhandledEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full bg-orange-500/80"></span> ${formatNumber(bannerUnhandled)} Unhandled Events`;
+    }
+    const bannerBuildVersionWarningsEl = document.getElementById('issues-banner-build-version-warnings');
+    if (bannerBuildVersionWarningsEl) {
+        bannerBuildVersionWarningsEl.classList.toggle('hidden', bannerBuildVersionWarnings === 0);
+        bannerBuildVersionWarningsEl.classList.toggle('inline-flex', bannerBuildVersionWarnings > 0);
+        bannerBuildVersionWarningsEl.href = streamData.build_version_warning_url || '/projects';
+        bannerBuildVersionWarningsEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full bg-yellow-500/80"></span> ${formatNumber(bannerBuildVersionWarnings)} Build Version Warnings`;
     }
 }
 

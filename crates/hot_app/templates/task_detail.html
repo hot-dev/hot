@@ -337,15 +337,6 @@ function openTaskArgsWithFormats() {
     openContentModalWithFormats('Args', hotContent, jsonContent);
 }
 
-function openPlainTextModal(title, content) {
-    var decoded = (function(text) {
-        var textarea = document.createElement('textarea');
-        textarea.innerHTML = text;
-        return textarea.value;
-    })(content);
-    openContentModal(title, decoded);
-}
-
 // SSE refresh callback - used by the SSE status indicator component.
 // Targeted refresh of the task header (status/result) on task lifecycle events
 // instead of a full page reload, preserving scroll position.

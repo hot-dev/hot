@@ -152,7 +152,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                         info!("hot.dev: Default data inserted successfully");
                     }
                 } else {
-                    info!(
+                    debug!(
                         "hot.dev: Default data already exists (orgs: {}, users: {})",
                         org_count, user_count
                     );

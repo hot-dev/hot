@@ -369,6 +369,11 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
     }
 
     #[derive(serde::Deserialize)]
+    struct RuntimeWarningResponse {
+        message: String,
+    }
+
+    #[derive(serde::Deserialize)]
     struct BuildResponse {
         #[allow(dead_code)]
         build_id: String,
@@ -377,6 +382,7 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
         runtime_status: String,
         hash: String,
         size: i64,
+        runtime_warning: Option<RuntimeWarningResponse>,
     }
 
     #[derive(serde::Serialize)]
@@ -406,6 +412,9 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
             println!("  Runtime status: {}", response.data.runtime_status);
             println!("  Hash: {}", response.data.hash);
             println!("  Size: {} bytes", response.data.size);
+            if let Some(warning) = response.data.runtime_warning {
+                println!("  Warning: {}", warning.message);
+            }
             Ok(())
         }
         Err(err) => {
@@ -477,6 +486,9 @@ async fn deploy_via_api(build_uuid: Uuid, conf: &Val) -> Result<(), String> {
                 println!("  Runtime status: {}", response.data.runtime_status);
                 println!("  Hash: {}", response.data.hash);
                 println!("  Size: {} bytes", response.data.size);
+                if let Some(warning) = response.data.runtime_warning {
+                    println!("  Warning: {}", warning.message);
+                }
                 Ok(())
             } else if is_build_not_found {
                 // Check if auto-upload is enabled
@@ -553,6 +565,11 @@ async fn deploy_via_api_only(build_uuid: Uuid, conf: &Val) -> Result<(), String>
     }
 
     #[derive(serde::Deserialize)]
+    struct RuntimeWarningResponse {
+        message: String,
+    }
+
+    #[derive(serde::Deserialize)]
     struct BuildResponse {
         #[allow(dead_code)]
         build_id: String,
@@ -561,6 +578,7 @@ async fn deploy_via_api_only(build_uuid: Uuid, conf: &Val) -> Result<(), String>
         runtime_status: String,
         hash: String,
         size: i64,
+        runtime_warning: Option<RuntimeWarningResponse>,
     }
 
     let response: ApiResponse<BuildResponse> = api.post(&path).await?;
@@ -574,6 +592,9 @@ async fn deploy_via_api_only(build_uuid: Uuid, conf: &Val) -> Result<(), String>
     println!("  Runtime status: {}", response.data.runtime_status);
     println!("  Hash: {}", response.data.hash);
     println!("  Size: {} bytes", response.data.size);
+    if let Some(warning) = response.data.runtime_warning {
+        println!("  Warning: {}", warning.message);
+    }
     Ok(())
 }
 

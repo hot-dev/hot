@@ -667,6 +667,58 @@ fn test_parallel_flow_respects_dependencies() {
 }
 
 #[test]
+fn test_parallel_flow_worker_resolves_cross_namespace_global() {
+    let mut compiler = Compiler::new();
+
+    let source = r#"
+    ::parallel::global::dep ns
+
+    GLOBAL_VALUE "ok"
+
+    read-global fn (): Str {
+        GLOBAL_VALUE
+    }
+
+    ::parallel::global::test ns
+
+    result parallel|map {
+        value ::parallel::global::dep/read-global()
+        other "side"
+    }
+    "#;
+    let mut hot_program = parse_hot(source).expect("Failed to parse");
+    let result = compiler.compile_program_unchecked(&mut hot_program);
+    assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
+
+    let program = compiler.get_program_arc();
+    let hot_ast = std::sync::Arc::new(crate::lang::ast::HotAst::from_program(hot_program.clone()));
+    let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
+        program,
+        Some(hot_ast),
+        compiler.get_function_mapping_arc(),
+        compiler.get_core_functions_arc(),
+        compiler.get_type_implementations_arc(),
+        compiler.get_core_variables_arc(),
+        None,
+    );
+
+    let exec_result = vm.execute();
+    assert!(
+        exec_result.is_ok(),
+        "Execution failed: {:?}",
+        exec_result.err()
+    );
+
+    let result_val = vm.get_var(Some("::parallel::global::test"), "result");
+    if let Some(Val::Map(map)) = result_val {
+        assert_eq!(map.get(&Val::from("value")), Some(&Val::from("ok")));
+        assert_eq!(map.get(&Val::from("other")), Some(&Val::from("side")));
+    } else {
+        panic!("Result should be a map");
+    }
+}
+
+#[test]
 fn test_compile_simple_variable() {
     let mut compiler = Compiler::new();
 

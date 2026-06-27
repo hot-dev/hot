@@ -96,6 +96,21 @@ pub fn require_api_key(
     ))
 }
 
+fn project_error_response(
+    error: hot::db::project::ProjectError,
+) -> (StatusCode, Json<ApiErrorResponse>) {
+    match error {
+        hot::db::project::ProjectError::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found("Project")),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&error.to_string())),
+        ),
+    }
+}
+
 /// Helper to get project and verify ownership
 pub async fn get_and_verify_project(
     db: &DatabasePool,
@@ -109,16 +124,7 @@ pub async fn get_and_verify_project(
             .await
             .and_then(|opt| opt.ok_or(hot::db::project::ProjectError::NotFound))
     }
-    .map_err(|e| match e {
-        hot::db::project::ProjectError::NotFound => (
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Project")),
-        ),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        ),
-    })?;
+    .map_err(project_error_response)?;
 
     // Verify ownership
     if project.env_id != api_key.env_id {
@@ -129,6 +135,46 @@ pub async fn get_and_verify_project(
     }
 
     Ok(project)
+}
+
+/// Helper for write paths that should bring an inactive project back online.
+pub async fn get_and_ensure_active_project(
+    db: &DatabasePool,
+    api_key: &ApiKey,
+    project_id_or_slug: &str,
+) -> Result<Project, (StatusCode, Json<ApiErrorResponse>)> {
+    let project = if let Ok(project_id) = Uuid::parse_str(project_id_or_slug) {
+        Project::get_project_including_inactive(db, &project_id).await
+    } else {
+        Project::get_project_by_env_and_name(db, &api_key.env_id, project_id_or_slug)
+            .await
+            .and_then(|opt| opt.ok_or(hot::db::project::ProjectError::NotFound))
+    }
+    .map_err(project_error_response)?;
+
+    if project.env_id != api_key.env_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found("Project")),
+        ));
+    }
+
+    if project.active {
+        return Ok(project);
+    }
+
+    Project::toggle_active(db, &project.project_id, true, &api_key.created_by_user_id)
+        .await
+        .map_err(project_error_response)?;
+
+    tracing::info!(
+        "Reactivated project {} while handling write request",
+        project.project_id
+    );
+
+    Project::get_project(db, &project.project_id)
+        .await
+        .map_err(project_error_response)
 }
 
 /// Get org_id for the API key's environment
@@ -143,4 +189,76 @@ pub async fn get_org_id_for_env(
         )
     })?;
     Ok(env.org_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use hot::db::{self, Project, api_key::ApiKey};
+
+    fn test_api_key(env_id: Uuid, user_id: Uuid) -> ApiKey {
+        ApiKey {
+            api_key_id: Uuid::now_v7(),
+            env_id,
+            description: "test".to_string(),
+            key_data: serde_json::json!({}),
+            active: true,
+            created_by_user_id: user_id,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            updated_by_user_id: None,
+            active_toggle_at: None,
+            active_toggle_by_user_id: None,
+            permissions: serde_json::json!({"*:*": ["*"]}),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_project_lookup_reactivates_inactive_project_by_slug() {
+        let db = db::test_db().await;
+        let data = db::insert_test_data(&db).await.unwrap();
+        let api_key = test_api_key(data.env_id, data.user_id);
+
+        Project::toggle_active(&db, &data.project_id, false, &data.user_id)
+            .await
+            .unwrap();
+
+        let project = get_and_ensure_active_project(&db, &api_key, "test-project")
+            .await
+            .unwrap();
+
+        assert_eq!(project.project_id, data.project_id);
+        assert!(project.active);
+        assert!(
+            Project::get_project(&db, &data.project_id)
+                .await
+                .unwrap()
+                .active
+        );
+    }
+
+    #[tokio::test]
+    async fn write_project_lookup_reactivates_inactive_project_by_id() {
+        let db = db::test_db().await;
+        let data = db::insert_test_data(&db).await.unwrap();
+        let api_key = test_api_key(data.env_id, data.user_id);
+
+        Project::toggle_active(&db, &data.project_id, false, &data.user_id)
+            .await
+            .unwrap();
+
+        let project = get_and_ensure_active_project(&db, &api_key, &data.project_id.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(project.project_id, data.project_id);
+        assert!(project.active);
+        assert!(
+            Project::get_project(&db, &data.project_id)
+                .await
+                .unwrap()
+                .active
+        );
+    }
 }

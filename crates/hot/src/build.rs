@@ -22,108 +22,11 @@ pub struct VersionCheckResult {
     pub warnings: Vec<String>,
 }
 
-impl VersionCheckResult {
-    /// Check if versions are semver compatible
-    ///
-    /// Compatibility rules:
-    /// - Major version MUST match exactly
-    /// - Server minor version must be >= build minor version (server has all features build needs)
-    /// - Server patch version must be >= build patch version within same major.minor
-    ///
-    /// In other words: server version must be >= build version within the same major version.
-    fn is_compatible(build_version: &str, server_version: &str) -> bool {
-        // Parse semver: major.minor.patch
-        let parse_version = |v: &str| -> Option<(u32, u32, u32)> {
-            let parts: Vec<&str> = v.split('.').collect();
-            if parts.len() >= 2 {
-                let major = parts[0].parse().ok()?;
-                let minor = parts[1].parse().ok()?;
-                let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
-                Some((major, minor, patch))
-            } else {
-                None
-            }
-        };
-
-        match (parse_version(build_version), parse_version(server_version)) {
-            (Some((b_major, b_minor, b_patch)), Some((s_major, s_minor, s_patch))) => {
-                // Major version must match exactly
-                if b_major != s_major {
-                    return false;
-                }
-
-                // Server version must be >= build version
-                // This ensures the server has all features the build might use
-                if s_minor > b_minor {
-                    // Server has newer minor version - always compatible
-                    return true;
-                }
-                if s_minor < b_minor {
-                    // Server has older minor version - build might use features server doesn't have
-                    return false;
-                }
-
-                // Same major.minor - check patch
-                // Server patch >= build patch is safe
-                s_patch >= b_patch
-            }
-            _ => {
-                // If we can't parse versions, allow it but warn
-                true
-            }
-        }
-    }
-
-    /// Get a human-readable explanation of the compatibility status
-    fn compatibility_explanation(build_version: &str, server_version: &str) -> String {
-        let parse_version = |v: &str| -> Option<(u32, u32, u32)> {
-            let parts: Vec<&str> = v.split('.').collect();
-            if parts.len() >= 2 {
-                let major = parts[0].parse().ok()?;
-                let minor = parts[1].parse().ok()?;
-                let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
-                Some((major, minor, patch))
-            } else {
-                None
-            }
-        };
-
-        match (parse_version(build_version), parse_version(server_version)) {
-            (Some((b_major, _, _)), Some((s_major, _, _))) if b_major != s_major => {
-                format!(
-                    "Major version mismatch: build uses v{}.x but server is v{}.x. \
-                     Major version changes are breaking - rebuild with compatible hot-std.",
-                    b_major, s_major
-                )
-            }
-            (Some((_, b_minor, _)), Some((_, s_minor, _))) if b_minor > s_minor => {
-                format!(
-                    "Build uses newer minor version (v{}) than server (v{}). \
-                     Build might use features the server doesn't support. \
-                     Update the server or rebuild with older hot-std.",
-                    build_version, server_version
-                )
-            }
-            (Some((_, b_minor, b_patch)), Some((_, s_minor, s_patch)))
-                if b_minor == s_minor && b_patch > s_patch =>
-            {
-                format!(
-                    "Build uses newer patch version (v{}) than server (v{}). \
-                     This is usually safe but the build might expect bug fixes not present in the server.",
-                    build_version, server_version
-                )
-            }
-            _ => "Versions are compatible".to_string(),
-        }
-    }
-}
-
 /// Validate version compatibility between a build's manifest and the current server version
 pub fn validate_build_version(
     bundle_map: &indexmap::IndexMap<crate::val::Val, crate::val::Val>,
 ) -> VersionCheckResult {
-    let server_version = crate::build_info::VERSION.to_string();
-    let mut warnings = Vec::new();
+    let server_version = crate::version::current_runtime_version().to_string();
 
     // Extract versions from bundle map
     let build_engine_version = bundle_map
@@ -140,51 +43,21 @@ pub fn validate_build_version(
             _ => None,
         });
 
-    // Check engine version compatibility
-    let engine_compatible = match &build_engine_version {
-        Some(v) => VersionCheckResult::is_compatible(v, &server_version),
-        None => {
-            warnings.push(
-                "Build missing engine_version in manifest (pre-versioning build)".to_string(),
-            );
-            true // Allow legacy builds without version info
-        }
-    };
-
-    // Check hot-std version compatibility
-    let hot_std_compatible = match &build_hot_std_version {
-        Some(v) => VersionCheckResult::is_compatible(v, &server_version),
-        None => {
-            warnings.push(
-                "Build missing hot_std_version in manifest (pre-versioning build)".to_string(),
-            );
-            true // Allow legacy builds without version info
-        }
-    };
-
-    let compatible = engine_compatible && hot_std_compatible;
-
-    if !compatible {
-        if let Some(ref v) = build_engine_version
-            && !VersionCheckResult::is_compatible(v, &server_version)
-        {
-            warnings.push(format!(
-                "Engine version incompatible: {}",
-                VersionCheckResult::compatibility_explanation(v, &server_version)
-            ));
-        }
-        if let Some(ref v) = build_hot_std_version
-            && !VersionCheckResult::is_compatible(v, &server_version)
-        {
-            warnings.push(format!(
-                "hot-std version incompatible: {}",
-                VersionCheckResult::compatibility_explanation(v, &server_version)
-            ));
-        }
+    let compatibility = crate::version::check_runtime_version_compatibility(
+        build_engine_version.as_deref(),
+        build_hot_std_version.as_deref(),
+        &server_version,
+    );
+    let mut warnings = Vec::new();
+    if let Some(warning) = compatibility.warning {
+        warnings.push(warning.message);
+    }
+    if let Some(error) = &compatibility.error {
+        warnings.push(error.clone());
     }
 
     VersionCheckResult {
-        compatible,
+        compatible: compatibility.compatible,
         build_engine_version,
         build_hot_std_version,
         server_version,
@@ -1615,7 +1488,7 @@ impl BuildFetcher for LocalBuildFetcher {
 
         let bundle_cache_dir = extract_path.join(".hot").join("cache");
         let bundle_cache = crate::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-        tracing::info!(
+        tracing::debug!(
             "Pre-compiling bundle {} to generate bytecode cache",
             build.build_id
         );
@@ -1760,6 +1633,27 @@ pub async fn load_build_manifest_data(
             {
                 // Validate version compatibility
                 let version_check = validate_build_version(bundle_map);
+                if let Err(e) = Build::update_manifest_versions(
+                    db,
+                    build_id,
+                    version_check.build_engine_version.as_deref(),
+                    version_check.build_hot_std_version.as_deref(),
+                )
+                .await
+                {
+                    if Build::manifest_version_metadata_unavailable(&e) {
+                        tracing::debug!(
+                            "Manifest version metadata columns are not available yet; skipping persist for build {}",
+                            build_id
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Failed to persist manifest versions for build {}: {}",
+                            build_id,
+                            e
+                        );
+                    }
+                }
 
                 // Log warnings
                 for warning in &version_check.warnings {

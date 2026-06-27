@@ -1302,7 +1302,7 @@ impl Schedule {
                 .execute(pg_pool)
                 .await?;
                 if result.rows_affected() > 0 {
-                    tracing::info!(
+                    tracing::debug!(
                         "Deactivated {} schedule(s) for build {}",
                         result.rows_affected(),
                         build_id
@@ -1319,7 +1319,7 @@ impl Schedule {
                 .execute(sqlite_pool)
                 .await?;
                 if result.rows_affected() > 0 {
-                    tracing::info!(
+                    tracing::debug!(
                         "Deactivated {} schedule(s) for build {}",
                         result.rows_affected(),
                         build_id
