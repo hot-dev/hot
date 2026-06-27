@@ -29,6 +29,7 @@ utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 
 [dev-dependencies]
+hot = { workspace = true, features = ["s3-storage", "test-utils"] }
 tower = { workspace = true, features = ["util"] }
 sqlx = { workspace = true }
 async-trait = { workspace = true }

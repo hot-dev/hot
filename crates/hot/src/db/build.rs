@@ -71,6 +71,38 @@ impl Build {
             .map(|warning| warning.message)
     }
 
+    pub fn runtime_version_error_message(&self) -> Option<String> {
+        if !self.is_bundle() {
+            return None;
+        }
+
+        crate::version::check_runtime_version_compatibility(
+            self.engine_version.as_deref(),
+            self.hot_std_version.as_deref(),
+            crate::version::current_runtime_version(),
+        )
+        .error
+        .map(|error| format!("Build is incompatible with this Hot runtime: {error}"))
+    }
+
+    /// Error message to show for a failed build.
+    ///
+    /// Prefer the error recorded at failure time (already sanitized on write, so
+    /// it reflects what the runtime that processed the build actually observed).
+    /// Fall back to a freshly derived version-incompatibility message only when
+    /// no error was recorded or when older records have only the generic
+    /// manifest-load failure.
+    pub fn runtime_display_error_message(&self) -> Option<String> {
+        let version_error = self.runtime_version_error_message();
+        match self.runtime_error.as_deref() {
+            Some("Build manifest data could not be loaded") => {
+                version_error.or_else(|| self.runtime_error.clone())
+            }
+            Some(runtime_error) => Some(runtime_error.to_string()),
+            None => version_error,
+        }
+    }
+
     /// Get build by ID
     pub async fn get_build(
         db: &crate::db::DatabasePool,
@@ -1301,26 +1333,31 @@ impl Build {
     fn sanitize_runtime_error(runtime_error: &str) -> String {
         let lower = runtime_error.to_ascii_lowercase();
         let classified = if lower.contains("failed to create build storage") {
-            Some("Build storage could not be initialized")
+            Some("Build storage could not be initialized".to_string())
         } else if lower.contains("failed to retrieve build") {
-            Some("Build artifact could not be retrieved from storage")
+            Some("Build artifact could not be retrieved from storage".to_string())
         } else if lower.contains("failed to extract build") {
-            Some("Build artifact could not be extracted")
+            Some("Build artifact could not be extracted".to_string())
+        } else if let Some((_, details)) = runtime_error.split_once(" is incompatible: ") {
+            Some(format!(
+                "Build is incompatible with this Hot runtime: {details}"
+            ))
+        } else if lower.contains("runtime must be greater than or equal to the build version") {
+            Some(runtime_error.to_string())
         } else if lower.contains("failed to load handlers and schedules") {
-            Some("Build manifest data could not be loaded")
+            Some("Build manifest data could not be loaded".to_string())
         } else if lower.contains("failed to activate build") {
-            Some("Build could not be activated")
+            Some("Build could not be activated".to_string())
         } else {
             None
         };
 
-        classified.map(ToString::to_string).unwrap_or_else(|| {
-            runtime_error
-                .chars()
-                .filter(|ch| !ch.is_control())
-                .take(512)
-                .collect()
-        })
+        classified
+            .unwrap_or_else(|| runtime_error.to_string())
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(512)
+            .collect()
     }
 
     pub async fn mark_runtime_superseded(
@@ -1631,6 +1668,62 @@ mod tests {
         .await
         .unwrap();
         build_id
+    }
+
+    #[test]
+    fn sanitize_runtime_error_preserves_version_incompatibility() {
+        let build_id = Uuid::now_v7();
+        let error = format!(
+            "Failed to load handlers and schedules for build {build_id}: Build {build_id} is incompatible: Bundle engine version 2.4.4 is incompatible with runtime 2.4.3; runtime must be greater than or equal to the build version"
+        );
+
+        assert_eq!(
+            Build::sanitize_runtime_error(&error),
+            "Build is incompatible with this Hot runtime: Bundle engine version 2.4.4 is incompatible with runtime 2.4.3; runtime must be greater than or equal to the build version"
+        );
+    }
+
+    #[test]
+    fn runtime_display_error_replaces_generic_manifest_error_with_version_error() {
+        let now = Utc::now();
+        let runtime_version = crate::version::current_runtime_version();
+        let runtime_major = runtime_version
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u64>().ok())
+            .unwrap_or(0);
+        let incompatible_version = format!("{}.0.0", runtime_major + 1);
+        let build = Build {
+            build_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            hash: "test-hash".to_string(),
+            size: 1024,
+            build_type_id: Build::BUILD_TYPE_BUNDLE,
+            build_type: "bundle".to_string(),
+            deployed: false,
+            active: true,
+            created_by_user_id: Uuid::now_v7(),
+            created_at: now,
+            updated_at: now,
+            updated_by_user_id: None,
+            active_toggle_at: None,
+            active_toggle_by_user_id: None,
+            storage_path: None,
+            storage_backend: None,
+            runtime_status: Build::RUNTIME_STATUS_FAILED.to_string(),
+            runtime_ready_at: None,
+            runtime_error: Some("Build manifest data could not be loaded".to_string()),
+            deployment_sequence: 0,
+            engine_version: Some(incompatible_version.clone()),
+            hot_std_version: Some(incompatible_version.clone()),
+        };
+
+        assert_eq!(
+            build.runtime_display_error_message(),
+            Some(format!(
+                "Build is incompatible with this Hot runtime: Bundle engine version {incompatible_version} is incompatible with runtime {runtime_version}; major versions must match"
+            ))
+        );
     }
 
     #[tokio::test]

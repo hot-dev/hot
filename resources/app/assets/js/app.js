@@ -1189,6 +1189,23 @@
     }
 
     /**
+     * Open a plain-text modal without JSON/Hot format detection.
+     */
+    function openPlainTextModal(title, content) {
+        openContentModal(title, decodeHtmlEntities(content || ''));
+    }
+
+    /**
+     * Open a plain-text modal from a script tag.
+     */
+    function openPlainTextModalFromScript(scriptId, title) {
+        var scriptEl = document.getElementById(scriptId);
+        if (scriptEl) {
+            openPlainTextModal(title, scriptEl.textContent);
+        }
+    }
+
+    /**
      * Open modal with raw data
      */
     function openContentModalWithData(title, rawData) {
@@ -1838,6 +1855,8 @@
     window.openContentModalWithFormats = openContentModalWithFormats;
     window.openContentModalFromElement = openContentModalFromElement;
     window.openContentModalFromScript = openContentModalFromScript;
+    window.openPlainTextModal = openPlainTextModal;
+    window.openPlainTextModalFromScript = openPlainTextModalFromScript;
     window.openContentModalWithData = openContentModalWithData;
     window.openEventDataFromElement = openEventDataFromElement;
     window.switchModalFormat = switchModalFormat;

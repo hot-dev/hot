@@ -57,6 +57,25 @@ impl Project {
         Ok(project)
     }
 
+    /// Get a project by ID without filtering inactive projects.
+    ///
+    /// Most runtime/read paths should use `get_project`, which only returns
+    /// active projects. Write paths that can intentionally reactivate a project
+    /// need to resolve the row first, even while it is inactive.
+    pub async fn get_project_including_inactive(
+        db: &crate::db::DatabasePool,
+        project_id: &Uuid,
+    ) -> Result<Project, ProjectError> {
+        match db {
+            crate::db::DatabasePool::Sqlite(db) => {
+                Self::get_project_including_inactive_sqlite(db, project_id).await
+            }
+            crate::db::DatabasePool::Postgres(db) => {
+                Self::get_project_including_inactive_postgres(db, project_id).await
+            }
+        }
+    }
+
     pub fn invalidate_project_cache(project_id: &Uuid) {
         PROJECT_CACHE.invalidate(project_id);
     }
@@ -145,6 +164,26 @@ impl Project {
         Ok(row)
     }
 
+    async fn get_project_including_inactive_sqlite(
+        db: &Pool<Sqlite>,
+        project_id: &Uuid,
+    ) -> Result<Project, ProjectError> {
+        let row = sqlx::query_as::<_, Project>(
+            r#"
+            SELECT project_id, env_id, name, active, created_by_user_id, created_at, updated_at,
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
+            FROM project
+            WHERE project_id = ?
+            "#,
+        )
+        .bind(project_id)
+        .fetch_one(db)
+        .await?;
+
+        Ok(row)
+    }
+
     async fn get_project_postgres(
         db: &Pool<Postgres>,
         project_id: &Uuid,
@@ -157,6 +196,27 @@ impl Project {
                    deployment_sequence
             FROM project
             WHERE project_id = $1 AND active = true
+            "#,
+        )
+        .bind(project_id)
+        .fetch_one(db)
+        .await?;
+
+        Ok(row)
+    }
+
+    async fn get_project_including_inactive_postgres(
+        db: &Pool<Postgres>,
+        project_id: &Uuid,
+    ) -> Result<Project, ProjectError> {
+        let row = sqlx::query_as::<_, Project>(
+            r#"
+            SELECT project_id, env_id, name, active,
+                   created_by_user_id, created_at, updated_at,
+                   updated_by_user_id, active_toggle_at, active_toggle_by_user_id,
+                   deployment_sequence
+            FROM project
+            WHERE project_id = $1
             "#,
         )
         .bind(project_id)
