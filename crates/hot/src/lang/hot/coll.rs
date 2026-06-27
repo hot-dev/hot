@@ -1655,8 +1655,11 @@ fn pmap_vec(
     let conf = vm.get_conf().clone();
     let function_val_clone = function_val.clone();
 
-    // Get current namespace variables to pass to spawned tasks
-    let current_namespace_vars = vm.get_namespace_vars(None).cloned().unwrap_or_default();
+    // Worker VMs need the same realized namespace state as the parent because
+    // callbacks can call package functions that switch namespaces and read
+    // package-level constants.
+    let namespace_snapshot = vm.namespace_variables_snapshot();
+    let current_namespace = vm.get_current_namespace().to_string();
 
     // pmap mirrors `map`'s failure contract with a batch-completion twist:
     //   * Each worker runs its chunk; if a per-item call halts via `fail()`
@@ -1706,7 +1709,8 @@ fn pmap_vec(
         let core_variables_clone = core_variables.clone();
         let conf_clone = Some(conf.clone());
         let function_clone = function_val_clone.clone();
-        let namespace_vars_clone = current_namespace_vars.clone();
+        let namespace_snapshot_clone = namespace_snapshot.clone();
+        let namespace_clone = current_namespace.clone();
         let results_clone = results_mutex.clone();
         let error_clone = error_mutex.clone();
         let tokio_handle_clone = tokio_handle.clone();
@@ -1729,11 +1733,8 @@ fn pmap_vec(
                 conf_clone,
             );
             task_vm.inherit_host_context(&host_context_clone);
-
-            // Restore namespace variables
-            for (var_name, var_val) in namespace_vars_clone {
-                task_vm.store_variable_public(&var_name, var_val).ok();
-            }
+            task_vm.inherit_namespace_variables(&namespace_snapshot_clone);
+            task_vm.set_current_namespace(namespace_clone);
 
             let mut chunk_results: Vec<Val> = Vec::with_capacity(chunk_vec.len());
             let mut chunk_halt: Option<PmapHalt> = None;
