@@ -17,6 +17,60 @@ use crate::ApiStateData;
 use crate::auth::AuthContext;
 use crate::models::*;
 
+fn build_runtime_warning_response(build: &Build) -> Option<BuildRuntimeWarningResponse> {
+    build
+        .runtime_version_warning()
+        .map(|warning| BuildRuntimeWarningResponse {
+            build_engine_version: warning.build_engine_version,
+            build_hot_std_version: warning.build_hot_std_version,
+            runtime_version: warning.runtime_version,
+            message: warning.message,
+        })
+}
+
+fn build_response(build: Build, project_id: Uuid) -> BuildResponse {
+    let runtime_warning = build_runtime_warning_response(&build);
+    BuildResponse {
+        build_id: build.build_id,
+        project_id,
+        hash: build.hash,
+        size: build.size,
+        build_type: build.build_type,
+        deployed: build.deployed,
+        active: build.active,
+        runtime_status: build.runtime_status,
+        runtime_error: build.runtime_error,
+        deployment_sequence: build.deployment_sequence,
+        created_at: build.created_at,
+        updated_at: build.updated_at,
+        storage_path: build.storage_path,
+        storage_backend: build.storage_backend,
+        runtime_warning,
+    }
+}
+
+fn build_with_project_response(build: Build, project_name: String) -> BuildWithProjectResponse {
+    let runtime_warning = build_runtime_warning_response(&build);
+    BuildWithProjectResponse {
+        build_id: build.build_id,
+        project_id: build.project_id,
+        project_name,
+        hash: build.hash,
+        size: build.size,
+        build_type: build.build_type,
+        deployed: build.deployed,
+        active: build.active,
+        runtime_status: build.runtime_status,
+        runtime_error: build.runtime_error,
+        deployment_sequence: build.deployment_sequence,
+        created_at: build.created_at,
+        updated_at: build.updated_at,
+        storage_path: build.storage_path,
+        storage_backend: build.storage_backend,
+        runtime_warning,
+    }
+}
+
 pub async fn list_builds(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -28,7 +82,7 @@ pub async fn list_builds(
 
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
-    let builds = Build::get_builds_by_project(
+    let mut builds = Build::get_builds_by_project(
         &db,
         &project.project_id,
         Some(params.limit),
@@ -41,6 +95,14 @@ pub async fn list_builds(
             Json(ApiErrorResponse::internal_error(&e.to_string())),
         )
     })?;
+    Build::hydrate_manifest_versions_for_builds(&db, &mut builds)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
     let total = Build::get_count_by_project(&db, &project.project_id)
         .await
@@ -53,22 +115,7 @@ pub async fn list_builds(
 
     let build_responses: Vec<BuildResponse> = builds
         .into_iter()
-        .map(|b| BuildResponse {
-            build_id: b.build_id,
-            project_id: project.project_id,
-            hash: b.hash,
-            size: b.size,
-            build_type: b.build_type,
-            deployed: b.deployed,
-            active: b.active,
-            runtime_status: b.runtime_status,
-            runtime_error: b.runtime_error,
-            deployment_sequence: b.deployment_sequence,
-            created_at: b.created_at,
-            updated_at: b.updated_at,
-            storage_path: b.storage_path,
-            storage_backend: b.storage_backend,
-        })
+        .map(|b| build_response(b, project.project_id))
         .collect();
 
     Ok(Json(ApiListResponse::new(
@@ -87,7 +134,7 @@ pub async fn list_builds_by_env(
 ) -> Result<Json<ApiListResponse<BuildWithProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can list builds.")?;
 
-    let builds = Build::get_builds_by_env(
+    let mut builds = Build::get_builds_by_env(
         &db,
         &api_key.env_id,
         Some(params.limit),
@@ -100,6 +147,14 @@ pub async fn list_builds_by_env(
             Json(ApiErrorResponse::internal_error(&e.to_string())),
         )
     })?;
+    Build::hydrate_manifest_versions_for_builds(&db, &mut builds)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
     let total = Build::get_count_by_env(&db, &api_key.env_id)
         .await
@@ -123,23 +178,7 @@ pub async fn list_builds_by_env(
                 )
             })?;
 
-        build_responses.push(BuildWithProjectResponse {
-            build_id: build.build_id,
-            project_id: build.project_id,
-            project_name: project.name,
-            hash: build.hash,
-            size: build.size,
-            build_type: build.build_type,
-            deployed: build.deployed,
-            active: build.active,
-            runtime_status: build.runtime_status,
-            runtime_error: build.runtime_error,
-            deployment_sequence: build.deployment_sequence,
-            created_at: build.created_at,
-            updated_at: build.updated_at,
-            storage_path: build.storage_path,
-            storage_backend: build.storage_backend,
-        });
+        build_responses.push(build_with_project_response(build, project.name));
     }
 
     Ok(Json(ApiListResponse::new(
@@ -160,7 +199,7 @@ pub async fn get_build(
 
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
-    let build = Build::get_build(&db, &build_id)
+    let mut build = Build::get_build(&db, &build_id)
         .await
         .map_err(|e| match e {
             hot::db::build::BuildError::NotFound => (
@@ -172,6 +211,14 @@ pub async fn get_build(
                 Json(ApiErrorResponse::internal_error(&e.to_string())),
             ),
         })?;
+    Build::hydrate_manifest_versions(&db, &mut build)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
     // Verify the build belongs to this project
     if build.project_id != project.project_id {
@@ -181,22 +228,10 @@ pub async fn get_build(
         ));
     }
 
-    Ok(Json(ApiResponse::new(BuildResponse {
-        build_id: build.build_id,
-        project_id: project.project_id,
-        hash: build.hash,
-        size: build.size,
-        build_type: build.build_type,
-        deployed: build.deployed,
-        active: build.active,
-        runtime_status: build.runtime_status,
-        runtime_error: build.runtime_error,
-        deployment_sequence: build.deployment_sequence,
-        created_at: build.created_at,
-        updated_at: build.updated_at,
-        storage_path: build.storage_path,
-        storage_backend: build.storage_backend,
-    })))
+    Ok(Json(ApiResponse::new(build_response(
+        build,
+        project.project_id,
+    ))))
 }
 
 pub async fn get_deployed_build(
@@ -218,27 +253,23 @@ pub async fn get_deployed_build(
             )
         })?;
 
-    let build = build.ok_or((
+    let mut build = build.ok_or((
         StatusCode::NOT_FOUND,
         Json(ApiErrorResponse::not_found("No deployed build found")),
     ))?;
+    Build::hydrate_manifest_versions(&db, &mut build)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
-    Ok(Json(ApiResponse::new(BuildResponse {
-        build_id: build.build_id,
-        project_id: project.project_id,
-        hash: build.hash,
-        size: build.size,
-        build_type: build.build_type,
-        deployed: build.deployed,
-        active: build.active,
-        runtime_status: build.runtime_status,
-        runtime_error: build.runtime_error,
-        deployment_sequence: build.deployment_sequence,
-        created_at: build.created_at,
-        updated_at: build.updated_at,
-        storage_path: build.storage_path,
-        storage_backend: build.storage_backend,
-    })))
+    Ok(Json(ApiResponse::new(build_response(
+        build,
+        project.project_id,
+    ))))
 }
 
 pub async fn get_live_build(
@@ -260,27 +291,23 @@ pub async fn get_live_build(
             )
         })?;
 
-    let build = build.ok_or((
+    let mut build = build.ok_or((
         StatusCode::NOT_FOUND,
         Json(ApiErrorResponse::not_found("No live build found")),
     ))?;
+    Build::hydrate_manifest_versions(&db, &mut build)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
-    Ok(Json(ApiResponse::new(BuildResponse {
-        build_id: build.build_id,
-        project_id: project.project_id,
-        hash: build.hash,
-        size: build.size,
-        build_type: build.build_type,
-        deployed: build.deployed,
-        active: build.active,
-        runtime_status: build.runtime_status,
-        runtime_error: build.runtime_error,
-        deployment_sequence: build.deployment_sequence,
-        created_at: build.created_at,
-        updated_at: build.updated_at,
-        storage_path: build.storage_path,
-        storage_backend: build.storage_backend,
-    })))
+    Ok(Json(ApiResponse::new(build_response(
+        build,
+        project.project_id,
+    ))))
 }
 
 pub async fn deploy_build(
@@ -428,29 +455,25 @@ pub async fn deploy_build(
     }
 
     // Get the updated build
-    let deployed_build = Build::get_build(&db, &build_id).await.map_err(|e| {
+    let mut deployed_build = Build::get_build(&db, &build_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiErrorResponse::internal_error(&e.to_string())),
         )
     })?;
+    Build::hydrate_manifest_versions(&db, &mut deployed_build)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
-    Ok(Json(ApiResponse::new(BuildResponse {
-        build_id: deployed_build.build_id,
-        project_id: project.project_id,
-        hash: deployed_build.hash,
-        size: deployed_build.size,
-        build_type: deployed_build.build_type,
-        deployed: deployed_build.deployed,
-        active: deployed_build.active,
-        runtime_status: deployed_build.runtime_status,
-        runtime_error: deployed_build.runtime_error,
-        deployment_sequence: deployed_build.deployment_sequence,
-        created_at: deployed_build.created_at,
-        updated_at: deployed_build.updated_at,
-        storage_path: deployed_build.storage_path,
-        storage_backend: deployed_build.storage_backend,
-    })))
+    Ok(Json(ApiResponse::new(build_response(
+        deployed_build,
+        project.project_id,
+    ))))
 }
 
 pub async fn upload_build(

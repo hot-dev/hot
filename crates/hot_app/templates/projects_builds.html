@@ -43,6 +43,17 @@
                 </div>
                 {% endif %}
 
+                {% if let Some(warning) = deploy_warning %}
+                <div class="mb-6 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 p-4">
+                    <div class="flex">
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-yellow-800 dark:text-yellow-200">Build deployed with version warning</h3>
+                            <p class="mt-1 text-sm text-yellow-700 dark:text-yellow-300">{{ warning }}</p>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <!-- Builds list -->
                 <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
                     {% if builds.is_empty() %}
@@ -128,6 +139,16 @@
                                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-100">
                                                     {{ build.runtime_status }}
                                                 </span>
+                                            {% endif %}
+                                            {% if let Some(warning) = build.runtime_version_warning_message() %}
+                                                <div class="mt-1">
+                                                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300" title="{{ warning }}">
+                                                        Version drift
+                                                    </span>
+                                                </div>
+                                                <div class="mt-1 max-w-64 whitespace-normal text-[11px] text-yellow-700 dark:text-yellow-300" title="{{ warning }}">
+                                                    {{ warning }}
+                                                </div>
                                             {% endif %}
                                             {% if build.runtime_error.is_some() && build.runtime_status == "failed" %}
                                                 <div class="mt-1 max-w-48 truncate text-[11px] text-red-600 dark:text-red-300" title="{{ build.runtime_error.as_deref().unwrap_or("") }}">
@@ -228,6 +249,13 @@
                                 {% if build.runtime_error.is_some() && build.runtime_status == "failed" %}
                                 <div class="mb-3 rounded-md bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs text-red-700 dark:text-red-300">
                                     {{ build.runtime_error.as_deref().unwrap_or("") }}
+                                </div>
+                                {% endif %}
+
+                                {% if let Some(warning) = build.runtime_version_warning_message() %}
+                                <div class="mb-3 rounded-md bg-yellow-50 dark:bg-yellow-900/20 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-300">
+                                    <div class="font-medium">Version drift</div>
+                                    <div class="mt-1">{{ warning }}</div>
                                 </div>
                                 {% endif %}
 

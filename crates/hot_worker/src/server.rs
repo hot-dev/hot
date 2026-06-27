@@ -1543,6 +1543,7 @@ async fn retrieve_build_data(
 }
 
 async fn prepare_bundle_runtime(
+    db: &DatabasePool,
     build: &Build,
     project: &Project,
     env: &Env,
@@ -1604,10 +1605,65 @@ async fn prepare_bundle_runtime(
         )
     })?;
 
+    persist_bundle_manifest_versions(db, build, project, env, &extract_dir).await;
+
     Ok(PreparedBundleRuntime {
         extract_dir,
         build_data,
     })
+}
+
+async fn persist_bundle_manifest_versions(
+    db: &DatabasePool,
+    build: &Build,
+    project: &Project,
+    env: &Env,
+    extract_dir: &std::path::Path,
+) {
+    let Ok(manifest) = hot::bundle::read_bundle_manifest(extract_dir) else {
+        return;
+    };
+    let compatibility = hot::version::check_runtime_version_compatibility(
+        Some(manifest.engine_version.as_str()),
+        Some(manifest.hot_std_version.as_str()),
+        hot::version::current_runtime_version(),
+    );
+    if let Some(warning) = &compatibility.warning {
+        warn!(
+            build_id = %build.build_id,
+            project_id = %project.project_id,
+            env_id = %env.env_id,
+            bundle_engine_version = %manifest.engine_version,
+            bundle_hot_std_version = %manifest.hot_std_version,
+            runtime_version = %warning.runtime_version,
+            "ROUTING: Bundle runtime version drift detected"
+        );
+    }
+    if build.engine_version.as_deref() == Some(manifest.engine_version.as_str())
+        && build.hot_std_version.as_deref() == Some(manifest.hot_std_version.as_str())
+    {
+        return;
+    }
+    if let Err(e) = Build::update_manifest_versions(
+        db,
+        &build.build_id,
+        Some(manifest.engine_version.as_str()),
+        Some(manifest.hot_std_version.as_str()),
+    )
+    .await
+    {
+        if Build::manifest_version_metadata_unavailable(&e) {
+            debug!(
+                "ROUTING: Manifest version metadata columns are not available yet; skipping persist for build {}",
+                build.build_id
+            );
+        } else {
+            warn!(
+                "ROUTING: Failed to persist manifest versions for build {}: {}",
+                build.build_id, e
+            );
+        }
+    }
 }
 
 /// Advisory lock id electing a single worker to perform startup deployment
@@ -1662,6 +1718,23 @@ async fn startup_repair_and_warm_bundle_runtimes(
             }
 
             tokio::select! {
+                _ = backfill_deployed_bundle_manifest_versions(db, worker_conf, build_path_cache, limit) => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        info!("hot.dev: WORKER startup version backfill stopped for shutdown");
+                        lock.release().await;
+                        return;
+                    }
+                }
+            }
+
+            if *shutdown_rx.borrow() {
+                info!("hot.dev: WORKER startup recovery skipped for shutdown");
+                lock.release().await;
+                return;
+            }
+
+            tokio::select! {
                 _ = recover_interrupted_bundle_deployments(db, worker_conf, build_path_cache, limit) => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
@@ -1683,6 +1756,82 @@ async fn startup_repair_and_warm_bundle_runtimes(
             );
         }
     }
+}
+
+async fn backfill_deployed_bundle_manifest_versions(
+    db: &DatabasePool,
+    worker_conf: &Val,
+    build_path_cache: &Arc<BuildPathCache>,
+    limit: i64,
+) {
+    let builds = match Build::get_deployed_bundle_builds_missing_versions(db, limit).await {
+        Ok(builds) => builds,
+        Err(e) => {
+            if Build::manifest_version_metadata_unavailable(&e) {
+                debug!(
+                    "hot.dev: WORKER startup version backfill skipped because manifest version metadata columns are not available yet"
+                );
+            } else {
+                warn!(
+                    "hot.dev: WORKER startup version backfill could not list builds: {}",
+                    e
+                );
+            }
+            return;
+        }
+    };
+
+    if builds.is_empty() {
+        debug!("hot.dev: WORKER startup version backfill found no bundle builds missing versions");
+        return;
+    }
+
+    info!(
+        "hot.dev: WORKER startup version backfill preparing {} deployed bundle build(s)",
+        builds.len()
+    );
+
+    let mut backfilled_count = 0usize;
+    let mut failed_count = 0usize;
+    for build in builds {
+        let (project, env) = match resolve_build_project_env(db, &build).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup version backfill skipped build {}: {}",
+                    build.build_id, e
+                );
+                continue;
+            }
+        };
+
+        match prepare_bundle_runtime(
+            db,
+            &build,
+            &project,
+            &env,
+            worker_conf,
+            build_path_cache,
+            false,
+        )
+        .await
+        {
+            Ok(_) => backfilled_count += 1,
+            Err(e) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup version backfill failed for build {} (project {}): {}",
+                    build.build_id, project.name, e
+                );
+            }
+        }
+    }
+
+    info!(
+        "hot.dev: WORKER startup version backfill finished (backfilled={}, failed={})",
+        backfilled_count, failed_count
+    );
 }
 
 /// Resolve the owning project and env for a build, mapping lookup errors to a
@@ -1745,8 +1894,16 @@ async fn warm_ready_bundle_runtimes(
             }
         };
 
-        match prepare_bundle_runtime(&build, &project, &env, worker_conf, build_path_cache, false)
-            .await
+        match prepare_bundle_runtime(
+            db,
+            &build,
+            &project,
+            &env,
+            worker_conf,
+            build_path_cache,
+            false,
+        )
+        .await
         {
             Ok(_) => prepared_count += 1,
             Err(e) => {
@@ -1812,6 +1969,7 @@ async fn recover_interrupted_bundle_deployments(
         };
 
         let prepared = match prepare_bundle_runtime(
+            db,
             &build,
             &project,
             &env,
@@ -2127,6 +2285,7 @@ async fn find_build_for_function(
                     };
 
                     match prepare_bundle_runtime(
+                        db,
                         &build,
                         &project,
                         &env,

@@ -88,6 +88,15 @@ pub struct UpdateProjectRequest {
 // ============================================================================
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct BuildRuntimeWarningResponse {
+    pub build_engine_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_hot_std_version: Option<String>,
+    pub runtime_version: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BuildResponse {
     pub build_id: Uuid,
     pub project_id: Uuid,
@@ -106,6 +115,8 @@ pub struct BuildResponse {
     pub storage_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_warning: Option<BuildRuntimeWarningResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -128,6 +139,8 @@ pub struct BuildWithProjectResponse {
     pub storage_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_warning: Option<BuildRuntimeWarningResponse>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
