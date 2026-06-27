@@ -710,6 +710,26 @@ impl VirtualMachine {
         self.run_start_instant = context.run_start_instant;
     }
 
+    /// Capture realized namespace state for a worker VM.
+    pub(crate) fn namespace_variables_snapshot(
+        &self,
+    ) -> indexmap::IndexMap<String, indexmap::IndexMap<String, Val>> {
+        self.namespace_variables.clone()
+    }
+
+    /// Inherit realized namespace variables when a worker VM is forked.
+    ///
+    /// Worker VMs execute the same program as the parent, but they do not run
+    /// top-level namespace initialization. Restoring the parent registry keeps
+    /// package/global variables available when a branch calls into another
+    /// namespace.
+    pub(crate) fn inherit_namespace_variables(
+        &mut self,
+        state: &indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
+    ) {
+        self.namespace_variables = state.clone();
+    }
+
     /// Get the thread count for parallel execution
     pub fn get_thread_count(&self) -> usize {
         self.thread_count
@@ -861,7 +881,7 @@ impl VirtualMachine {
         &mut self,
         state: &indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
     ) {
-        self.namespace_variables = state.clone();
+        self.inherit_namespace_variables(state);
     }
 
     /// Execute a range of instructions (for incremental REPL execution)
@@ -8412,11 +8432,13 @@ impl VirtualMachine {
                 self.thread_count
             );
 
-            // Get current namespace variables for task VMs
-            let current_namespace_vars = self.get_namespace_vars(None).cloned().unwrap_or_default();
-
             // Get the current namespace so task VMs use the same one
             let main_namespace = self.current_namespace.clone();
+
+            // Worker VMs need the whole realized namespace registry, not just
+            // the caller namespace. Branches may call package functions that
+            // switch namespaces and read package-level constants.
+            let namespace_snapshot = StdArc::new(self.namespace_variables_snapshot());
 
             // Clone computed vars from previous levels for task VMs
             let computed_vars_snapshot = computed_vars.clone();
@@ -8458,7 +8480,7 @@ impl VirtualMachine {
                 let core_variables_tmpl = core_variables.clone();
                 let conf_tmpl = conf.clone();
                 let host_context_tmpl = host_context.clone();
-                let namespace_vars_tmpl = current_namespace_vars.clone();
+                let namespace_snapshot_tmpl = namespace_snapshot.clone();
                 let namespace_tmpl = main_namespace.clone();
                 let computed_vars_tmpl = computed_vars_snapshot.clone();
                 let results_clone = results_mutex.clone();
@@ -8497,7 +8519,7 @@ impl VirtualMachine {
                             let type_implementations_clone = type_implementations_tmpl.clone();
                             let core_variables_clone = core_variables_tmpl.clone();
                             let conf_clone = Some(conf_tmpl.clone());
-                            let namespace_vars_clone = namespace_vars_tmpl.clone();
+                            let namespace_snapshot_clone = namespace_snapshot_tmpl.clone();
                             let namespace_clone = namespace_tmpl.clone();
                             let computed_vars_clone = computed_vars_tmpl.clone();
                             let failure_state_clone = failure_state_worker.clone();
@@ -8530,17 +8552,13 @@ impl VirtualMachine {
                                     conf_clone,
                                 );
                                 task_vm.inherit_host_context(&host_context_tmpl);
+                                task_vm.inherit_namespace_variables(&namespace_snapshot_clone);
 
                                 // Share the failure state
                                 task_vm.failure_state = failure_state_clone;
 
                                 // Set the same namespace as the main VM so variable lookups work
                                 task_vm.current_namespace = namespace_clone;
-
-                                // Restore namespace variables so thunks can access outer scope
-                                for (name, val) in namespace_vars_clone {
-                                    task_vm.store_variable_public(&name, val).ok();
-                                }
 
                                 // Restore computed variables from previous levels
                                 for (name, val) in computed_vars_clone {

@@ -1,0 +1,21 @@
+::test::parallel-global::dep ns
+
+GLOBAL_VALUE "ok"
+
+read-global fn (): Str {
+    GLOBAL_VALUE
+}
+
+::test::parallel-global ns
+meta ["test"]
+
+test-parallel-worker-can-read-cross-namespace-global
+meta ["test"] fn () {
+    result parallel {
+        value ::test::parallel-global::dep/read-global()
+        other "side"
+    }
+
+    assert-eq("ok", result.value)
+    assert-eq("side", result.other)
+}
