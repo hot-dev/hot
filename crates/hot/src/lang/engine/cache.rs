@@ -20,6 +20,19 @@ use ahash::AHashMap;
 use std::sync::Arc;
 
 impl Engine {
+    /// Convert VM terminal states into the same value shape as explicit Hot
+    /// terminal results. The emitter has already recorded run:fail/run:cancel;
+    /// callers should not treat these as worker/runtime infrastructure errors.
+    fn terminal_value_from_vm_state(
+        vm: &crate::lang::runtime::vm::VirtualMachine,
+    ) -> Option<crate::val::Val> {
+        if let Some(failure_state) = vm.get_failure() {
+            Some(crate::val::Val::err(failure_state.data))
+        } else {
+            vm.get_cancellation().map(|cancellation| cancellation.data)
+        }
+    }
+
     /// Pre-warm the package cache by discovering and parsing all project dependencies.
     /// This is useful for REPL initialization to avoid parsing delays on first input.
     /// Returns the number of units cached.
@@ -854,8 +867,11 @@ impl Engine {
         );
 
         let final_result_started = std::time::Instant::now();
-        let final_result =
-            result.map_err(|e| format!("Failed to call function '{}': {}", function_name, e))?;
+        let final_result = if let Some(terminal_value) = Self::terminal_value_from_vm_state(&vm) {
+            terminal_value
+        } else {
+            result.map_err(|e| format!("Failed to call function '{}': {}", function_name, e))?
+        };
         tracing::debug!(
             "TIMING [{}]: vm_final_result: {:?}",
             timing_id,
@@ -1091,7 +1107,11 @@ impl Engine {
             }
         }
 
-        result.map_err(|e| format!("Failed to call function '{}': {}", function_name, e))
+        if let Some(terminal_value) = Self::terminal_value_from_vm_state(&vm) {
+            Ok(terminal_value)
+        } else {
+            result.map_err(|e| format!("Failed to call function '{}': {}", function_name, e))
+        }
     }
 
     /// Compile project sources and return artifacts without executing any code
@@ -1298,5 +1318,92 @@ impl Engine {
                 skill_specs,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lang::ast::HotAst;
+    use crate::lang::compiler::Compiler;
+    use crate::lang::parser;
+    use crate::val::Val;
+
+    fn cached_bytecode_for(
+        source: &str,
+    ) -> Arc<crate::lang::cache::bytecode_cache::CachedBytecode> {
+        let mut compiler = Compiler::new();
+        let mut ast_program = parser::parse_hot(source).expect("test source should parse");
+
+        compiler
+            .compile_program_unchecked(&mut ast_program)
+            .expect("test source should compile");
+
+        Engine::artifacts_to_cached_bytecode(CompilationArtifacts {
+            program: compiler.get_program().clone(),
+            function_mapping: compiler.get_function_mapping().clone(),
+            core_functions: compiler.get_core_functions().clone(),
+            type_implementations: compiler.get_type_implementations().clone(),
+            ast_program: ast_program.clone(),
+            hot_ast: HotAst::from_program(ast_program),
+        })
+    }
+
+    #[test]
+    fn cached_call_returns_user_failures_as_result_err_values() {
+        let source = r#"
+            ::test ns
+
+            force fn (lazy value: Any): Any {
+                ::hot::core/do(value)
+            }
+
+            handler fn (): Any {
+                force(::hot::exec/fail("Request failed: 503"))
+            }
+        "#;
+
+        let cached = cached_bytecode_for(source);
+        let result = Engine::call_function_with_cached_bytecode(
+            "::test/handler",
+            &[],
+            cached,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let result = result.expect("user-level fail should not be a Rust execution error");
+        assert!(result.is_err(), "expected Result.Err value, got {result:?}");
+
+        let failure = result
+            .unwrap_err()
+            .expect("Result.Err should carry the Hot Failure payload");
+        assert!(
+            failure.to_string().contains("Request failed: 503"),
+            "failure payload should include the user error, got {failure:?}",
+        );
+        assert!(
+            !failure.to_string().contains("Lambda execution error"),
+            "failure payload should not expose lazy-thunk implementation details: {failure:?}",
+        );
+
+        if let Val::Map(map) = failure {
+            assert_eq!(
+                map.get(&Val::from("$type")),
+                Some(&Val::from("::hot::run/Failure"))
+            );
+        } else {
+            panic!("expected ::hot::run/Failure payload, got {failure:?}");
+        }
     }
 }

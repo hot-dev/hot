@@ -8,7 +8,7 @@ meta {
     retry: {attempts: 5, delay: 2000}
 }
 fn (event) {
-    result ::http/post(or(event.data.url, "https://httpbin.org/post"), {source: "demo"})
+    result ::http/get(or(event.data.url, "https://hot.dev/status"))
     if(not(::http/is-ok-response(result)), fail(`Request failed: ${result.status}`))
     {
         status: result.status,
