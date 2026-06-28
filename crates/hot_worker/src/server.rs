@@ -1016,6 +1016,36 @@ async fn should_defer_missing_event_handlers(
     Ok(deployment_in_progress)
 }
 
+async fn acknowledge_unhandled_event_if_stable(
+    worker_id: usize,
+    db: &DatabasePool,
+    env_id: &Uuid,
+    event_type: &str,
+    err_msg: String,
+    infra_retry_backoff_ms: u64,
+) -> Result<(), WorkerError> {
+    if should_defer_missing_event_handlers(
+        worker_id,
+        db,
+        env_id,
+        event_type,
+        infra_retry_backoff_ms,
+    )
+    .await?
+    {
+        return Err(worker_infrastructure_retry_error(
+            err_msg,
+            infra_retry_backoff_ms,
+        ));
+    }
+
+    debug!(
+        "hot.dev: WORKER {} {}; acknowledging event as unhandled",
+        worker_id, err_msg
+    );
+    Ok(())
+}
+
 async fn process_alert_delivery_message(
     worker_id: usize,
     db: Arc<DatabasePool>,
@@ -5554,20 +5584,15 @@ pub async fn run_with_components_shared_context(
                                                     Ok(all_handlers) => {
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
-                                                            if should_defer_missing_event_handlers(
+                                                            acknowledge_unhandled_event_if_stable(
                                                                 worker_id,
                                                                 db,
                                                                 &env_id,
                                                                 &event_message.body.event.event_type,
+                                                                err_msg,
                                                                 infra_retry_backoff_ms,
-                                                            ).await? {
-                                                                return Err(worker_infrastructure_retry_error(
-                                                                    err_msg,
-                                                                    infra_retry_backoff_ms,
-                                                                ));
-                                                            }
-                                                            debug!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                            return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                            ).await?;
+                                                            return Ok(());
                                                         }
 
                                                         // Step 2: Partition handlers by `once` flag
@@ -5662,20 +5687,15 @@ pub async fn run_with_components_shared_context(
 
                                                         if handlers_to_execute.is_empty() {
                                                             let err_msg = format!("No handlers to execute for event type '{}'", event_message.body.event.event_type);
-                                                            if should_defer_missing_event_handlers(
+                                                            acknowledge_unhandled_event_if_stable(
                                                                 worker_id,
                                                                 db,
                                                                 &env_id,
                                                                 &event_message.body.event.event_type,
+                                                                err_msg,
                                                                 infra_retry_backoff_ms,
-                                                            ).await? {
-                                                                return Err(worker_infrastructure_retry_error(
-                                                                    err_msg,
-                                                                    infra_retry_backoff_ms,
-                                                                ));
-                                                            }
-                                                            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                            return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                            ).await?;
+                                                            return Ok(());
                                                         }
 
                                                         debug!("hot.dev: WORKER {} executing {} handler(s) for event type '{}'",
@@ -6824,6 +6844,97 @@ mod tests {
             extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
             Some(target_fn)
         );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn missing_event_handlers_acknowledge_unhandled_event_when_stable() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_time = chrono::Utc::now();
+
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &test_data.env_id,
+            &stream_id,
+            "slack:post",
+            &serde_json::json!({
+                "channel": "#sales",
+                "text": "hello",
+            }),
+            event_time,
+            &test_data.user_id,
+            None,
+        )
+        .await
+        .expect("event should insert");
+
+        let result = acknowledge_unhandled_event_if_stable(
+            0,
+            &db,
+            &test_data.env_id,
+            "slack:post",
+            "No event handlers found for event type 'slack:post'".to_string(),
+            0,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let event = hot::db::event::Event::get_event(&db, &event_id)
+            .await
+            .expect("event should still exist");
+        assert!(!event.handled);
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn missing_event_handlers_still_defer_during_bundle_deployment() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let bundle_build_id = Uuid::now_v7();
+
+        Build::insert_build(
+            &db,
+            &bundle_build_id,
+            &test_data.project_id,
+            "pending-bundle-hash",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &test_data.user_id,
+        )
+        .await
+        .expect("bundle build should insert");
+        Build::request_bundle_deployment(&db, &bundle_build_id, &test_data.user_id)
+            .await
+            .expect("bundle deployment should be requested");
+
+        let err = acknowledge_unhandled_event_if_stable(
+            0,
+            &db,
+            &test_data.env_id,
+            "slack:post",
+            "No event handlers found for event type 'slack:post'".to_string(),
+            250,
+        )
+        .await
+        .expect_err("deployment in progress should defer missing handlers");
+
+        assert!(err.downcast_ref::<QueueInfrastructureError>().is_some());
 
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;
