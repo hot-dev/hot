@@ -300,6 +300,15 @@ jobs:
         restore-keys: |
           sccache-${{ runner.os }}-${{ matrix.target }}-
 
+    - name: Cache ORT downloads (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/cache@v5
+      with:
+        path: ~/Library/Caches/ort.pyke.io
+        key: ort-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ort-${{ runner.os }}-${{ matrix.target }}-
+
     # Cargo registry/git/target caching across runs. Swatinem/rust-cache
     # handles cross-compile target dirs and strips incremental artifacts
     # before saving (which is why we set CARGO_INCREMENTAL=0 above).
@@ -309,6 +318,29 @@ jobs:
         # Per-target key so each matrix entry gets its own cache.
         key: ${{ matrix.target }}
         save-if: true
+
+    - name: Refresh ORT build output (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo clean --release --target "${{ matrix.target }}" -p ort -p ort-sys || true
+        rm -rf \
+          "target/${{ matrix.target }}/release/build/ort-"* \
+          "target/${{ matrix.target }}/release/build/ort-sys-"* \
+          "target/${{ matrix.target }}/release/.fingerprint/ort-"* \
+          "target/${{ matrix.target }}/release/.fingerprint/ort-sys-"*
+
+    - name: Verify macOS linker runtime
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "xcode-select: $(xcode-select -p)"
+        clang --version
+        runtime="$(clang -print-file-name=libclang_rt.osx.a)"
+        echo "libclang_rt.osx.a: ${runtime}"
+        test -f "${runtime}"
 
     - name: Setup Cargo optimizations
       shell: bash
