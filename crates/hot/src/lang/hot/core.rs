@@ -25,7 +25,7 @@ pub fn do_eval(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
                         return HotResult::Ok(result);
                     }
                     Err(e) => {
-                        return HotResult::Err(Val::from(format!("Lambda execution error: {}", e)));
+                        return HotResult::Err(Val::from(e.to_string()));
                     }
                 }
             } else {
