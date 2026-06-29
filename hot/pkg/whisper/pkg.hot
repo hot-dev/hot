@@ -2,7 +2,7 @@
 
 hot.pkg.whisper {
   name: "hot.dev/whisper",
-  version: "1.1.0",
+  version: "1.1.1",
   hot-min-version: "1.2.4",
   description: "OpenAI Whisper speech-to-text via Hot Box containers. Transcribe audio to text with language detection.",
   author: "Hot Dev",
