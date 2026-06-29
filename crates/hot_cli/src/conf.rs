@@ -46,6 +46,27 @@ pub(crate) fn get_emitter_resolved_conf(conf: Val, in_project: bool) -> Val {
     hot::lang::emitter::get_resolved_conf(conf, in_project)
 }
 
+pub(crate) fn get_file_resolved_conf(
+    conf: Val,
+    in_project_runtime: bool,
+    managed_runtime: bool,
+) -> Val {
+    let mode = conf.get_str("mode");
+    let resolved_mode = if managed_runtime {
+        "service"
+    } else if mode.is_empty() {
+        if in_project_runtime {
+            "service"
+        } else {
+            "direct"
+        }
+    } else {
+        mode.as_str()
+    };
+
+    conf.set_str("mode", Some(resolved_mode.to_string()), "")
+}
+
 // Helper function to convert environment variable name to dot notation conf key
 fn env_var_to_conf_key(env_var: &str) -> String {
     env_var
@@ -157,6 +178,7 @@ pub(crate) fn create_default_conf() -> Val {
             }
         },
         "file": {
+            "mode": "",  // Sentinel: service in project/managed runtimes, direct for ad hoc local CLI
             "max-bytes": -1i64  // -1 = no config ceiling, defer to plan-based limits
         },
         "emitter": emitter_conf,
@@ -925,6 +947,12 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
     let resolved_queue_conf = hot::queue::get_resolved_conf(queue_conf_from_user, true);
     conf = conf.set("queue", resolved_queue_conf);
 
+    // Apply file defaults in project context after init. This path is local
+    // development, so explicit file.mode overrides remain honored.
+    let file_conf_from_user = conf.get("file").unwrap_or_else(Val::map_empty);
+    let resolved_file_conf = get_file_resolved_conf(file_conf_from_user, true, false);
+    conf = conf.set("file", resolved_file_conf);
+
     Ok(preserve_runtime_overrides_after_init(conf, base_conf))
 }
 
@@ -949,7 +977,7 @@ fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val 
         }
     }
 
-    for path in ["redis.uri", "queue.type", "serialization.type"] {
+    for path in ["redis.uri", "queue.type", "serialization.type", "file.mode"] {
         let value = base_conf.get_str(path);
         if !value.is_empty() && value != "null" {
             conf = conf.set_str(path, Some(value), "");
@@ -1572,6 +1600,34 @@ mod tests {
     }
 
     #[test]
+    fn test_file_mode_defaults_to_direct_for_local_ad_hoc_runtime() {
+        let conf = get_file_resolved_conf(val!({"mode": ""}), false, false);
+
+        assert_eq!(conf.get_str("mode"), "direct");
+    }
+
+    #[test]
+    fn test_file_mode_defaults_to_service_for_local_project_runtime() {
+        let conf = get_file_resolved_conf(val!({"mode": ""}), true, false);
+
+        assert_eq!(conf.get_str("mode"), "service");
+    }
+
+    #[test]
+    fn test_file_mode_honors_explicit_direct_in_local_project_runtime() {
+        let conf = get_file_resolved_conf(val!({"mode": "direct"}), true, false);
+
+        assert_eq!(conf.get_str("mode"), "direct");
+    }
+
+    #[test]
+    fn test_file_mode_forces_service_in_managed_runtime() {
+        let conf = get_file_resolved_conf(val!({"mode": "direct"}), true, true);
+
+        assert_eq!(conf.get_str("mode"), "service");
+    }
+
+    #[test]
     fn test_scheduler_cli_options_override_config() {
         let conf = apply_configuration_options(
             create_default_conf(),
@@ -1617,6 +1673,9 @@ mod tests {
             "queue": {
                 "type": "memory",
             },
+            "file": {
+                "mode": "service",
+            },
             "serialization": {
                 "type": "zstdjson",
             },
@@ -1631,6 +1690,9 @@ mod tests {
             },
             "queue": {
                 "type": "redis",
+            },
+            "file": {
+                "mode": "direct",
             },
             "serialization": {
                 "type": "json",
@@ -1649,6 +1711,7 @@ mod tests {
         assert_eq!(conf.get_str("redis.uri"), "redis://127.0.0.1:56379");
         assert!(conf.get_bool_or_default("redis.cluster", false));
         assert_eq!(conf.get_str("queue.type"), "redis");
+        assert_eq!(conf.get_str("file.mode"), "direct");
         assert_eq!(conf.get_str("serialization.type"), "json");
     }
 }

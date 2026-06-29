@@ -127,6 +127,13 @@ join-args fn (args: Vec<Str>): Str {
     join(args, " ")
 }
 
+input-copy-command fn (input: Str, in-path: Str): Str {
+    cond {
+        starts-with(input, "hot://") => { `hotbox cp '${input}' ${in-path}` }
+        => { `cp '${input}' ${in-path}` }
+    }
+}
+
 model-to-min-size fn (model: Str): Str {
     m model |> trim() |> lowercase()
     cond {
@@ -243,7 +250,53 @@ fn (input: Str): Map {
 
     whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
     out-file `${out-dir}/${stem}.${fmt}`
-    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+    copy-input input-copy-command(input, in-path)
+    script `mkdir -p ${out-dir} && ${copy-input} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+
+    result run-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
+    checked check-box-result(result, "whisper")
+
+    cond {
+        eq(fmt, "json") => {
+            parsed parse-transcribe-output(checked.stdout)
+            {
+                text: or(parsed.text, ""),
+                language: parsed.language,
+                segments: parsed.segments,
+                url: hot-output,
+            }
+        }
+        => {
+            {
+                text: trim(or(checked.stdout, "")),
+                language: null,
+                segments: null,
+                url: hot-output,
+            }
+        }
+    }
+}
+
+transcribe-base64
+meta {
+    doc: "Transcribe base64-encoded audio bytes using OpenAI Whisper in a container.",
+    box: {min-size: "small"}
+}
+fn (encoded: Str, ext: Str, opts: TranscribeOpts): Map {
+    stem "whisper-input"
+    out-dir "/data/whisper-out"
+    fmt or(opts.format, "json")
+
+    in-path `/data/${stem}.${ext}`
+    model or(opts.model, "base")
+    box-size or(opts.size, model-to-min-size(model))
+
+    uuid Uuid()
+    hot-output resolve-output(opts.output, `hot://whisper/${uuid}/transcript.${fmt}`)
+
+    whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
+    out-file `${out-dir}/${stem}.${fmt}`
+    script `mkdir -p ${out-dir} && echo '${encoded}' | base64 -d > ${in-path} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
 
     result run-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
     checked check-box-result(result, "whisper")
@@ -312,7 +365,8 @@ fn (input: Str): Map {
 
     whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
     out-file `${out-dir}/${stem}.${fmt}`
-    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+    copy-input input-copy-command(input, in-path)
+    script `mkdir -p ${out-dir} && ${copy-input} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
 
     info start-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
     assoc(info, "data", {output: hot-output})

@@ -73,6 +73,8 @@ hot.db.local.retention.call.days Int(::env/get("HOT_DB_LOCAL_RETENTION_CALL_DAYS
 
 // File Storage Configuration
 // Mode: "direct" (simple filesystem) or "service" (managed storage with DB tracking)
+// Defaults: "service" in project/managed runtimes, "direct" for ad hoc local CLI.
+// Managed/cloud runtimes force "service" for filesystem isolation.
 hot.file.mode ::env/get("HOT_FILE_MODE", "service")
 // Type: "local" or "s3" (only used in "service" mode)
 hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "local")

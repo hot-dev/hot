@@ -5,6 +5,7 @@ build-transcribe-args ::whisper/build-transcribe-args
 parse-transcribe-output ::whisper/parse-transcribe-output
 file-ext ::whisper/file-ext
 join-args ::whisper/join-args
+input-copy-command ::whisper/input-copy-command
 model-to-min-size ::whisper/model-to-min-size
 TranscribeOpts ::whisper/TranscribeOpts
 
@@ -38,31 +39,43 @@ meta ["test"] fn () {
     assert(contains(s, "--model base"), "should join model flag")
 }
 
+test-input-copy-command-hot-url
+meta ["test"] fn () {
+    command input-copy-command("hot://uploads/audio.wav", "/data/in.wav")
+    assert-eq("hotbox cp 'hot://uploads/audio.wav' /data/in.wav", command)
+}
+
+test-input-copy-command-local-file
+meta ["test"] fn () {
+    command input-copy-command("/tmp/audio.wav", "/data/in.wav")
+    assert-eq("cp '/tmp/audio.wav' /data/in.wav", command)
+}
+
 // ============================================================================
 // model-to-min-size tests
 // ============================================================================
 
 test-model-to-min-size-tiny-base
 meta ["test"] fn () {
-    assert-eq("small", model-to-min-size("tiny"))
-    assert-eq("small", model-to-min-size("base"))
+    assert-eq("large", model-to-min-size("tiny"))
+    assert-eq("large", model-to-min-size("base"))
 }
 
 test-model-to-min-size-small-medium-large
 meta ["test"] fn () {
-    assert-eq("medium", model-to-min-size("small"))
-    assert-eq("large", model-to-min-size("medium"))
-    assert-eq("xlarge", model-to-min-size("large"))
+    assert-eq("xlarge", model-to-min-size("small"))
+    assert-eq("2xlarge", model-to-min-size("medium"))
+    assert-eq("4xlarge", model-to-min-size("large"))
 }
 
 test-model-to-min-size-unknown
 meta ["test"] fn () {
-    assert-eq("small", model-to-min-size("unknown-model"))
+    assert-eq("large", model-to-min-size("unknown-model"))
 }
 
 test-model-to-min-size-case
 meta ["test"] fn () {
-    assert-eq("medium", model-to-min-size("SMALL"))
+    assert-eq("xlarge", model-to-min-size("SMALL"))
 }
 
 // ============================================================================
