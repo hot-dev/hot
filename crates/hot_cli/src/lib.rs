@@ -34,8 +34,8 @@ use crate::command::worker::{run_task_worker, run_worker};
 use crate::conf::{
     ExtractedOptions, apply_command_specific_defaults, apply_configuration_options, apply_env_vars,
     create_default_conf, extract_options_from_command, get_emitter_resolved_conf,
-    get_log_format_for_command, get_merged_src_paths, get_merged_test_paths, load_conf, load_ctx,
-    load_dotenv_files, show_command_config,
+    get_file_resolved_conf, get_log_format_for_command, get_merged_src_paths,
+    get_merged_test_paths, load_conf, load_ctx, load_dotenv_files, show_command_config,
 };
 
 // Log a structured OOM line to stderr before the inevitable abort. The
@@ -511,6 +511,7 @@ async fn async_main(providers: CliProviders) {
     );
     // Only enable queue/emitter defaults for runtime commands in a project
     let in_project_runtime = in_project && is_runtime_command;
+    let managed_runtime = !hot::env::is_local_dev();
 
     // First, check if hot.hot exists in current directory
     if in_project {
@@ -627,6 +628,17 @@ async fn async_main(providers: CliProviders) {
     let resolved_queue_conf =
         hot::queue::get_resolved_conf(queue_conf_from_user, in_project_runtime);
     conf = conf.set("queue", resolved_queue_conf);
+
+    // Apply file storage defaults AFTER configuration files are loaded.
+    // - Local ad hoc CLI defaults to direct filesystem access for convenience.
+    // - Local project runtimes default to service storage so hot:// paths and
+    //   hotbox file handoff use the same DB-backed file records.
+    // - Managed/cloud runtimes always use service storage to preserve filesystem
+    //   isolation, even if user config attempted to opt into direct mode.
+    let file_conf_from_user = conf.get("file").unwrap_or_else(Val::map_empty);
+    let resolved_file_conf =
+        get_file_resolved_conf(file_conf_from_user, in_project_runtime, managed_runtime);
+    conf = conf.set("file", resolved_file_conf);
 
     // 6. Load context variables from hot/ctx.hot file(s)
     // This happens after conf loading so hot/ctx.hot can use conf settings if needed
