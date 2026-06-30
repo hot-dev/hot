@@ -534,26 +534,22 @@ async fn run_action_handler(
         }
     };
 
-    // Extract fn and args from original event data
-    let fn_name = original_event
-        .event_data
-        .get("fn")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let args = original_event
-        .event_data
-        .get("args")
-        .cloned()
-        .unwrap_or(serde_json::Value::Array(vec![]));
+    // Determine how to re-dispatch the run based on the original event type.
+    //
+    // Direct function calls (hot:call) and scheduled runs (hot:schedule) carry
+    // the target function in their event data, so they re-dispatch as a
+    // hot:call. Event-handler runs are triggered by custom event types (e.g.
+    // "data:analyze" via `meta {on-event: ...}`) and have no `fn` field — they
+    // must be re-emitted with their original event type and data so the
+    // matching on-event handlers fire again.
+    let original_event_type = original_event.event_type.as_str();
+    let is_function_call =
+        original_event_type == "hot:call" || original_event_type == "hot:schedule";
 
-    let fn_name = match fn_name {
-        Some(f) => f,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Original event has no function name"})),
-            );
-        }
+    let new_event_type = if is_function_call {
+        "hot:call".to_string()
+    } else {
+        original_event_type.to_string()
     };
 
     // Create new event data
@@ -568,22 +564,54 @@ async fn run_action_handler(
         Uuid::now_v7()
     };
 
-    // Build event data with optional retry context
-    let event_data: serde_json::Value = if is_retry {
-        json!({
-            "fn": fn_name,
-            "args": args,
-            "retry": {
-                "origin-run-id": run_id.to_string(),
-                "attempt": run.retry_attempt + 1
+    // Build the base event data.
+    let mut event_data: serde_json::Value = if is_function_call {
+        // Function calls re-dispatch with the target fn and its args.
+        let fn_name = original_event
+            .event_data
+            .get("fn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let fn_name = match fn_name {
+            Some(f) => f,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "Original event has no function name"})),
+                );
             }
-        })
-    } else {
+        };
+        let args = original_event
+            .event_data
+            .get("args")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![]));
         json!({
             "fn": fn_name,
             "args": args
         })
+    } else {
+        // Event-handler runs re-emit the original event payload verbatim,
+        // dropping any stale retry context recorded on the previous attempt.
+        let mut data = original_event.event_data.clone();
+        if let Some(obj) = data.as_object_mut() {
+            obj.remove("retry");
+        }
+        data
     };
+
+    // For retries, attach the retry context so the worker links the new run to
+    // the original and tracks the attempt count. (Re-runs start a fresh stream
+    // with no retry linkage.)
+    if is_retry && let Some(obj) = event_data.as_object_mut() {
+        obj.insert(
+            "retry".to_string(),
+            json!({
+                "origin-run-id": run_id.to_string(),
+                "attempt": run.retry_attempt + 1
+            }),
+        );
+    }
 
     // Insert the event
     if let Err(e) = hot::db::Event::insert_event(
@@ -591,7 +619,7 @@ async fn run_action_handler(
         &new_event_id,
         &run.env_id,
         &stream_id,
-        "hot:call",
+        &new_event_type,
         &event_data,
         event_time,
         &session.user.user_id,
@@ -620,7 +648,13 @@ async fn run_action_handler(
     let execution_context = hot::lang::event::ExecutionContext {
         run_id: new_run_id,
         stream_id,
-        run_type_id: hot::db::run::RunType::Call.as_id(),
+        run_type_id: if new_event_type == "hot:call" {
+            hot::db::run::RunType::Call.as_id()
+        } else if new_event_type == "hot:schedule" {
+            hot::db::run::RunType::Schedule.as_id()
+        } else {
+            hot::db::run::RunType::Event.as_id()
+        },
         env_id: Some(run.env_id),
         env_name: None,
         user_id: Some(session.user.user_id),
@@ -646,7 +680,7 @@ async fn run_action_handler(
         event_id: new_event_id,
         env_id: run.env_id,
         stream_id,
-        event_type: "hot:call".to_string(),
+        event_type: new_event_type.clone(),
         event_data: event_data_val,
         event_time,
         // Propagate project context from original run for routing tie-breaker
@@ -658,7 +692,7 @@ async fn run_action_handler(
         id: new_event_id,
         head: AHashMap::from([
             ("env_id".to_string(), run.env_id.to_string()),
-            ("event_type".to_string(), "hot:call".to_string()),
+            ("event_type".to_string(), new_event_type.clone()),
         ]),
         body: hot::lang::event::EventMessageBody {
             event: hot_event,

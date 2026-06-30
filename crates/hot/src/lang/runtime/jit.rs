@@ -9652,6 +9652,100 @@ mod tests {
     }
 
     #[test]
+    fn jitted_function_uses_defining_namespace_for_alias_lookup() {
+        let mut program = BytecodeProgram::new();
+        let ok_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("ok")));
+        let alias_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("http-request")));
+
+        program.functions.push(FunctionInfo {
+            name: "::dep/target".to_string(),
+            namespace: "::dep".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: ok_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            source: None,
+        });
+        program.functions.push(FunctionInfo {
+            name: "::lib/call-alias".to_string(),
+            namespace: "::lib".to_string(),
+            arity: 0,
+            is_variadic: false,
+            param_names: vec![],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: alias_name,
+                },
+                Instruction::Call {
+                    dest: 1,
+                    function: 0,
+                    args_start: 2,
+                    args_count: 0,
+                },
+                Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
+            source: None,
+        });
+
+        let mut function_mapping = IndexMap::new();
+        function_mapping.insert("::dep/target".to_string(), 0);
+        function_mapping.insert("::dep/target/0".to_string(), 0);
+        function_mapping.insert("::lib/call-alias".to_string(), 1);
+        function_mapping.insert("::lib/call-alias/0".to_string(), 1);
+
+        let make_vm = |conf| {
+            let mut vm = VirtualMachine::new(
+                Arc::new(program.clone()),
+                None,
+                Arc::new(function_mapping.clone()),
+                Arc::new(IndexMap::<String, FunctionId>::new()),
+                Arc::new(IndexMap::<(String, String), String>::new()),
+                Arc::new(CoreVariableRegistry::new()),
+                Some(conf),
+            );
+            vm.namespace_variables
+                .entry("::lib".to_string())
+                .or_default()
+                .insert("http-request".to_string(), val!("::dep/target"));
+            vm.set_current_namespace("::live".to_string());
+            vm
+        };
+
+        let mut interp_vm = make_vm(val!({"jit": {"mode": "disabled"}}));
+        assert_eq!(
+            interp_vm.execute_compiled_user_function(1, &[]).unwrap(),
+            val!("ok")
+        );
+
+        let mut jit_vm = make_vm(val!({"jit": {"mode": "enabled", "threshold": 1}}));
+        assert_eq!(
+            jit_vm.execute_compiled_user_function(1, &[]).unwrap(),
+            val!("ok")
+        );
+        assert!(jit_vm.jit_has_compiled_function(1));
+        assert_eq!(jit_vm.get_current_namespace(), "::live");
+    }
+
+    #[test]
     fn vm_executes_jitted_function_with_threshold_1() {
         let mut program = BytecodeProgram::new();
         let one_const = program.constants.len() as u32;
