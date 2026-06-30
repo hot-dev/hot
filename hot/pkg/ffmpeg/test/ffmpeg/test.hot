@@ -2,6 +2,7 @@
 meta ["test"]
 
 build-thumbnail-args ::ffmpeg/build-thumbnail-args
+build-extract-frames-args ::ffmpeg/build-extract-frames-args
 build-transcode-args ::ffmpeg/build-transcode-args
 build-extract-audio-args ::ffmpeg/build-extract-audio-args
 build-probe-args ::ffmpeg/build-probe-args
@@ -64,6 +65,33 @@ test-thumbnail-args-custom-time
 meta ["test"] fn () {
     args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:01:30", null, null, 2)
     assert(in("00:01:30", args), "should use custom seek time")
+}
+
+// ============================================================================
+// build-extract-frames-args tests
+// ============================================================================
+
+test-extract-frames-args-defaults
+meta ["test"] fn () {
+    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "1/2", null, null, null, null, 2)
+    assert-eq("-y", first(args), "should start with overwrite")
+    assert(in("-i", args), "should include input flag")
+    assert(in("/tmp/input.webm", args), "should include input path")
+    assert(in("-vf", args), "should include video filter")
+    assert(in("fps=1/2", args), "should include frame rate")
+    assert(in("-q:v", args), "should include quality flag")
+    assert-eq("/tmp/frames/frame-%03d.jpg", last(args), "should end with output pattern")
+}
+
+test-extract-frames-args-with-window-and-scale
+meta ["test"] fn () {
+    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "2", "00:00:03", 10, 640, null, 3)
+    assert(in("-ss", args), "should include seek flag")
+    assert(in("00:00:03", args), "should include seek value")
+    assert(in("-t", args), "should include duration flag")
+    assert(in("10", args), "should include duration value")
+    assert(in("fps=2,scale=640:-1", args), "should include fps and scale")
+    assert(in("3", args), "should include quality value")
 }
 
 // ============================================================================

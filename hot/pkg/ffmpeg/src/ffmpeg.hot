@@ -146,6 +146,41 @@ type {
     timeout: Int?,
 }
 
+ExtractFramesOpts
+meta {
+    doc: """
+    Options for extracting multiple image frames from a video.
+
+    **Fields**
+    - `fps` — Frame extraction rate, e.g. `"1/2"` for one frame every two seconds (default: `"1/2"`)
+    - `start` — Optional seek position, e.g. `"00:00:05"`
+    - `duration` — Optional extraction duration in seconds
+    - `width` — Output width in pixels (default: source width)
+    - `height` — Output height in pixels (default: source height)
+    - `format` — Output format: `"jpg"`, `"png"`, `"webp"` (default: `"jpg"`)
+    - `quality` — Quality 1-31, lower is better (default: `2`)
+    - `output-prefix` — Output `hot://` directory/prefix (default: auto-generated)
+    - `extra-args` — Additional ffmpeg arguments
+    - `image` — Custom Docker image with ffmpeg
+    - `size` — Box size override (default: `"medium"`)
+    - `timeout` — Execution timeout in seconds (default: `300`)
+    """
+}
+type {
+    fps: Str?,
+    start: Str?,
+    duration: Int?,
+    width: Int?,
+    height: Int?,
+    format: Str?,
+    quality: Int?,
+    output-prefix: Str?,
+    extra-args: Vec<Str>?,
+    image: Str?,
+    size: Str?,
+    timeout: Int?,
+}
+
 // ============================================================================
 // Command Builders (internal, testable without Docker)
 // ============================================================================
@@ -218,6 +253,34 @@ fn (input-path: Str, output-path: Str, bitrate: Str, sample-rate: Int?, channels
 
     extra or(extra-args, [])
     [...base, ...sr-args, ...ch-args, ...extra, output-path]
+}
+
+build-extract-frames-args
+meta {
+    doc: "Build ffmpeg CLI arguments for multi-frame image extraction."
+}
+fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?): Vec<Str> {
+    seek-args if(is-some(start), ["-ss", start], [])
+    base ["-y", ...seek-args, "-i", input-path]
+    duration-args if(is-some(duration), ["-t", Str(duration)], [])
+
+    scale cond {
+        and(is-some(width), is-some(height)) => {
+            `,scale=${Str(width)}:${Str(height)}`
+        }
+        is-some(width) => {
+            `,scale=${Str(width)}:-1`
+        }
+        is-some(height) => {
+            `,scale=-1:${Str(height)}`
+        }
+        => { "" }
+    }
+
+    filter-args ["-vf", `fps=${fps}${scale}`]
+    quality-args ["-q:v", Str(quality)]
+    extra or(extra-args, [])
+    [...base, ...duration-args, ...filter-args, ...quality-args, ...extra, output-pattern]
 }
 
 build-probe-args
@@ -410,6 +473,91 @@ fn (input: Str): Map {
     {url: hot-output, format,}
 }
 
+extract-frames
+meta {
+    doc: """
+    Extract multiple image frames from a video.
+
+    Returns `{frames: Vec<Map>, format: Str, output_prefix: Str}`. Each frame
+    has `{url, index}` where `url` is a `hot://` URL.
+
+    **Example**
+
+    ```hot
+    frames ::ffmpeg/extract-frames("hot://uploads/window.webm", {
+        fps: "1/2",
+        format: "jpg",
+        output-prefix: "hot://hot-live/frames/window-1"
+    })
+    ```
+    """,
+    box: {min-size: "medium"}
+}
+fn (input: Str): Map {
+    extract-frames(input, ExtractFramesOpts({
+        fps: null,
+        start: null,
+        duration: null,
+        width: null,
+        height: null,
+        format: null,
+        quality: null,
+        output-prefix: null,
+        extra-args: null,
+        image: null,
+        size: null,
+        timeout: null,
+    }))
+},
+(input: Str, opts: ExtractFramesOpts): Map {
+    format or(opts.format, "jpg")
+    fps or(opts.fps, "1/2")
+    quality or(opts.quality, 2)
+    uuid Uuid()
+    output-prefix resolve-output(opts.output-prefix, `hot://ffmpeg/${uuid}/frames`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-dir "/data/frames"
+    out-pattern `${out-dir}/frame-%03d.${format}`
+
+    ffmpeg-args join-args(build-extract-frames-args(
+        in-path,
+        out-pattern,
+        fps,
+        opts.start,
+        opts.duration,
+        opts.width,
+        opts.height,
+        quality,
+        opts.extra-args
+    ))
+    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
+
+    box-size or(opts.size, "medium")
+    result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    checked check-box-result(result, "ffmpeg")
+    count Int(trim(or(checked.stdout, "0")))
+    indexes range(1, add(count, 1))
+    frames map(indexes, (idx) {
+        padded cond {
+            lt(idx, 10) => { `00${idx}` }
+            lt(idx, 100) => { `0${idx}` }
+            => { Str(idx) }
+        }
+        {
+            url: `${output-prefix}/frame-${padded}.${format}`,
+            index: idx,
+        }
+    })
+
+    {
+        frames,
+        format,
+        output_prefix: output-prefix,
+    }
+}
+
 transcode
 meta {
     doc: """
@@ -589,6 +737,57 @@ fn (input: Str): Map {
     box-size or(opts.size, "small")
     info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
     assoc(info, "data", {output: hot-output})
+}
+
+start-extract-frames
+meta {
+    doc: "Start multi-frame image extraction without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    box: {min-size: "medium"}
+}
+fn (input: Str): Map {
+    start-extract-frames(input, ExtractFramesOpts({
+        fps: null,
+        start: null,
+        duration: null,
+        width: null,
+        height: null,
+        format: null,
+        quality: null,
+        output-prefix: null,
+        extra-args: null,
+        image: null,
+        size: null,
+        timeout: null,
+    }))
+},
+(input: Str, opts: ExtractFramesOpts): Map {
+    format or(opts.format, "jpg")
+    fps or(opts.fps, "1/2")
+    quality or(opts.quality, 2)
+    uuid Uuid()
+    output-prefix resolve-output(opts.output-prefix, `hot://ffmpeg/${uuid}/frames`)
+
+    ext file-ext(input)
+    in-path `/data/input.${ext}`
+    out-dir "/data/frames"
+    out-pattern `${out-dir}/frame-%03d.${format}`
+
+    ffmpeg-args join-args(build-extract-frames-args(
+        in-path,
+        out-pattern,
+        fps,
+        opts.start,
+        opts.duration,
+        opts.width,
+        opts.height,
+        quality,
+        opts.extra-args
+    ))
+    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
+
+    box-size or(opts.size, "medium")
+    info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
+    assoc(info, "data", {output-prefix})
 }
 
 start-transcode
