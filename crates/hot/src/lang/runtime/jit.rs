@@ -4782,18 +4782,26 @@ impl<'a> EmitCtx<'a> {
                         let mut capture_names: Vec<cranelift_codegen::ir::Value> = Vec::new();
                         let mut capture_values: Vec<cranelift_codegen::ir::Value> = Vec::new();
                         for var_name in &lambda_info.capture_vars {
-                            if let Some(&(var, kind)) = self.locals.get(var_name.as_str()) {
+                            let owned = if let Some(&(var, kind)) =
+                                self.locals.get(var_name.as_str())
+                            {
                                 let raw = builder.use_var(var);
-                                let owned = if kind == RawKind::OwnedVal {
+                                if kind == RawKind::OwnedVal {
                                     clone_owned_raw(builder, &self.helper_refs, raw)
                                 } else {
                                     promote_to_owned(builder, &self.helper_refs, kind, raw)?
-                                };
+                                }
+                            } else {
                                 let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
                                 let name_ptr = builder.ins().iconst(types::I64, name_val);
-                                capture_names.push(name_ptr);
-                                capture_values.push(owned);
-                            }
+                                let call =
+                                    builder.ins().call(self.helper_refs.lookup_var, &[name_ptr]);
+                                builder.inst_results(call)[0]
+                            };
+                            let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
+                            let name_ptr = builder.ins().iconst(types::I64, name_val);
+                            capture_names.push(name_ptr);
+                            capture_values.push(owned);
                         }
 
                         if capture_names.is_empty() {
@@ -9743,6 +9751,94 @@ mod tests {
         );
         assert!(jit_vm.jit_has_compiled_function(1));
         assert_eq!(jit_vm.get_current_namespace(), "::live");
+    }
+
+    #[test]
+    fn jitted_function_preserves_param_scope_for_lazy_core_lookup() {
+        let mut program = BytecodeProgram::new();
+        let predicate_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("predicate")));
+        let true_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(Val::Bool(true)));
+        let one_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(1)));
+
+        program.functions.push(FunctionInfo {
+            name: "::hot::coll/call-predicate".to_string(),
+            namespace: "::hot::coll".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["predicate".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: predicate_name,
+                },
+                Instruction::LoadConst {
+                    dest: 1,
+                    constant: one_const,
+                },
+                Instruction::Call {
+                    dest: 2,
+                    function: 0,
+                    args_start: 1,
+                    args_count: 1,
+                },
+                Instruction::Return { value: 2 },
+            ],
+            register_count: 3,
+            source: None,
+        });
+
+        let mut function_mapping = IndexMap::new();
+        function_mapping.insert("::hot::coll/call-predicate".to_string(), 0);
+        function_mapping.insert("::hot::coll/call-predicate/1".to_string(), 0);
+
+        let predicate = Val::Box(Box::new(crate::lang::bytecode::LambdaInfo {
+            parameters: vec!["x".to_string()],
+            instructions: vec![
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: true_const,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 1,
+            capture_vars: vec![],
+            closure_env: AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: false,
+            used_registers: vec![0],
+        }));
+
+        let make_vm = |conf| {
+            VirtualMachine::new(
+                Arc::new(program.clone()),
+                None,
+                Arc::new(function_mapping.clone()),
+                Arc::new(IndexMap::<String, FunctionId>::new()),
+                Arc::new(IndexMap::<(String, String), String>::new()),
+                Arc::new(CoreVariableRegistry::new()),
+                Some(conf),
+            )
+        };
+
+        let mut interp_vm = make_vm(val!({"jit": {"mode": "disabled", "threshold": 1}}));
+        let interp = interp_vm
+            .execute_compiled_user_function(0, std::slice::from_ref(&predicate))
+            .expect("interpreter should resolve predicate from probe scope");
+        assert_eq!(interp, Val::Bool(true));
+
+        let mut jit_vm = make_vm(val!({"jit": {"mode": "enabled", "threshold": 1}}));
+        let jitted = jit_vm
+            .execute_compiled_user_function(0, &[predicate])
+            .expect("JIT should preserve predicate parameter scope for VM callbacks");
+        assert_eq!(jitted, Val::Bool(true));
+        assert!(jit_vm.jit_has_compiled_function(0));
     }
 
     #[test]

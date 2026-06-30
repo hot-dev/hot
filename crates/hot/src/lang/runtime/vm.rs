@@ -7125,16 +7125,17 @@ impl VirtualMachine {
         }
 
         // Check if closure environment was already populated at creation time.
-        // We can't use "non-Null" as a sentinel for "captured" because a legitimately
-        // captured value may itself be Null (e.g. `is-null(null)` capturing `value=Null`).
-        // Instead, treat the closure as already-captured iff every declared capture_var
-        // has a corresponding entry in closure_env. Lambdas with no capture_vars are
-        // trivially "already captured" (nothing to populate).
+        // Compiler-created lambdas use Null placeholders for capture slots; if
+        // JIT materializes one without the interpreter LoadConst capture step,
+        // those placeholders need a best-effort refresh from the active VM
+        // scope before the body runs.
         let already_captured = lambda_info_ref.capture_vars.is_empty()
-            || lambda_info_ref
-                .capture_vars
-                .iter()
-                .all(|name| lambda_info_ref.closure_env.contains_key(name));
+            || lambda_info_ref.capture_vars.iter().all(|name| {
+                lambda_info_ref
+                    .closure_env
+                    .get(name)
+                    .is_some_and(|value| !matches!(value, Val::Null))
+            });
 
         // Use Cow pattern: only clone if we need to mutate closure_env
         let lambda_info: std::borrow::Cow<'_, crate::lang::bytecode::LambdaInfo> =
@@ -7149,9 +7150,9 @@ impl VirtualMachine {
                 // Slow path: need to populate closure_env, so clone
                 let mut lambda_info_owned = lambda_info_ref.clone();
 
-                // Clear any placeholder compile-time captures and populate runtime values
-                // This handles lambdas that are executed immediately (not returned/stored)
-                lambda_info_owned.closure_env.clear();
+                // Populate or refresh placeholder compile-time captures. If a
+                // value genuinely captured as Null is no longer resolvable in
+                // the active scope, keep the existing Null.
 
                 // Populate closure environment with current variable values
                 for var_name in &lambda_info_owned.capture_vars.clone() {
@@ -7523,23 +7524,52 @@ impl VirtualMachine {
 
     /// Execute a user function
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
-        let function_namespace = self
+        let function_info = self
             .program
             .functions
             .get(function_id as usize)
-            .map(|function_info| function_info.namespace.clone());
+            .map(|function_info| {
+                (
+                    function_info.namespace.clone(),
+                    function_info.param_names.clone(),
+                )
+            });
         let saved_namespace = self.current_namespace.clone();
-        if let Some(namespace) = &function_namespace {
+        let mut saved_namespace_bindings: Vec<(String, Option<Val>)> = Vec::new();
+        if let Some((namespace, param_names)) = &function_info {
             self.current_namespace = namespace.clone();
             if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
                 self.current_namespace = saved_namespace;
                 return Err(err.to_string());
+            }
+            let namespace_vars = self
+                .namespace_variables
+                .entry(namespace.clone())
+                .or_default();
+            saved_namespace_bindings.reserve(param_names.len());
+            for (idx, param_name) in param_names.iter().enumerate() {
+                let arg_value = args.get(idx).cloned().unwrap_or(Val::Null);
+                saved_namespace_bindings.push((
+                    param_name.clone(),
+                    namespace_vars.insert(param_name.clone(), arg_value),
+                ));
             }
         }
 
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result = self.jit.try_call_compiled(function_id, args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        if let Some((namespace, _)) = &function_info
+            && let Some(namespace_vars) = self.namespace_variables.get_mut(namespace)
+        {
+            for (name, previous) in saved_namespace_bindings {
+                if let Some(value) = previous {
+                    namespace_vars.insert(name, value);
+                } else {
+                    namespace_vars.shift_remove(&name);
+                }
+            }
+        }
         self.current_namespace = saved_namespace;
         result
     }
@@ -7912,25 +7942,33 @@ impl VirtualMachine {
                 loop {
                     // Update parameter bindings with current args (for tail call iterations)
                     // On first iteration, this duplicates the initial binding, but that's okay
+                    let mut namespace_param_updates: Vec<(String, Val)> = Vec::new();
                     if let Some(scope) = self.scope_stack.last_mut() {
                         for (i, param_name) in function_param_names.iter().enumerate() {
-                            if function_is_variadic && i == variadic_param_index {
+                            let value = if function_is_variadic && i == variadic_param_index {
                                 // Variadic parameter - collect remaining args
                                 let variadic_args: Vec<Val> = if i < current_args.len() {
                                     current_args[i..].to_vec()
                                 } else {
                                     vec![]
                                 };
-                                scope
-                                    .variables
-                                    .insert(param_name.clone(), Val::Vec(variadic_args));
+                                Val::Vec(variadic_args)
                             } else if i < current_args.len() {
-                                scope
-                                    .variables
-                                    .insert(param_name.clone(), current_args[i].clone());
+                                current_args[i].clone()
                             } else {
-                                scope.variables.insert(param_name.clone(), Val::Null);
-                            }
+                                Val::Null
+                            };
+                            scope.variables.insert(param_name.clone(), value.clone());
+                            namespace_param_updates.push((param_name.clone(), value));
+                        }
+                    }
+                    if !namespace_param_updates.is_empty() {
+                        let ns_entry = self
+                            .namespace_variables
+                            .entry(self.current_namespace.clone())
+                            .or_default();
+                        for (param_name, value) in namespace_param_updates {
+                            ns_entry.insert(param_name, value);
                         }
                     }
 
