@@ -7523,9 +7523,24 @@ impl VirtualMachine {
 
     /// Execute a user function
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
+        let function_namespace = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|function_info| function_info.namespace.clone());
+        let saved_namespace = self.current_namespace.clone();
+        if let Some(namespace) = &function_namespace {
+            self.current_namespace = namespace.clone();
+            if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
+                self.current_namespace = saved_namespace;
+                return Err(err.to_string());
+            }
+        }
+
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result = self.jit.try_call_compiled(function_id, args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        self.current_namespace = saved_namespace;
         result
     }
 
