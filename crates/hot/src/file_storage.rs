@@ -265,6 +265,13 @@ pub trait FileStorage: Send + Sync {
 
 /// Normalize a file path to prevent directory traversal
 pub fn normalize_path(path: &str) -> Result<String, String> {
+    // Accept the same hot:// paths that the in-container hotbox CLI accepts.
+    // hotbox strips this scheme before it asks the file server for /files/<path>,
+    // so language-level file writes must canonicalize the same way or a file
+    // written as hot://foo/bar will be stored under a different DB path than
+    // hotbox later reads.
+    let path = path.strip_prefix("hot://").unwrap_or(path);
+
     // Remove leading slash if present
     let path = path.trim_start_matches('/');
 
@@ -1449,6 +1456,11 @@ mod tests {
     #[test]
     fn test_normalize_path() {
         assert_eq!(normalize_path("foo/bar").unwrap(), "foo/bar");
+        assert_eq!(normalize_path("hot://foo/bar").unwrap(), "foo/bar");
+        assert_eq!(
+            normalize_path("hot://hot-live/windows/a/b/1.webm").unwrap(),
+            "hot-live/windows/a/b/1.webm"
+        );
         assert_eq!(normalize_path("/foo/bar").unwrap(), "foo/bar");
         assert_eq!(normalize_path("./foo/bar").unwrap(), "foo/bar");
         assert_eq!(normalize_path("foo/./bar").unwrap(), "foo/bar");
@@ -1674,6 +1686,24 @@ mod tests {
         let paths: Vec<_> = files.into_iter().map(|file| file.path).collect();
 
         assert_eq!(paths, vec!["docs/current.txt".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_hot_scheme_paths_are_canonical_for_hotbox_reads() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+
+        storage
+            .write_file("hot://hot-live/windows/a/b/153.webm", b"video", None, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .read_file("hot-live/windows/a/b/153.webm", &ctx)
+                .await
+                .unwrap(),
+            b"video"
+        );
     }
 
     #[tokio::test]
