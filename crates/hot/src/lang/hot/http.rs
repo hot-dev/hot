@@ -129,6 +129,44 @@ fn build_user_agent(headers: &IndexMap<Val, Val>) -> String {
     }
 }
 
+fn normalized_content_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_textual_content_type(content_type: &str) -> bool {
+    let normalized = normalized_content_type(content_type);
+    normalized.starts_with("text/")
+        || normalized == "application/json"
+        || normalized == "application/ld+json"
+        || normalized == "application/x-ndjson"
+        || normalized == "application/xml"
+        || normalized == "application/xhtml+xml"
+        || normalized == "application/javascript"
+        || normalized == "application/x-www-form-urlencoded"
+        || normalized == "image/svg+xml"
+        || normalized.ends_with("+json")
+        || normalized.ends_with("+xml")
+}
+
+fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
+    if content_type.is_some_and(|ct| !is_textual_content_type(ct)) {
+        return Val::Bytes(bytes);
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(text) => match serde_json::from_str::<JsonValue>(&text) {
+            Ok(json) => serde_json::from_value(json).unwrap_or(Val::from(text)),
+            Err(_) => Val::from(text),
+        },
+        Err(err) => Val::Bytes(err.into_bytes()),
+    }
+}
+
 async fn make_http_request(
     method: &str,
     url: &str,
@@ -172,6 +210,9 @@ async fn make_http_request(
         Val::Str(s) if !s.is_empty() => {
             request_builder = request_builder.body(s.to_string());
         }
+        Val::Bytes(bytes) if !bytes.is_empty() => {
+            request_builder = request_builder.body(bytes.clone());
+        }
         Val::Map(_) | Val::Vec(_) => {
             // Serialize Val to JsonValue then to string
             let json_value: JsonValue = body.into();
@@ -196,6 +237,11 @@ async fn make_http_request(
 
     // Build response object
     let status = response.status().as_u16() as i64;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
 
     // Get headers
     let mut response_headers: IndexMap<Val, Val> = IndexMap::new();
@@ -205,9 +251,9 @@ async fn make_http_request(
         }
     }
 
-    // Get body
-    let body_text = match response.text().await {
-        Ok(text) => text,
+    // Get body as raw bytes first so binary responses are not lossy.
+    let body_bytes = match response.bytes().await {
+        Ok(bytes) => bytes.to_vec(),
         Err(e) => {
             return HotResult::Err(err_val(format!(
                 "::hot::http/request: failed to read body: {}",
@@ -216,17 +262,15 @@ async fn make_http_request(
         }
     };
 
-    // Try to parse as JSON, then convert to Val
-    let body_val: Val = match serde_json::from_str::<JsonValue>(&body_text) {
-        Ok(json) => serde_json::from_value(json).unwrap_or(Val::from(body_text.clone())),
-        Err(_) => Val::from(body_text),
-    };
+    let body_bytes_val = Val::Bytes(body_bytes.clone());
+    let body_val = response_body_val(body_bytes, content_type.as_deref());
 
     // Build response map
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
     response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
     response_map.insert(Val::from("body"), body_val);
+    response_map.insert(Val::from("body-bytes"), body_bytes_val);
 
     HotResult::Ok(Val::Map(Box::new(response_map)))
 }
@@ -768,7 +812,7 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        http::StatusCode,
+        http::{StatusCode, header},
         response::{IntoResponse, Sse, sse::Event},
     };
     use futures::stream;
@@ -841,6 +885,44 @@ mod tests {
             } else {
                 panic!("Expected body to be a map");
             }
+
+            let body_bytes = map.get(&Val::from("body-bytes")).unwrap();
+            assert!(matches!(body_bytes, Val::Bytes(bytes) if !bytes.is_empty()));
+        } else {
+            panic!("Expected response to be a map");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_http_get_binary_body() {
+        let app = Router::new().route(
+            "/video.webm",
+            axum::routing::get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "video/webm")],
+                    vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42],
+                )
+            }),
+        );
+
+        let base_url = start_mock_server(app).await;
+        let url = format!("{}/video.webm", base_url);
+
+        let response = tokio::task::spawn_blocking(move || {
+            let result = super::get(&[Val::from(url)]);
+            unwrap_result(result)
+        })
+        .await
+        .unwrap();
+
+        if let Val::Map(map) = response {
+            let body = map.get(&Val::from("body")).unwrap();
+            assert_eq!(body, &Val::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42]));
+            let body_bytes = map.get(&Val::from("body-bytes")).unwrap();
+            assert_eq!(
+                body_bytes,
+                &Val::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42])
+            );
         } else {
             panic!("Expected response to be a map");
         }
@@ -1058,6 +1140,38 @@ mod tests {
             assert_eq!(id, &Val::Int(1));
             let name = obj.get(&Val::from("name")).unwrap();
             assert_eq!(name, &Val::from("first"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_http_put_with_bytes_body() {
+        async fn echo_handler(body: Bytes) -> impl IntoResponse {
+            ([(header::CONTENT_TYPE, "application/octet-stream")], body)
+        }
+
+        let app = Router::new().route("/echo-bytes", axum::routing::put(echo_handler));
+        let base_url = start_mock_server(app).await;
+        let url = format!("{}/echo-bytes", base_url);
+
+        let payload = vec![0x1a, 0x45, 0xdf, 0xa3, 0x00, 0xff];
+        let expected = payload.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            let result = request(&[
+                Val::from("PUT"),
+                Val::from(url),
+                Val::map_empty(),
+                Val::Bytes(payload),
+            ]);
+            unwrap_result(result)
+        })
+        .await
+        .unwrap();
+
+        if let Val::Map(map) = response {
+            let body = map.get(&Val::from("body")).unwrap();
+            assert_eq!(body, &Val::Bytes(expected));
+        } else {
+            panic!("Expected response to be a map");
         }
     }
 

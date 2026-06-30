@@ -85,7 +85,7 @@ meta {
 }
 fn (request: SpeechRequest): Bytes | HttpError {
     response api-request("POST", `${::openai/BASE_URL}/audio/speech`, {}, request)
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    if(is-ok-response(response), response.body-bytes, err(HttpError(response)))
 }
 
 // Note: transcriptions and translations require multipart/form-data file uploads

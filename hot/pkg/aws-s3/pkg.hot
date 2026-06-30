@@ -2,8 +2,8 @@
 
 hot.pkg.aws-s3 {
   name: "hot.dev/aws-s3",
-  version: "1.2.0",
-  hot-min-version: "1.2.0",
+  version: "1.2.1",
+  hot-min-version: "2.4.10",
   description: "AWS S3 API bindings for object storage, buckets, and presigned URLs.",
   author: "Hot Dev",
   email: "support@hot.dev",
@@ -11,7 +11,7 @@ hot.pkg.aws-s3 {
   tags: ["cloud"],
   deps: {
     "hot.dev/hot-std": {},
-    "hot.dev/aws-core": "1.2.0"
+    "hot.dev/aws-core": "1.2.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

@@ -72,13 +72,15 @@ meta {
     response.status   // 200
     response.headers  // {"content-type": "application/json", ...}
     response.body     // {"id": 1, "name": "Alice"}
+    response.body-bytes // Raw response bytes
     ```
     """
 }
 type {
     status: Int,
     headers: Map<Str, Str>?,
-    body: Any?
+    body: Any?,
+    body-bytes: Bytes?
 }
 
 request
