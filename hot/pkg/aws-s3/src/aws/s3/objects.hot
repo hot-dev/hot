@@ -15,6 +15,7 @@ sign-request ::aws::core/sign-request
 AwsError ::aws::core/AwsError
 
 is-str ::hot::type/is-str
+is-bytes ::hot::type/is-bytes
 
 // XML parsing for S3 responses
 ::xml ::hot::xml
@@ -115,6 +116,7 @@ PutObjectResponse type {
 // Get object response
 GetObjectResponse type {
     body: Any,
+    body-bytes: Bytes?,
     content_type: Str?,
     content_length: Int?,
     etag: Str?,
@@ -160,16 +162,16 @@ fn
     endpoint s3-endpoint(bucket, region)
     url `${endpoint}/${key}`
 
-    body-str if(is-str(body), body, to-json(body))
+    body-wire if(or(is-str(body), is-bytes(body)), body, to-json(body))
 
     headers {
         "Content-Type": content_type,
         "Host": `${bucket}.s3.${region}.amazonaws.com`
     }
 
-    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, body-str)
+    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, body-wire)
 
-    response http-request("PUT", url, signed-headers, body-str)
+    response http-request("PUT", url, signed-headers, body-wire)
 
     if(is-ok-response(response),
         PutObjectResponse({
@@ -214,6 +216,7 @@ fn (bucket: Str, key: Str): GetObjectResponse | AwsError {
     if(is-ok-response(response),
         GetObjectResponse({
             body: response.body,
+            body-bytes: response.body-bytes,
             content_type: response.headers.content_type,
             content_length: null,
             etag: response.headers.ETag,
