@@ -498,7 +498,7 @@ meta {
 
     // Coerce all values to strings
     map-vals({a: 1, b: true, c: null}, Str)
-    // {a: "1", b: "true", c: "null"}
+    // {a: "1", b: "true", c: ""}
     ```
     """
 }

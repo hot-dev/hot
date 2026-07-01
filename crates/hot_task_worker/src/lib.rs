@@ -680,10 +680,19 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         }
     };
 
-    // Shutdown coordinator — fixed 30s drain followed by cancel + infra-retry
+    // Shutdown coordinator - 30s by default, followed by cancel + infra-retry
     // re-enqueue + DELCONSUMER. End-to-end fits comfortably within ECS 120s
     // stopTimeout. See `shutdown.rs` module docs for the full timeline.
-    let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::new());
+    let shutdown_drain_secs = config
+        .worker_conf
+        .get_int_or_default(
+            "task.shutdown-drain-seconds",
+            shutdown::DEFAULT_CODE_DRAIN_SECS as i64,
+        )
+        .max(1) as u64;
+    let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::with_drain_secs(
+        shutdown_drain_secs,
+    ));
 
     // Clean up orphaned data volumes from a previous crash
     cleanup_stale_data_volumes(&data_vol_base).await;
@@ -1902,6 +1911,9 @@ async fn process_container_task(
     // -- Acquire resource budget --
     let resource_mem = limits.memory_mb + limits.tmp_size_mb;
     let resource_disk = limits.disk_size_mb;
+    let infra_retry_backoff_ms = worker_conf
+        .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
+        .max(0) as u64;
     let resource_guard = match budget
         .acquire(
             resource_mem,
@@ -1911,6 +1923,19 @@ async fn process_container_task(
         .await
     {
         Ok(guard) => guard,
+        Err(e @ resource_budget::ResourceBudgetError::Timeout { .. }) => {
+            tracing::warn!(
+                task_id = %task_id,
+                requested_memory_mb = resource_mem,
+                requested_disk_mb = resource_disk,
+                backoff_ms = infra_retry_backoff_ms,
+                "Container resources unavailable within admission window; deferring queue message"
+            );
+            return Err(Box::new(QueueInfrastructureError::new(
+                e.to_string(),
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )));
+        }
         Err(e) => {
             let error = task_failure_json(&e.to_string(), None);
             complete_task_with_event(

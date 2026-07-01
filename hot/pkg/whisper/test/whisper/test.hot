@@ -158,6 +158,27 @@ meta ["test"] fn () {
     assert-eq(0, length(result.segments))
 }
 
+test-parse-transcribe-output-empty-transcript
+meta ["test"] fn () {
+    json """{"text": "", "segments": [], "language": "nn"}"""
+    result parse-transcribe-output(json)
+    assert-eq("", result.text)
+    assert-eq("nn", result.language)
+    assert-eq(0, length(result.segments))
+}
+
+test-parse-transcribe-output-null
+meta ["test"] fn () {
+    result parse-transcribe-output(null)
+    assert-eq(null, result.text)
+}
+
+test-parse-transcribe-output-coerces-non-string
+meta ["test"] fn () {
+    result parse-transcribe-output(42)
+    assert-eq(null, result.text)
+}
+
 // ============================================================================
 // TranscribeOpts construction
 // ============================================================================

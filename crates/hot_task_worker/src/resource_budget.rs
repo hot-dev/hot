@@ -37,6 +37,15 @@ impl ResourceBudget {
         disk_mb: u64,
         timeout: std::time::Duration,
     ) -> Result<ResourceGuard, ResourceBudgetError> {
+        if memory_mb > self.total_memory_mb || disk_mb > self.total_disk_mb {
+            return Err(ResourceBudgetError::InsufficientCapacity {
+                requested_memory_mb: memory_mb,
+                requested_disk_mb: disk_mb,
+                total_memory_mb: self.total_memory_mb,
+                total_disk_mb: self.total_disk_mb,
+            });
+        }
+
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
@@ -131,6 +140,12 @@ impl Drop for ResourceGuard {
 
 #[derive(Debug)]
 pub enum ResourceBudgetError {
+    InsufficientCapacity {
+        requested_memory_mb: u64,
+        requested_disk_mb: u64,
+        total_memory_mb: u64,
+        total_disk_mb: u64,
+    },
     Timeout {
         requested_memory_mb: u64,
         requested_disk_mb: u64,
@@ -142,6 +157,17 @@ pub enum ResourceBudgetError {
 impl std::fmt::Display for ResourceBudgetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InsufficientCapacity {
+                requested_memory_mb,
+                requested_disk_mb,
+                total_memory_mb,
+                total_disk_mb,
+            } => write!(
+                f,
+                "Requested resources exceed worker capacity: requested {}MB memory + {}MB disk, \
+                 capacity {}MB memory + {}MB disk",
+                requested_memory_mb, requested_disk_mb, total_memory_mb, total_disk_mb,
+            ),
             Self::Timeout {
                 requested_memory_mb,
                 requested_disk_mb,
@@ -213,7 +239,20 @@ mod tests {
         let result = budget
             .acquire(256, 1024, std::time::Duration::from_millis(50))
             .await;
-        assert!(result.is_err());
+        assert!(matches!(result, Err(ResourceBudgetError::Timeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_rejects_request_larger_than_capacity() {
+        let budget = ResourceBudget::new(512, 5120);
+
+        let result = budget
+            .acquire(768, 1024, std::time::Duration::from_millis(50))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ResourceBudgetError::InsufficientCapacity { .. })
+        ));
     }
 
     #[tokio::test]

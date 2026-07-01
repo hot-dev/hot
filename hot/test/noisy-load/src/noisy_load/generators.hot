@@ -9,7 +9,8 @@ burst-count: Int 128
 
 // High-volume load: every second, emit independent events. The hard-coded
 // burst pushes event-handler supply well beyond the old ~26 runs/sec ceiling.
-pump-burst meta {schedule: "* * * * * *"}
+pump-burst
+meta {schedule: "* * * * * *"}
 fn (event) {
     sent map(range(0, burst-count), (i) {
         ::event/send("noisy:burst", {n: i})
@@ -18,7 +19,8 @@ fn (event) {
 }
 
 // Primary load: every second, emit a burst of `noisy:work` events.
-pump-work meta {schedule: "* * * * * *"}
+pump-work
+meta {schedule: "* * * * * *"}
 fn (event) {
     sent map(range(0, 12), (i) {
         ::event/send("noisy:work", {n: i, depth: 0})
@@ -27,7 +29,8 @@ fn (event) {
 }
 
 // Medium load: every 3 seconds, queue a few code tasks.
-pump-code-tasks meta {schedule: "*/3 * * * * *"}
+pump-code-tasks
+meta {schedule: "*/3 * * * * *"}
 fn (event) {
     sent map(range(0, 3), (i) {
         ::event/send("noisy:code-task", {n: i})
@@ -36,7 +39,8 @@ fn (event) {
 }
 
 // Light load: every 15 seconds, queue a container (box) task.
-pump-box-tasks meta {schedule: "*/15 * * * * *"}
+pump-box-tasks
+meta {schedule: "*/15 * * * * *"}
 fn (event) {
     ::event/send("noisy:box-task", {n: 1})
     "queued-box-task"

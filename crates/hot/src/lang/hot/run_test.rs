@@ -96,6 +96,12 @@ f fn (n: Int): Str {
     |> reduce((acc, s) { concat(acc, concat(s, ",")) }, "")
 }
 f(10)"#,
+            // Null interpolation should match `Str(null)` in fused templates.
+            r#"::t ns
+f fn (): Str {
+    [null, "ok"] |> reduce((acc, item) { concat(acc, `item=${item};`) }, "")
+}
+f()"#,
             // --- Single-stage terminal reduce (matches string-concat-benchmark) ---
             r#"::t ns
 f fn (n: Int): Str {

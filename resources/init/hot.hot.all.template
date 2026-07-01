@@ -288,6 +288,7 @@ hot.task.container-reserved-memory-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED
 hot.task.container-reserved-disk-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED_DISK_MB", "10240"))
 hot.task.recovery-reserved-slots Int(::env/get("HOT_TASK_RECOVERY_RESERVED_SLOTS", "1"))
 hot.task.capacity-fairness ::env/get("HOT_TASK_CAPACITY_FAIRNESS", "none")
+hot.task.shutdown-drain-seconds Int(::env/get("HOT_TASK_SHUTDOWN_DRAIN_SECONDS", "5"))
 hot.task.shutdown-container-timeout-seconds Int(::env/get("HOT_TASK_SHUTDOWN_CONTAINER_TIMEOUT_SECONDS", "30"))
 hot.task.reconcile-queued-after-seconds Int(::env/get("HOT_TASK_RECONCILE_QUEUED_AFTER_SECONDS", "60"))
 hot.task.reconcile-interval-seconds Int(::env/get("HOT_TASK_RECONCILE_INTERVAL_SECONDS", "30"))

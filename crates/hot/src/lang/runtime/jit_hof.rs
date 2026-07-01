@@ -622,7 +622,7 @@ fn push_template_part(out: &mut String, part: &PureValue, max_bytes: usize) -> b
         PureValue::Other(Val::Str(s)) => push_checked(out, s, max_bytes),
         PureValue::Other(Val::Dec(d)) => push_checked(out, &d.to_string(), max_bytes),
         PureValue::Other(Val::Byte(b)) => push_checked(out, &b.to_string(), max_bytes),
-        PureValue::Other(Val::Null) => push_checked(out, "null", max_bytes),
+        PureValue::Other(Val::Null) => push_checked(out, "", max_bytes),
         PureValue::Other(v) => {
             let piece = match str_internal(std::slice::from_ref(v)) {
                 HotResult::Ok(Val::Str(s)) => s.to_string(),
@@ -2020,6 +2020,11 @@ f fn (n: Int): Str {
             eval_expr(&template, &[PureValue::Int(3)]),
             EvalOutcome::Value(PureValue::Other(Val::from("item-3-")))
         );
+
+        assert_eq!(
+            eval_expr(&template, &[PureValue::Other(Val::Null)]),
+            EvalOutcome::Value(PureValue::Other(Val::from("item--")))
+        );
     }
 
     #[test]
@@ -2480,6 +2485,28 @@ f fn (items: Vec<Int>): Str {
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("123"))
+        );
+    }
+
+    #[test]
+    fn run_pipeline_template_null_matches_str_constructor() {
+        let prog = compile(
+            r#"::t ns
+f fn (items: Vec): Str {
+    items |> reduce((acc, item) { concat(acc, `item=${item};`) }, "")
+}
+"#,
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/f"))
+            .expect("fn f");
+        let plan = &detect_pipelines(&func.instructions, &prog)[0];
+        let source = Val::Vec(vec![Val::Null, Val::from("ok")]);
+        assert_eq!(
+            run_pipeline(plan, &source),
+            FusedRun::Produced(Val::from("item=;item=ok;"))
         );
     }
 

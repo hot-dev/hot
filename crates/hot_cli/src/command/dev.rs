@@ -21,10 +21,14 @@ use crate::conf::{
     reload_conf_after_init, reload_dotenv_files,
 };
 
+const HOT_DEV_WORKER_SHUTDOWN_TIMEOUT_SECONDS: i64 = 1;
+const HOT_DEV_TASK_SHUTDOWN_DRAIN_SECONDS: i64 = 5;
+
 pub(crate) async fn run_dev(
     conf: Val,
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
     ctx_files: Vec<String>,
+    conf_files: Vec<String>,
     open_browser: bool,
     providers: &crate::CliProviders,
 ) {
@@ -33,6 +37,7 @@ pub(crate) async fn run_dev(
         build_info::VERSION,
         build_info::git_sha_short()
     );
+    let _dev_shutdown_policy = tokio::spawn(run_hot_dev_shutdown_signal_policy());
 
     let dev_context_storage = std::sync::Arc::new(std::sync::RwLock::new(context_storage))
         as hot_worker::server::DevContextStorage;
@@ -76,6 +81,7 @@ pub(crate) async fn run_dev(
     } else {
         conf
     };
+    let conf = apply_hot_dev_shutdown_defaults(conf, &conf_files);
 
     // Create or update live build for development
     // Extract global options from conf for live build setup
@@ -292,6 +298,89 @@ pub(crate) async fn run_dev(
     // Force exit to terminate any orphaned spawn_blocking tasks (e.g., VM compilation)
     // These cannot be cancelled gracefully and would otherwise block the tokio runtime
     std::process::exit(0);
+}
+
+fn apply_hot_dev_shutdown_defaults(conf: Val, conf_files: &[String]) -> Val {
+    let mut conf = conf;
+
+    if std::env::var_os("HOT_WORKER_SHUTDOWN_TIMEOUT").is_none()
+        && !hot_conf_declares_key("worker.shutdown-timeout", conf_files)
+    {
+        let production_default = hot_worker::server::DEFAULT_SHUTDOWN_TIMEOUT_SECONDS as i64;
+        let current = conf.get_int_or_default("worker.shutdown-timeout", production_default);
+        if current == production_default {
+            conf = conf.set_int(
+                "worker.shutdown-timeout",
+                Some(HOT_DEV_WORKER_SHUTDOWN_TIMEOUT_SECONDS),
+                production_default,
+            );
+        }
+    }
+
+    if std::env::var_os("HOT_TASK_SHUTDOWN_DRAIN_SECONDS").is_none()
+        && !hot_conf_declares_key("task.shutdown-drain-seconds", conf_files)
+    {
+        let production_default = hot_task_worker::shutdown::DEFAULT_CODE_DRAIN_SECS as i64;
+        let current = conf.get_int_or_default("task.shutdown-drain-seconds", production_default);
+        if current == production_default {
+            conf = conf.set_int(
+                "task.shutdown-drain-seconds",
+                Some(HOT_DEV_TASK_SHUTDOWN_DRAIN_SECONDS),
+                production_default,
+            );
+        }
+    }
+
+    conf
+}
+
+async fn run_hot_dev_shutdown_signal_policy() {
+    let mut signals = hot::signal::shutdown_signals();
+    let mut ctrl_c_seen = false;
+
+    loop {
+        match signals.recv().await {
+            Ok(hot::signal::ShutdownSignal::Interrupt) if ctrl_c_seen => {
+                eprintln!("\nhot: force quit");
+                info!("hot.dev: force quit on repeated Ctrl+C");
+                std::process::exit(130);
+            }
+            Ok(hot::signal::ShutdownSignal::Interrupt) => {
+                ctrl_c_seen = true;
+                eprintln!("\nhot: shutting down gracefully. Ctrl+C again to force quit.");
+                info!("hot.dev: graceful shutdown requested by Ctrl+C");
+            }
+            Ok(hot::signal::ShutdownSignal::Terminate) => {
+                info!("hot.dev: graceful shutdown requested by SIGTERM");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                debug!(
+                    skipped,
+                    "hot.dev: shutdown signal policy skipped lagged signal event"
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+fn hot_conf_declares_key(key: &str, conf_files: &[String]) -> bool {
+    let default_conf = std::iter::once("hot.hot");
+    let cli_conf_files = conf_files.iter().map(String::as_str);
+
+    default_conf.chain(cli_conf_files).any(|path| {
+        std::fs::read_to_string(path)
+            .map(|content| hot_conf_content_declares_key(&content, key))
+            .unwrap_or(false)
+    })
+}
+
+fn hot_conf_content_declares_key(content: &str, key: &str) -> bool {
+    let qualified_key = format!("hot.{key}");
+    content.lines().any(|line| {
+        let without_comment = line.split("//").next().unwrap_or("").trim();
+        without_comment.starts_with(key) || without_comment.starts_with(&qualified_key)
+    })
 }
 
 fn collect_dev_ctx_files(cli_ctx_files: &[String]) -> Vec<String> {

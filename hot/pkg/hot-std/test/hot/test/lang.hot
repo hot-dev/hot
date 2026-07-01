@@ -890,6 +890,8 @@ meta ["test"] fn () {
     // % in template string
     greetings map(["Alice", "Bob"], `Hello, ${%}!`)
     assert-eq(["Hello, Alice!", "Hello, Bob!"], greetings, "placeholder: % in template string")
+    null-greeting map([null], `Hello, ${%}!`)
+    assert-eq(["Hello, !"], null-greeting, "placeholder: null in template string")
 
     // % in map spread
     defaults {color: "red", size: 10}

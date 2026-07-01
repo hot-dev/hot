@@ -847,6 +847,9 @@ Dec -> Str fn (value: Dec): Str { call-lib(::hot::type/Str, [value]) }
 // Convert boolean to string ("true" or "false")
 Bool -> Str fn (value: Bool): Str { call-lib(::hot::type/Str, [value]) }
 
+// Convert null to an empty string for nullable text ergonomics.
+Null -> Str fn (value: Null): Str { call-lib(::hot::type/Str, [value]) }
+
 // Convert bytes to UTF-8 string. Invalid UTF-8 sequences are replaced with the Unicode replacement character.
 Bytes -> Str fn (value: Bytes): Str { call-lib(::hot::type/Str, [value]) }
 
