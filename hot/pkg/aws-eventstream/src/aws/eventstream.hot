@@ -46,7 +46,9 @@ crc32 ::hot::bytes/crc32
 // ============================================================================
 
 Message
-meta { doc: """A parsed event stream message. `payload` holds the raw message bytes.""" }
+meta {
+    doc: """A parsed event stream message. `payload` holds the raw message bytes."""
+}
 type {
     headers: Map<Str, Any>,
     payload: Bytes

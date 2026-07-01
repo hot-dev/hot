@@ -18,7 +18,8 @@ crunch fn (args: Any): Map {
 }
 
 // Spawn a code task per event.
-on-code-task meta {on-event: "noisy:code-task"}
+on-code-task
+meta {on-event: "noisy:code-task"}
 fn (event) {
     n or(event.data.n, 0)
     info ::task/start(::noisy_load::tasks/crunch, {n: n})
@@ -27,7 +28,8 @@ fn (event) {
 
 // Spawn a short-lived container task per event. Pass a plain map (matching the
 // ffmpeg/whisper/etc. stdlib packages) — `::box/start` coerces it to BoxConf.
-on-box-task meta {on-event: "noisy:box-task"}
+on-box-task
+meta {on-event: "noisy:box-task"}
 fn (event) {
     info ::box/start({
         image: "alpine:latest",

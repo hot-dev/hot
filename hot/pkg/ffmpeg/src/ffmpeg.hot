@@ -268,9 +268,11 @@ fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?,
         and(is-some(width), is-some(height)) => {
             `,scale=${Str(width)}:${Str(height)}`
         }
+
         is-some(width) => {
             `,scale=${Str(width)}:-1`
         }
+
         is-some(height) => {
             `,scale=-1:${Str(height)}`
         }

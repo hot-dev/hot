@@ -15,6 +15,7 @@ stage-audio fn (url: Str, hot-path: Str): Str {
                 body: response.body,
             })
         }
+
         is-null(response.body-bytes) => {
             fail("audio download returned no bytes", {url: url})
         }
