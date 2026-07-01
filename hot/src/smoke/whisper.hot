@@ -1,0 +1,101 @@
+::smoke::whisper ns
+
+::http ::hot::http
+
+DEFAULT_AUDIO_URL "https://www.kozco.com/tech/LRMonoPhase4.wav"
+DEFAULT_AUDIO_NAME "lr-mono-phase4.wav"
+
+stage-audio fn (url: Str, hot-path: Str): Str {
+    response ::http/get(url)
+    cond {
+        not(::http/is-ok-response(response)) => {
+            fail("audio download failed", {
+                url: url,
+                status: response.status,
+                body: response.body,
+            })
+        }
+        is-null(response.body-bytes) => {
+            fail("audio download returned no bytes", {url: url})
+        }
+        => {
+            write-file-bytes(hot-path, response.body-bytes)
+            hot-path
+        }
+    }
+}
+
+transcribe-real-audio fn (): Map {
+    transcribe-real-audio({})
+},
+(opts: Map): Map {
+    url or(opts.url, DEFAULT_AUDIO_URL)
+    name or(opts.name, DEFAULT_AUDIO_NAME)
+    model or(opts.model, "tiny")
+    timeout or(opts.timeout, 1800)
+
+    input stage-audio(url, `hot://smoke/whisper/${name}`)
+    out ::whisper/transcribe(input, {
+        model: model,
+        language: opts.language,
+        format: "json",
+        timeout: timeout,
+    })
+
+    {
+        input: input,
+        text: out.text,
+        language: out.language,
+        segments: out.segments,
+        transcript-url: out.url,
+    }
+}
+
+start-real-audio-transcription fn (opts: Map): Map {
+    url or(opts.url, DEFAULT_AUDIO_URL)
+    name or(opts.name, DEFAULT_AUDIO_NAME)
+    model or(opts.model, "tiny")
+    timeout or(opts.timeout, 1800)
+
+    input stage-audio(url, `hot://smoke/whisper/${name}`)
+    info ::whisper/start-transcribe(input, {
+        model: model,
+        language: opts.language,
+        format: "json",
+        timeout: timeout,
+    })
+
+    {
+        input: input,
+        info: info,
+    }
+}
+
+on-transcribe-real-audio
+meta {on-event: "smoke:whisper-transcribe"}
+fn (event): Map {
+    transcribe-real-audio(or(event.data, {}))
+}
+
+test-transcribe-real-audio
+meta ["test"] fn () {
+    started start-real-audio-transcription({})
+    task ::hot::task/await(started.info.id)
+    stdout Str(or(task.stdout, ""))
+    stderr Str(or(task.stderr, ""))
+    println(to-json({
+        status: task.status,
+        exit-code: task.exit-code,
+        input: started.input,
+        output: started.info.data.output,
+        stdout: slice(stdout, 0, 2000),
+        stderr: slice(stderr, 0, 4000),
+    }))
+
+    assert-eq("completed", task.status, stderr)
+    assert-eq(0, task.exit-code, stderr)
+
+    parsed from-json(trim(stdout))
+    assert(gt(length(parsed.text), 0), "transcript should be non-empty")
+    assert(starts-with(started.info.data.output, "hot://whisper/"), "transcript should be written to hot:// storage")
+}
