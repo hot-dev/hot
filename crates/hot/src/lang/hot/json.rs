@@ -1,5 +1,5 @@
 use crate::lang::hot::r#type::HotResult;
-use crate::val::Val;
+use crate::val::{HOT_BYTE_TYPE, HOT_BYTES_TYPE, Val};
 use crate::validate_args;
 
 /// Maximum nesting depth we'll traverse in either direction (build_json_value /
@@ -100,9 +100,14 @@ fn build_json_value(v: &Val, depth: usize) -> Result<serde_json::Value, Val> {
             serde_json::Value::Object(obj)
         }
         Val::Box(b) => serde_json::Value::String(b.to_string()),
-        Val::Byte(b) => serde_json::json!({"$type":"Byte","data": b}),
-        Val::Bytes(bytes) => serde_json::json!({"$type":"Bytes","data": bytes}),
+        Val::Byte(b) => serde_json::json!({"$type": HOT_BYTE_TYPE, "$val": b}),
+        Val::Bytes(bytes) => serde_json::json!({"$type": HOT_BYTES_TYPE, "$val": bytes}),
     })
+}
+
+fn json_value_to_byte(v: &serde_json::Value) -> Option<u8> {
+    let byte = v.as_u64()?;
+    u8::try_from(byte).ok()
 }
 
 fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val, Val> {
@@ -134,6 +139,21 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
             Val::Vec(out)
         }
         serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(type_name)) = map.get("$type") {
+                if type_name == HOT_BYTE_TYPE
+                    && let Some(byte) = map.get("$val").and_then(json_value_to_byte)
+                {
+                    return Ok(Val::Byte(byte));
+                }
+
+                if type_name == HOT_BYTES_TYPE
+                    && let Some(serde_json::Value::Array(items)) = map.get("$val")
+                    && let Some(bytes) = items.iter().map(json_value_to_byte).collect()
+                {
+                    return Ok(Val::Bytes(bytes));
+                }
+            }
+
             let mut out = indexmap::IndexMap::new();
             for (k, v) in map.iter() {
                 out.insert(
@@ -144,4 +164,34 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
             Val::Map(Box::new(out))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_json_uses_qualified_byte_type_names() {
+        let byte = to_json(&[Val::Byte(42)]).ok().unwrap();
+        assert_eq!(byte, Val::from(r#"{"$type":"::hot::type/Byte","$val":42}"#));
+
+        let bytes = to_json(&[Val::Bytes(vec![1, 2, 3])]).ok().unwrap();
+        assert_eq!(
+            bytes,
+            Val::from(r#"{"$type":"::hot::type/Bytes","$val":[1,2,3]}"#)
+        );
+    }
+
+    #[test]
+    fn test_from_json_restores_byte_types() {
+        let byte = from_json(&[Val::from(r#"{"$type":"::hot::type/Byte","$val":42}"#)])
+            .ok()
+            .unwrap();
+        assert_eq!(byte, Val::Byte(42));
+
+        let bytes = from_json(&[Val::from(r#"{"$type":"::hot::type/Bytes","$val":[1,2,3]}"#)])
+            .ok()
+            .unwrap();
+        assert_eq!(bytes, Val::Bytes(vec![1, 2, 3]));
+    }
 }

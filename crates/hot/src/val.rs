@@ -9,6 +9,9 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+pub(crate) const HOT_BYTE_TYPE: &str = "::hot::type/Byte";
+pub(crate) const HOT_BYTES_TYPE: &str = "::hot::type/Bytes";
+
 pub use crate::val;
 // Re-export indexmap for use by macros
 pub use indexmap;
@@ -788,19 +791,18 @@ impl Val {
             Val::Bool(b) => ToString::to_string(b),
             Val::Byte(b) => {
                 format!(
-                    "{{\n{}\"$type\": \"Byte\",\n{}\"data\": \"{}\"\n{}}}",
-                    next_indent_str,
-                    next_indent_str,
-                    crate::lang::hot::base64::encode_bytes_to_base64(&[*b]),
-                    indent_str
+                    "{{\n{}\"$type\": \"{}\",\n{}\"$val\": {}\n{}}}",
+                    next_indent_str, HOT_BYTE_TYPE, next_indent_str, b, indent_str
                 )
             }
             Val::Bytes(bytes) => {
+                let items: Vec<String> = bytes.iter().map(ToString::to_string).collect();
                 format!(
-                    "{{\n{}\"$type\": \"Bytes\",\n{}\"data\": \"{}\"\n{}}}",
+                    "{{\n{}\"$type\": \"{}\",\n{}\"$val\": [{}]\n{}}}",
                     next_indent_str,
+                    HOT_BYTES_TYPE,
                     next_indent_str,
-                    crate::lang::hot::base64::encode_bytes_to_base64(bytes),
+                    items.join(", "),
                     indent_str
                 )
             }
@@ -1058,23 +1060,17 @@ impl Serialize for Val {
             Val::Str(s) => serializer.serialize_str(s),
             Val::Bool(b) => serializer.serialize_bool(*b),
             Val::Byte(b) => {
-                // Serialize single byte as Map with $type field and base64 encoding
+                // JSON has no byte primitive, so preserve Hot type metadata around the numeric value.
                 let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("$type", "Byte")?;
-                map.serialize_entry(
-                    "data",
-                    &crate::lang::hot::base64::encode_bytes_to_base64(&[*b]),
-                )?;
+                map.serialize_entry("$type", HOT_BYTE_TYPE)?;
+                map.serialize_entry("$val", b)?;
                 map.end()
             }
             Val::Bytes(bytes) => {
-                // Serialize bytes as Map with $type field and base64 encoding
+                // Preserve Hot's Bytes-as-Vec<Int> semantics in JSON for easy JS interop.
                 let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("$type", "Bytes")?;
-                map.serialize_entry(
-                    "data",
-                    &crate::lang::hot::base64::encode_bytes_to_base64(bytes),
-                )?;
+                map.serialize_entry("$type", HOT_BYTES_TYPE)?;
+                map.serialize_entry("$val", bytes)?;
                 map.end()
             }
             Val::Vec(v) => {
@@ -1149,22 +1145,30 @@ impl From<&Val> for JsonValue {
             Val::Str(s) => JsonValue::String((**s).to_owned()),
             Val::Bool(b) => JsonValue::Bool(*b),
             Val::Byte(b) => {
-                // Convert single byte to Map with $type field and base64
+                // Convert single byte to typed JSON with its numeric value.
                 let mut map = serde_json::Map::new();
-                map.insert("$type".to_string(), JsonValue::String("Byte".to_string()));
                 map.insert(
-                    "data".to_string(),
-                    JsonValue::String(crate::lang::hot::base64::encode_bytes_to_base64(&[*b])),
+                    "$type".to_string(),
+                    JsonValue::String(HOT_BYTE_TYPE.to_string()),
                 );
+                map.insert("$val".to_string(), JsonValue::Number((*b).into()));
                 JsonValue::Object(map)
             }
             Val::Bytes(bytes) => {
-                // Convert bytes to Map with $type field and base64
+                // Convert bytes to a typed JSON array of byte values.
                 let mut map = serde_json::Map::new();
-                map.insert("$type".to_string(), JsonValue::String("Bytes".to_string()));
                 map.insert(
-                    "data".to_string(),
-                    JsonValue::String(crate::lang::hot::base64::encode_bytes_to_base64(bytes)),
+                    "$type".to_string(),
+                    JsonValue::String(HOT_BYTES_TYPE.to_string()),
+                );
+                map.insert(
+                    "$val".to_string(),
+                    JsonValue::Array(
+                        bytes
+                            .iter()
+                            .map(|byte| JsonValue::Number((*byte).into()))
+                            .collect(),
+                    ),
                 );
                 JsonValue::Object(map)
             }
@@ -1218,6 +1222,16 @@ impl<'de> Deserialize<'de> for Val {
 // Keep the old implementation as a fallback for non-JSON deserializers
 
 // Helper function to convert serde_json::Value to Val
+fn json_array_to_bytes(items: &[serde_json::Value]) -> Option<Vec<u8>> {
+    items
+        .iter()
+        .map(|item| {
+            let byte = item.as_u64()?;
+            u8::try_from(byte).ok()
+        })
+        .collect()
+}
+
 fn serde_json_to_val(value: serde_json::Value) -> Val {
     match value {
         serde_json::Value::Null => Val::Null,
@@ -1285,19 +1299,16 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
 
             if let Some(tag_str) = tag_str {
                 match tag_str {
-                    "Byte" => {
-                        if let Some(serde_json::Value::String(data)) = obj.get("data")
-                            && let Ok(bytes) =
-                                crate::lang::hot::base64::decode_base64_to_bytes(data)
-                            && bytes.len() == 1
+                    HOT_BYTE_TYPE => {
+                        if let Some(byte) = obj.get("$val").and_then(|value| value.as_u64())
+                            && byte <= u8::MAX as u64
                         {
-                            return Val::Byte(bytes[0]);
+                            return Val::Byte(byte as u8);
                         }
                     }
-                    "Bytes" => {
-                        if let Some(serde_json::Value::String(data)) = obj.get("data")
-                            && let Ok(bytes) =
-                                crate::lang::hot::base64::decode_base64_to_bytes(data)
+                    HOT_BYTES_TYPE => {
+                        if let Some(serde_json::Value::Array(items)) = obj.get("$val")
+                            && let Some(bytes) = json_array_to_bytes(items)
                         {
                             return Val::Bytes(bytes);
                         }
@@ -4527,6 +4538,34 @@ mod tests {
         assert_roundtrip(&Val::Bytes(vec![255, 0, 127, 128]), "bytes edge values");
         // Test binary data that looks like base64
         assert_roundtrip(&Val::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]), "bytes deadbeef");
+    }
+
+    #[test]
+    fn test_byte_and_bytes_serialize_with_qualified_type_names() {
+        let byte_json = serde_json::to_value(Val::Byte(42)).unwrap();
+        assert_eq!(byte_json["$type"], HOT_BYTE_TYPE);
+        assert_eq!(byte_json["$val"], serde_json::json!(42));
+
+        let bytes_json = serde_json::to_value(Val::Bytes(vec![1, 2, 3])).unwrap();
+        assert_eq!(bytes_json["$type"], HOT_BYTES_TYPE);
+        assert_eq!(bytes_json["$val"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_byte_and_bytes_deserialize_typed_val_repr() {
+        let byte: Val = serde_json::from_value(serde_json::json!({
+            "$type": "::hot::type/Byte",
+            "$val": 42,
+        }))
+        .unwrap();
+        assert_eq!(byte, Val::Byte(42));
+
+        let bytes: Val = serde_json::from_value(serde_json::json!({
+            "$type": "::hot::type/Bytes",
+            "$val": [1, 2, 3],
+        }))
+        .unwrap();
+        assert_eq!(bytes, Val::Bytes(vec![1, 2, 3]));
     }
 
     #[test]

@@ -53,3 +53,16 @@ meta ["test"] fn () {
     restored from-json(json-str)
     assert-eq(decimal-val, restored, "Decimal precision should be preserved in JSON round-trip")
 }
+
+test-json-byte-types
+meta ["test"] fn () {
+    byte-json to-json(Byte(42))
+    assert-eq("{\"$type\":\"::hot::type/Byte\",\"$val\":42}", byte-json, "Byte JSON should use typed $val representation")
+    assert(is-byte(from-json(byte-json)), "from-json should restore Byte values")
+    assert-eq(Byte(42), from-json(byte-json), "Byte JSON should round-trip")
+
+    bytes-json to-json(Bytes([1, 2, 3]))
+    assert-eq("{\"$type\":\"::hot::type/Bytes\",\"$val\":[1,2,3]}", bytes-json, "Bytes JSON should use typed $val representation")
+    assert(is-bytes(from-json(bytes-json)), "from-json should restore Bytes values")
+    assert-eq(Bytes([1, 2, 3]), from-json(bytes-json), "Bytes JSON should round-trip")
+}
