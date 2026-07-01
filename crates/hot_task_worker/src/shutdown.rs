@@ -72,7 +72,7 @@ use uuid::Uuid;
 /// signalling cancellation. Reduced from 90s to 30s based on observation
 /// that the long tail of code tasks doesn't finish in 90s either — beyond
 /// ~30s we're better off cancelling and retrying than continuing to wait.
-const CODE_DRAIN_SECS: u64 = 30;
+pub const DEFAULT_CODE_DRAIN_SECS: u64 = 30;
 
 /// Brief grace period after signalling cancel_token before we start
 /// failing tasks. Lets the cooperative-cancel path actually reach the VM.
@@ -116,7 +116,7 @@ pub struct TaskShutdownCoordinator {
 impl TaskShutdownCoordinator {
     /// Construct with the production default drain (30s).
     pub fn new() -> Self {
-        Self::with_drain_secs(CODE_DRAIN_SECS)
+        Self::with_drain_secs(DEFAULT_CODE_DRAIN_SECS)
     }
 
     /// Construct with a custom drain timeout (used by tests).

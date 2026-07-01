@@ -130,6 +130,7 @@ pub(crate) fn create_default_conf() -> Val {
         "container-reserved-disk-mb": 10_240i64,
         "recovery-reserved-slots": 1i64,
         "capacity-fairness": "none",
+        "shutdown-drain-seconds": 30i64,
         "shutdown-container-timeout-seconds": 30i64,
         "reconcile-queued-after-seconds": 60i64,
         "reconcile-interval-seconds": 30i64,

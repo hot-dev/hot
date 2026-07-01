@@ -829,6 +829,7 @@ async fn async_main(providers: CliProviders) {
                 conf.clone(),
                 context_storage.clone(),
                 global_options.ctx_files.clone(),
+                global_options.conf_files.clone(),
                 open_browser,
                 &providers,
             )
