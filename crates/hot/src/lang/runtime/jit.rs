@@ -2012,7 +2012,7 @@ unsafe extern "C" fn hot_jit_template_interpolate(parts_ptr: *const i64, parts_c
         if !vm_ptr.is_null() {
             let vm = unsafe { &*vm_ptr };
             result.push_str(&vm.value_to_string(&val));
-        } else {
+        } else if !matches!(val, Val::Null) {
             result.push_str(&val.to_string());
         }
     }
@@ -13294,6 +13294,9 @@ mod tests {
             .execute_compiled_user_function(0, &[val!("World")])
             .unwrap();
         assert_eq!(result, val!("Hello, World!"));
+
+        let null_result = vm.execute_compiled_user_function(0, &[Val::Null]).unwrap();
+        assert_eq!(null_result, val!("Hello, !"));
     }
 
     // --- DynamicDotAccess test ---

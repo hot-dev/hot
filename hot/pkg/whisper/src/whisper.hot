@@ -99,9 +99,9 @@ parse-transcribe-output
 meta {
     doc: "Parse whisper JSON output (full transcript, segments, detected language)."
 }
-fn (stdout: Str?): Map {
-    text or(stdout, "") |> trim()
-    if(is-empty(text), {}, from-json(text))
+fn (stdout: Any): Map {
+    text Str(or(stdout, "")) |> trim()
+    if(is-blank(text), {}, from-json(text))
 }
 
 // ============================================================================
@@ -268,7 +268,7 @@ fn (input: Str): Map {
         }
         => {
             {
-                text: trim(or(checked.stdout, "")),
+                text: trim(Str(or(checked.stdout, ""))),
                 language: null,
                 segments: null,
                 url: hot-output,

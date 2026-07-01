@@ -34,7 +34,7 @@ meta ["test"] fn () {
     map_result println({a: 1, b: 2, c: 3})
     assert-eq(`{a: 1, b: 2, c: 3}\n`, map_result, "println(map) returns map string with newline")
     null_result println(null)
-    assert-eq("null\n", null_result, "println(null) returns null string with newline")
+    assert-eq("\n", null_result, "println(null) returns empty string with newline")
 }
 
 // We ignore this test because the test runner itself is a test of this functionality

@@ -48,7 +48,7 @@ pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
         Val::Int(i) => HotResult::Ok(Val::from(i.to_string())),
         Val::Dec(d) => HotResult::Ok(Val::from(d.to_string())),
         Val::Bool(b) => HotResult::Ok(Val::from(b.to_string())),
-        Val::Null => HotResult::Ok(Val::from("null")),
+        Val::Null => HotResult::Ok(Val::from("")),
         Val::Map(m) => {
             // Typed object special-cases
             if let Some(Val::Str(type_name)) = m.get(&Val::from("$type")) {
@@ -551,14 +551,19 @@ fn format_key_for_string(val: &Val) -> String {
     }
 }
 
-/// Helper function to format a Val for string representation
+/// Helper function to format a Val for string representation.
+///
+/// This is the `Str(...)` value-coercion path (used for Vec elements and Map
+/// values), NOT the Hot code representation. Null renders as an empty string
+/// here to match `Str(null)`; the round-trip-safe pretty-printer in `val.rs`
+/// still renders `null` as `null`.
 fn format_val_for_string(val: &Val) -> String {
     match val {
         Val::Str(s) => format!("\"{}\"", s),
         Val::Int(i) => i.to_string(),
         Val::Dec(d) => d.to_string(),
         Val::Bool(b) => b.to_string(),
-        Val::Null => "null".to_string(),
+        Val::Null => String::new(),
         _ => format!("{:?}", val),
     }
 }

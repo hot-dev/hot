@@ -8091,6 +8091,7 @@ impl VirtualMachine {
     pub fn value_to_string(&self, val: &Val) -> String {
         match val {
             Val::Str(s) => (**s).to_owned(),
+            Val::Null => String::new(),
             _ => val.to_string(),
         }
     }
