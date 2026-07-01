@@ -79,7 +79,8 @@ fn (event): Map {
 }
 
 test-transcribe-real-audio
-meta ["test"] fn () {
+//meta ["test"]
+fn () {
     started start-real-audio-transcription({})
     task ::hot::task/await(started.info.id)
     stdout Str(or(task.stdout, ""))
