@@ -3,6 +3,7 @@
 api-request ::openai::api/request
 HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
+::file ::hot::file
 
 // Stop sequence(s): a single string or array of strings
 StopConfiguration type Any
@@ -787,10 +788,86 @@ CreateTranscriptionResponse type {
 }
 
 
+multipart-field fn (boundary: Str, name: Str, value: Str): Bytes {
+  Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
+}
+
+optional-multipart-field fn (boundary: Str, name: Str, value: Any): Bytes {
+  cond {
+    is-null(value) => { Bytes("") }
+    is-empty(Str(value)) => { Bytes("") }
+    => { multipart-field(boundary, name, Str(value)) }
+  }
+}
+
+optional-json-multipart-field fn (boundary: Str, name: Str, value: Any): Bytes {
+  cond {
+    is-null(value) => { Bytes("") }
+    => { multipart-field(boundary, name, to-json(untype(value))) }
+  }
+}
+
+repeated-multipart-field fn (boundary: Str, name: Str, values: Any): Bytes {
+  cond {
+    is-null(values) => { Bytes("") }
+    not(is-vec(values)) => { Bytes("") }
+    => {
+      reduce(values, (acc, value) {
+        concat(acc, multipart-field(boundary, `${name}[]`, Str(value)))
+      }, Bytes(""))
+    }
+  }
+}
+
+file-name-from-path fn (path: Str): Str {
+  candidate last(split(path, "/"))
+  if(is-blank(candidate), "audio.webm", candidate)
+}
+
+audio-file-mime-type fn (path: Str): Str {
+  lower lowercase(path)
+  cond {
+    ends-with(lower, ".mp3") => { "audio/mpeg" }
+    ends-with(lower, ".mp4") => { "audio/mp4" }
+    ends-with(lower, ".m4a") => { "audio/mp4" }
+    ends-with(lower, ".wav") => { "audio/wav" }
+    ends-with(lower, ".ogg") => { "audio/ogg" }
+    ends-with(lower, ".flac") => { "audio/flac" }
+    => { "audio/webm" }
+  }
+}
+
+multipart-file-field fn (boundary: Str, name: Str, path: Str): Bytes {
+  filename file-name-from-path(path)
+  mime-type audio-file-mime-type(path)
+  file-bytes ::file/read-file-bytes(path)
+  concat(
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${mime-type}\r\n\r\n`),
+    file-bytes,
+    Bytes("\r\n")
+  )
+}
+
+transcription-multipart-body fn (request: CreateTranscriptionRequest, boundary: Str): Bytes {
+  concat(
+    multipart-file-field(boundary, "file", request.file),
+    optional-multipart-field(boundary, "model", request.model),
+    optional-multipart-field(boundary, "language", request.language),
+    optional-multipart-field(boundary, "prompt", request.prompt),
+    optional-multipart-field(boundary, "response_format", request.response_format),
+    optional-multipart-field(boundary, "temperature", request.temperature),
+    optional-multipart-field(boundary, "stream", request.stream),
+    optional-json-multipart-field(boundary, "chunking_strategy", request.chunking_strategy),
+    repeated-multipart-field(boundary, "timestamp_granularities", request.timestamp_granularities),
+    repeated-multipart-field(boundary, "include", request.include),
+    Bytes(`--${boundary}--\r\n`)
+  )
+}
+
 create-transcription
 meta {
     doc: """
-    POST /audio/transcriptions - Transcribe audio to text using Whisper.
+    POST /audio/transcriptions - Transcribe audio to text using OpenAI.
 
     **Example**
 
@@ -803,8 +880,11 @@ meta {
     """
 }
 fn (request: CreateTranscriptionRequest): CreateTranscriptionResponse {
-  response api-request("POST", `${::openai/BASE_URL}/audio/transcriptions`, {}, request)
-  if(is-ok-response(response), CreateTranscriptionResponse(response.body), err(HttpError(response)))
+  boundary `hot-openai-${Uuid()}`
+  response api-request("POST", `${::openai/BASE_URL}/audio/transcriptions`, {
+    "Content-Type": `multipart/form-data; boundary=${boundary}`
+  }, transcription-multipart-body(request, boundary))
+  if(is-ok-response(response), CreateTranscriptionResponse({value: response.body}), err(HttpError(response)))
 }
 
 CreateTranslationRequest type {

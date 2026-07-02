@@ -1,0 +1,45 @@
+::openai::test::transcription ns
+meta ["test"]
+
+::create ::openai::create
+write-file-bytes ::hot::file/write-file-bytes
+
+test-transcription-multipart-body
+meta ["test"]
+fn () {
+    path `/tmp/openai-transcription-${Uuid()}.webm`
+    write-file-bytes(path, Bytes("fake-audio"))
+
+    body ::create/transcription-multipart-body(::create/CreateTranscriptionRequest({
+        file: path,
+        model: "gpt-4o-transcribe-diarize",
+        prompt: "transcribe this",
+        response_format: "verbose_json",
+        timestamp_granularities: ["segment"],
+    }), "test-boundary")
+    text Str(body)
+
+    assert(contains(text, "--test-boundary"), "includes multipart boundary")
+    assert(contains(text, "name=\"file\""), "includes file field")
+    assert(contains(text, "filename=\""), "includes filename")
+    assert(contains(text, "Content-Type: audio/webm"), "uses audio mime type")
+    assert(contains(text, "fake-audio"), "includes file bytes")
+    assert(contains(text, "name=\"model\""), "includes model field")
+    assert(contains(text, "gpt-4o-transcribe-diarize"), "includes model value")
+    assert(contains(text, "name=\"response_format\""), "includes response format")
+    assert(contains(text, "name=\"timestamp_granularities[]\""), "includes repeated timestamp field")
+    assert(ends-with(text, "--test-boundary--\r\n"), "closes multipart body")
+}
+
+test-transcription-response-wraps-raw-body
+meta ["test"]
+fn () {
+    response ::create/CreateTranscriptionResponse({
+        value: {
+            text: "hello",
+            segments: [],
+        },
+    })
+
+    assert-eq("hello", response.value.text)
+}

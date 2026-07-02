@@ -40,10 +40,9 @@ meta {
 ::box ::hot::box
 ::task ::hot::task
 
-// Default image — Alpine with ffmpeg installed at runtime.
-// Users can pass a custom image with ffmpeg pre-installed for faster execution.
-DEFAULT_IMAGE "alpine:3.21"
-INSTALL_CMD "apk add --no-cache ffmpeg > /dev/null 2>&1"
+// Pre-built Alpine image with ffmpeg + ffprobe (no runtime install step).
+// Users can pass a custom image via opts.image when needed.
+DEFAULT_IMAGE "jrottenberg/ffmpeg:7-alpine"
 
 // ============================================================================
 // Types
@@ -62,7 +61,7 @@ meta {
     - `quality` — Quality 1–31, lower is better (default: `2`)
     - `output` — Output `hot://` URL (default: auto-generated)
     - `extra-args` — Additional ffmpeg arguments
-    - `image` — Custom Docker image with ffmpeg (default: alpine + ffmpeg)
+    - `image` — Custom Docker image with ffmpeg (default: `jrottenberg/ffmpeg:7-alpine`)
     - `size` — Box size override (default: `"small"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
     """
@@ -160,7 +159,8 @@ meta {
     - `format` — Output format: `"jpg"`, `"png"`, `"webp"` (default: `"jpg"`)
     - `quality` — Quality 1-31, lower is better (default: `2`)
     - `output-prefix` — Output `hot://` directory/prefix (default: auto-generated)
-    - `extra-args` — Additional ffmpeg arguments
+    - `extra-args` — Additional ffmpeg arguments appended before the output pattern
+    - `keyframes-only` — When true, pass `-skip_frame nokey` before input so only decodable keyframes are extracted (default: `false`)
     - `image` — Custom Docker image with ffmpeg
     - `size` — Box size override (default: `"medium"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
@@ -176,6 +176,7 @@ type {
     quality: Int?,
     output-prefix: Str?,
     extra-args: Vec<Str>?,
+    keyframes-only: Bool?,
     image: Str?,
     size: Str?,
     timeout: Int?,
@@ -259,9 +260,13 @@ build-extract-frames-args
 meta {
     doc: "Build ffmpeg CLI arguments for multi-frame image extraction."
 }
-fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?): Vec<Str> {
+fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?, keyframes-only: Bool?): Vec<Str> {
     seek-args if(is-some(start), ["-ss", start], [])
-    base ["-y", ...seek-args, "-i", input-path]
+    input-args cond {
+        eq(keyframes-only, true) => { ["-skip_frame", "nokey"] }
+        => { [] }
+    }
+    base ["-y", ...seek-args, ...input-args, "-i", input-path]
     duration-args if(is-some(duration), ["-t", Str(duration)], [])
 
     scale cond {
@@ -279,7 +284,15 @@ fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?,
         => { "" }
     }
 
-    filter-args ["-vf", `fps=${fps}${scale}`]
+    filter-args cond {
+        eq(keyframes-only, true) => {
+            cond {
+                ne(scale, "") => { ["-vf", slice(scale, 1)] }
+                => { [] }
+            }
+        }
+        => { ["-vf", `fps=${fps}${scale}`] }
+    }
     quality-args ["-q:v", Str(quality)]
     extra or(extra-args, [])
     [...base, ...duration-args, ...filter-args, ...quality-args, ...extra, output-pattern]
@@ -331,10 +344,10 @@ join-args fn (args: Vec<Str>): Str {
 
 run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
-    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     info ::box/start({
         image: img,
-        script: full-script,
+        script: script,
+        entrypoint: [""],
         timeout: timeout,
         size: box-size,
     })
@@ -343,10 +356,10 @@ run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
 
 start-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
-    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     ::box/start({
         image: img,
-        script: full-script,
+        script: script,
+        entrypoint: [""],
         timeout: timeout,
         size: box-size,
     })
@@ -532,7 +545,8 @@ fn (input: Str): Map {
         opts.width,
         opts.height,
         quality,
-        opts.extra-args
+        opts.extra-args,
+        opts.keyframes-only,
     ))
     script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
 
@@ -783,7 +797,8 @@ fn (input: Str): Map {
         opts.width,
         opts.height,
         quality,
-        opts.extra-args
+        opts.extra-args,
+        opts.keyframes-only,
     ))
     script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
 
