@@ -142,7 +142,7 @@ pub(crate) async fn run_run(
 
     let emitter = if has_emitter_config {
         if let Some(ref pool) = db_pool {
-            create_emitter(conf, pool.as_ref()).ok().flatten()
+            create_emitter(conf, pool.as_ref()).await.ok().flatten()
         } else {
             None
         }
@@ -157,7 +157,10 @@ pub(crate) async fn run_run(
 
     let event_publisher = if has_queue_config {
         if let Some(ref pool) = db_pool {
-            create_event_publisher(conf, pool.as_ref()).ok().flatten()
+            create_event_publisher(conf, pool.as_ref())
+                .await
+                .ok()
+                .flatten()
         } else {
             None
         }

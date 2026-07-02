@@ -1,4 +1,5 @@
 use super::{Event, EventPublisher, ExecutionContext};
+use crate::blob::{BlobScope, BlobStore, SpillSource};
 use crate::db::DatabasePool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,16 @@ impl DatabaseEventPublisher {
     /// Create a new DatabaseEventPublisher with an existing database pool (preferred)
     /// This ensures the database connection is ready before events are published
     pub fn new_with_pool(db_pool: DatabasePool) -> Self {
+        Self::new_with_pool_and_blob_store(db_pool, None)
+    }
+
+    /// Like [`Self::new_with_pool`], but with an optional blob store used to
+    /// spill large event payload leaves to content-addressed storage before
+    /// the event row insert.
+    pub fn new_with_pool_and_blob_store(
+        db_pool: DatabasePool,
+        blob_store: Option<Arc<BlobStore>>,
+    ) -> Self {
         let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<EventWrite>();
         let (shutdown_sender, mut shutdown_receiver) =
             mpsc::unbounded_channel::<oneshot::Sender<()>>();
@@ -30,6 +41,7 @@ impl DatabaseEventPublisher {
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
                 db: db_for_processor,
+                blob_store,
             };
 
             loop {
@@ -110,6 +122,7 @@ impl DatabaseEventPublisher {
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
                 db: db_for_processor,
+                blob_store: None,
             };
 
             loop {
@@ -178,6 +191,9 @@ impl DatabaseEventPublisher {
 
 struct DatabaseEventProcessor {
     db: Arc<RwLock<Option<DatabasePool>>>,
+    /// When present, large event payload leaves are spilled to blob storage
+    /// before the event row insert.
+    blob_store: Option<Arc<BlobStore>>,
 }
 
 impl DatabaseEventProcessor {
@@ -207,7 +223,35 @@ impl DatabaseEventProcessor {
                 "Missing user_id in ExecutionContext - cannot publish event".to_string()
             })?;
 
-            let event_data = serde_json::to_value(&event.event_data)
+            // Spill large payload leaves before serialization. Event data is
+            // executable payload: fail closed on spill errors rather than
+            // silently persisting a partially-spilled value.
+            let event_data_val = match (&self.blob_store, ctx.org_id) {
+                (Some(store), Some(org_id))
+                    if store.config().spill_enabled_for(SpillSource::EventData)
+                        && crate::blob::estimate_val_size(&event.event_data)
+                            >= store.config().spill_threshold_bytes =>
+                {
+                    let scope = BlobScope {
+                        org_id,
+                        env_id: ctx.env_id,
+                        run_id: Some(ctx.run_id),
+                    };
+                    let source_id = event.event_id.to_string();
+                    store
+                        .spill_large_val(
+                            event.event_data.clone(),
+                            scope,
+                            SpillSource::EventData,
+                            Some(&source_id),
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to spill event data to blob storage: {}", e))?
+                }
+                _ => event.event_data.clone(),
+            };
+
+            let event_data = serde_json::to_value(&event_data_val)
                 .map_err(|e| format!("Failed to serialize event data: {}", e))?;
 
             crate::db::event::Event::insert_event(
@@ -340,5 +384,76 @@ mod tests {
 
         // This should not panic
         publisher.publish(&ctx, event);
+    }
+
+    #[tokio::test]
+    async fn test_event_publisher_spills_large_event_data() {
+        let db = Arc::new(crate::db::test_db().await);
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(crate::file_storage::LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let blob_store = Arc::new(BlobStore::new(
+            db.clone(),
+            storage,
+            crate::blob::BlobConfig {
+                mode: crate::blob::BlobMode::Service,
+                spill_threshold_bytes: 1024,
+                spill_events: true,
+                ..Default::default()
+            },
+        ));
+
+        let processor = DatabaseEventProcessor {
+            db: Arc::new(RwLock::new(Some((*db).clone()))),
+            blob_store: Some(blob_store.clone()),
+        };
+
+        let payload = "e".repeat(4096);
+        let event = Event::new(
+            data.env_id,
+            data.stream_id,
+            "test_event".to_string(),
+            crate::val!({"body": payload.clone()}),
+        );
+        let event_id = event.event_id;
+        let ctx = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            crate::db::run::RunType::Run.as_id(),
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+
+        processor.insert_event(&ctx, &event).await.unwrap();
+
+        // The stored row holds a compact BlobRef, not the large payload.
+        let stored = crate::db::event::Event::get_event(&db, &event_id)
+            .await
+            .unwrap();
+        let stored_val: crate::val::Val =
+            serde_json::from_value(stored.event_data.clone()).unwrap();
+        assert!(crate::blob::contains_blob_ref(&stored_val));
+        assert!(stored.event_data.to_string().len() < 1024);
+
+        // Rehydration restores the original data.
+        let scope = BlobScope {
+            org_id: data.org_id,
+            env_id: Some(data.env_id),
+            run_id: None,
+        };
+        let rehydrated = blob_store
+            .rehydrate_blob_refs(
+                stored_val,
+                scope,
+                crate::blob::RehydrateBudget::from_config(blob_store.config()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rehydrated.get_str("body"), payload);
     }
 }

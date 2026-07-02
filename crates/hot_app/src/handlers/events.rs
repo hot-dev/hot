@@ -17,6 +17,7 @@ const EVENTS_PER_PAGE: i64 = 10;
 
 pub async fn events_list_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     Query(params): Query<AHashMap<String, String>>,
     headers: HeaderMap,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
@@ -41,7 +42,7 @@ pub async fn events_list_handler(
     let search_term = query_filters.search_term();
 
     // Get events for current environment
-    let (events, total_events) = if let Some(env) = &session.current_env {
+    let (mut events, total_events) = if let Some(env) = &session.current_env {
         let events = hot::db::Event::get_events_by_env_filtered(
             &db,
             &env.env_id,
@@ -82,7 +83,8 @@ pub async fn events_list_handler(
 
     let pagination = list_query::PaginationWindow::new(total_events, &page);
 
-    // Convert events to display format with timezone-aware formatting
+    // Rehydrate spilled event data, then convert events to display format
+    crate::handlers::rehydrate_events_for_display(blob_store.as_ref(), &session, &mut events).await;
     let events_display: Vec<templates::EventListItem> = events
         .iter()
         .map(|event| {
@@ -135,6 +137,7 @@ pub async fn events_detail_handler(
     Path(event_id): Path<Uuid>,
     Query(params): Query<AHashMap<String, String>>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Get current env_id for access check
@@ -149,13 +152,20 @@ pub async fn events_detail_handler(
 
     // Get event details
     match hot::db::Event::get_event(&db, &event_id).await {
-        Ok(event) => {
+        Ok(mut event) => {
             // SECURITY: Verify the event belongs to the current environment
             if event.env_id != env_id {
                 return Redirect::to("/events").into_response();
             }
+            // Rehydrate spilled event data before display
+            crate::handlers::rehydrate_json_for_session(
+                blob_store.as_ref(),
+                &session,
+                &mut event.event_data,
+            )
+            .await;
             // Get event runs
-            let event_runs_raw = hot::db::Event::get_runs_by_event(
+            let mut event_runs_raw = hot::db::Event::get_runs_by_event(
                 &db,
                 &event_id,
                 Some(EVENTS_PER_PAGE),
@@ -166,6 +176,12 @@ pub async fn events_detail_handler(
                 tracing::error!("Failed to get runs by event {}: {}", event_id, e);
                 Vec::new()
             });
+            crate::handlers::rehydrate_runs_for_display(
+                blob_store.as_ref(),
+                &session,
+                &mut event_runs_raw,
+            )
+            .await;
 
             // Convert runs to RunDisplay format for consistent formatting
             let event_runs: Vec<templates::RunDisplay> = event_runs_raw
@@ -301,6 +317,7 @@ pub async fn event_detail_table_handler(
     Path(event_id): Path<Uuid>,
     Query(params): Query<AHashMap<String, String>>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Get current env_id for access check
@@ -326,13 +343,15 @@ pub async fn event_detail_table_handler(
     let page = list_query::PageParams::parse(&params, EVENTS_PER_PAGE);
 
     // Get event runs
-    let event_runs_raw =
+    let mut event_runs_raw =
         hot::db::Event::get_runs_by_event(&db, &event_id, Some(EVENTS_PER_PAGE), Some(page.offset))
             .await
             .unwrap_or_else(|e| {
                 tracing::error!("Failed to get runs by event {} for table: {}", event_id, e);
                 Vec::new()
             });
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut event_runs_raw)
+        .await;
 
     // Convert runs to RunDisplay format for consistent formatting
     let event_runs: Vec<templates::RunDisplay> = event_runs_raw
@@ -378,6 +397,7 @@ pub async fn event_detail_table_handler(
 pub async fn event_json_handler(
     Path(event_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Get current env_id for access check
@@ -391,13 +411,20 @@ pub async fn event_json_handler(
     };
 
     match hot::db::Event::get_event(&db, &event_id).await {
-        Ok(event) => {
+        Ok(mut event) => {
             // SECURITY: Verify the event belongs to the current environment
             if event.env_id != env_id {
                 return Json(json!({
                     "error": "Event not found"
                 }));
             }
+
+            crate::handlers::rehydrate_json_for_session(
+                blob_store.as_ref(),
+                &session,
+                &mut event.event_data,
+            )
+            .await;
 
             Json(json!({
                 "event_id": event.event_id,

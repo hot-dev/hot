@@ -67,6 +67,32 @@ pub(crate) fn get_file_resolved_conf(
     conf.set_str("mode", Some(resolved_mode.to_string()), "")
 }
 
+/// Resolve `blob.mode` ("service" | "disabled"), mirroring `file.mode`.
+///
+/// Unlike emitter/queue resolution, this keys off plain `in_project` rather
+/// than `in_project_runtime`: read-side servers (`hot api`, `hot app`) are not
+/// runtime commands but still need service mode to rehydrate BlobRefs and
+/// serve blob downloads, and they only construct a BlobStore when a database
+/// is actually configured.
+///
+/// - Managed/cloud runtimes default to "service" (blob spill matters most
+///   there), but an explicit user value is honored since disabling blobs is a
+///   feature toggle, not an isolation boundary like `file.mode`.
+/// - Local in-project defaults to "service"; ad hoc out-of-project runs
+///   default to "disabled" (no project database to track blob objects).
+pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtime: bool) -> Val {
+    let mode = conf.get_str_or_default("mode", "");
+    let resolved_mode = if !mode.is_empty() {
+        mode.as_str()
+    } else if managed_runtime || in_project {
+        "service"
+    } else {
+        "disabled"
+    };
+
+    conf.set_str("mode", Some(resolved_mode.to_string()), "")
+}
+
 // Helper function to convert environment variable name to dot notation conf key
 fn env_var_to_conf_key(env_var: &str) -> String {
     env_var
@@ -954,6 +980,12 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
     let resolved_file_conf = get_file_resolved_conf(file_conf_from_user, true, false);
     conf = conf.set("file", resolved_file_conf);
 
+    // Apply blob defaults in project context after init ("service" unless the
+    // user explicitly set blob.mode).
+    let blob_conf_from_user = conf.get("blob").unwrap_or_else(Val::map_empty);
+    let resolved_blob_conf = get_blob_resolved_conf(blob_conf_from_user, true, false);
+    conf = conf.set("blob", resolved_blob_conf);
+
     Ok(preserve_runtime_overrides_after_init(conf, base_conf))
 }
 
@@ -978,7 +1010,13 @@ fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val 
         }
     }
 
-    for path in ["redis.uri", "queue.type", "serialization.type", "file.mode"] {
+    for path in [
+        "redis.uri",
+        "queue.type",
+        "serialization.type",
+        "file.mode",
+        "blob.mode",
+    ] {
         let value = base_conf.get_str(path);
         if !value.is_empty() && value != "null" {
             conf = conf.set_str(path, Some(value), "");
@@ -1387,7 +1425,7 @@ fn is_sensitive_config_path(path: &str) -> bool {
         || last_segment.ends_with("_password")
 }
 
-pub(crate) fn create_emitter(
+pub(crate) async fn create_emitter(
     conf: &Val,
     db_pool: &hot::db::DatabasePool,
 ) -> Result<Option<std::sync::Arc<dyn EngineEventEmitter>>, String> {
@@ -1429,8 +1467,13 @@ pub(crate) fn create_emitter(
         "db" => {
             // Use existing database pool instead of creating a new one
             // Note: stream_data is no longer persisted to DB - delivered via Redis Streams only
+            let blob_store =
+                hot::blob::blob_store_from_conf(std::sync::Arc::new(db_pool.clone()), conf).await;
             let db_emitter =
-                hot::lang::emitter::DatabaseEngineEventEmitter::new_with_pool(db_pool.clone());
+                hot::lang::emitter::DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+                    db_pool.clone(),
+                    blob_store,
+                );
             let filtered_emitter =
                 hot::lang::emitter::FilteredEmitter::new(db_emitter, filter_conf.as_ref())?;
             Ok(Some(std::sync::Arc::new(filtered_emitter)))
@@ -1442,7 +1485,7 @@ pub(crate) fn create_emitter(
     }
 }
 
-pub(crate) fn create_event_publisher(
+pub(crate) async fn create_event_publisher(
     conf: &Val,
     db_pool: &hot::db::DatabasePool,
 ) -> Result<Option<std::sync::Arc<dyn hot::lang::event::EventPublisher>>, String> {
@@ -1475,8 +1518,12 @@ pub(crate) fn create_event_publisher(
     let serialization = Serialization::from_str(&serialization_str).unwrap_or_default();
 
     // Create database publisher with existing pool (ensures connection is ready)
-    let database_publisher =
-        hot::lang::event::DatabaseEventPublisher::new_with_pool(db_pool.clone());
+    let blob_store =
+        hot::blob::blob_store_from_conf(std::sync::Arc::new(db_pool.clone()), conf).await;
+    let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool_and_blob_store(
+        db_pool.clone(),
+        blob_store,
+    );
 
     // Create queue publisher with extracted configuration (including cluster support)
     let queue_publisher = hot::lang::event::QueueEventPublisher::new_with_cluster(
@@ -1626,6 +1673,36 @@ mod tests {
         let conf = get_file_resolved_conf(val!({"mode": "direct"}), true, true);
 
         assert_eq!(conf.get_str("mode"), "service");
+    }
+
+    #[test]
+    fn test_blob_mode_defaults_to_disabled_out_of_project() {
+        let conf = get_blob_resolved_conf(val!({"mode": ""}), false, false);
+
+        assert_eq!(conf.get_str("mode"), "disabled");
+    }
+
+    #[test]
+    fn test_blob_mode_defaults_to_service_in_project() {
+        let conf = get_blob_resolved_conf(val!({"mode": ""}), true, false);
+
+        assert_eq!(conf.get_str("mode"), "service");
+    }
+
+    #[test]
+    fn test_blob_mode_defaults_to_service_in_managed_runtime() {
+        let conf = get_blob_resolved_conf(val!({"mode": ""}), false, true);
+
+        assert_eq!(conf.get_str("mode"), "service");
+    }
+
+    #[test]
+    fn test_blob_mode_honors_explicit_disabled_everywhere() {
+        let local = get_blob_resolved_conf(val!({"mode": "disabled"}), true, false);
+        let managed = get_blob_resolved_conf(val!({"mode": "disabled"}), true, true);
+
+        assert_eq!(local.get_str("mode"), "disabled");
+        assert_eq!(managed.get_str("mode"), "disabled");
     }
 
     #[test]

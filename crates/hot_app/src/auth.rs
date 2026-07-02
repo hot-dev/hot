@@ -23,6 +23,9 @@ pub struct AppState {
     pub db: Arc<DatabasePool>,
     pub conf: Val,
     pub stream_pubsub: Option<Arc<StreamPubSub>>,
+    /// Blob store for rehydrating spilled payloads before display.
+    /// None when blob.mode is "disabled".
+    pub blob_store: Option<Arc<hot::blob::BlobStore>>,
     /// Shutdown signal receiver - becomes true when server is shutting down
     /// Used by SSE handlers to cleanly terminate long-lived connections
     pub shutdown_rx: watch::Receiver<bool>,
@@ -34,12 +37,18 @@ impl AppState {
             db,
             conf,
             stream_pubsub: None,
+            blob_store: None,
             shutdown_rx,
         }
     }
 
     pub fn with_stream_pubsub(mut self, pubsub: Option<Arc<StreamPubSub>>) -> Self {
         self.stream_pubsub = pubsub;
+        self
+    }
+
+    pub fn with_blob_store(mut self, blob_store: Option<Arc<hot::blob::BlobStore>>) -> Self {
+        self.blob_store = blob_store;
         self
     }
 }
@@ -55,6 +64,14 @@ impl axum::extract::FromRef<AppState> for Arc<DatabasePool> {
 impl axum::extract::FromRef<AppState> for Val {
     fn from_ref(state: &AppState) -> Self {
         state.conf.clone()
+    }
+}
+
+// Allow extracting the optional blob store for handlers that rehydrate
+// spilled payloads before display
+impl axum::extract::FromRef<AppState> for Option<Arc<hot::blob::BlobStore>> {
+    fn from_ref(state: &AppState) -> Self {
+        state.blob_store.clone()
     }
 }
 

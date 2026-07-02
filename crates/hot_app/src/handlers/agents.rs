@@ -673,6 +673,7 @@ pub async fn agents_list_handler(
 
 pub async fn agents_detail_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     Path(url_path): Path<String>,
     Query(params): Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
@@ -738,7 +739,7 @@ pub async fn agents_detail_handler(
     let handler_count = handler_displays.len() as i64;
 
     // Runs (paginated, filtered by agent_type)
-    let runs = hot::db::Run::get_runs_by_agent_type(
+    let mut runs = hot::db::Run::get_runs_by_agent_type(
         &db,
         &env_id,
         &qualified_name,
@@ -747,6 +748,7 @@ pub async fn agents_detail_handler(
     )
     .await
     .unwrap_or_default();
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut runs).await;
 
     let runs_total = hot::db::Run::get_count_by_agent_type(&db, &env_id, &qualified_name)
         .await

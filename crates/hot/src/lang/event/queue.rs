@@ -252,6 +252,7 @@ impl MaintenanceMessage {
                     "queue_cleanup".to_string(),
                     "zombie_run_cleanup".to_string(),
                     "call_retention_cleanup".to_string(),
+                    "blob_cleanup".to_string(),
                 ],
             },
         }

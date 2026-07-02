@@ -1,6 +1,7 @@
 use super::database_writer::{DatabaseWrite, DatabaseWriter};
 use super::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use super::{EngineEvent, EngineEventEmitter};
+use crate::blob::{BlobScope, BlobStore, SpillSource};
 use crate::db::DatabasePool;
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
@@ -36,6 +37,9 @@ pub struct DatabaseEngineEventEmitter {
 struct DatabaseEngineEventEmitterProcessor {
     writer: DatabaseWriter,
     pending_calls: IndexMap<(Uuid, Uuid), CallEngineEventBatch>,
+    /// When present, large call/run payload leaves are spilled to blob storage
+    /// (after secret masking) before JSON serialization.
+    blob_store: Option<Arc<BlobStore>>,
 }
 
 struct ProcessorFlushRequest {
@@ -72,6 +76,16 @@ impl DatabaseEngineEventEmitter {
     /// Creates a new DatabaseEngineEventEmitter with an existing database pool (preferred)
     /// This ensures the database connection is ready before events are processed
     pub fn new_with_pool(db_pool: DatabasePool) -> Self {
+        Self::new_with_pool_and_blob_store(db_pool, None)
+    }
+
+    /// Like [`Self::new_with_pool`], but with an optional blob store used to
+    /// spill large call/run payloads to content-addressed storage before they
+    /// are serialized into JSON/JSONB columns.
+    pub fn new_with_pool_and_blob_store(
+        db_pool: DatabasePool,
+        blob_store: Option<Arc<BlobStore>>,
+    ) -> Self {
         let db = Arc::new(RwLock::new(Some(db_pool)));
 
         // Create the dedicated database writer
@@ -92,6 +106,7 @@ impl DatabaseEngineEventEmitter {
             let mut processor = DatabaseEngineEventEmitterProcessor {
                 writer: writer_for_processor,
                 pending_calls: IndexMap::new(),
+                blob_store,
             };
 
             let mut flush_timer = interval(BATCH_INTERVAL);
@@ -102,9 +117,9 @@ impl DatabaseEngineEventEmitter {
                     // Process incoming events
                     event = event_receiver.recv() => {
                         match event {
-                            Some(evt) => processor.process_event(evt),
+                            Some(evt) => processor.process_event(evt).await,
                             None => {
-                                processor.flush_all();
+                                processor.flush_all().await;
                                 if let Err(e) = processor.writer.shutdown().await {
                                     tracing::debug!("DatabaseEngineEventEmitter: Writer shutdown on channel close: {}", e);
                                 }
@@ -114,16 +129,16 @@ impl DatabaseEngineEventEmitter {
                     }
                     // Flush batched events every 500ms
                     _ = flush_timer.tick() => {
-                        processor.flush_all();
+                        processor.flush_all().await;
                     }
                     // Handle explicit flush requests by draining queued events
                     // before waiting on the writer.
                     flush_request = flush_receiver.recv() => {
                         if let Some(request) = flush_request {
                             while let Ok(evt) = event_receiver.try_recv() {
-                                processor.process_event(evt);
+                                processor.process_event(evt).await;
                             }
-                            processor.flush_all();
+                            processor.flush_all().await;
                             let result = match request.run_id {
                                 Some(run_id) => processor.writer.flush_run(run_id).await,
                                 None => processor.writer.flush_async().await,
@@ -136,11 +151,11 @@ impl DatabaseEngineEventEmitter {
                         if let Some(sender) = completion_sender {
                             // Process any remaining events
                             while let Ok(evt) = event_receiver.try_recv() {
-                                processor.process_event(evt);
+                                processor.process_event(evt).await;
                             }
 
                             // Final flush
-                            processor.flush_all();
+                            processor.flush_all().await;
 
                             // Shutdown the writer and wait for completion
                             if let Err(e) = processor.writer.shutdown().await {
@@ -206,6 +221,7 @@ impl DatabaseEngineEventEmitter {
             let mut processor = DatabaseEngineEventEmitterProcessor {
                 writer: writer_for_processor,
                 pending_calls: IndexMap::new(),
+                blob_store: None,
             };
 
             let mut flush_timer = interval(BATCH_INTERVAL);
@@ -216,9 +232,9 @@ impl DatabaseEngineEventEmitter {
                     // Process incoming events
                     event = event_receiver.recv() => {
                         match event {
-                            Some(evt) => processor.process_event(evt),
+                            Some(evt) => processor.process_event(evt).await,
                             None => {
-                                processor.flush_all();
+                                processor.flush_all().await;
                                 if let Err(e) = processor.writer.shutdown().await {
                                     tracing::debug!("DatabaseEngineEventEmitter: Writer shutdown on channel close: {}", e);
                                 }
@@ -228,16 +244,16 @@ impl DatabaseEngineEventEmitter {
                     }
                     // Flush batched events every 500ms
                     _ = flush_timer.tick() => {
-                        processor.flush_all();
+                        processor.flush_all().await;
                     }
                     // Handle explicit flush requests by draining queued events
                     // before waiting on the writer.
                     flush_request = flush_receiver.recv() => {
                         if let Some(request) = flush_request {
                             while let Ok(evt) = event_receiver.try_recv() {
-                                processor.process_event(evt);
+                                processor.process_event(evt).await;
                             }
-                            processor.flush_all();
+                            processor.flush_all().await;
                             let result = match request.run_id {
                                 Some(run_id) => processor.writer.flush_run(run_id).await,
                                 None => processor.writer.flush_async().await,
@@ -250,11 +266,11 @@ impl DatabaseEngineEventEmitter {
                         if let Some(sender) = completion_sender {
                             // Process any remaining events
                             while let Ok(evt) = event_receiver.try_recv() {
-                                processor.process_event(evt);
+                                processor.process_event(evt).await;
                             }
 
                             // Final flush
-                            processor.flush_all();
+                            processor.flush_all().await;
 
                             // Shutdown the writer and wait for completion
                             if let Err(e) = processor.writer.shutdown().await {
@@ -317,7 +333,7 @@ impl DatabaseEngineEventEmitter {
 
 impl DatabaseEngineEventEmitterProcessor {
     /// Process a single event - sends critical events immediately, batches others
-    fn process_event(&mut self, event: EngineEvent) {
+    async fn process_event(&mut self, event: EngineEvent) {
         match event.event_type.as_str() {
             "run:start" => {
                 // Critical - send immediately to writer
@@ -341,6 +357,10 @@ impl DatabaseEngineEventEmitterProcessor {
                 } else {
                     Val::Null
                 };
+                // Spill AFTER masking so secret bytes never reach blob storage
+                let result = self
+                    .maybe_spill_run_val(result, &event.execution_context, SpillSource::RunResult)
+                    .await;
                 self.writer.write(DatabaseWrite::RunStop {
                     run_id: event.execution_context.run_id,
                     event_time: event.event_time,
@@ -358,6 +378,9 @@ impl DatabaseEngineEventEmitterProcessor {
                 } else {
                     Val::Null
                 };
+                let failure = self
+                    .maybe_spill_run_val(failure, &event.execution_context, SpillSource::RunFailure)
+                    .await;
                 self.writer.write(DatabaseWrite::RunFail {
                     run_id: event.execution_context.run_id,
                     event_time: event.event_time,
@@ -375,6 +398,13 @@ impl DatabaseEngineEventEmitterProcessor {
                 } else {
                     Val::Null
                 };
+                let cancellation = self
+                    .maybe_spill_run_val(
+                        cancellation,
+                        &event.execution_context,
+                        SpillSource::RunFailure,
+                    )
+                    .await;
                 self.writer.write(DatabaseWrite::RunCancel {
                     run_id: event.execution_context.run_id,
                     event_time: event.event_time,
@@ -393,15 +423,118 @@ impl DatabaseEngineEventEmitterProcessor {
         }
     }
 
+    /// Spill large leaves of an already-masked run value to blob storage.
+    /// Observability path: on spill failure, fall back to the inline value.
+    async fn maybe_spill_run_val(
+        &self,
+        val: Val,
+        ctx: &ExecutionContext,
+        source: SpillSource,
+    ) -> Val {
+        let Some(store) = &self.blob_store else {
+            return val;
+        };
+        if !store.config().spill_enabled_for(source) {
+            return val;
+        }
+        let Some(org_id) = ctx.org_id else {
+            return val;
+        };
+        if crate::blob::estimate_val_size(&val) < store.config().spill_threshold_bytes {
+            return val;
+        }
+        let scope = BlobScope {
+            org_id,
+            env_id: ctx.env_id,
+            run_id: Some(ctx.run_id),
+        };
+        let source_id = ctx.run_id.to_string();
+        match store
+            .spill_large_val(val.clone(), scope, source, Some(&source_id))
+            .await
+        {
+            Ok(spilled) => spilled,
+            Err(e) => {
+                tracing::warn!(
+                    run_id = %ctx.run_id,
+                    source = source.as_str(),
+                    error = %e,
+                    "blob spill failed for run value; storing inline"
+                );
+                val
+            }
+        }
+    }
+
+    /// Mask secrets and then spill large leaves in a serialized call payload.
+    /// Masking MUST precede spill so secret bytes never reach blob storage.
+    /// Observability path: on spill failure, fall back to the masked inline
+    /// JSON.
+    async fn finalize_call_payload(
+        blob_store: &Option<Arc<BlobStore>>,
+        json_value: Option<String>,
+        secret_value_hashes: &AHashSet<u64>,
+        ctx: &ExecutionContext,
+        source: SpillSource,
+        source_id: &str,
+    ) -> Option<String> {
+        let masked = Self::maybe_mask_secret_value(json_value, secret_value_hashes);
+
+        let Some(store) = blob_store else {
+            return masked;
+        };
+        let masked = masked?;
+        if !store.config().spill_enabled_for(source)
+            || masked.len() < store.config().spill_threshold_bytes
+        {
+            return Some(masked);
+        }
+        let Some(org_id) = ctx.org_id else {
+            return Some(masked);
+        };
+        let Ok(val) = serde_json::from_str::<Val>(&masked) else {
+            return Some(masked);
+        };
+        let scope = BlobScope {
+            org_id,
+            env_id: ctx.env_id,
+            run_id: Some(ctx.run_id),
+        };
+        match store
+            .spill_large_val(val, scope, source, Some(source_id))
+            .await
+        {
+            Ok(spilled) => match serde_json::to_string(&spilled) {
+                Ok(json) => Some(sanitize_json_for_jsonb(&json).into_owned()),
+                Err(_) => Some(masked),
+            },
+            Err(e) => {
+                tracing::warn!(
+                    source = source.as_str(),
+                    source_id,
+                    error = %e,
+                    "blob spill failed for call payload; storing inline"
+                );
+                Some(masked)
+            }
+        }
+    }
+
     /// Flush all pending batched events
-    fn flush_all(&mut self) {
-        self.flush_pending_calls();
+    async fn flush_all(&mut self) {
+        self.flush_pending_calls().await;
     }
 
     /// Flush all pending call events
     /// Uses UPSERT to handle INSERT (on start) and UPDATE (on stop) seamlessly
     /// Sorts by call_depth to ensure parent calls are written before children
-    fn flush_pending_calls(&mut self) {
+    ///
+    /// Spill happens here (not at batch-insert time) on purpose: secret value
+    /// hashes are only complete after `call:stop` merges them into the batch's
+    /// execution context, and masking must precede spill so secret bytes never
+    /// reach blob storage. Payloads therefore sit inline in `pending_calls`
+    /// for at most one BATCH_INTERVAL before being spilled.
+    async fn flush_pending_calls(&mut self) {
         let pending = std::mem::take(&mut self.pending_calls);
 
         // CRITICAL: Sort calls by call_depth to ensure parent calls are written before children
@@ -410,17 +543,38 @@ impl DatabaseEngineEventEmitterProcessor {
         sorted_batches.sort_by_key(|batch| batch.call_depth);
 
         for batch in sorted_batches {
-            // Mask args that contain known secret values (deep scan)
-            let args = Self::maybe_mask_secret_value(
+            let call_id_str = batch.call_id.to_string();
+
+            // Mask secrets, then spill large leaves (mask-before-spill)
+            let args = Self::finalize_call_payload(
+                &self.blob_store,
                 batch.args,
                 &batch.execution_context.secret_value_hashes,
-            );
+                &batch.execution_context,
+                SpillSource::CallArgs,
+                &call_id_str,
+            )
+            .await;
 
-            // Mask return values that contain known secret values (deep scan)
-            let return_value = Self::maybe_mask_secret_value(
+            let return_value = Self::finalize_call_payload(
+                &self.blob_store,
                 batch.return_value,
                 &batch.execution_context.secret_value_hashes,
-            );
+                &batch.execution_context,
+                SpillSource::CallReturn,
+                &call_id_str,
+            )
+            .await;
+
+            let flow = Self::finalize_call_payload(
+                &self.blob_store,
+                batch.flow,
+                &batch.execution_context.secret_value_hashes,
+                &batch.execution_context,
+                SpillSource::CallFlow,
+                &call_id_str,
+            )
+            .await;
 
             self.writer.write(DatabaseWrite::Call {
                 execution_context: Box::new(batch.execution_context),
@@ -433,7 +587,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 args,
                 return_value,
                 error: batch.error,
-                flow: batch.flow,
+                flow,
                 file: batch.file,
                 line: batch.line,
                 column: batch.column,
@@ -954,5 +1108,252 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&args).unwrap();
         assert_eq!(parsed[0], false);
+    }
+
+    fn test_blob_store(
+        db: &crate::db::DatabasePool,
+        spill_runs: bool,
+    ) -> (Arc<crate::blob::BlobStore>, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(crate::file_storage::LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let config = crate::blob::BlobConfig {
+            mode: crate::blob::BlobMode::Service,
+            spill_threshold_bytes: 1024,
+            spill_runs,
+            ..crate::blob::BlobConfig::default()
+        };
+        (
+            Arc::new(crate::blob::BlobStore::new(
+                Arc::new(db.clone()),
+                storage,
+                config,
+            )),
+            temp_dir,
+        )
+    }
+
+    fn execution_context_with_org() -> ExecutionContext {
+        ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            crate::db::run::RunType::Run.as_id(),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            // run.build_id is NOT NULL; without it INSERT OR IGNORE drops the row
+            Some(Uuid::now_v7()),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_database_emitter_spills_large_call_args_to_blob() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db, false);
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
+        let execution_context = execution_context_with_org();
+        let call_id = Uuid::now_v7();
+        let big_bytes = vec![7u8; 8192];
+
+        emitter.emit(EngineEvent::call_start(
+            &execution_context,
+            call_id,
+            None,
+            "::hot::test/big".to_string(),
+            "::hot::test/big".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![Val::Bytes(big_bytes.clone())],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::call_stop(
+            &execution_context,
+            call_id,
+            Some(Val::from("ok")),
+            None,
+            chrono::Utc::now(),
+            10,
+        ));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db.clone() else {
+            panic!("test_db should return SQLite");
+        };
+        let args: String = sqlx::query("SELECT args FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("args");
+
+        // The stored JSON must be a compact BlobRef, not an inline byte array.
+        assert!(args.contains("::hot::blob/BlobRef"), "args: {}", args);
+        assert!(
+            args.len() < 4096,
+            "args should be compact, got {} bytes",
+            args.len()
+        );
+
+        // The blob must round-trip through rehydration in the correct scope.
+        let (blob_store2, _tmp2) = (
+            // Rebuild a store over the same db to parse and verify records
+            crate::db::blob::get_object_by_hash(
+                &db,
+                execution_context.org_id.unwrap(),
+                execution_context.env_id,
+                "blake3",
+                blake3::hash(&big_bytes).to_hex().as_ref(),
+            )
+            .await
+            .unwrap(),
+            (),
+        );
+        let object = blob_store2.expect("blob object should exist for spilled bytes");
+        assert_eq!(object.size, big_bytes.len() as i64);
+        assert_eq!(object.status, "available");
+    }
+
+    #[tokio::test]
+    async fn test_database_emitter_spills_large_run_result_when_enabled() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db, true);
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
+        let execution_context = execution_context_with_org();
+
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(
+            &execution_context,
+            Val::Bytes(vec![9u8; 8192]),
+        ));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "expected exactly one run row");
+        let result: String = sqlx::query("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("result");
+
+        assert!(result.contains("::hot::blob/BlobRef"), "result: {}", result);
+        assert!(result.len() < 4096);
+    }
+
+    #[tokio::test]
+    async fn test_database_emitter_run_result_inline_when_run_spill_disabled() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db, false);
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
+        let execution_context = execution_context_with_org();
+
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(
+            &execution_context,
+            Val::Bytes(vec![9u8; 8192]),
+        ));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let result: String = sqlx::query("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("result");
+
+        // Gated off: result stays inline.
+        assert!(!result.contains("::hot::blob/BlobRef"));
+    }
+
+    #[tokio::test]
+    async fn test_database_emitter_masks_secrets_before_spill() {
+        let db = crate::db::test_db().await;
+        let (blob_store, tmp) = test_blob_store(&db, false);
+        let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+            db.clone(),
+            Some(blob_store.clone()),
+        );
+        let mut execution_context = execution_context_with_org();
+
+        // Register a large string as a secret.
+        let secret_text = "s".repeat(4096);
+        let secret_val = Val::from(secret_text.clone());
+        {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            secret_val.hash(&mut hasher);
+            execution_context
+                .secret_value_hashes
+                .insert(hasher.finish());
+        }
+
+        let call_id = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            &execution_context,
+            call_id,
+            None,
+            "::hot::test/secret".to_string(),
+            "::hot::test/secret".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![secret_val],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::call_stop(
+            &execution_context,
+            call_id,
+            Some(Val::from("ok")),
+            None,
+            chrono::Utc::now(),
+            10,
+        ));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db.clone() else {
+            panic!("test_db should return SQLite");
+        };
+        let args: String = sqlx::query("SELECT args FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("args");
+
+        // The secret was masked before any spill could happen; nothing large
+        // remained, so no blob was written and no secret bytes are on disk.
+        assert!(args.contains("<secret>"), "args: {}", args);
+        assert!(!args.contains(&secret_text));
+        let secret_hash = blake3::hash(secret_text.as_bytes()).to_hex().to_string();
+        let object = crate::db::blob::get_object_by_hash(
+            &db,
+            execution_context.org_id.unwrap(),
+            execution_context.env_id,
+            "blake3",
+            &secret_hash,
+        )
+        .await
+        .unwrap();
+        assert!(
+            object.is_none(),
+            "secret bytes must never reach blob storage"
+        );
+        drop(tmp);
     }
 }

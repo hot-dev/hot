@@ -113,6 +113,7 @@ pub mod access;
 pub mod agent;
 pub mod alert;
 pub mod api_key;
+pub mod blob;
 pub mod build;
 pub mod call;
 pub mod context;
@@ -155,7 +156,7 @@ pub use agent::{
     AgentWithProject,
 };
 pub use build::{Build, BuildError};
-pub use call::Call;
+pub use call::{Call, CallHeader};
 pub use context::{Context, ContextError};
 pub use domain::{Domain, DomainError};
 pub use email_verification::{EmailVerification, EmailVerificationError, VerificationStatus};

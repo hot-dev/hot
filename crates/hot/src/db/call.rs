@@ -27,7 +27,145 @@ pub struct Call {
     pub position: Option<i32>,
 }
 
+/// Call row without the potentially large `args`/`return_value` payloads.
+/// Used to build call timelines/hierarchies cheaply; full payloads are
+/// fetched per call on demand (see `Call::get_call`). `flow` is included
+/// because tree rendering needs its small metadata (type/inline/fn/branch).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct CallHeader {
+    pub call_id: Uuid,
+    pub run_id: Uuid,
+    pub function_name: String,
+    pub static_scope: String,
+    pub parent_call_id: Option<Uuid>,
+    pub call_depth: i32,
+    pub start_time: DateTime<Utc>,
+    pub stop_time: Option<DateTime<Utc>>,
+    pub duration_us: Option<i64>,
+    pub runtime_path: Option<String>,
+    pub has_args: bool,
+    pub has_return_value: bool,
+    pub flow: Option<serde_json::Value>,
+    pub file: Option<String>,
+    pub line: Option<i32>,
+    pub column: Option<i32>,
+    pub position: Option<i32>,
+}
+
+impl CallHeader {
+    /// Get all call headers for a run (no args/return_value payloads),
+    /// ordered by start_time.
+    pub async fn get_by_run(
+        pool: &DatabasePool,
+        run_id: &Uuid,
+    ) -> Result<Vec<CallHeader>, DatabaseError> {
+        let calls = match pool {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_as::<_, CallHeader>(
+                    r#"
+                    SELECT call_id, run_id, function_name, static_scope,
+                           parent_call_id, call_depth, start_time, stop_time,
+                           duration_us, runtime_path,
+                           (args IS NOT NULL) AS has_args,
+                           (return_value IS NOT NULL) AS has_return_value,
+                           flow, file, line, "column", position
+                    FROM hot.call
+                    WHERE run_id = $1
+                    ORDER BY start_time
+                    "#,
+                )
+                .bind(run_id)
+                .fetch_all(pool)
+                .await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_as::<_, CallHeader>(
+                    r#"
+                    SELECT call_id, run_id, function_name, static_scope,
+                           parent_call_id, call_depth, start_time, stop_time,
+                           duration_us, runtime_path,
+                           (args IS NOT NULL) AS has_args,
+                           (return_value IS NOT NULL) AS has_return_value,
+                           flow, file, line, "column", position
+                    FROM call
+                    WHERE run_id = ?
+                    ORDER BY start_time
+                    "#,
+                )
+                .bind(run_id)
+                .fetch_all(pool)
+                .await?
+            }
+        };
+
+        Ok(calls)
+    }
+}
+
+/// Escape LIKE wildcards so a user-supplied term matches literally.
+/// Used with `ESCAPE '\'` in the query.
+fn escape_like(term: &str) -> String {
+    term.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 impl Call {
+    /// Find calls in a run whose args or return value contain `term`
+    /// (case-insensitive substring match on the stored JSON text). Powers the
+    /// server-side result search for the run detail timeline/hierarchy, where
+    /// payloads are no longer shipped to the browser. Note: for payloads
+    /// spilled to blob storage this matches the inline BlobRef preview text,
+    /// not the full blob content.
+    pub async fn search_call_ids_by_payload(
+        pool: &DatabasePool,
+        run_id: &Uuid,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let pattern = format!("%{}%", escape_like(term));
+        let ids: Vec<(Uuid,)> = match pool {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_as(
+                    r#"
+                    SELECT call_id
+                    FROM hot.call
+                    WHERE run_id = $1
+                      AND (args::text ILIKE $2 ESCAPE '\'
+                           OR return_value::text ILIKE $2 ESCAPE '\')
+                    LIMIT $3
+                    "#,
+                )
+                .bind(run_id)
+                .bind(&pattern)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                // SQLite LIKE is case-insensitive for ASCII by default.
+                sqlx::query_as(
+                    r#"
+                    SELECT call_id
+                    FROM call
+                    WHERE run_id = ?
+                      AND (args LIKE ? ESCAPE '\'
+                           OR return_value LIKE ? ESCAPE '\')
+                    LIMIT ?
+                    "#,
+                )
+                .bind(run_id)
+                .bind(&pattern)
+                .bind(&pattern)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?
+            }
+        };
+
+        Ok(ids.into_iter().map(|(id,)| id).collect())
+    }
+
     /// Get all calls for a run, ordered by start_time
     pub async fn get_calls_by_run(
         pool: &DatabasePool,

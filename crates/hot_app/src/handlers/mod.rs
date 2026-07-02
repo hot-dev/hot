@@ -108,7 +108,7 @@ pub use events::{
 pub use files::{
     file_detail_handler, file_download_handler, files_list_handler, run_files_handler,
 };
-pub use hierarchy::get_hierarchy_handler;
+pub use hierarchy::{get_call_detail_handler, get_hierarchy_handler, search_run_calls_handler};
 pub use invites::{invite_accept_handler, invite_accept_post_handler};
 pub use keys::{
     keys_create_handler, keys_edit_handler, keys_list_handler, keys_new_handler,
@@ -158,6 +158,82 @@ use std::sync::Arc;
 use time;
 use url::Url;
 use uuid::Uuid;
+
+/// Rehydrate spilled BlobRefs in a persisted JSON payload before rendering it
+/// in the web app, so users see the actual data rather than a blob reference.
+/// Fail-open: on any error the BlobRef map is kept and the templates render it
+/// as a compact `#blob[...]` summary, so one bad blob cannot break a page.
+pub(crate) async fn rehydrate_json_for_session(
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    session: &Session,
+    value: &mut serde_json::Value,
+) {
+    let Some(store) = blob_store else {
+        return;
+    };
+    let Some(org_id) = session.current_org_id() else {
+        return;
+    };
+    if !hot::blob::json_contains_blob_ref(value) {
+        return;
+    }
+    let scope = hot::blob::BlobScope {
+        org_id,
+        env_id: session.current_env_id(),
+        run_id: None,
+    };
+    let budget = hot::blob::RehydrateBudget::from_config(store.config());
+    match store.rehydrate_json(value.clone(), scope, budget).await {
+        Ok(rehydrated) => *value = rehydrated,
+        Err(e) => {
+            tracing::warn!(error = %e, "blob rehydration failed; rendering BlobRef summary")
+        }
+    }
+}
+
+pub(crate) async fn rehydrate_opt_json_for_session(
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    session: &Session,
+    value: &mut Option<serde_json::Value>,
+) {
+    if let Some(value) = value {
+        rehydrate_json_for_session(blob_store, session, value).await;
+    }
+}
+
+/// Rehydrate the display payloads of fetched run rows (results).
+pub(crate) async fn rehydrate_runs_for_display(
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    session: &Session,
+    runs: &mut [hot::db::Run],
+) {
+    for run in runs {
+        rehydrate_opt_json_for_session(blob_store, session, &mut run.result).await;
+    }
+}
+
+/// Rehydrate the display payloads of fetched task rows (args and results).
+pub(crate) async fn rehydrate_tasks_for_display(
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    session: &Session,
+    tasks: &mut [hot::db::Task],
+) {
+    for task in tasks {
+        rehydrate_opt_json_for_session(blob_store, session, &mut task.args).await;
+        rehydrate_opt_json_for_session(blob_store, session, &mut task.result).await;
+    }
+}
+
+/// Rehydrate the display payloads of fetched event rows (event data).
+pub(crate) async fn rehydrate_events_for_display(
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    session: &Session,
+    events: &mut [hot::db::Event],
+) {
+    for event in events {
+        rehydrate_json_for_session(blob_store, session, &mut event.event_data).await;
+    }
+}
 
 fn is_safe_relative_redirect(path: &str) -> bool {
     path.starts_with('/') && !path.starts_with("//")

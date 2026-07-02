@@ -1,5 +1,6 @@
 //! API Handlers organized by functional area
 
+mod blobs;
 mod builds;
 mod context;
 mod domains;
@@ -20,6 +21,7 @@ mod streams;
 mod webhook;
 
 // Re-export all handlers
+pub use blobs::*;
 pub use builds::*;
 pub use context::*;
 pub use domains::*;
@@ -175,6 +177,55 @@ pub async fn get_and_ensure_active_project(
     Project::get_project(db, &project.project_id)
         .await
         .map_err(project_error_response)
+}
+
+/// Unwrap the optional blob-store request extension. The layer is absent in
+/// some test routers, and the store itself is None when blob spill is
+/// disabled; both mean "no rehydration".
+pub(crate) fn blob_store_from_ext(
+    ext: Option<axum::Extension<Option<std::sync::Arc<hot::blob::BlobStore>>>>,
+) -> Option<std::sync::Arc<hot::blob::BlobStore>> {
+    ext.and_then(|axum::Extension(store)| store)
+}
+
+/// Rehydrate spilled BlobRefs in a persisted JSON payload (run result, event
+/// data, call args) before returning it to API callers. Display reads fail
+/// open: on rehydration errors the original JSON (still holding the BlobRef
+/// map) is returned and a warning is logged, so one oversized or missing blob
+/// does not break list endpoints.
+pub(crate) async fn rehydrate_payload_json(
+    db: &DatabasePool,
+    blob_store: Option<&std::sync::Arc<hot::blob::BlobStore>>,
+    env_id: Uuid,
+    payload: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let payload = payload?;
+    let Some(store) = blob_store else {
+        return Some(payload);
+    };
+    if !hot::blob::json_contains_blob_ref(&payload) {
+        return Some(payload);
+    }
+    let org_id = match hot::db::Env::get_env(db, &env_id).await {
+        Ok(env) => env.org_id,
+        Err(e) => {
+            tracing::warn!(%env_id, error = %e, "cannot resolve org for blob rehydration; returning payload as-is");
+            return Some(payload);
+        }
+    };
+    let scope = hot::blob::BlobScope {
+        org_id,
+        env_id: Some(env_id),
+        run_id: None,
+    };
+    let budget = hot::blob::RehydrateBudget::from_config(store.config());
+    match store.rehydrate_json(payload.clone(), scope, budget).await {
+        Ok(rehydrated) => Some(rehydrated),
+        Err(e) => {
+            tracing::warn!(%env_id, error = %e, "blob rehydration failed; returning payload as-is");
+            Some(payload)
+        }
+    }
 }
 
 /// Get org_id for the API key's environment

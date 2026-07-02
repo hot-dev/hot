@@ -257,6 +257,39 @@ pub trait FileStorage: Send + Sync {
     ) -> Result<(), String> {
         Err("Multipart upload not supported by this storage backend".to_string())
     }
+
+    /// Write internal blob bytes to storage without creating a `file` row.
+    /// Used by the content-addressed blob store; blob metadata lives in
+    /// `blob_object`/`blob_ref`, so these bytes must never appear in the
+    /// Files UI or file listings. Returns the backend storage path.
+    async fn write_blob_bytes(
+        &self,
+        _storage_key: &str,
+        _content: &[u8],
+        _content_type: Option<&str>,
+        _ctx: &FileStorageContext,
+    ) -> Result<String, String> {
+        Err("Blob storage not supported by this storage backend".to_string())
+    }
+
+    /// Read internal blob bytes written by `write_blob_bytes`. No `file` row
+    /// access control applies; callers must authorize via `blob_ref` first.
+    async fn read_blob_bytes(
+        &self,
+        _storage_key: &str,
+        _ctx: &FileStorageContext,
+    ) -> Result<Vec<u8>, String> {
+        Err("Blob storage not supported by this storage backend".to_string())
+    }
+
+    /// Delete internal blob bytes written by `write_blob_bytes`.
+    async fn delete_blob_bytes(
+        &self,
+        _storage_key: &str,
+        _ctx: &FileStorageContext,
+    ) -> Result<(), String> {
+        Err("Blob storage not supported by this storage backend".to_string())
+    }
 }
 
 // ============================================================================
@@ -791,6 +824,63 @@ impl FileStorage for LocalFileStorage {
         tokio::fs::remove_dir_all(&upload_dir)
             .await
             .map_err(|e| format!("Failed to clean up multipart upload: {}", e))?;
+        Ok(())
+    }
+
+    async fn write_blob_bytes(
+        &self,
+        storage_key: &str,
+        content: &[u8],
+        _content_type: Option<&str>,
+        ctx: &FileStorageContext,
+    ) -> Result<String, String> {
+        let normalized = normalize_path(storage_key)?;
+        validate_path_security(&normalized)?;
+
+        let full_path = self.full_path(&normalized, ctx);
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create blob directories: {}", e))?;
+        }
+        tokio::fs::write(&full_path, content)
+            .await
+            .map_err(|e| format!("Failed to write blob to storage: {}", e))?;
+
+        Ok(full_path.to_string_lossy().to_string())
+    }
+
+    async fn read_blob_bytes(
+        &self,
+        storage_key: &str,
+        ctx: &FileStorageContext,
+    ) -> Result<Vec<u8>, String> {
+        let normalized = normalize_path(storage_key)?;
+        validate_path_security(&normalized)?;
+
+        let full_path = self.full_path(&normalized, ctx);
+        if !full_path.exists() {
+            return Err(format!("Blob not found in storage: {}", normalized));
+        }
+        tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| format!("Failed to read blob: {}", e))
+    }
+
+    async fn delete_blob_bytes(
+        &self,
+        storage_key: &str,
+        ctx: &FileStorageContext,
+    ) -> Result<(), String> {
+        let normalized = normalize_path(storage_key)?;
+        validate_path_security(&normalized)?;
+
+        let full_path = self.full_path(&normalized, ctx);
+        if full_path.exists() {
+            tokio::fs::remove_file(&full_path)
+                .await
+                .map_err(|e| format!("Failed to delete blob: {}", e))?;
+        }
         Ok(())
     }
 }
@@ -1394,6 +1484,93 @@ pub mod s3 {
                 .await
                 .map_err(|e| format!("Failed to abort multipart upload: {}", e))?;
 
+            Ok(())
+        }
+
+        async fn write_blob_bytes(
+            &self,
+            storage_key: &str,
+            content: &[u8],
+            content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<String, String> {
+            let normalized = normalize_path(storage_key)?;
+            validate_path_security(&normalized)?;
+
+            let key = self.s3_key(&normalized, ctx);
+            let mut put_request = self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .body(ByteStream::from(content.to_vec()));
+            if let Some(ct) = content_type {
+                put_request = put_request.content_type(ct);
+            }
+
+            put_request.send().await.map_err(|e| {
+                format!(
+                    "Failed to upload blob to S3 (bucket: {}, key: {}): {}",
+                    self.bucket, key, e
+                )
+            })?;
+
+            Ok(format!("s3://{}/{}", self.bucket, key))
+        }
+
+        async fn read_blob_bytes(
+            &self,
+            storage_key: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<Vec<u8>, String> {
+            let normalized = normalize_path(storage_key)?;
+            validate_path_security(&normalized)?;
+
+            let key = self.s3_key(&normalized, ctx);
+            let response = self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to retrieve blob from S3 (bucket: {}, key: {}): {}",
+                        self.bucket, key, e
+                    )
+                })?;
+
+            Ok(response
+                .body
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to read S3 blob body (key: {}): {}", key, e))?
+                .into_bytes()
+                .to_vec())
+        }
+
+        async fn delete_blob_bytes(
+            &self,
+            storage_key: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<(), String> {
+            let normalized = normalize_path(storage_key)?;
+            validate_path_security(&normalized)?;
+
+            let key = self.s3_key(&normalized, ctx);
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to delete blob from S3 (bucket: {}, key: {}): {}",
+                        self.bucket, key, e
+                    )
+                })?;
             Ok(())
         }
     }

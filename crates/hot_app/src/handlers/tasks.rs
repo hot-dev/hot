@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 pub async fn tasks_list_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     Query(params): Query<AHashMap<String, String>>,
     headers: HeaderMap,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
@@ -33,7 +34,7 @@ pub async fn tasks_list_handler(
 
     let env_id = session.current_env_id();
 
-    let (tasks_data, total_tasks) = if let Some(env_id) = env_id {
+    let (mut tasks_data, total_tasks) = if let Some(env_id) = env_id {
         let tasks = Task::get_filtered_by_env(
             &db,
             &env_id,
@@ -69,6 +70,8 @@ pub async fn tasks_list_handler(
         (Vec::new(), 0)
     };
 
+    crate::handlers::rehydrate_tasks_for_display(blob_store.as_ref(), &session, &mut tasks_data)
+        .await;
     let tasks_display: Vec<TaskDisplay> = tasks_data
         .iter()
         .map(|t| {
@@ -126,6 +129,7 @@ pub async fn tasks_list_handler(
 pub async fn task_detail_handler(
     Path(task_id): Path<String>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let task_uuid: Uuid = task_id
@@ -135,13 +139,22 @@ pub async fn task_detail_handler(
         .current_env_id()
         .ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
 
-    let task = Task::get(&db, &task_uuid)
+    let mut task = Task::get(&db, &task_uuid)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Task not found".to_string()))?;
 
     if task.env_id != env_id {
         return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
     }
+
+    crate::handlers::rehydrate_opt_json_for_session(blob_store.as_ref(), &session, &mut task.args)
+        .await;
+    crate::handlers::rehydrate_opt_json_for_session(
+        blob_store.as_ref(),
+        &session,
+        &mut task.result,
+    )
+    .await;
 
     let task_display = TaskDisplay::from_with_timezone(
         &task,

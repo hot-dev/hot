@@ -85,6 +85,19 @@ hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
 hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
 hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
 
+// Blob Storage Configuration
+// In "service" mode, large byte/string values in persisted call/run/event
+// payloads are spilled to content-addressed blob storage (backed by file
+// storage) and replaced with compact ::hot::blob/BlobRef maps in the database.
+// Mode: "service" or "disabled". Defaults to "service" inside a project and
+// "disabled" for ad hoc runs outside a project.
+// hot.blob.mode "service"
+// hot.blob.spill.threshold-bytes 65536
+// hot.blob.preview.max-bytes 256
+// hot.blob.spill.calls true
+// hot.blob.spill.runs false   // keep off until run-result reads rehydrate
+// hot.blob.spill.events false // keep off until worker rehydration is enabled
+
 // Store Configuration
 // ::hot::store data lives in the main Hot database and is scoped by org/env.
 // Backend: "sqlite" or "postgres". HOT_STORE_TYPE overrides this value.

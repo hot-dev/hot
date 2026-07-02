@@ -33,9 +33,10 @@ use crate::command::test::run_test;
 use crate::command::worker::{run_task_worker, run_worker};
 use crate::conf::{
     ExtractedOptions, apply_command_specific_defaults, apply_configuration_options, apply_env_vars,
-    create_default_conf, extract_options_from_command, get_emitter_resolved_conf,
-    get_file_resolved_conf, get_log_format_for_command, get_merged_src_paths,
-    get_merged_test_paths, load_conf, load_ctx, load_dotenv_files, show_command_config,
+    create_default_conf, extract_options_from_command, get_blob_resolved_conf,
+    get_emitter_resolved_conf, get_file_resolved_conf, get_log_format_for_command,
+    get_merged_src_paths, get_merged_test_paths, load_conf, load_ctx, load_dotenv_files,
+    show_command_config,
 };
 
 // Log a structured OOM line to stderr before the inevitable abort. The
@@ -639,6 +640,17 @@ async fn async_main(providers: CliProviders) {
     let resolved_file_conf =
         get_file_resolved_conf(file_conf_from_user, in_project_runtime, managed_runtime);
     conf = conf.set("file", resolved_file_conf);
+
+    // Apply blob storage defaults AFTER configuration files are loaded.
+    // Resolves off plain `in_project` (not `in_project_runtime`) because
+    // read-side servers like `hot api`/`hot app` are not runtime commands but
+    // must still rehydrate BlobRefs when the project's workers spill them.
+    // - In-project and managed runtimes default to "service".
+    // - Ad hoc out-of-project runs default to "disabled" (no project DB).
+    let blob_conf_from_user = conf.get("blob").unwrap_or_else(Val::map_empty);
+    let resolved_blob_conf =
+        get_blob_resolved_conf(blob_conf_from_user, in_project, managed_runtime);
+    conf = conf.set("blob", resolved_blob_conf);
 
     // 6. Load context variables from hot/ctx.hot file(s)
     // This happens after conf loading so hot/ctx.hot can use conf settings if needed

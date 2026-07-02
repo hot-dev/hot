@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 pub async fn runs_list_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     Query(params): Query<AHashMap<String, String>>,
     headers: HeaderMap,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
@@ -54,7 +55,7 @@ pub async fn runs_list_handler(
     let search_filter = query_filters.search_term();
 
     // Get filtered runs and total count for current environment
-    let (runs_data, total_runs) = if let Some(env_id) = env_id {
+    let (mut runs_data, total_runs) = if let Some(env_id) = env_id {
         let runs = Run::get_filtered_runs_by_env(
             &db,
             &env_id,
@@ -97,7 +98,10 @@ pub async fn runs_list_handler(
         (Vec::new(), 0)
     };
 
-    // Convert runs to display format with timezone-aware formatting
+    // Rehydrate spilled results so users see actual data, then convert runs
+    // to display format with timezone-aware formatting
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut runs_data)
+        .await;
     let runs: Vec<templates::RunDisplay> = runs_data
         .iter()
         .map(|run| {
@@ -169,6 +173,7 @@ pub async fn run_detail_handler(
     Path(run_id): Path<Uuid>,
     Query(params): Query<AHashMap<String, String>>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Parse query parameters
@@ -185,7 +190,7 @@ pub async fn run_detail_handler(
 
     // Get run details
     match hot::db::Run::get_run(&db, &run_id).await {
-        Ok(run) => {
+        Ok(mut run) => {
             // SECURITY: Verify the run belongs to the current environment
             if run.env_id != env_id {
                 // If the run belongs to a different env in the same org, prompt to switch
@@ -231,7 +236,14 @@ pub async fn run_detail_handler(
                 serde_json::to_string(&graph_data).unwrap_or_else(|_| "{}".to_string());
             tracing::debug!("Graph data JSON length: {}", graph_data_json.len());
 
-            // Convert run to display format with timezone-aware formatting
+            // Rehydrate spilled result, then convert run to display format
+            // with timezone-aware formatting
+            crate::handlers::rehydrate_opt_json_for_session(
+                blob_store.as_ref(),
+                &session,
+                &mut run.result,
+            )
+            .await;
             let run_display = Some(templates::RunDisplay::from_with_timezone(
                 &run,
                 &session.display_timezone,
@@ -324,6 +336,7 @@ pub async fn run_detail_handler(
 pub async fn run_tasks_tab_handler(
     Path(run_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     let env_id = match session.current_env_id() {
@@ -337,9 +350,12 @@ pub async fn run_tasks_tab_handler(
         _ => return StatusCode::NOT_FOUND.into_response(),
     }
 
-    let tasks = Task::get_by_origin_run_id(&db, &run_id, Some(100))
+    let mut tasks_data = Task::get_by_origin_run_id(&db, &run_id, Some(100))
         .await
-        .unwrap_or_default()
+        .unwrap_or_default();
+    crate::handlers::rehydrate_tasks_for_display(blob_store.as_ref(), &session, &mut tasks_data)
+        .await;
+    let tasks = tasks_data
         .iter()
         .map(|t| {
             templates::TaskDisplay::from_with_timezone(
@@ -395,6 +411,7 @@ pub async fn run_stream_graph_handler(
 pub async fn run_json_handler(
     Path(run_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Get current env_id for access check
@@ -408,13 +425,20 @@ pub async fn run_json_handler(
     };
 
     match Run::get_run(&db, &run_id).await {
-        Ok(run) => {
+        Ok(mut run) => {
             // SECURITY: Verify the run belongs to the current environment
             if run.env_id != env_id {
                 return Json(json!({
                     "error": "Run not found"
                 }));
             }
+
+            crate::handlers::rehydrate_opt_json_for_session(
+                blob_store.as_ref(),
+                &session,
+                &mut run.result,
+            )
+            .await;
 
             Json(json!({
                 "run_id": run.run_id,
@@ -523,7 +547,7 @@ async fn run_action_handler(
         }
     };
 
-    let original_event = match hot::db::Event::get_event(db, &event_id).await {
+    let mut original_event = match hot::db::Event::get_event(db, &event_id).await {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("Failed to get event {} for run {}: {}", event_id, run_id, e);
@@ -533,6 +557,16 @@ async fn run_action_handler(
             );
         }
     };
+
+    // Rehydrate spilled event data before re-emitting: the new event must not
+    // reference blobs whose refs belong to (and are GC'd with) the original
+    // event.
+    crate::handlers::rehydrate_json_for_session(
+        state.blob_store.as_ref(),
+        &session,
+        &mut original_event.event_data,
+    )
+    .await;
 
     // Determine how to re-dispatch the run based on the original event type.
     //
