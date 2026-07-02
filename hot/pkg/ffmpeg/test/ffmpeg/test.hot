@@ -35,20 +35,20 @@ meta ["test"] fn () {
 
 test-thumbnail-args-defaults
 meta ["test"] fn () {
-    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:01", null, null, 2)
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:01", null, null, 2, null)
     assert-eq(["-y", "-i", "/tmp/input.mp4", "-ss", "00:00:01", "-vframes", "1", "-q:v", "2", "/tmp/output.jpg"], args)
 }
 
 test-thumbnail-args-with-width
 meta ["test"] fn () {
-    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:05", 320, null, 2)
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:05", 320, null, 2, null)
     assert(in("-vf", args), "should contain -vf flag")
     assert(in("scale=320:-1", args), "should scale width with auto height")
 }
 
 test-thumbnail-args-with-both-dimensions
 meta ["test"] fn () {
-    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.png", "00:00:10", 640, 480, 5)
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.png", "00:00:10", 640, 480, 5, null)
     assert(in("-vf", args), "should contain -vf flag")
     assert(in("scale=640:480", args), "should scale to exact dimensions")
     assert(in("-q:v", args), "should have quality flag")
@@ -57,13 +57,13 @@ meta ["test"] fn () {
 
 test-thumbnail-args-with-height-only
 meta ["test"] fn () {
-    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:01", null, 240, 2)
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:00:01", null, 240, 2, null)
     assert(in("scale=-1:240", args), "should scale height with auto width")
 }
 
 test-thumbnail-args-custom-time
 meta ["test"] fn () {
-    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:01:30", null, null, 2)
+    args build-thumbnail-args("/tmp/input.mp4", "/tmp/output.jpg", "00:01:30", null, null, 2, null)
     assert(in("00:01:30", args), "should use custom seek time")
 }
 
@@ -73,7 +73,7 @@ meta ["test"] fn () {
 
 test-extract-frames-args-defaults
 meta ["test"] fn () {
-    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "1/2", null, null, null, null, 2)
+    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "1/2", null, null, null, null, 2, null, null)
     assert-eq("-y", first(args), "should start with overwrite")
     assert(in("-i", args), "should include input flag")
     assert(in("/tmp/input.webm", args), "should include input path")
@@ -85,13 +85,21 @@ meta ["test"] fn () {
 
 test-extract-frames-args-with-window-and-scale
 meta ["test"] fn () {
-    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "2", "00:00:03", 10, 640, null, 3)
+    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "2", "00:00:03", 10, 640, null, 3, null, null)
     assert(in("-ss", args), "should include seek flag")
     assert(in("00:00:03", args), "should include seek value")
     assert(in("-t", args), "should include duration flag")
     assert(in("10", args), "should include duration value")
     assert(in("fps=2,scale=640:-1", args), "should include fps and scale")
     assert(in("3", args), "should include quality value")
+}
+
+test-extract-frames-args-keyframes-only
+meta ["test"] fn () {
+    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "1/2", null, null, null, null, 2, null, true)
+    assert(in("-skip_frame", args), "should skip non-keyframes before decode")
+    assert(in("nokey", args), "should request keyframes only")
+    assert(not(in("fps=1/2", args)), "should not subsample with fps filter when keyframes-only")
 }
 
 // ============================================================================
@@ -168,20 +176,20 @@ meta ["test"] fn () {
 
 test-extract-audio-args-defaults
 meta ["test"] fn () {
-    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.mp3", "192k", null, null)
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.mp3", "192k", null, null, null)
     assert-eq(["-y", "-i", "/tmp/input.mp4", "-vn", "-b:a", "192k", "/tmp/output.mp3"], args)
 }
 
 test-extract-audio-args-with-sample-rate
 meta ["test"] fn () {
-    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.wav", "192k", 16000, null)
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.wav", "192k", 16000, null, null)
     assert(in("-ar", args), "should have sample rate flag")
     assert(in("16000", args), "should have 16000 Hz sample rate")
 }
 
 test-extract-audio-args-with-channels
 meta ["test"] fn () {
-    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.mp3", "320k", null, 1)
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.mp3", "320k", null, 1, null)
     assert(in("-ac", args), "should have channels flag")
     assert(in("1", args), "should be mono")
     assert(in("-b:a", args), "should have bitrate flag")
@@ -190,7 +198,7 @@ meta ["test"] fn () {
 
 test-extract-audio-args-all-options
 meta ["test"] fn () {
-    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.flac", "256k", 48000, 2)
+    args build-extract-audio-args("/tmp/input.mp4", "/tmp/output.flac", "256k", 48000, 2, null)
     assert(in("-ar", args), "should have sample rate flag")
     assert(in("48000", args), "should have 48kHz")
     assert(in("-ac", args), "should have channels flag")
