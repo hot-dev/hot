@@ -25,7 +25,41 @@ pub struct FileRecord {
     pub updated_by_user_id: Option<Uuid>,
 }
 
-/// Insert a new file record into the database
+/// Insert/update error that distinguishes foreign-key violations so callers
+/// can degrade gracefully (e.g. drop run provenance) instead of failing the
+/// user's file write.
+enum FileWriteError {
+    ForeignKey(String),
+    Other(String),
+}
+
+impl FileWriteError {
+    fn from_sqlx(context: &str, e: sqlx::Error) -> Self {
+        let is_fk = e
+            .as_database_error()
+            .is_some_and(|d| d.is_foreign_key_violation());
+        let msg = format!("{}: {}", context, e);
+        if is_fk {
+            FileWriteError::ForeignKey(msg)
+        } else {
+            FileWriteError::Other(msg)
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            FileWriteError::ForeignKey(msg) | FileWriteError::Other(msg) => msg,
+        }
+    }
+}
+
+/// Insert a new file record into the database.
+///
+/// The `created_by_run_id` column has a foreign key to `run`, but the run row
+/// is written asynchronously by the event emitter (and never written at all
+/// when the emitter is disabled). File writes are user data and must not
+/// depend on observability timing, so a foreign-key violation is retried once
+/// with a NULL run id rather than failing the write.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_file_record(
     db: &DatabasePool,
@@ -40,6 +74,66 @@ pub async fn insert_file_record(
     created_by_user_id: Uuid,
     created_by_run_id: Option<Uuid>,
 ) -> Result<FileRecord, String> {
+    let attempt = insert_file_record_attempt(
+        db,
+        path,
+        size,
+        etag,
+        content_type,
+        storage_backend,
+        storage_path,
+        org_id,
+        env_id,
+        created_by_user_id,
+        created_by_run_id,
+    )
+    .await;
+
+    match attempt {
+        Ok(record) => Ok(record),
+        Err(FileWriteError::ForeignKey(msg)) if created_by_run_id.is_some() => {
+            tracing::warn!(
+                "File record insert for '{}' hit a foreign-key violation ({}); retrying with \
+                 created_by_run_id = NULL because run {} is not persisted yet (async emitter \
+                 backlog) or run tracking is disabled",
+                path,
+                msg,
+                created_by_run_id.unwrap_or_default(),
+            );
+            insert_file_record_attempt(
+                db,
+                path,
+                size,
+                etag,
+                content_type,
+                storage_backend,
+                storage_path,
+                org_id,
+                env_id,
+                created_by_user_id,
+                None,
+            )
+            .await
+            .map_err(FileWriteError::into_message)
+        }
+        Err(e) => Err(e.into_message()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_file_record_attempt(
+    db: &DatabasePool,
+    path: &str,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_backend: &str,
+    storage_path: &str,
+    org_id: Uuid,
+    env_id: Option<Uuid>,
+    created_by_user_id: Uuid,
+    created_by_run_id: Option<Uuid>,
+) -> Result<FileRecord, FileWriteError> {
     let file_id = Uuid::now_v7();
     let now = Utc::now();
 
@@ -88,32 +182,24 @@ pub async fn insert_file_record(
                 .bind(now)
                 .fetch_one(pool)
                 .await
-                .map_err(|e| format!("Failed to insert file record: {}", e))?;
+                .map_err(|e| FileWriteError::from_sqlx("Failed to insert file record", e))?;
 
             Ok(FileRecord {
-                file_id: row.try_get("file_id").map_err(|e| e.to_string())?,
-                path: row.try_get("path").map_err(|e| e.to_string())?,
-                size: row.try_get("size").map_err(|e| e.to_string())?,
-                etag: row.try_get("etag").map_err(|e| e.to_string())?,
-                content_type: row.try_get("content_type").map_err(|e| e.to_string())?,
-                storage_backend: row.try_get("storage_backend").map_err(|e| e.to_string())?,
-                storage_path: row.try_get("storage_path").map_err(|e| e.to_string())?,
-                org_id: row.try_get("org_id").map_err(|e| e.to_string())?,
-                env_id: row.try_get("env_id").map_err(|e| e.to_string())?, // Added env_id
-                created_by_run_id: row
-                    .try_get("created_by_run_id")
-                    .map_err(|e| e.to_string())?,
-                updated_by_run_id: row
-                    .try_get("updated_by_run_id")
-                    .map_err(|e| e.to_string())?,
-                created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
-                updated_at: row.try_get("updated_at").map_err(|e| e.to_string())?,
-                created_by_user_id: row
-                    .try_get("created_by_user_id")
-                    .map_err(|e| e.to_string())?,
-                updated_by_user_id: row
-                    .try_get("updated_by_user_id")
-                    .map_err(|e| e.to_string())?,
+                file_id: row.try_get("file_id").map_err(fwe)?,
+                path: row.try_get("path").map_err(fwe)?,
+                size: row.try_get("size").map_err(fwe)?,
+                etag: row.try_get("etag").map_err(fwe)?,
+                content_type: row.try_get("content_type").map_err(fwe)?,
+                storage_backend: row.try_get("storage_backend").map_err(fwe)?,
+                storage_path: row.try_get("storage_path").map_err(fwe)?,
+                org_id: row.try_get("org_id").map_err(fwe)?,
+                env_id: row.try_get("env_id").map_err(fwe)?, // Added env_id
+                created_by_run_id: row.try_get("created_by_run_id").map_err(fwe)?,
+                updated_by_run_id: row.try_get("updated_by_run_id").map_err(fwe)?,
+                created_at: row.try_get("created_at").map_err(fwe)?,
+                updated_at: row.try_get("updated_at").map_err(fwe)?,
+                created_by_user_id: row.try_get("created_by_user_id").map_err(fwe)?,
+                updated_by_user_id: row.try_get("updated_by_user_id").map_err(fwe)?,
             })
         }
         DatabasePool::Sqlite(pool) => {
@@ -133,15 +219,26 @@ pub async fn insert_file_record(
                 .bind(now)
                 .execute(pool)
                 .await
-                .map_err(|e| format!("Failed to insert file record: {}", e))?;
+                .map_err(|e| FileWriteError::from_sqlx("Failed to insert file record", e))?;
 
             // Fetch the inserted record - now requires env_id for security
-            get_file_by_path(db, path, org_id, env_id).await
+            get_file_by_path(db, path, org_id, env_id)
+                .await
+                .map_err(FileWriteError::Other)
         }
     }
 }
 
-/// Update an existing file record
+/// Map a non-FK error into `FileWriteError::Other` (row decoding, etc).
+fn fwe<E: std::fmt::Display>(e: E) -> FileWriteError {
+    FileWriteError::Other(e.to_string())
+}
+
+/// Update an existing file record.
+///
+/// Like [`insert_file_record`], `updated_by_run_id` references a run row that
+/// may not be persisted yet (async emitter) or ever (emitter disabled), so a
+/// foreign-key violation is retried once with a NULL run id.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_file_record(
     db: &DatabasePool,
@@ -153,6 +250,57 @@ pub async fn update_file_record(
     updated_by_user_id: Uuid,
     updated_by_run_id: Option<Uuid>,
 ) -> Result<FileRecord, String> {
+    let attempt = update_file_record_attempt(
+        db,
+        file_id,
+        size,
+        etag,
+        content_type,
+        storage_path,
+        updated_by_user_id,
+        updated_by_run_id,
+    )
+    .await;
+
+    match attempt {
+        Ok(record) => Ok(record),
+        Err(FileWriteError::ForeignKey(msg)) if updated_by_run_id.is_some() => {
+            tracing::warn!(
+                "File record update for '{}' hit a foreign-key violation ({}); retrying with \
+                 updated_by_run_id = NULL because run {} is not persisted yet (async emitter \
+                 backlog) or run tracking is disabled",
+                file_id,
+                msg,
+                updated_by_run_id.unwrap_or_default(),
+            );
+            update_file_record_attempt(
+                db,
+                file_id,
+                size,
+                etag,
+                content_type,
+                storage_path,
+                updated_by_user_id,
+                None,
+            )
+            .await
+            .map_err(FileWriteError::into_message)
+        }
+        Err(e) => Err(e.into_message()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_file_record_attempt(
+    db: &DatabasePool,
+    file_id: Uuid,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_path: &str,
+    updated_by_user_id: Uuid,
+    updated_by_run_id: Option<Uuid>,
+) -> Result<FileRecord, FileWriteError> {
     let now = Utc::now();
 
     let query = match db {
@@ -201,32 +349,24 @@ pub async fn update_file_record(
                 .bind(now)
                 .fetch_one(pool)
                 .await
-                .map_err(|e| format!("Failed to update file record: {}", e))?;
+                .map_err(|e| FileWriteError::from_sqlx("Failed to update file record", e))?;
 
             Ok(FileRecord {
-                file_id: row.try_get("file_id").map_err(|e| e.to_string())?,
-                path: row.try_get("path").map_err(|e| e.to_string())?,
-                size: row.try_get("size").map_err(|e| e.to_string())?,
-                etag: row.try_get("etag").map_err(|e| e.to_string())?,
-                content_type: row.try_get("content_type").map_err(|e| e.to_string())?,
-                storage_backend: row.try_get("storage_backend").map_err(|e| e.to_string())?,
-                storage_path: row.try_get("storage_path").map_err(|e| e.to_string())?,
-                org_id: row.try_get("org_id").map_err(|e| e.to_string())?,
-                env_id: row.try_get("env_id").map_err(|e| e.to_string())?,
-                created_by_run_id: row
-                    .try_get("created_by_run_id")
-                    .map_err(|e| e.to_string())?,
-                updated_by_run_id: row
-                    .try_get("updated_by_run_id")
-                    .map_err(|e| e.to_string())?,
-                created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
-                updated_at: row.try_get("updated_at").map_err(|e| e.to_string())?,
-                created_by_user_id: row
-                    .try_get("created_by_user_id")
-                    .map_err(|e| e.to_string())?,
-                updated_by_user_id: row
-                    .try_get("updated_by_user_id")
-                    .map_err(|e| e.to_string())?,
+                file_id: row.try_get("file_id").map_err(fwe)?,
+                path: row.try_get("path").map_err(fwe)?,
+                size: row.try_get("size").map_err(fwe)?,
+                etag: row.try_get("etag").map_err(fwe)?,
+                content_type: row.try_get("content_type").map_err(fwe)?,
+                storage_backend: row.try_get("storage_backend").map_err(fwe)?,
+                storage_path: row.try_get("storage_path").map_err(fwe)?,
+                org_id: row.try_get("org_id").map_err(fwe)?,
+                env_id: row.try_get("env_id").map_err(fwe)?,
+                created_by_run_id: row.try_get("created_by_run_id").map_err(fwe)?,
+                updated_by_run_id: row.try_get("updated_by_run_id").map_err(fwe)?,
+                created_at: row.try_get("created_at").map_err(fwe)?,
+                updated_at: row.try_get("updated_at").map_err(fwe)?,
+                created_by_user_id: row.try_get("created_by_user_id").map_err(fwe)?,
+                updated_by_user_id: row.try_get("updated_by_user_id").map_err(fwe)?,
             })
         }
         DatabasePool::Sqlite(pool) => {
@@ -241,10 +381,12 @@ pub async fn update_file_record(
                 .bind(file_id)
                 .execute(pool)
                 .await
-                .map_err(|e| format!("Failed to update file record: {}", e))?;
+                .map_err(|e| FileWriteError::from_sqlx("Failed to update file record", e))?;
 
             // Fetch the updated record by file_id
-            get_file_by_id(db, file_id).await
+            get_file_by_id(db, file_id)
+                .await
+                .map_err(FileWriteError::Other)
         }
     }
 }
@@ -1700,6 +1842,199 @@ pub async fn get_storage_usage_by_org(db: &DatabasePool, org_id: Uuid) -> Result
                 .map_err(|e| format!("Failed to get storage usage: {}", e))?;
 
             row.try_get("total_size").map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SQLite DB with FK enforcement on and a `run` table, mirroring the
+    /// production race: the file insert carries a run id whose run row has
+    /// not been persisted yet by the async emitter.
+    async fn setup_fk_db() -> DatabasePool {
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("CREATE TABLE run (run_id blob PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            r#"CREATE TABLE file (
+                file_id blob PRIMARY KEY,
+                path text NOT NULL,
+                size integer NOT NULL,
+                etag text,
+                content_type text,
+                storage_backend text NOT NULL,
+                storage_path text,
+                org_id blob NOT NULL,
+                env_id blob,
+                created_by_run_id blob REFERENCES run(run_id),
+                updated_by_run_id blob REFERENCES run(run_id),
+                active integer DEFAULT 1,
+                created_at datetime NOT NULL DEFAULT current_timestamp,
+                created_by_user_id blob NOT NULL,
+                updated_at datetime NOT NULL DEFAULT current_timestamp,
+                updated_by_user_id blob,
+                active_toggle_at datetime,
+                active_toggle_by_user_id blob
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        DatabasePool::Sqlite(pool)
+    }
+
+    #[tokio::test]
+    async fn insert_falls_back_to_null_run_id_when_run_row_is_missing() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let missing_run_id = Uuid::now_v7();
+
+        let record = insert_file_record(
+            &db,
+            "hot-live/windows/a/1.webm",
+            42,
+            Some("etag"),
+            Some("video/webm"),
+            "local",
+            "/tmp/storage/a/1.webm",
+            org_id,
+            Some(env_id),
+            user_id,
+            Some(missing_run_id),
+        )
+        .await
+        .expect("insert should survive a missing run row by dropping run provenance");
+
+        assert_eq!(record.path, "hot-live/windows/a/1.webm");
+        assert_eq!(record.created_by_run_id, None);
+    }
+
+    #[tokio::test]
+    async fn insert_keeps_run_id_when_run_row_exists() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let run_id = Uuid::now_v7();
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("INSERT INTO run (run_id) VALUES (?)")
+                .bind(run_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+
+        let record = insert_file_record(
+            &db,
+            "hot-live/windows/a/2.webm",
+            42,
+            None,
+            None,
+            "local",
+            "/tmp/storage/a/2.webm",
+            org_id,
+            None,
+            user_id,
+            Some(run_id),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(record.created_by_run_id, Some(run_id));
+    }
+
+    #[tokio::test]
+    async fn update_falls_back_to_null_run_id_when_run_row_is_missing() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        let inserted = insert_file_record(
+            &db,
+            "hot-live/windows/a/3.webm",
+            42,
+            None,
+            None,
+            "local",
+            "/tmp/storage/a/3.webm",
+            org_id,
+            None,
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let updated = update_file_record(
+            &db,
+            inserted.file_id,
+            100,
+            Some("etag2"),
+            None,
+            "/tmp/storage/a/3-v2.webm",
+            user_id,
+            Some(Uuid::now_v7()),
+        )
+        .await
+        .expect("update should survive a missing run row by dropping run provenance");
+
+        assert_eq!(updated.size, 100);
+        assert_eq!(updated.updated_by_run_id, None);
+    }
+
+    #[tokio::test]
+    async fn non_fk_errors_still_fail() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let file_id = Uuid::now_v7();
+
+        // Duplicate primary key is a constraint error but NOT an FK
+        // violation; it must not be retried/absorbed.
+        if let DatabasePool::Sqlite(pool) = &db {
+            for attempt in 0..2 {
+                let result = sqlx::query(
+                    "INSERT INTO file (file_id, path, size, storage_backend, org_id, created_by_user_id)
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(file_id)
+                .bind("dup/path.bin")
+                .bind(1_i64)
+                .bind("local")
+                .bind(org_id)
+                .bind(user_id)
+                .execute(pool)
+                .await;
+                if attempt == 0 {
+                    result.unwrap();
+                } else {
+                    let err = FileWriteError::from_sqlx(
+                        "Failed to insert file record",
+                        result.unwrap_err(),
+                    );
+                    assert!(matches!(err, FileWriteError::Other(_)));
+                }
+            }
         }
     }
 }
