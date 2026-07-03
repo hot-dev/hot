@@ -1017,10 +1017,22 @@ fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val 
         "file.mode",
         "blob.mode",
     ] {
-        let value = base_conf.get_str(path);
+        let value = base_conf.get_str_or_default(path, "");
         if !value.is_empty() && value != "null" {
             conf = conf.set_str(path, Some(value), "");
         }
+    }
+
+    // This path runs after project init/reload, so we are in local project
+    // context. If hot.hot (or hot.test.hot in tests) omits blob.mode, still
+    // apply the same dynamic default as the main startup path: in-project local
+    // dev uses service mode, while an explicit runtime override above wins.
+    if conf.get_str_or_default("blob.mode", "").is_empty() {
+        let blob_conf_from_user = conf.get("blob").unwrap_or_else(Val::map_empty);
+        conf = conf.set(
+            "blob",
+            get_blob_resolved_conf(blob_conf_from_user, true, false),
+        );
     }
 
     if let Some(redis_cluster) = base_conf
@@ -1790,6 +1802,7 @@ mod tests {
         assert!(conf.get_bool_or_default("redis.cluster", false));
         assert_eq!(conf.get_str("queue.type"), "redis");
         assert_eq!(conf.get_str("file.mode"), "direct");
+        assert_eq!(conf.get_str("blob.mode"), "service");
         assert_eq!(conf.get_str("serialization.type"), "json");
     }
 }
