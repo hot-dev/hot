@@ -1716,7 +1716,13 @@ fn pmap_vec(
         let tokio_handle_clone = tokio_handle.clone();
         let host_context_clone = host_context.clone();
 
-        let handle = thread::spawn(move || {
+        // These workers run the VM, which may execute JIT-compiled code. The
+        // JIT stack-overflow guard is calibrated for a large stack (see
+        // `VM_THREAD_STACK_SIZE`); the default `thread::spawn` stack (~2 MiB) is
+        // far smaller than the guard budget, which would let recursive JIT code
+        // overrun the real stack and segfault. Spawn with an explicit large
+        // stack so the guard is effective.
+        let worker_body = move || {
             // Enter Tokio runtime context so async functions work on spawned threads
             let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
 
@@ -1784,7 +1790,21 @@ fn pmap_vec(
 
             let mut results = results_clone.lock();
             results.push((chunk_idx, chunk_results, chunk_halt));
-        });
+        };
+
+        let handle = match thread::Builder::new()
+            .name(format!("pmap-w{}", chunk_idx))
+            .stack_size(crate::lang::runtime::jit::VM_THREAD_STACK_SIZE)
+            .spawn(worker_body)
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                return HotResult::Err(Val::from(format!(
+                    "pmap: failed to spawn worker thread: {}",
+                    e
+                )));
+            }
+        };
 
         join_handles.push(handle);
     }

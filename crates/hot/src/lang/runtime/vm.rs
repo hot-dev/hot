@@ -8544,6 +8544,12 @@ impl VirtualMachine {
 
                 let spawn_result = thread::Builder::new()
                     .name(format!("parallel-w{}", worker_idx))
+                    // These workers run the VM, which may execute JIT-compiled
+                    // code. The JIT stack-overflow guard is calibrated for a
+                    // large stack; the default thread stack (~2 MiB) is smaller
+                    // than the guard budget, so recursive JIT code could overrun
+                    // the real stack and segfault. Match the guard's budget.
+                    .stack_size(crate::lang::runtime::jit::VM_THREAD_STACK_SIZE)
                     .spawn(move || {
                         // Enter Tokio runtime context so async functions (e.g.
                         // ::hot::box/run) work on spawned threads.
