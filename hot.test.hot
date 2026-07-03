@@ -1,5 +1,7 @@
 ::hot::conf ns
 
+::env ::hot::env
+
 hot.set.profile "local-dev"
 hot.set.project "hot-dev"
 
@@ -54,17 +56,17 @@ hot.project.hot-dev.deps {
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
 }
 
-hot.db.uri "sqlite:./.hot/hot.db"
-hot.db.schema "hot"
+hot.db.uri ::env/get("HOT_TEST_DB_URI", ::env/get("HOT_TEST_POSTGRES_URI", "sqlite:./.hot/hot.db"))
+hot.db.schema ::env/get("HOT_TEST_DB_SCHEMA", ::env/get("HOT_TEST_POSTGRES_SCHEMA", "hot"))
 
 hot.file.storage.type "local"
-hot.file.storage.path "./.hot/file"
+hot.file.storage.path ::env/get("HOT_TEST_FILE_STORAGE_PATH", "./.hot/file")
 
 hot.log.level "info"
 hot.log.target "stdout"
 hot.log.dir ".hot/log"
 
-hot.redis.uri ""
+hot.redis.uri ::env/get("HOT_REDIS_URI", "")
 
 hot.api.port 4681
 
@@ -82,7 +84,7 @@ hot.emitter.type "none"
 
 hot.engine.threads 4
 
-hot.queue.type "memory"
+hot.queue.type ::env/get("HOT_QUEUE_TYPE", "memory")
 
 hot.scheduler.backfill false
 hot.scheduler.sync-interval-seconds 30

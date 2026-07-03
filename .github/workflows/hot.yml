@@ -177,14 +177,26 @@ jobs:
           docker exec "${{ job.services.postgres.id }}" \
             bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
 
-      - name: Run Hot init (Postgres + Redis)
+      - name: Run Hot init (full suite, Postgres + Redis)
         env:
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_DB_SCHEMA: hot_full
+          HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
 
-      - name: Run Hot tests (Postgres + Redis)
+      - name: Run Hot tests (full suite, Postgres + Redis)
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_DB_SCHEMA: hot_full
+          HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
+          HOT_REDIS_URI: redis://localhost:6379
+          HOT_QUEUE_TYPE: redis
+        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Postgres queue smoke tests
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
@@ -197,13 +209,15 @@ jobs:
           HOT_BOX_ENABLED: true
         run: cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
 
-      - name: Run Hot Box tests (Postgres + Redis)
+      - name: Run Hot Box tests (full suite, Postgres + Redis)
         env:
           HOT_BOX_ENABLED: true
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_DB_SCHEMA: hot_full
+          HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- test box -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: sccache stats
         run: sccache --show-stats || true
