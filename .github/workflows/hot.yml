@@ -180,7 +180,6 @@ jobs:
       - name: Run Hot init (full suite, Postgres + Redis)
         env:
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
-          HOT_TEST_DB_SCHEMA: hot_full
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
@@ -190,11 +189,17 @@ jobs:
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
-          HOT_TEST_DB_SCHEMA: hot_full
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
         run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Postgres queue smoke init
+        env:
+          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_REDIS_URI: redis://localhost:6379
+          HOT_QUEUE_TYPE: redis
+        run: cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Postgres queue smoke tests
         env:
@@ -213,7 +218,6 @@ jobs:
         env:
           HOT_BOX_ENABLED: true
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
-          HOT_TEST_DB_SCHEMA: hot_full
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
