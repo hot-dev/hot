@@ -2,9 +2,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Call, DatabaseError, DatabasePool};
+use super::{CallHeader, DatabaseError, DatabasePool};
 
-/// A node in the execution hierarchy tree
+/// A node in the execution hierarchy tree.
+///
+/// Nodes intentionally carry only lightweight metadata: the potentially large
+/// `args`/`return_value`/`flow` payloads are NOT embedded in the tree. The UI
+/// fetches them per call on demand (`GET /data/calls/{call_id}` in hot_app),
+/// which keeps the hierarchy response small and guarantees that spilled
+/// BlobRef payloads never travel with the tree. `has_args`/`has_return_value`
+/// tell the UI whether a detail fetch will yield anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HierarchyNode {
@@ -19,9 +26,9 @@ pub enum HierarchyNode {
         duration_us: Option<i64>,
         call_depth: i32,
         runtime_path: Option<String>,
-        args: Box<Option<serde_json::Value>>,
-        return_value: Box<Option<serde_json::Value>>,
-        flow: Box<Option<serde_json::Value>>,
+        has_args: bool,
+        has_return_value: bool,
+        flow: Option<serde_json::Value>,
         file: Option<String>,
         line: Option<i32>,
         children: Vec<HierarchyNode>,
@@ -71,13 +78,32 @@ impl HierarchyNode {
     }
 }
 
+/// Keep only the small flow metadata the tree rendering needs (pills, borders,
+/// branch indentation). Flow payloads can carry arbitrary values — and can
+/// even be spilled to a BlobRef — so anything beyond these keys stays out of
+/// the hierarchy response; the full flow comes from the per-call detail fetch.
+fn slim_flow(flow: &Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let obj = flow.as_ref()?.as_object()?;
+    let mut slim = serde_json::Map::new();
+    for key in ["type", "inline", "fn", "branch"] {
+        if let Some(v) = obj.get(key) {
+            slim.insert(key.to_string(), v.clone());
+        }
+    }
+    if slim.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(slim))
+    }
+}
+
 /// Build a complete execution hierarchy for a run
 pub async fn build_hierarchy(
     pool: &DatabasePool,
     run_id: &Uuid,
 ) -> Result<HierarchyResponse, DatabaseError> {
-    // Fetch all calls
-    let calls = Call::get_calls_by_run(pool, run_id).await?;
+    // Fetch lightweight call headers only — no args/return_value payloads.
+    let calls = CallHeader::get_by_run(pool, run_id).await?;
 
     // Build tree structure
     let tree = build_tree(&calls);
@@ -99,9 +125,9 @@ pub async fn build_hierarchy(
 }
 
 /// Build tree structure from flat call list
-fn build_tree(calls: &[Call]) -> Vec<HierarchyNode> {
+fn build_tree(calls: &[CallHeader]) -> Vec<HierarchyNode> {
     // Get root calls (no parent)
-    let root_calls: Vec<&Call> = calls
+    let root_calls: Vec<&CallHeader> = calls
         .iter()
         .filter(|c| c.parent_call_id.is_none())
         .collect();
@@ -114,9 +140,9 @@ fn build_tree(calls: &[Call]) -> Vec<HierarchyNode> {
 }
 
 /// Build a call node with its children
-fn build_call_node(call: &Call, all_calls: &[Call]) -> HierarchyNode {
+fn build_call_node(call: &CallHeader, all_calls: &[CallHeader]) -> HierarchyNode {
     // Get child calls
-    let child_calls: Vec<&Call> = all_calls
+    let child_calls: Vec<&CallHeader> = all_calls
         .iter()
         .filter(|c| c.parent_call_id == Some(call.call_id))
         .collect();
@@ -141,11 +167,48 @@ fn build_call_node(call: &Call, all_calls: &[Call]) -> HierarchyNode {
         duration_us: call.duration_us,
         call_depth: call.call_depth,
         runtime_path: call.runtime_path.clone(),
-        args: Box::new(call.args.clone()),
-        return_value: Box::new(call.return_value.clone()),
-        flow: Box::new(call.flow.clone()),
+        has_args: call.has_args,
+        has_return_value: call.has_return_value,
+        flow: slim_flow(&call.flow),
         file: call.file.clone(),
         line: call.line,
         children,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slim_flow_keeps_only_metadata_keys() {
+        let flow = Some(serde_json::json!({
+            "type": "cond",
+            "inline": true,
+            "branch": "b1",
+            "predicate_result": "x".repeat(100_000),
+        }));
+        let slim = slim_flow(&flow).expect("slim flow");
+        let obj = slim.as_object().unwrap();
+        assert_eq!(obj.get("type"), Some(&serde_json::json!("cond")));
+        assert_eq!(obj.get("inline"), Some(&serde_json::json!(true)));
+        assert_eq!(obj.get("branch"), Some(&serde_json::json!("b1")));
+        assert!(!obj.contains_key("predicate_result"));
+    }
+
+    #[test]
+    fn test_slim_flow_drops_blob_ref_maps() {
+        // A spilled flow is a BlobRef typed map with none of the metadata
+        // keys — slimming must not leak it into the tree.
+        let flow = Some(serde_json::json!({
+            "$type": "::hot::blob/BlobRef",
+            "$val": {"id": "abc", "size": 12345},
+        }));
+        assert_eq!(slim_flow(&flow), None);
+    }
+
+    #[test]
+    fn test_slim_flow_none() {
+        assert_eq!(slim_flow(&None), None);
     }
 }

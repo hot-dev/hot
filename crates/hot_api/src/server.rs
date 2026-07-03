@@ -30,6 +30,7 @@ use crate::handlers::{
     delete_file,
     delete_project,
     deploy_build,
+    download_blob,
     download_build,
     download_file,
     get_build,
@@ -183,6 +184,11 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                 panic!("Failed to initialize file storage: {}", e);
             }
         };
+
+    // Shared blob store for rehydrating spilled BlobRefs in read paths.
+    // None when blob spill is disabled.
+    let blob_store: Option<Arc<hot::blob::BlobStore>> =
+        hot::blob::blob_store_from_conf(db.clone(), &conf).await;
 
     // Use provided stream pub/sub or create new one
     let stream_pubsub: Option<Arc<StreamPubSub>> = if shared_stream_pubsub.is_some() {
@@ -403,6 +409,8 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         .route("/v1/files", get(list_files))
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/download", get(download_file))
+        // Blob references (spilled large payloads)
+        .route("/v1/blobs/{blob_ref_id}/download", get(download_blob))
         // File upload (simple)
         .route("/v1/files/upload/{*path}", axum::routing::put(upload_file))
         // Multipart uploads
@@ -446,6 +454,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
             domain_resolution_middleware,
         ))
         .layer(Extension(file_storage))
+        .layer(Extension(blob_store))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {

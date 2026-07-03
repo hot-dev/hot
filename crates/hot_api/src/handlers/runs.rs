@@ -7,13 +7,15 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use hot::blob::BlobStore;
 use hot::db::{api_key::ApiKey, run::Run};
 use hot::time_range::parse_time_range_cutoff;
 use serde::Deserialize;
+use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::deserialize_clamped_limit;
+use super::{blob_store_from_ext, deserialize_clamped_limit, rehydrate_payload_json};
 use crate::auth::AuthContext;
 
 fn default_limit() -> i64 {
@@ -39,9 +41,11 @@ pub async fn list_runs(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Query(filters): Query<RunFilters>,
 ) -> Result<Json<ApiListResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can list runs.")?;
+    let blob_store = blob_store_from_ext(blob_store);
 
     // Parse filters into arrays
     let statuses: Option<Vec<&str>> = filters.status.as_ref().map(|s| vec![s.as_str()]);
@@ -85,9 +89,10 @@ pub async fn list_runs(
         )
     })?;
 
-    let run_responses: Vec<RunResponse> = runs
-        .into_iter()
-        .map(|r| RunResponse {
+    let mut run_responses: Vec<RunResponse> = Vec::with_capacity(runs.len());
+    for r in runs {
+        let result = rehydrate_payload_json(&db, blob_store.as_ref(), r.env_id, r.result).await;
+        run_responses.push(RunResponse {
             run_id: r.run_id,
             env_id: r.env_id,
             stream_id: r.stream_id,
@@ -98,13 +103,13 @@ pub async fn list_runs(
             stop_time: r.stop_time,
             origin_run_id: r.origin_run_id,
             event_id: r.event_id,
-            result: r.result,
+            result,
             project_id: r.project_id,
             project_name: r.project_name,
             retry_attempt: r.retry_attempt,
             next_retry_at: r.next_retry_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(ApiListResponse::new(
         run_responses,
@@ -118,9 +123,11 @@ pub async fn get_run(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Path(run_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can read runs.")?;
+    let blob_store = blob_store_from_ext(blob_store);
 
     let run = Run::get_run(&db, &run_id).await.map_err(|e| match e {
         hot::db::run::RunError::NotFound => (
@@ -141,6 +148,8 @@ pub async fn get_run(
         ));
     }
 
+    let result = rehydrate_payload_json(&db, blob_store.as_ref(), run.env_id, run.result).await;
+
     Ok(Json(ApiResponse::new(RunResponse {
         run_id: run.run_id,
         env_id: run.env_id,
@@ -152,7 +161,7 @@ pub async fn get_run(
         stop_time: run.stop_time,
         origin_run_id: run.origin_run_id,
         event_id: run.event_id,
-        result: run.result,
+        result,
         project_id: run.project_id,
         project_name: run.project_name,
         retry_attempt: run.retry_attempt,

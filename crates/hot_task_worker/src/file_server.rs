@@ -530,6 +530,7 @@ where
         env_id: Some(ctx.env_id),
         user_id: ctx.user_id,
         run_id: ctx.run_id,
+        run_provenance: None,
         file_max_bytes_conf: None,
     };
 

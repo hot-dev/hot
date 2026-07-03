@@ -17,11 +17,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::ListQueryParams;
+use super::{ListQueryParams, blob_store_from_ext, rehydrate_payload_json};
 use crate::ApiStateData;
 use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
 use crate::models::*;
+use hot::blob::BlobStore;
 
 /// The queue name that API-published events are sent to.
 /// This MUST match the worker's event queue name ("hot:event").
@@ -306,8 +307,10 @@ pub async fn list_events(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<EventResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    let blob_store = blob_store_from_ext(blob_store);
     // Permission check for scoped credentials (sessions and service keys)
     if !auth.is_api_key() && !auth.has_permission("event:*", actions::READ) {
         return Err((
@@ -342,18 +345,22 @@ pub async fn list_events(
             )
         })?;
 
-    let event_responses: Vec<EventResponse> = events
-        .into_iter()
-        .map(|e| EventResponse {
+    let mut event_responses: Vec<EventResponse> = Vec::with_capacity(events.len());
+    for e in events {
+        let event_data =
+            rehydrate_payload_json(&db, blob_store.as_ref(), e.env_id, Some(e.event_data))
+                .await
+                .unwrap_or(serde_json::Value::Null);
+        event_responses.push(EventResponse {
             event_id: e.event_id,
             env_id: e.env_id,
             stream_id: e.stream_id,
             event_type: e.event_type,
-            event_data: e.event_data,
+            event_data,
             event_time: e.event_time,
             created_at: e.created_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(ApiListResponse::new(
         event_responses,
@@ -367,8 +374,10 @@ pub async fn get_event(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Path(event_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<EventResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    let blob_store = blob_store_from_ext(blob_store);
     // Permission check for scoped credentials (sessions and service keys)
     if !auth.is_api_key() && !auth.has_permission("event:*", actions::READ) {
         return Err((
@@ -401,12 +410,21 @@ pub async fn get_event(
         ));
     }
 
+    let event_data = rehydrate_payload_json(
+        &db,
+        blob_store.as_ref(),
+        event.env_id,
+        Some(event.event_data),
+    )
+    .await
+    .unwrap_or(serde_json::Value::Null);
+
     Ok(Json(ApiResponse::new(EventResponse {
         event_id: event.event_id,
         env_id: event.env_id,
         stream_id: event.stream_id,
         event_type: event.event_type,
-        event_data: event.event_data,
+        event_data,
         event_time: event.event_time,
         created_at: event.created_at,
     })))
@@ -416,9 +434,11 @@ pub async fn get_event_runs(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Path(event_id): Path<Uuid>,
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
+    let blob_store = blob_store_from_ext(blob_store);
     // Permission check for scoped credentials (sessions and service keys)
     if !auth.is_api_key() && !auth.has_permission("event:*", actions::READ) {
         return Err((
@@ -469,9 +489,10 @@ pub async fn get_event_runs(
             )
         })?;
 
-    let run_responses: Vec<RunResponse> = runs
-        .into_iter()
-        .map(|r| RunResponse {
+    let mut run_responses: Vec<RunResponse> = Vec::with_capacity(runs.len());
+    for r in runs {
+        let result = rehydrate_payload_json(&db, blob_store.as_ref(), r.env_id, r.result).await;
+        run_responses.push(RunResponse {
             run_id: r.run_id,
             env_id: r.env_id,
             stream_id: r.stream_id,
@@ -482,13 +503,13 @@ pub async fn get_event_runs(
             stop_time: r.stop_time,
             origin_run_id: r.origin_run_id,
             event_id: r.event_id,
-            result: r.result,
+            result,
             project_id: r.project_id,
             project_name: r.project_name,
             retry_attempt: r.retry_attempt,
             next_retry_at: r.next_retry_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(ApiListResponse::new(
         run_responses,

@@ -113,6 +113,7 @@ pub mod access;
 pub mod agent;
 pub mod alert;
 pub mod api_key;
+pub mod blob;
 pub mod build;
 pub mod call;
 pub mod context;
@@ -140,6 +141,7 @@ pub mod scheduler_state;
 pub(crate) mod search;
 pub mod service_key;
 pub mod session;
+pub mod sqlite;
 pub mod stream;
 pub mod subscription;
 pub mod task;
@@ -155,7 +157,7 @@ pub use agent::{
     AgentWithProject,
 };
 pub use build::{Build, BuildError};
-pub use call::Call;
+pub use call::{Call, CallHeader};
 pub use context::{Context, ContextError};
 pub use domain::{Domain, DomainError};
 pub use email_verification::{EmailVerification, EmailVerificationError, VerificationStatus};
@@ -464,6 +466,7 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
 
             use sqlx::sqlite::SqlitePoolOptions;
             let max_connections = crate::runtime_budget::derive_sqlite_pool_connections(conf);
+            let sqlite_pragmas = sqlite::SqlitePragmaConfig::from_conf(conf);
             tracing::debug!(
                 "SQLite pool max_connections={} (read concurrency + write headroom)",
                 max_connections
@@ -471,18 +474,15 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             let db = SqlitePoolOptions::new()
                 .max_connections(max_connections)
                 .acquire_timeout(std::time::Duration::from_secs(30))
-                .after_connect(|conn, _meta| {
-                    Box::pin(async move {
-                        use sqlx::Executor;
-                        // Enable WAL mode for better concurrency (allows multiple readers with one writer)
-                        conn.execute("PRAGMA journal_mode = WAL;").await?;
-                        // Increase busy timeout to 30 seconds (waits for locks instead of failing immediately)
-                        conn.execute("PRAGMA busy_timeout = 30000;").await?;
-                        // Enable foreign keys
-                        conn.execute("PRAGMA foreign_keys = ON;").await?;
-                        tracing::debug!("SQLite configured: WAL mode enabled, busy_timeout=30s");
-                        Ok(())
-                    })
+                .after_connect({
+                    let sqlite_pragmas = sqlite_pragmas.clone();
+                    move |conn, _meta| {
+                        let sqlite_pragmas = sqlite_pragmas.clone();
+                        Box::pin(async move {
+                            sqlite_pragmas.apply(conn).await?;
+                            Ok(())
+                        })
+                    }
                 })
                 .connect(&uri_with_options)
                 .await
@@ -600,23 +600,19 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
             );
 
             use sqlx::sqlite::SqlitePoolOptions;
+            let sqlite_pragmas = sqlite::SqlitePragmaConfig::from_conf(conf);
             let db = SqlitePoolOptions::new()
                 .max_connections(10)
                 .acquire_timeout(std::time::Duration::from_secs(30))
-                .after_connect(|conn, _meta| {
-                    Box::pin(async move {
-                        use sqlx::Executor;
-                        // Enable WAL mode for better concurrency
-                        conn.execute("PRAGMA journal_mode = WAL;").await?;
-                        // Increase busy timeout to 30 seconds
-                        conn.execute("PRAGMA busy_timeout = 30000;").await?;
-                        // Enable foreign keys
-                        conn.execute("PRAGMA foreign_keys = ON;").await?;
-                        tracing::debug!(
-                            "SQLite configured for migrations: WAL mode enabled, busy_timeout=30s"
-                        );
-                        Ok(())
-                    })
+                .after_connect({
+                    let sqlite_pragmas = sqlite_pragmas.clone();
+                    move |conn, _meta| {
+                        let sqlite_pragmas = sqlite_pragmas.clone();
+                        Box::pin(async move {
+                            sqlite_pragmas.apply(conn).await?;
+                            Ok(())
+                        })
+                    }
                 })
                 .connect(&uri_with_options)
                 .await

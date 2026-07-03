@@ -828,6 +828,10 @@ pub struct OrgUsageStats {
     pub oldest_call_time: Option<DateTime<Utc>>,
     /// Store data storage in bytes (::hot::store)
     pub store_storage_bytes: i64,
+    /// Content-addressed blob storage in bytes (spilled large payloads).
+    /// Each blob object is counted once regardless of how many refs point at it.
+    #[serde(default)]
+    pub blob_storage_bytes: i64,
     /// Tasks in the current billing period
     pub tasks_this_period: i64,
     /// Total task duration in milliseconds (current billing period)
@@ -926,6 +930,13 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
+        let blob_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COALESCE(SUM(size), 0)::bigint FROM blob_object
+             WHERE org_id = $1 AND status = 'available'",
+        )
+        .bind(org_id)
+        .fetch_one(pool);
+
         let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(
             "SELECT COUNT(*)::bigint, COALESCE(SUM(duration_ms), 0)::bigint,
                     COALESCE(SUM(CASE
@@ -958,15 +969,17 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, store_row, task_row, schedule_row) = tokio::try_join!(
-            runs_fut,
-            file_fut,
-            team_fut,
-            call_fut,
-            store_fut,
-            task_fut,
-            schedule_fut
-        )?;
+        let (runs_row, file_row, team_row, call_row, store_row, blob_row, task_row, schedule_row) =
+            tokio::try_join!(
+                runs_fut,
+                file_fut,
+                team_fut,
+                call_fut,
+                store_fut,
+                blob_fut,
+                task_fut,
+                schedule_fut
+            )?;
 
         Ok(Self {
             runs_this_period: runs_row.0,
@@ -976,6 +989,7 @@ impl OrgUsageStats {
             call_count: call_row.1,
             oldest_call_time: call_row.2,
             store_storage_bytes: store_row.0,
+            blob_storage_bytes: blob_row.0,
             tasks_this_period: task_row.0,
             task_duration_ms: task_row.1.unwrap_or(0),
             compute_units: task_row.2.unwrap_or(0),
@@ -1083,11 +1097,19 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, task_row, schedule_row) = tokio::try_join!(
+        let blob_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COALESCE(SUM(size), 0) FROM blob_object
+             WHERE org_id = ? AND status = 'available'",
+        )
+        .bind(org_id)
+        .fetch_one(pool);
+
+        let (runs_row, file_row, team_row, call_row, blob_row, task_row, schedule_row) = tokio::try_join!(
             runs_fut,
             file_fut,
             team_fut,
             call_fut,
+            blob_fut,
             task_fut,
             schedule_fut
         )?;
@@ -1100,6 +1122,7 @@ impl OrgUsageStats {
             call_count: call_row.1,
             oldest_call_time: call_row.2,
             store_storage_bytes: 0,
+            blob_storage_bytes: blob_row.0,
             tasks_this_period: task_row.0,
             task_duration_ms: task_row.1.unwrap_or(0),
             compute_units: task_row.2.unwrap_or(0),

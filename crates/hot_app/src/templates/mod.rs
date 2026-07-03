@@ -8,9 +8,85 @@ use std::fs;
 use std::sync::RwLock;
 use uuid::Uuid;
 
+/// Human-readable size for blob summaries (e.g. "5.2 MB").
+fn format_blob_size(size: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = size.max(0) as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", size as i64, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
+}
+
+/// Replace `::hot::blob/BlobRef` typed maps with a compact one-line summary
+/// string so spilled payloads render as previews instead of raw ref maps.
+/// The full content is available via the blob download API by ref id.
+pub(crate) fn summarize_blob_refs_json(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Object(map) => {
+            let is_blob_ref = matches!(
+                map.get("$type"),
+                Some(JsonValue::String(t)) if t == hot::blob::BLOB_REF_TYPE
+            );
+            if is_blob_ref {
+                let inner = map.get("$val").and_then(|v| v.as_object());
+                let get_str = |key: &str| {
+                    inner
+                        .and_then(|m| m.get(key))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let size = inner
+                    .and_then(|m| m.get("size"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let preview = get_str("preview");
+                let mut summary = format!("#blob[{}", format_blob_size(size));
+                let content_type = get_str("content-type");
+                if !content_type.is_empty() {
+                    summary.push_str(&format!(" {}", content_type));
+                }
+                let id = get_str("id");
+                if !id.is_empty() {
+                    summary.push_str(&format!(" ref={}", id));
+                }
+                if !preview.is_empty() {
+                    summary.push_str(&format!(" preview={:?}", preview));
+                }
+                summary.push(']');
+                return JsonValue::String(summary);
+            }
+            JsonValue::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), summarize_blob_refs_json(v)))
+                    .collect(),
+            )
+        }
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.iter().map(summarize_blob_refs_json).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// Format a JSON value as a Hot literal string
 /// This is used for displaying results in the UI with Hot syntax (default)
 fn format_json_as_hot_literal(value: &JsonValue, indent: usize) -> String {
+    // Render spilled blob refs as compact previews rather than raw ref maps.
+    let summarized;
+    let value = if hot::blob::json_contains_blob_ref(value) {
+        summarized = summarize_blob_refs_json(value);
+        &summarized
+    } else {
+        value
+    };
     // Convert JSON to Val and use the Hot format
     if let Ok(val) = serde_json::from_value::<Val>(value.clone()) {
         if indent == 0 {

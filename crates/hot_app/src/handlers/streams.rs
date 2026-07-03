@@ -134,6 +134,7 @@ pub async fn stream_detail_handler(
     Path(stream_id): Path<Uuid>,
     Query(params): Query<AHashMap<String, String>>,
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     // Get current env_id for access check
@@ -176,7 +177,7 @@ pub async fn stream_detail_handler(
         page.offset
     );
 
-    let runs = Run::get_runs_by_stream(
+    let mut runs = Run::get_runs_by_stream(
         &db,
         &stream_id,
         &env_id,
@@ -191,7 +192,8 @@ pub async fn stream_detail_handler(
 
     tracing::debug!("Found {} runs for stream_id: {}", runs.len(), stream_id);
 
-    // Convert runs to display format with timezone-aware formatting
+    // Rehydrate spilled results, then convert runs to display format
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut runs).await;
     let run_displays: Vec<templates::RunDisplay> = runs
         .iter()
         .map(|run| {
@@ -204,7 +206,7 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Get events for this stream
-    let events_raw = Event::get_events_by_stream(
+    let mut events_raw = Event::get_events_by_stream(
         &db,
         &stream_id,
         &env_id,
@@ -216,6 +218,8 @@ pub async fn stream_detail_handler(
         tracing::error!("Failed to fetch events for stream {}: {}", stream_id, e);
         Vec::new()
     });
+    crate::handlers::rehydrate_events_for_display(blob_store.as_ref(), &session, &mut events_raw)
+        .await;
 
     tracing::debug!(
         "Found {} events for stream_id: {}",
@@ -236,12 +240,14 @@ pub async fn stream_detail_handler(
         .collect();
 
     // Get tasks for this stream
-    let tasks_raw = Task::get_by_stream(&db, &stream_id, &env_id, Some(page.page_size))
+    let mut tasks_raw = Task::get_by_stream(&db, &stream_id, &env_id, Some(page.page_size))
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Failed to fetch tasks for stream {}: {}", stream_id, e);
             Vec::new()
         });
+    crate::handlers::rehydrate_tasks_for_display(blob_store.as_ref(), &session, &mut tasks_raw)
+        .await;
 
     let tasks: Vec<templates::TaskDisplay> = tasks_raw
         .iter()

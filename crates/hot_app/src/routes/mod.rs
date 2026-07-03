@@ -24,10 +24,12 @@ pub fn routes(
     db: Arc<DatabasePool>,
     conf: Val,
     stream_pubsub: Option<Arc<StreamPubSub>>,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Router {
-    let app_state =
-        AppState::new(db.clone(), conf.clone(), shutdown_rx).with_stream_pubsub(stream_pubsub);
+    let app_state = AppState::new(db.clone(), conf.clone(), shutdown_rx)
+        .with_stream_pubsub(stream_pubsub)
+        .with_blob_store(blob_store);
     // Protected routes - require authentication
     let protected_routes = Router::new()
         .route("/", get(dashboard_handler))
@@ -244,6 +246,11 @@ pub fn routes(
         )
         .route("/data/runs/{run_id}/json", get(run_json_handler))
         .route("/data/runs/{run_id}/hierarchy", get(get_hierarchy_handler))
+        .route(
+            "/data/runs/{run_id}/calls/search",
+            get(search_run_calls_handler),
+        )
+        .route("/data/calls/{call_id}", get(get_call_detail_handler))
         .route("/data/runs/{run_id}/files", get(run_files_handler))
         .route(
             "/data/runs/{run_id}/stream-graph",

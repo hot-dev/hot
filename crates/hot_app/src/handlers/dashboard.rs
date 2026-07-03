@@ -145,6 +145,7 @@ struct FailedRunsRows {
 /// GET /dashboard/widgets/failed-runs - Get failed runs table rows for Quick Issues
 pub async fn failed_runs_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -163,7 +164,7 @@ pub async fn failed_runs_widget_handler(
         .get("project")
         .and_then(|p| uuid::Uuid::parse_str(p).ok());
 
-    let runs_data = Run::get_filtered_runs_by_env(
+    let mut runs_data = Run::get_filtered_runs_by_env(
         &db,
         &env_id,
         Some(&["failed"]),
@@ -183,6 +184,8 @@ pub async fn failed_runs_widget_handler(
         );
         Vec::new()
     });
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut runs_data)
+        .await;
 
     let runs: Vec<templates::RunDisplay> = runs_data
         .iter()
@@ -208,6 +211,7 @@ struct CancelledRunsRows {
 /// GET /dashboard/widgets/cancelled-runs - Get cancelled runs table rows for Quick Issues
 pub async fn cancelled_runs_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -226,7 +230,7 @@ pub async fn cancelled_runs_widget_handler(
         .get("project")
         .and_then(|p| uuid::Uuid::parse_str(p).ok());
 
-    let runs_data = Run::get_filtered_runs_by_env(
+    let mut runs_data = Run::get_filtered_runs_by_env(
         &db,
         &env_id,
         Some(&["cancelled"]),
@@ -246,6 +250,8 @@ pub async fn cancelled_runs_widget_handler(
         );
         Vec::new()
     });
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut runs_data)
+        .await;
 
     let runs: Vec<templates::RunDisplay> = runs_data
         .iter()
@@ -271,6 +277,7 @@ struct UnhandledEventsRows {
 /// GET /dashboard/widgets/unhandled-events - Get unhandled events table rows for Quick Issues
 pub async fn unhandled_events_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -286,7 +293,7 @@ pub async fn unhandled_events_widget_handler(
         chrono::Utc::now(),
     );
 
-    let events_data = Event::get_events_by_env_filtered(
+    let mut events_data = Event::get_events_by_env_filtered(
         &db,
         &env_id,
         Some(false),
@@ -304,6 +311,8 @@ pub async fn unhandled_events_widget_handler(
         );
         Vec::new()
     });
+    crate::handlers::rehydrate_events_for_display(blob_store.as_ref(), &session, &mut events_data)
+        .await;
 
     let events: Vec<templates::EventDisplay> = events_data
         .into_iter()
@@ -323,6 +332,7 @@ pub async fn unhandled_events_widget_handler(
 /// GET /dashboard/widgets/recent-runs - Get recent runs table rows for Recent Activity
 pub async fn recent_runs_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     _params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -334,7 +344,7 @@ pub async fn recent_runs_widget_handler(
     };
 
     // Get recent runs (basic query)
-    let runs_data = Run::get_runs_by_env(&db, &env_id, Some(5), None)
+    let mut runs_data = Run::get_runs_by_env(&db, &env_id, Some(5), None)
         .await
         .unwrap_or_else(|e| {
             tracing::error!(
@@ -344,6 +354,8 @@ pub async fn recent_runs_widget_handler(
             );
             Vec::new()
         });
+    crate::handlers::rehydrate_runs_for_display(blob_store.as_ref(), &session, &mut runs_data)
+        .await;
 
     let runs: Vec<templates::RunDisplay> = runs_data
         .iter()
@@ -363,6 +375,7 @@ pub async fn recent_runs_widget_handler(
 /// GET /dashboard/widgets/recent-events - Get recent events table rows for Recent Activity
 pub async fn recent_events_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     _params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -374,7 +387,7 @@ pub async fn recent_events_widget_handler(
     };
 
     // Get recent events (basic query)
-    let events_data = Event::get_events_by_env(&db, &env_id, Some(5), None)
+    let mut events_data = Event::get_events_by_env(&db, &env_id, Some(5), None)
         .await
         .unwrap_or_else(|e| {
             tracing::error!(
@@ -384,6 +397,8 @@ pub async fn recent_events_widget_handler(
             );
             Vec::new()
         });
+    crate::handlers::rehydrate_events_for_display(blob_store.as_ref(), &session, &mut events_data)
+        .await;
 
     let events: Vec<templates::EventDisplay> = events_data
         .into_iter()
@@ -411,6 +426,7 @@ struct FailedTasksRows {
 /// GET /dashboard/widgets/failed-tasks - Get failed tasks table rows for Quick Issues
 pub async fn failed_tasks_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -426,7 +442,7 @@ pub async fn failed_tasks_widget_handler(
         chrono::Utc::now(),
     );
 
-    let tasks: Vec<templates::TaskDisplay> = Task::get_filtered_by_env(
+    let mut tasks_data = Task::get_filtered_by_env(
         &db,
         &env_id,
         Some(&["failed", "timed_out"]),
@@ -444,16 +460,19 @@ pub async fn failed_tasks_widget_handler(
             e
         );
         Vec::new()
-    })
-    .iter()
-    .map(|task| {
-        templates::TaskDisplay::from_with_timezone(
-            task,
-            &session.display_timezone,
-            &session.timezone_abbreviation,
-        )
-    })
-    .collect();
+    });
+    crate::handlers::rehydrate_tasks_for_display(blob_store.as_ref(), &session, &mut tasks_data)
+        .await;
+    let tasks: Vec<templates::TaskDisplay> = tasks_data
+        .iter()
+        .map(|task| {
+            templates::TaskDisplay::from_with_timezone(
+                task,
+                &session.display_timezone,
+                &session.timezone_abbreviation,
+            )
+        })
+        .collect();
 
     let template = FailedTasksRows { tasks };
     Html(template.render().unwrap()).into_response()
@@ -462,6 +481,7 @@ pub async fn failed_tasks_widget_handler(
 /// GET /dashboard/widgets/recent-tasks - Get recent tasks table rows for Recent Activity
 pub async fn recent_tasks_widget_handler(
     State(db): State<Arc<DatabasePool>>,
+    State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     _params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
@@ -472,7 +492,7 @@ pub async fn recent_tasks_widget_handler(
         }
     };
 
-    let tasks_data = Task::get_by_env(&db, &env_id, Some(5), None)
+    let mut tasks_data = Task::get_by_env(&db, &env_id, Some(5), None)
         .await
         .unwrap_or_else(|e| {
             tracing::error!(
@@ -482,6 +502,8 @@ pub async fn recent_tasks_widget_handler(
             );
             Vec::new()
         });
+    crate::handlers::rehydrate_tasks_for_display(blob_store.as_ref(), &session, &mut tasks_data)
+        .await;
 
     let recent_tasks: Vec<templates::TaskDisplay> = tasks_data
         .iter()

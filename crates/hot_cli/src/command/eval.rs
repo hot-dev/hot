@@ -64,7 +64,7 @@ pub(crate) async fn run_eval(
 
     let emitter = if has_emitter_config {
         if let Some(ref pool) = db_pool {
-            match create_emitter(conf, pool.as_ref()) {
+            match create_emitter(conf, pool.as_ref()).await {
                 Ok(Some(emitter)) => Some(emitter),
                 Ok(None) => None,
                 Err(e) => {
@@ -87,7 +87,7 @@ pub(crate) async fn run_eval(
 
     let event_publisher = if has_queue_config {
         if let Some(ref pool) = db_pool {
-            match create_event_publisher(conf, pool.as_ref()) {
+            match create_event_publisher(conf, pool.as_ref()).await {
                 Ok(Some(publisher)) => Some(publisher),
                 Ok(None) => None,
                 Err(e) => {

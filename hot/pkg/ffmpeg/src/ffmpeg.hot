@@ -40,10 +40,9 @@ meta {
 ::box ::hot::box
 ::task ::hot::task
 
-// Default image — Alpine with ffmpeg installed at runtime.
-// Users can pass a custom image with ffmpeg pre-installed for faster execution.
-DEFAULT_IMAGE "alpine:3.21"
-INSTALL_CMD "apk add --no-cache ffmpeg > /dev/null 2>&1"
+// Pre-built Alpine image with ffmpeg + ffprobe (no runtime install step).
+// Users can pass a custom image via opts.image when needed.
+DEFAULT_IMAGE "jrottenberg/ffmpeg:7-alpine"
 
 // ============================================================================
 // Types
@@ -62,7 +61,7 @@ meta {
     - `quality` — Quality 1–31, lower is better (default: `2`)
     - `output` — Output `hot://` URL (default: auto-generated)
     - `extra-args` — Additional ffmpeg arguments
-    - `image` — Custom Docker image with ffmpeg (default: alpine + ffmpeg)
+    - `image` — Custom Docker image with ffmpeg (default: `jrottenberg/ffmpeg:7-alpine`)
     - `size` — Box size override (default: `"small"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
     """
@@ -153,14 +152,15 @@ meta {
 
     **Fields**
     - `fps` — Frame extraction rate, e.g. `"1/2"` for one frame every two seconds (default: `"1/2"`)
-    - `start` — Optional seek position, e.g. `"00:00:05"`
+    - `start` — Optional start position, e.g. `"00:00:05"` or `"8.5"`. Applied as a `trim` filter (accurate on index-less streaming inputs), so the whole input up to this point is still decoded.
     - `duration` — Optional extraction duration in seconds
     - `width` — Output width in pixels (default: source width)
     - `height` — Output height in pixels (default: source height)
     - `format` — Output format: `"jpg"`, `"png"`, `"webp"` (default: `"jpg"`)
     - `quality` — Quality 1-31, lower is better (default: `2`)
     - `output-prefix` — Output `hot://` directory/prefix (default: auto-generated)
-    - `extra-args` — Additional ffmpeg arguments
+    - `extra-args` — Additional ffmpeg arguments appended before the output pattern
+    - `keyframes-only` — When true, pass `-skip_frame nokey` before input so only decodable keyframes are extracted (default: `false`)
     - `image` — Custom Docker image with ffmpeg
     - `size` — Box size override (default: `"medium"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
@@ -176,6 +176,7 @@ type {
     quality: Int?,
     output-prefix: Str?,
     extra-args: Vec<Str>?,
+    keyframes-only: Bool?,
     image: Str?,
     size: Str?,
     timeout: Int?,
@@ -259,27 +260,44 @@ build-extract-frames-args
 meta {
     doc: "Build ffmpeg CLI arguments for multi-frame image extraction."
 }
-fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?): Vec<Str> {
-    seek-args if(is-some(start), ["-ss", start], [])
-    base ["-y", ...seek-args, "-i", input-path]
+fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?, keyframes-only: Bool?): Vec<Str> {
+    input-args cond {
+        eq(keyframes-only, true) => { ["-skip_frame", "nokey"] }
+        => { [] }
+    }
+    base ["-y", ...input-args, "-i", input-path]
     duration-args if(is-some(duration), ["-t", Str(duration)], [])
 
-    scale cond {
+    // `start` trims in the filter graph rather than input-seeking with -ss:
+    // streaming inputs (e.g. MediaRecorder WebM) carry no cue index, so an
+    // input seek lands at EOF and extracts nothing. trim decodes linearly,
+    // drops frames before the start point, and keeps original timestamps so
+    // the fps sampling that follows stays anchored at the requested start.
+    trim-filter if(is-some(start), `trim=start=${start}`, "")
+    fps-filter cond {
+        eq(keyframes-only, true) => { "" }
+        => { `fps=${fps}` }
+    }
+    scale-filter cond {
         and(is-some(width), is-some(height)) => {
-            `,scale=${Str(width)}:${Str(height)}`
+            `scale=${Str(width)}:${Str(height)}`
         }
 
         is-some(width) => {
-            `,scale=${Str(width)}:-1`
+            `scale=${Str(width)}:-1`
         }
 
         is-some(height) => {
-            `,scale=-1:${Str(height)}`
+            `scale=-1:${Str(height)}`
         }
         => { "" }
     }
 
-    filter-args ["-vf", `fps=${fps}${scale}`]
+    filters filter([trim-filter, fps-filter, scale-filter], (part) { ne(part, "") })
+    filter-args cond {
+        is-zero(length(filters)) => { [] }
+        => { ["-vf", join(filters, ",")] }
+    }
     quality-args ["-q:v", Str(quality)]
     extra or(extra-args, [])
     [...base, ...duration-args, ...filter-args, ...quality-args, ...extra, output-pattern]
@@ -331,10 +349,10 @@ join-args fn (args: Vec<Str>): Str {
 
 run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
-    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     info ::box/start({
         image: img,
-        script: full-script,
+        script: script,
+        entrypoint: [""],
         timeout: timeout,
         size: box-size,
     })
@@ -343,10 +361,10 @@ run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
 
 start-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
-    full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     ::box/start({
         image: img,
-        script: full-script,
+        script: script,
+        entrypoint: [""],
         timeout: timeout,
         size: box-size,
     })
@@ -532,7 +550,8 @@ fn (input: Str): Map {
         opts.width,
         opts.height,
         quality,
-        opts.extra-args
+        opts.extra-args,
+        opts.keyframes-only,
     ))
     script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
 
@@ -783,7 +802,8 @@ fn (input: Str): Map {
         opts.width,
         opts.height,
         quality,
-        opts.extra-args
+        opts.extra-args,
+        opts.keyframes-only,
     ))
     script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
 

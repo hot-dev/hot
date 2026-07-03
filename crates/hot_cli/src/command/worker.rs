@@ -219,7 +219,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
     // Create emitter and event publisher for the worker
     // These now require the database pool to be available
     let emitter = if let Some(ref pool) = db_pool {
-        match create_emitter(&conf, pool.as_ref()) {
+        match create_emitter(&conf, pool.as_ref()).await {
             Ok(emitter) => emitter,
             Err(e) => {
                 error!("Failed to create emitter for worker: {}", e);
@@ -232,7 +232,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
     };
 
     let event_publisher = if let Some(ref pool) = db_pool {
-        match create_event_publisher(&conf, pool.as_ref()) {
+        match create_event_publisher(&conf, pool.as_ref()).await {
             Ok(publisher) => publisher,
             Err(e) => {
                 error!("Failed to create event publisher for worker: {}", e);

@@ -1,4 +1,5 @@
 use super::{Event, EventPublisher, ExecutionContext};
+use crate::blob::{BlobScope, BlobStore, SpillSource};
 use crate::db::DatabasePool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,16 @@ impl DatabaseEventPublisher {
     /// Create a new DatabaseEventPublisher with an existing database pool (preferred)
     /// This ensures the database connection is ready before events are published
     pub fn new_with_pool(db_pool: DatabasePool) -> Self {
+        Self::new_with_pool_and_blob_store(db_pool, None)
+    }
+
+    /// Like [`Self::new_with_pool`], but with an optional blob store used to
+    /// spill large event payload leaves to content-addressed storage before
+    /// the event row insert.
+    pub fn new_with_pool_and_blob_store(
+        db_pool: DatabasePool,
+        blob_store: Option<Arc<BlobStore>>,
+    ) -> Self {
         let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<EventWrite>();
         let (shutdown_sender, mut shutdown_receiver) =
             mpsc::unbounded_channel::<oneshot::Sender<()>>();
@@ -30,6 +41,7 @@ impl DatabaseEventPublisher {
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
                 db: db_for_processor,
+                blob_store,
             };
 
             loop {
@@ -110,6 +122,7 @@ impl DatabaseEventPublisher {
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
                 db: db_for_processor,
+                blob_store: None,
             };
 
             loop {
@@ -178,6 +191,9 @@ impl DatabaseEventPublisher {
 
 struct DatabaseEventProcessor {
     db: Arc<RwLock<Option<DatabasePool>>>,
+    /// When present, large event payload leaves are spilled to blob storage
+    /// before the event row insert.
+    blob_store: Option<Arc<BlobStore>>,
 }
 
 impl DatabaseEventProcessor {
@@ -207,7 +223,35 @@ impl DatabaseEventProcessor {
                 "Missing user_id in ExecutionContext - cannot publish event".to_string()
             })?;
 
-            let event_data = serde_json::to_value(&event.event_data)
+            // Spill large payload leaves before serialization. Event data is
+            // executable payload: fail closed on spill errors rather than
+            // silently persisting a partially-spilled value.
+            let event_data_val = match (&self.blob_store, ctx.org_id) {
+                (Some(store), Some(org_id))
+                    if store.config().enabled()
+                        && crate::blob::estimate_val_size(&event.event_data)
+                            >= store.config().spill_threshold_bytes =>
+                {
+                    let scope = BlobScope {
+                        org_id,
+                        env_id: ctx.env_id,
+                        run_id: Some(ctx.run_id),
+                    };
+                    let source_id = event.event_id.to_string();
+                    store
+                        .spill_large_val(
+                            event.event_data.clone(),
+                            scope,
+                            SpillSource::EventData,
+                            Some(&source_id),
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to spill event data to blob storage: {}", e))?
+                }
+                _ => event.event_data.clone(),
+            };
+
+            let event_data = serde_json::to_value(&event_data_val)
                 .map_err(|e| format!("Failed to serialize event data: {}", e))?;
 
             crate::db::event::Event::insert_event(
@@ -231,10 +275,27 @@ impl DatabaseEventProcessor {
     }
 }
 
+/// Maximum time a publisher will wait for the serial database processor to
+/// acknowledge an event insert. The processor is a single serial task, so one
+/// slow/stuck insert (network outage, database contention) would otherwise
+/// wedge every publisher - and the worker's serial event pipeline behind it -
+/// indefinitely.
+const PUBLISH_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl DatabaseEventPublisher {
     /// Publish an event and wait for database write to complete
-    /// This blocks until the event has been written to the database
+    /// This blocks until the event has been written to the database, bounded
+    /// by [`PUBLISH_ACK_TIMEOUT`].
     pub fn publish_and_wait(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
+        self.publish_and_wait_with_timeout(ctx, event, PUBLISH_ACK_TIMEOUT)
+    }
+
+    fn publish_and_wait_with_timeout(
+        &self,
+        ctx: &ExecutionContext,
+        event: Event,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
         // Validate that ExecutionContext has required fields
         if ctx.env_id.is_none() {
             return Err("Cannot publish event - missing env_id in ExecutionContext".to_string());
@@ -257,9 +318,15 @@ impl DatabaseEventPublisher {
         // correct sync-to-async bridge. Do not use `block_in_place` here:
         // this path is called from Hot VM execution, not from async worker code.
         tokio::runtime::Handle::current().block_on(async {
-            ack_receiver
-                .await
-                .map_err(|_| "Database write acknowledgment was dropped".to_string())?
+            match tokio::time::timeout(timeout, ack_receiver).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("Database write acknowledgment was dropped".to_string()),
+                Err(_) => Err(format!(
+                    "Timed out after {:?} waiting for event database write (writer backlog or \
+                     database outage)",
+                    timeout
+                )),
+            }
         })
     }
 }
@@ -340,5 +407,126 @@ mod tests {
 
         // This should not panic
         publisher.publish(&ctx, event);
+    }
+
+    #[tokio::test]
+    async fn test_event_publisher_spills_large_event_data() {
+        let db = Arc::new(crate::db::test_db().await);
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(crate::file_storage::LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let blob_store = Arc::new(BlobStore::new(
+            db.clone(),
+            storage,
+            crate::blob::BlobConfig {
+                mode: crate::blob::BlobMode::Service,
+                spill_threshold_bytes: 1024,
+                ..Default::default()
+            },
+        ));
+
+        let processor = DatabaseEventProcessor {
+            db: Arc::new(RwLock::new(Some((*db).clone()))),
+            blob_store: Some(blob_store.clone()),
+        };
+
+        let payload = "e".repeat(4096);
+        let event = Event::new(
+            data.env_id,
+            data.stream_id,
+            "test_event".to_string(),
+            crate::val!({"body": payload.clone()}),
+        );
+        let event_id = event.event_id;
+        let ctx = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            crate::db::run::RunType::Run.as_id(),
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+
+        processor.insert_event(&ctx, &event).await.unwrap();
+
+        // The stored row holds a compact BlobRef, not the large payload.
+        let stored = crate::db::event::Event::get_event(&db, &event_id)
+            .await
+            .unwrap();
+        let stored_val: crate::val::Val =
+            serde_json::from_value(stored.event_data.clone()).unwrap();
+        assert!(crate::blob::contains_blob_ref(&stored_val));
+        assert!(stored.event_data.to_string().len() < 1024);
+
+        // Rehydration restores the original data.
+        let scope = BlobScope {
+            org_id: data.org_id,
+            env_id: Some(data.env_id),
+            run_id: None,
+        };
+        let rehydrated = blob_store
+            .rehydrate_blob_refs(
+                stored_val,
+                scope,
+                crate::blob::RehydrateBudget::from_config(blob_store.config()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rehydrated.get_str("body"), payload);
+    }
+
+    /// A wedged database processor must not block publishers forever: the ack
+    /// wait times out and returns an error instead of hanging the caller (and
+    /// the worker's serial event pipeline behind it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_publish_and_wait_times_out_when_processor_is_stuck() {
+        let (event_sender, event_receiver) = mpsc::unbounded_channel::<EventWrite>();
+        let (shutdown_sender, _shutdown_receiver) =
+            mpsc::unbounded_channel::<oneshot::Sender<()>>();
+
+        // No processor task drains the channel: simulates a stuck insert.
+        let publisher = DatabaseEventPublisher {
+            db: Arc::new(RwLock::new(None)),
+            event_sender,
+            shutdown_sender,
+            shutdown_initiated: Arc::new(AtomicBool::new(false)),
+        };
+
+        let stream_id = Uuid::now_v7();
+        let event = Event::new(
+            Uuid::now_v7(),
+            stream_id,
+            "test_event".to_string(),
+            crate::val::Val::from("test_data"),
+        );
+        let ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            stream_id,
+            crate::db::run::RunType::Run.as_id(),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+
+        // publish_and_wait uses Handle::block_on, which is only legal from a
+        // blocking (non-core) thread - same as the real VM execution path.
+        let result = tokio::task::spawn_blocking(move || {
+            publisher.publish_and_wait_with_timeout(
+                &ctx,
+                event,
+                std::time::Duration::from_millis(200),
+            )
+        })
+        .await
+        .unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("Timed out"), "unexpected error: {err}");
+        drop(event_receiver);
     }
 }

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod blob;
 pub mod build;
 pub mod build_info;
 pub mod bundle;

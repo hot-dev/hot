@@ -24,10 +24,15 @@ use hot::stream::{
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{get_and_verify_project, publish_event_internal};
+use hot::blob::BlobStore;
+
+use super::{
+    blob_store_from_ext, get_and_verify_project, publish_event_internal, rehydrate_payload_json,
+};
 use crate::ApiStateData;
 use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
@@ -134,12 +139,14 @@ pub async fn subscribe_to_stream(
     State((db, _storage, _conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Path(stream_id): Path<Uuid>,
     Query(params): Query<StreamSubscribeParams>,
 ) -> Result<
     Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    let blob_store = blob_store_from_ext(blob_store);
     let env_id = auth.env_id();
 
     // Verify the stream exists and belongs to this environment
@@ -169,6 +176,7 @@ pub async fn subscribe_to_stream(
         None
     };
     let db_clone = db.clone();
+    let blob_store_clone = blob_store.clone();
 
     // Try to subscribe to pub/sub for real-time updates
     let subscriber: Option<Box<dyn StreamSubscriber>> = if let Some(ref pubsub) = stream_pubsub {
@@ -257,7 +265,7 @@ pub async fn subscribe_to_stream(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunStart { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:start for {}", run_id);
@@ -284,7 +292,7 @@ pub async fn subscribe_to_stream(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunStop { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:stop for {}", run_id);
@@ -311,7 +319,7 @@ pub async fn subscribe_to_stream(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunFail { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:fail for {}", run_id);
@@ -338,7 +346,7 @@ pub async fn subscribe_to_stream(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunCancel { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:cancel for {}", run_id);
@@ -393,7 +401,7 @@ pub async fn subscribe_to_stream(
                                 if !seen_run_ids.contains(&run.run_id) {
                                     seen_run_ids.insert(run.run_id);
 
-                                    let run_response = run_to_response(&run);
+                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                     let event = StreamEvent::RunStart { run: run_response };
                                     if let Ok(json) = serde_json::to_string(&event) {
                                         tracing::debug!("SSE poll: run:start for {}", run.run_id);
@@ -405,7 +413,7 @@ pub async fn subscribe_to_stream(
                                 if run.stop_time.is_some() && !completed_run_ids.contains(&run.run_id) {
                                     completed_run_ids.insert(run.run_id);
 
-                                    let run_response = run_to_response(&run);
+                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
 
                                     let (event_type, event) = match run.status.as_str() {
                                         "failed" => ("run:fail", StreamEvent::RunFail { run: run_response }),
@@ -446,6 +454,7 @@ pub async fn subscribe_to_stream_post(
     State(state): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     Path(stream_id): Path<Uuid>,
     Query(params): Query<StreamSubscribeParams>,
 ) -> Result<
@@ -457,14 +466,21 @@ pub async fn subscribe_to_stream_post(
         State(state),
         Extension(auth),
         Extension(api_key),
+        blob_store,
         Path(stream_id),
         Query(params),
     )
     .await
 }
 
-/// Helper to convert a Run database record to RunResponse
-fn run_to_response(run: &Run) -> RunResponse {
+/// Helper to convert a Run database record to RunResponse, rehydrating any
+/// spilled BlobRefs in the run result before it goes out over SSE.
+async fn run_to_response(
+    db: &hot::db::DatabasePool,
+    blob_store: Option<&Arc<BlobStore>>,
+    run: &Run,
+) -> RunResponse {
+    let result = rehydrate_payload_json(db, blob_store, run.env_id, run.result.clone()).await;
     RunResponse {
         run_id: run.run_id,
         env_id: run.env_id,
@@ -476,7 +492,7 @@ fn run_to_response(run: &Run) -> RunResponse {
         stop_time: run.stop_time,
         origin_run_id: run.origin_run_id,
         event_id: run.event_id,
-        result: run.result.clone(),
+        result,
         project_id: run.project_id,
         project_name: run.project_name.clone(),
         retry_attempt: run.retry_attempt,
@@ -543,6 +559,7 @@ pub async fn subscribe_with_event(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
     OptionalAccessId(access_id): OptionalAccessId,
     Query(params): Query<SubscribeWithEventParams>,
     Json(req): Json<SubscribeWithEventRequest>,
@@ -550,6 +567,7 @@ pub async fn subscribe_with_event(
     Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    let blob_store = blob_store_from_ext(blob_store);
     let env_id = auth.env_id();
 
     // Step 1: Determine stream_id - use provided or create new
@@ -663,6 +681,7 @@ pub async fn subscribe_with_event(
         None
     };
     let db_clone = db.clone();
+    let blob_store_clone = blob_store.clone();
     let event_id = published.event_id;
     let event_type = published.event_type.clone();
 
@@ -745,7 +764,7 @@ pub async fn subscribe_with_event(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunStart { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:start for {}", run_id);
@@ -772,7 +791,7 @@ pub async fn subscribe_with_event(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunStop { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:stop for {}", run_id);
@@ -799,7 +818,7 @@ pub async fn subscribe_with_event(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunFail { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:fail for {}", run_id);
@@ -826,7 +845,7 @@ pub async fn subscribe_with_event(
                                                 continue;
                                             }
 
-                                        let run_response = run_to_response(&run);
+                                        let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                         let sse_event = StreamEvent::RunCancel { run: run_response };
                                         if let Ok(json) = serde_json::to_string(&sse_event) {
                                             tracing::debug!("SSE push: run:cancel for {}", run_id);
@@ -881,7 +900,7 @@ pub async fn subscribe_with_event(
                                 if !seen_run_ids.contains(&run.run_id) {
                                     seen_run_ids.insert(run.run_id);
 
-                                    let run_response = run_to_response(&run);
+                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
                                     let event = StreamEvent::RunStart { run: run_response };
                                     if let Ok(json) = serde_json::to_string(&event) {
                                         tracing::debug!("SSE poll: run:start for {}", run.run_id);
@@ -893,7 +912,7 @@ pub async fn subscribe_with_event(
                                 if run.stop_time.is_some() && !completed_run_ids.contains(&run.run_id) {
                                     completed_run_ids.insert(run.run_id);
 
-                                    let run_response = run_to_response(&run);
+                                    let run_response = run_to_response(&db_clone, blob_store_clone.as_ref(), &run).await;
 
                                     let (event_type, event) = match run.status.as_str() {
                                         "failed" => ("run:fail", StreamEvent::RunFail { run: run_response }),

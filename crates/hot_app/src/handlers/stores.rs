@@ -443,7 +443,16 @@ pub async fn entry_value_handler(
     };
 
     let entry = match store.get(&store_name, &key).await {
-        Ok(Some(e)) => templates::StoreEntryDisplay::from(&e),
+        Ok(Some(mut e)) => {
+            // Rehydrate a spilled value so the reveal shows the actual data
+            crate::handlers::rehydrate_json_for_session(
+                state.blob_store.as_ref(),
+                &session,
+                &mut e.value,
+            )
+            .await;
+            templates::StoreEntryDisplay::from(&e)
+        }
         Ok(None) => {
             return no_store_text_response(StatusCode::NOT_FOUND, "Store entry not found.");
         }

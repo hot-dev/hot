@@ -1532,6 +1532,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
             hierarchy: new Set()
         };
 
+        // Server-side payload search: call payloads are not shipped with the
+        // hierarchy, so result matching is done by the server. Holds the
+        // call_ids whose args/return value contain the current search term.
+        this.resultSearchMatches = new Set();
+        this._resultSearchTerm = '';
+
         // State tracking for each tab
         this.tabState = {
             timeline: { selectedItemId: null, selectedItemType: null },
@@ -1620,9 +1626,10 @@ window.ObservabilityTabs = class ObservabilityTabs {
         let hierarchySearchTimeout;
         this.hierarchySearchInput?.addEventListener('input', (e) => {
             clearTimeout(hierarchySearchTimeout);
-            hierarchySearchTimeout = setTimeout(() => {
+            hierarchySearchTimeout = setTimeout(async () => {
                 this.filters.hierarchy.search = e.target.value.toLowerCase();
                 this.revealedHiddenGroups.hierarchy.clear();
+                await this.fetchResultSearchMatches(this.filters.hierarchy.search);
                 this.renderHierarchy();
             }, 150);
         });
@@ -1647,9 +1654,10 @@ window.ObservabilityTabs = class ObservabilityTabs {
         let timelineSearchTimeout;
         this.timelineSearchInput?.addEventListener('input', (e) => {
             clearTimeout(timelineSearchTimeout);
-            timelineSearchTimeout = setTimeout(() => {
+            timelineSearchTimeout = setTimeout(async () => {
                 this.filters.timeline.search = e.target.value.toLowerCase();
                 this.revealedHiddenGroups.timeline.clear();
+                await this.fetchResultSearchMatches(this.filters.timeline.search);
                 this.renderTimeline();
             }, 150);
         });
@@ -1726,25 +1734,17 @@ window.ObservabilityTabs = class ObservabilityTabs {
     //   - Namespace prefixes: "::hot" matches functions starting with "::hot"
     //   - Flow constructs: "@cond" matches flow type "cond", "@loop" matches "loop", etc.
     // Returns: { filtered: boolean, matchType: 'name' | 'result' | null }
-    shouldFilterOut(name, filterType, flowType = null, result = null) {
+    shouldFilterOut(name, filterType, flowType = null, callId = null) {
         const filter = this.filters[filterType];
         if (!name) return { filtered: false, matchType: null };
 
-        // Check search filter - searches both name and result
+        // Check search filter - searches the name locally and the call's
+        // args/return value via the server-side match set (payloads are not
+        // available client-side).
         if (filter.search) {
             const searchLower = filter.search.toLowerCase();
             const nameMatches = name.toLowerCase().includes(searchLower);
-
-            // Check if result matches (stringify for searching)
-            let resultMatches = false;
-            if (result !== null && result !== undefined) {
-                try {
-                    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-                    resultMatches = resultStr.toLowerCase().includes(searchLower);
-                } catch (e) {
-                    // Ignore stringify errors
-                }
-            }
+            const resultMatches = callId != null && this.resultSearchMatches.has(String(callId));
 
             if (!nameMatches && !resultMatches) {
                 return { filtered: true, matchType: null };
@@ -1805,8 +1805,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     hasVisibleDescendants(node, filterType) {
         const name = node.name || node.function_name || 'Unknown';
         const flowType = node.flow?.type || null;
-        const result = node.return_value || null;
-        const filterResult = this.shouldFilterOut(name, filterType, flowType, result);
+        const filterResult = this.shouldFilterOut(name, filterType, flowType, node.call_id);
         if (!filterResult.filtered) {
             return true;
         }
@@ -2852,8 +2851,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         items.forEach(item => {
             // Apply filter (pass flow type for @cond, @loop, etc. filtering)
             const flowType = item.flow?.type || null;
-            const result = item.node?.return_value || null;
-            const filterResult = this.shouldFilterOut(item.name, 'timeline', flowType, result);
+            const filterResult = this.shouldFilterOut(item.name, 'timeline', flowType, item.node?.call_id);
 
             if (filterResult.filtered) {
                 hiddenCount++;
@@ -3331,9 +3329,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
         for (const node of nodes) {
             const name = node.name || node.function_name || 'Unknown';
             const flowType = node.flow?.type || null;
-            const result = node.return_value || null;
 
-            const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, result);
+            const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, node.call_id);
             const isFiltered = filterResult.filtered;
             const hasVisibleChildren = node.children && node.children.length > 0 &&
                 node.children.some(child => this.hasVisibleDescendants(child, 'hierarchy'));
@@ -3390,9 +3387,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
         for (const node of nodes) {
             const name = node.name || node.function_name || 'Unknown';
             const flowType = node.flow?.type || null;
-            const result = node.return_value || null;
 
-            const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, result);
+            const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, node.call_id);
             const isFiltered = filterResult.filtered;
             const hasVisibleChildren = node.children && node.children.length > 0 &&
                 node.children.some(child => this.hasVisibleDescendants(child, 'hierarchy'));
@@ -3480,10 +3476,9 @@ window.ObservabilityTabs = class ObservabilityTabs {
     renderHierarchyNode(node, depth, extraClass = '') {
         const name = node.name || node.function_name || 'Unknown';
         const flowType = node.flow?.type || null;
-        const result = node.return_value || null;
 
         // Check if this node should be filtered out (already checked in renderHierarchyNodes, but needed for matchedOnResult)
-        const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, result);
+        const filterResult = this.shouldFilterOut(name, 'hierarchy', flowType, node.call_id);
         const matchedOnResult = filterResult.matchType === 'result';
 
         // Track if this is a result match for auto-opening inspector
@@ -3601,7 +3596,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         }
     }
 
-    showNodeInInspector(node) {
+    async showNodeInInspector(node) {
         // Save state based on current tab
         if (this.currentTab === 'hierarchy') {
             this.tabState.hierarchy.selectedNodeId = node.id;
@@ -3610,6 +3605,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
             this.tabState.timeline.selectedItemId = node.id;
             this.tabState.timeline.selectedItemType = node.type;
         }
+
+        // The hierarchy response carries only call metadata; args and return
+        // values (potentially large) are fetched lazily per call and cached on
+        // the node. The server rehydrates any blob-spilled payloads, so the
+        // inspector always shows the actual data.
+        await this.loadCallDetails(node);
 
         const escapedFunctionName = this.escapeHtml(node.function_name || node.name);
         let content = `
@@ -3720,6 +3721,55 @@ window.ObservabilityTabs = class ObservabilityTabs {
         }
 
         this.openInspector(content);
+    }
+
+    // Ask the server which calls in this run have args/return values that
+    // contain the search term. Payloads don't travel with the hierarchy, so
+    // this is the only way to search inside them (including blob previews).
+    async fetchResultSearchMatches(term) {
+        if (term === this._resultSearchTerm) {
+            return;
+        }
+        this._resultSearchTerm = term;
+        if (!term) {
+            this.resultSearchMatches = new Set();
+            return;
+        }
+        try {
+            const response = await fetch(`/data/runs/${this.runId}/calls/search?q=${encodeURIComponent(term)}`);
+            const data = await response.json();
+            // Ignore stale responses from superseded searches.
+            if (term !== this._resultSearchTerm) {
+                return;
+            }
+            this.resultSearchMatches = new Set(data.success ? (data.call_ids || []) : []);
+        } catch (e) {
+            console.error('Call payload search failed:', e);
+            this.resultSearchMatches = new Set();
+        }
+    }
+
+    // Fetch a call's args/return value on demand and cache them on the node.
+    // No-op for non-call nodes, nodes with no payloads, or already-loaded nodes.
+    async loadCallDetails(node) {
+        if (node._detailsLoaded || node.type !== 'call' || !node.call_id) {
+            return;
+        }
+        if (!node.has_args && !node.has_return_value) {
+            node._detailsLoaded = true;
+            return;
+        }
+        try {
+            const response = await fetch(`/data/calls/${node.call_id}`);
+            const data = await response.json();
+            if (data.success && data.call) {
+                node.args = data.call.args;
+                node.return_value = data.call.return_value;
+                node._detailsLoaded = true;
+            }
+        } catch (e) {
+            console.error('Failed to load call details:', e);
+        }
     }
 
     expandAllHierarchy() {

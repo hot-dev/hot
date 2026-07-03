@@ -80,7 +80,8 @@ impl TestApp {
         let db = Arc::new(db);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let router = crate::routes::routes(db.clone(), conf.clone(), None, shutdown_rx);
+        let blob_store = hot::blob::blob_store_from_conf(db.clone(), &conf).await;
+        let router = crate::routes::routes(db.clone(), conf.clone(), None, blob_store, shutdown_rx);
 
         Self {
             db,

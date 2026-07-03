@@ -777,9 +777,10 @@ pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // mus
 // Helper functions for creating emitter and event publisher
 
 /// Create a emitter based on worker configuration
-fn create_emitter(
+async fn create_emitter(
     conf: &Val,
     db_pool: &DatabasePool,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
 ) -> Result<Option<std::sync::Arc<dyn EngineEventEmitter>>, String> {
     // Get resolved emitter configuration (hot.emitter.type in config becomes emitter.type after load_conf)
     let emitter_conf = conf.get("emitter").unwrap_or_else(Val::map_empty);
@@ -818,7 +819,10 @@ fn create_emitter(
             tracing::debug!("create_emitter: creating db emitter");
             // Use existing database pool instead of creating a new one
             // Note: stream_data is no longer persisted to DB - delivered via Redis Streams only
-            let db_emitter = DatabaseEngineEventEmitter::new_with_pool(db_pool.clone());
+            let db_emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+                db_pool.clone(),
+                blob_store,
+            );
             let filtered_emitter =
                 hot::lang::emitter::FilteredEmitter::new(db_emitter, filter_conf.as_ref())?;
             Ok(Some(std::sync::Arc::new(filtered_emitter)))
@@ -831,9 +835,10 @@ fn create_emitter(
 }
 
 /// Create a event publisher based on worker configuration
-fn create_event_publisher(
+async fn create_event_publisher(
     conf: &Val,
     db_pool: &DatabasePool,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
 ) -> Result<Option<std::sync::Arc<dyn EventPublisher>>, String> {
     // Extract queue configuration
     let queue_type_str = conf.get_str("queue.type");
@@ -853,7 +858,8 @@ fn create_event_publisher(
     let serialization = Serialization::from_str(&serialization_str).unwrap_or_default();
 
     // Create database publisher with existing pool (ensures connection is ready)
-    let database_publisher = DatabaseEventPublisher::new_with_pool(db_pool.clone());
+    let database_publisher =
+        DatabaseEventPublisher::new_with_pool_and_blob_store(db_pool.clone(), blob_store);
 
     // Create queue publisher with extracted configuration including cluster mode
     let queue_publisher = hot::lang::event::QueueEventPublisher::new_with_cluster(
@@ -908,6 +914,7 @@ fn extract_target_function_from_event(event_data: &Val) -> Option<String> {
 async fn hydrate_event_message_from_db(
     worker_id: usize,
     db: &DatabasePool,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
     event_message: EventMessage,
     infra_retry_backoff_ms: u64,
 ) -> Result<EventMessage, WorkerError> {
@@ -962,6 +969,48 @@ async fn hydrate_event_message_from_db(
         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
         worker_error(err_msg)
     })?;
+
+    // Rehydrate spilled blob references before the payload reaches handler
+    // code. Executable payloads fail closed: a BlobRef the store cannot
+    // resolve (missing, inactive, or wrong tenant) fails the event rather
+    // than silently handing user code a ref map.
+    let event_data = if hot::blob::contains_blob_ref(&event_data) {
+        let Some(store) = blob_store else {
+            let err_msg = format!(
+                "Event {} contains blob references but blob storage is not configured - cannot hydrate",
+                event_id
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            return Err(worker_error(err_msg));
+        };
+        let Some(org_id) = event_message.body.execution_context.org_id else {
+            let err_msg = format!(
+                "Event {} contains blob references but execution context has no org_id - cannot hydrate",
+                event_id
+            );
+            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+            return Err(worker_error(err_msg));
+        };
+        let scope = hot::blob::BlobScope {
+            org_id,
+            env_id: Some(stored_event.env_id),
+            run_id: None,
+        };
+        let budget = hot::blob::RehydrateBudget::from_config(store.config());
+        store
+            .rehydrate_blob_refs(event_data, scope, budget)
+            .await
+            .map_err(|e| {
+                let err_msg = format!(
+                    "Failed to rehydrate blob references for event {}: {}",
+                    event_id, e
+                );
+                error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                worker_error(err_msg)
+            })?
+    } else {
+        event_data
+    };
 
     Ok(EventMessage {
         body: hot::lang::event::queue::EventMessageBody {
@@ -4319,6 +4368,15 @@ pub async fn run_with_components_shared_context(
         }
     };
 
+    // Shared blob store for spilling large payloads on write (emitter/event
+    // publisher) and rehydrating BlobRefs when events are loaded for execution.
+    // None when blob spill is disabled or storage init fails.
+    let blob_store = if let Some(ref db_pool) = db {
+        hot::blob::blob_store_from_conf(db_pool.clone(), &worker_conf).await
+    } else {
+        None
+    };
+
     // Use provided emitter and event publisher, or create them from configuration
     // NOTE: These need the database pool to be created first
     let emitter = if emitter.is_some() {
@@ -4326,7 +4384,7 @@ pub async fn run_with_components_shared_context(
     } else {
         // emitter requires database pool, so only create if db is available
         if let Some(ref db_pool) = db {
-            match create_emitter(&worker_conf, db_pool.as_ref()) {
+            match create_emitter(&worker_conf, db_pool.as_ref(), blob_store.clone()).await {
                 Ok(emitter) => emitter,
                 Err(e) => {
                     error!("Failed to create emitter: {}", e);
@@ -4344,7 +4402,7 @@ pub async fn run_with_components_shared_context(
     } else {
         // event_publisher requires database pool, so only create if db is available
         if let Some(ref db_pool) = db {
-            match create_event_publisher(&worker_conf, db_pool.as_ref()) {
+            match create_event_publisher(&worker_conf, db_pool.as_ref(), blob_store.clone()).await {
                 Ok(publisher) => publisher,
                 Err(e) => {
                     error!("Failed to create event publisher: {}", e);
@@ -4971,6 +5029,20 @@ pub async fn run_with_components_shared_context(
                     }
                 }
             }
+            if let hot::db::DatabasePool::Sqlite(pool) = cleanup_db.as_ref() {
+                match hot::db::sqlite::run_maintenance(pool, &cleanup_conf).await {
+                    Ok(stats) if stats.wal_checkpointed_pages > 0 => {
+                        info!(
+                            "hot.dev: WORKER startup sqlite maintenance checkpointed {} WAL page(s)",
+                            stats.wal_checkpointed_pages
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("hot.dev: WORKER startup sqlite maintenance failed: {}", e);
+                    }
+                }
+            }
         });
     }
 
@@ -5439,6 +5511,7 @@ pub async fn run_with_components_shared_context(
             .with_consumer_name(admin_email_name.clone());
         let claimed_rx_clone = event_claimed_rx.clone();
         let db_clone = db.clone();
+        let blob_store_clone = blob_store.clone();
         let worker_conf_clone = worker_conf.clone();
         let emitter_clone = emitter.clone();
         let event_publisher_clone = event_publisher.clone();
@@ -5496,6 +5569,7 @@ pub async fn run_with_components_shared_context(
                             // Process ONE event message (atomic operation)
                             match lease.process(|message| {
                                 let db_ref = db_clone.clone();
+                                let blob_store_ref = blob_store_clone.clone();
                                 let worker_conf_ref = worker_conf_clone.clone();
                                 let _emitter_ref = emitter_clone.clone();
                                 let _event_publisher_ref = event_publisher_clone.clone();
@@ -5568,6 +5642,7 @@ pub async fn run_with_components_shared_context(
                                                     hydrate_event_message_from_db(
                                                         worker_id,
                                                         db,
+                                                        blob_store_ref.as_ref(),
                                                         event_message,
                                                         infra_retry_backoff_ms,
                                                     )
@@ -6427,6 +6502,10 @@ pub async fn run_with_components_shared_context(
                                                             }
                                                         }
                                                         "call_retention_cleanup" => {
+                                                            // Blob refs sourced from calls follow the same retention:
+                                                            // when call rows age out, their call_* refs deactivate so
+                                                            // blob GC can reclaim the backing objects.
+                                                            const CALL_REF_KINDS: &[&str] = &["call_args", "call_return", "call_flow"];
                                                             if hot::env::is_local_dev() {
                                                                 let days = hot::db::get_local_call_retention_days(&worker_conf_ref);
                                                                 if days >= 0 {
@@ -6437,6 +6516,16 @@ pub async fn run_with_components_shared_context(
                                                                         Ok(_) => {}
                                                                         Err(e) => {
                                                                             error!("hot.dev: WORKER {} maintenance: call retention cleanup failed: {}", worker_id, e);
+                                                                        }
+                                                                    }
+                                                                    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+                                                                    match hot::db::blob::deactivate_refs_older_than(db, None, CALL_REF_KINDS, cutoff).await {
+                                                                        Ok(n) if n > 0 => {
+                                                                            info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s)", worker_id, n);
+                                                                        }
+                                                                        Ok(_) => {}
+                                                                        Err(e) => {
+                                                                            error!("hot.dev: WORKER {} maintenance: call blob ref deactivation failed: {}", worker_id, e);
                                                                         }
                                                                     }
                                                                 }
@@ -6458,6 +6547,73 @@ pub async fn run_with_components_shared_context(
                                                                         Err(e) => {
                                                                             error!("hot.dev: WORKER {} maintenance: call retention cleanup for org {} failed: {}", worker_id, org_id, e);
                                                                         }
+                                                                    }
+
+                                                                    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+                                                                    match hot::db::blob::deactivate_refs_older_than(db, Some(*org_id), CALL_REF_KINDS, cutoff).await {
+                                                                        Ok(n) if n > 0 => {
+                                                                            info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s) for org {}", worker_id, n, org_id);
+                                                                        }
+                                                                        Ok(_) => {}
+                                                                        Err(e) => {
+                                                                            error!("hot.dev: WORKER {} maintenance: call blob ref deactivation for org {} failed: {}", worker_id, org_id, e);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        "blob_cleanup" => {
+                                                            // TTL-expired refs (expires_at) across all sources.
+                                                            match hot::db::blob::deactivate_expired_refs(db).await {
+                                                                Ok(n) if n > 0 => {
+                                                                    info!("hot.dev: WORKER {} maintenance: blob_cleanup deactivated {} TTL-expired ref(s)", worker_id, n);
+                                                                }
+                                                                Ok(_) => {}
+                                                                Err(e) => {
+                                                                    error!("hot.dev: WORKER {} maintenance: blob_cleanup ref expiry failed: {}", worker_id, e);
+                                                                }
+                                                            }
+                                                            // Physical GC needs the blob store (storage byte deletion).
+                                                            // 24h grace after last reference closes the dedupe-vs-GC race.
+                                                            if let Some(store) = &blob_store_ref {
+                                                                let grace_cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                                                                match store.gc_objects(grace_cutoff, 1_000).await {
+                                                                    Ok(n) if n > 0 => {
+                                                                        info!("hot.dev: WORKER {} maintenance: blob_cleanup deleted {} unreferenced blob object(s)", worker_id, n);
+                                                                    }
+                                                                    Ok(_) => {}
+                                                                    Err(e) => {
+                                                                        error!("hot.dev: WORKER {} maintenance: blob_cleanup object GC failed: {}", worker_id, e);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        "sqlite_maintenance" => {
+                                                            if let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() {
+                                                                match hot::db::sqlite::run_maintenance(
+                                                                    pool,
+                                                                    &worker_conf_ref,
+                                                                )
+                                                                .await
+                                                                {
+                                                                    Ok(stats) => {
+                                                                        if stats.wal_checkpointed_pages > 0
+                                                                            || stats.incremental_vacuum_pages_freed
+                                                                                > 0
+                                                                        {
+                                                                            info!(
+                                                                                "hot.dev: WORKER {} maintenance: sqlite checkpointed {} WAL page(s), incremental_vacuum {} page(s)",
+                                                                                worker_id,
+                                                                                stats.wal_checkpointed_pages,
+                                                                                stats.incremental_vacuum_pages_freed
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error!(
+                                                                            "hot.dev: WORKER {} maintenance: sqlite_maintenance failed: {}",
+                                                                            worker_id, e
+                                                                        );
                                                                     }
                                                                 }
                                                             }
@@ -6835,7 +6991,7 @@ mod tests {
             },
         };
 
-        let hydrated = hydrate_event_message_from_db(0, &db, thin_message, 0)
+        let hydrated = hydrate_event_message_from_db(0, &db, None, thin_message, 0)
             .await
             .expect("thin event should hydrate");
 
@@ -6843,6 +6999,115 @@ mod tests {
         assert_eq!(
             extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
             Some(target_fn)
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn hydrate_rehydrates_spilled_event_data_blob_refs() {
+        use hot::blob::{BlobConfig, BlobScope, BlobStore, SpillSource};
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(hot::file_storage::LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let blob_store = Arc::new(BlobStore::new(
+            Arc::new(db.clone()),
+            storage,
+            BlobConfig {
+                mode: hot::blob::BlobMode::Service,
+                spill_threshold_bytes: 1024,
+                ..BlobConfig::default()
+            },
+        ));
+
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_time = chrono::Utc::now();
+        let large_payload: String = "x".repeat(8192);
+        let original_event_data = val!({
+            "fn": "::demo/big",
+            "payload": large_payload.clone(),
+        });
+
+        let scope = BlobScope {
+            org_id: test_data.org_id,
+            env_id: Some(test_data.env_id),
+            run_id: None,
+        };
+        let spilled = blob_store
+            .spill_large_val(
+                original_event_data.clone(),
+                scope,
+                SpillSource::EventData,
+                Some(&event_id.to_string()),
+            )
+            .await
+            .expect("spill should succeed");
+        assert!(hot::blob::contains_blob_ref(&spilled));
+
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &test_data.env_id,
+            &stream_id,
+            "hot:call",
+            &serde_json::to_value(&spilled).unwrap(),
+            event_time,
+            &test_data.user_id,
+            None,
+        )
+        .await
+        .expect("event should insert");
+
+        let thin_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: test_data.env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "event_id": event_id.to_string(),
+                    }),
+                    event_time,
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(test_data.env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+
+        // Without a blob store, executable payloads with BlobRefs fail closed.
+        let no_store = hydrate_event_message_from_db(0, &db, None, thin_message.clone(), 0).await;
+        assert!(no_store.is_err());
+
+        let hydrated = hydrate_event_message_from_db(0, &db, Some(&blob_store), thin_message, 0)
+            .await
+            .expect("spilled event should rehydrate");
+
+        assert_eq!(hydrated.body.event.event_data, original_event_data);
+        assert_eq!(
+            hydrated.body.event.event_data.get_str("payload"),
+            large_payload
         );
 
         if let DatabasePool::Sqlite(pool) = &db {

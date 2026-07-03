@@ -2,7 +2,7 @@
 
 hot.pkg.ffmpeg {
   name: "hot.dev/ffmpeg",
-  version: "1.2.1",
+  version: "1.2.2",
   hot-min-version: "1.2.4",
   description: "FFmpeg video/audio processing via Hot Box containers. Thumbnail extraction, transcoding, audio extraction, and media probing.",
   author: "Hot Dev",

@@ -3065,3 +3065,162 @@ async fn test_multipart_invalid_part_number() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// ============================================================================
+// Blob reference tests (spilled large payloads)
+// ============================================================================
+
+async fn build_blob_store(
+    db: &hot_api::ApiStateData,
+) -> (Arc<hot::blob::BlobStore>, tempfile::TempDir) {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let storage = Arc::new(hot::file_storage::LocalFileStorage::new(
+        temp_dir.path().to_path_buf(),
+    ));
+    let blob_store = Arc::new(hot::blob::BlobStore::new(
+        db.0.clone(),
+        storage,
+        hot::blob::BlobConfig {
+            mode: hot::blob::BlobMode::Service,
+            spill_threshold_bytes: 1024,
+            ..hot::blob::BlobConfig::default()
+        },
+    ));
+    (blob_store, temp_dir)
+}
+
+#[tokio::test]
+async fn test_blob_download_endpoint() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (org_id, _user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+    let (blob_store, _temp_dir) = build_blob_store(&db).await;
+
+    // Spill a large payload for this tenant.
+    let payload = "z".repeat(4096);
+    let scope = hot::blob::BlobScope {
+        org_id,
+        env_id: Some(env.env_id),
+        run_id: None,
+    };
+    let spilled = blob_store
+        .spill_large_val(
+            val!({"body": payload.clone()}),
+            scope,
+            hot::blob::SpillSource::RunResult,
+            Some("test-run"),
+        )
+        .await
+        .unwrap();
+    let spilled_json = serde_json::to_value(&spilled).unwrap();
+    let blob_ref_id = spilled_json["body"]["$val"]["id"].as_str().unwrap();
+
+    let db_for_middleware = db.clone();
+    let blob_ext: Option<Arc<hot::blob::BlobStore>> = Some(blob_store.clone());
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/blobs/{blob_ref_id}/download",
+            axum::routing::get(hot_api::handlers::download_blob),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db_for_middleware,
+            hot_api::auth::api_key_auth_middleware,
+        ));
+
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .layer(axum::Extension(blob_ext))
+        .with_state(db.clone());
+
+    // Download the blob: full original bytes come back.
+    let uri = format!("/v1/blobs/{}/download", blob_ref_id);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), payload.as_bytes());
+
+    // Unknown ref id: not found.
+    let (status, _) = make_request(
+        &app,
+        Method::GET,
+        &format!("/v1/blobs/{}/download", Uuid::now_v7()),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_run_rehydrates_spilled_result() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (org_id, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+    let (blob_store, _temp_dir) = build_blob_store(&db).await;
+
+    // Create a run and store a spilled result in its row.
+    let project_id = create_test_project(&db.0, &env.env_id, &user_id).await;
+    let build_id = create_test_build(&db.0, &project_id, &user_id, false).await;
+    let (run_id, _stream_id) = create_test_run(&db.0, &env.env_id, &build_id, &user_id).await;
+
+    let payload = "r".repeat(4096);
+    let scope = hot::blob::BlobScope {
+        org_id,
+        env_id: Some(env.env_id),
+        run_id: Some(run_id),
+    };
+    let spilled = blob_store
+        .spill_large_val(
+            val!({"result": payload.clone()}),
+            scope,
+            hot::blob::SpillSource::RunResult,
+            Some(&run_id.to_string()),
+        )
+        .await
+        .unwrap();
+    let spilled_json = serde_json::to_value(&spilled).unwrap();
+    match &*db.0 {
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query("UPDATE run SET result = ? WHERE run_id = ?")
+                .bind(spilled_json.to_string())
+                .bind(run_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        _ => panic!("Expected SQLite database for tests"),
+    }
+
+    let db_for_middleware = db.clone();
+    let blob_ext: Option<Arc<hot::blob::BlobStore>> = Some(blob_store.clone());
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/runs/{run_id}",
+            axum::routing::get(hot_api::handlers::get_run),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db_for_middleware,
+            hot_api::auth::api_key_auth_middleware,
+        ));
+
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .layer(axum::Extension(blob_ext))
+        .with_state(db.clone());
+
+    let uri = format!("/v1/runs/{}", run_id);
+    let (status, json) = make_request(&app, Method::GET, &uri, &api_key, None).await;
+    assert_eq!(status, StatusCode::OK);
+    // The API caller sees the full original value, not a BlobRef map.
+    assert_eq!(json["data"]["result"]["result"], payload);
+}

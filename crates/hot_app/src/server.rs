@@ -257,7 +257,11 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         ))
         .service(assets_service);
 
-    let app = routes::routes(db, conf, stream_pubsub, shutdown_rx)
+    // Shared blob store so display pages can rehydrate spilled payloads.
+    // None when blob.mode is "disabled".
+    let blob_store = hot::blob::blob_store_from_conf(db.clone(), &conf).await;
+
+    let app = routes::routes(db, conf, stream_pubsub, blob_store, shutdown_rx)
         .nest_service(ASSETS_URL_PREFIX, cached_assets)
         .layer(
             TraceLayer::new_for_http()

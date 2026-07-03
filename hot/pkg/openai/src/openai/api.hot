@@ -55,6 +55,15 @@ fn
         headers: final-headers
       }))
     }
+    is-bytes(body) => {
+      final-headers {...default-headers, ...additional-headers}
+      ::hot::http/request(HttpRequest({
+        method,
+        url,
+        headers: final-headers,
+        body: body
+      }))
+    }
     => {
       headers {...default-headers, Content-Type: "application/json"}
       final-headers {...headers, ...additional-headers}

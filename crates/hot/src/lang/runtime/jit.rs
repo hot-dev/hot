@@ -18,6 +18,7 @@ use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::mem;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -34,6 +35,21 @@ thread_local! {
 
 const JIT_STACK_GUARD_BUDGET: u64 = 60_000_000;
 const JIT_STACK_EXHAUSTED: i64 = 1;
+
+/// Minimum stack size (bytes) any thread that executes the VM (and therefore may
+/// run JIT-compiled code) must be given.
+///
+/// The JIT stack-overflow guard ([`ensure_jit_stack_limit`]) computes its limit
+/// as `first_seen_sp - JIT_STACK_GUARD_BUDGET`. That budget only protects the
+/// thread if the thread actually has at least that much stack below its entry
+/// point; on a smaller stack the computed limit sits *below* the real stack
+/// bottom and the guard never trips, so deep/recursive JIT code overruns the
+/// real stack and segfaults. The CLI's tokio blocking pool uses 64 MiB stacks;
+/// every manually-spawned VM worker thread must match so the guard is effective
+/// there too. Kept strictly greater than `JIT_STACK_GUARD_BUDGET`.
+pub const VM_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+const _: () = assert!(VM_THREAD_STACK_SIZE as u64 > JIT_STACK_GUARD_BUDGET);
 
 fn ensure_jit_stack_limit() {
     JIT_STACK_LIMIT.with(|cell| {
@@ -458,6 +474,14 @@ struct ActiveFlowState {
     flow_header_regs: Vec<usize>,
     /// For Pipe flows: the register holding the last Pipe step result.
     last_pipe_reg: Option<u32>,
+    /// When the flow's branches do not all produce the same JIT value kind, the
+    /// shared result register cannot be tagged with a single narrow kind (an
+    /// earlier branch would store e.g. a raw `Int` while a later branch stores
+    /// an `OwnedVal` pointer, and the merge would then reinterpret the raw int
+    /// as an `Arc<Val>` pointer — a use-after-free / wild-pointer crash). When
+    /// this is set, every branch result is promoted to `OwnedVal` so the merged
+    /// register has one uniform, memory-safe kind. Computed once at `BeginFlow`.
+    force_owned_result: bool,
 }
 
 pub struct JitCompiledFunction {
@@ -589,9 +613,16 @@ pub struct JitRuntimeState {
     pub config: JitConfig,
     pub code_memory_status: CodeMemoryStatus,
     pub function_profiles: Vec<JitFunctionProfile>,
-    compiled_functions: Vec<Option<JitCompiledFunction>>,
+    // Compiled entries are behind `Rc` on purpose: JIT-compiled code can
+    // re-enter the VM (through the thread-local VM pointer) while a compiled
+    // entry is mid-call, and that reentrant execution may compile and insert
+    // *new* entries. A plain borrow into these containers across the call
+    // would dangle if the map rehashed / the slot moved. Callers must clone
+    // the `Rc` out and drop the container borrow before invoking `call`.
+    // (`Rc`, not `Arc`: the JIT state is owned by a single-threaded VM.)
+    compiled_functions: Vec<Option<Rc<JitCompiledFunction>>>,
     lambda_profiles: AHashMap<LambdaJitKey, JitFunctionProfile>,
-    compiled_lambdas: AHashMap<LambdaJitKey, JitCompiledFunction>,
+    compiled_lambdas: AHashMap<LambdaJitKey, Rc<JitCompiledFunction>>,
 }
 
 impl JitRuntimeState {
@@ -633,10 +664,14 @@ impl JitRuntimeState {
         function_id: FunctionId,
         args: &[Val],
     ) -> Result<Option<Val>, String> {
+        // Clone the Rc out so no borrow into `compiled_functions` is held
+        // while the compiled code runs: the JIT'd code can re-enter this VM
+        // and mutate the JIT state (e.g. compile another function).
         let Some(entry) = self
             .compiled_functions
             .get(function_id as usize)
             .and_then(|entry| entry.as_ref())
+            .map(Rc::clone)
         else {
             return Ok(None);
         };
@@ -712,7 +747,7 @@ impl JitRuntimeState {
         let compiled = compile_supported_function(program, function_id, function_info, &signature)?;
 
         if let Some(slot) = self.compiled_functions.get_mut(function_id as usize) {
-            *slot = Some(compiled);
+            *slot = Some(Rc::new(compiled));
         }
         GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -749,7 +784,11 @@ impl JitRuntimeState {
         let signature = TypeSig::from_args(&effective_args);
         let key = LambdaJitKey::new(lambda, args, captures);
 
-        if let Some(compiled) = self.compiled_lambdas.get(&key) {
+        // Clone the Rc out so no borrow into `compiled_lambdas` is held while
+        // the compiled code runs: the JIT'd lambda can re-enter the VM, which
+        // may compile and insert new lambdas, rehashing the map and moving its
+        // entries out from under a held reference.
+        if let Some(compiled) = self.compiled_lambdas.get(&key).map(Rc::clone) {
             if compiled.matches_args(&effective_args) {
                 return match compiled.call(&effective_args) {
                     Ok(val) => {
@@ -799,22 +838,21 @@ impl JitRuntimeState {
                         .cumulative_compile_time_ms
                         .saturating_add(start.elapsed().as_millis() as u64);
                 }
-                self.compiled_lambdas.insert(key.clone(), compiled);
-                if let Some(compiled) = self.compiled_lambdas.get(&key) {
-                    match compiled.call(&effective_args) {
-                        Ok(val) => {
-                            GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-                            Ok(Some(val))
-                        }
-                        Err(e) if e == "JIT_STACK_EXHAUSTED" => {
-                            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                            Ok(None)
-                        }
-                        Err(e) => Err(e),
+                // Keep our own Rc for the call; the map's clone can move
+                // freely if reentrant compilation rehashes the map.
+                let compiled = Rc::new(compiled);
+                self.compiled_lambdas
+                    .insert(key.clone(), Rc::clone(&compiled));
+                match compiled.call(&effective_args) {
+                    Ok(val) => {
+                        GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                        Ok(Some(val))
                     }
-                } else {
-                    GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                    Ok(None)
+                    Err(e) if e == "JIT_STACK_EXHAUSTED" => {
+                        GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
                 }
             }
             Err(err) => {
@@ -3388,6 +3426,14 @@ fn drop_owned_var(builder: &mut FunctionBuilder<'_>, helper_refs: &JitHelperRefs
     builder.ins().call(helper_refs.drop_owned_val, &[raw]);
 }
 
+fn drop_owned_raw(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    raw: cranelift_codegen::ir::Value,
+) {
+    builder.ins().call(helper_refs.drop_owned_val, &[raw]);
+}
+
 fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTreeSet<u32> {
     let mut regs = std::collections::BTreeSet::new();
     for inst in instructions {
@@ -4242,6 +4288,48 @@ impl<'a> EmitCtx<'a> {
         Ok(builder.use_var(self.registers[self.remap_reg(reg)?]))
     }
 
+    /// Resolve a register as an `OwnedVal` pointer suitable for passing to a
+    /// JIT helper that *borrows* its arguments (all `hot_jit_*` helpers clone
+    /// what they keep and never consume a refcount).
+    ///
+    /// Returns `(ptr, temp)`. When the register already holds an `OwnedVal`,
+    /// the register's pointer is passed through and `temp` is `None` — the
+    /// register keeps the value alive across the call. When the register holds
+    /// a scalar, it is boxed into a fresh `Arc<Val>` and `temp` is `Some(ptr)`;
+    /// the caller must release it with [`drop_owned_raw`] after the helper
+    /// call, otherwise one `Arc` leaks per execution.
+    fn owned_operand(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        reg: u32,
+    ) -> Result<
+        (
+            cranelift_codegen::ir::Value,
+            Option<cranelift_codegen::ir::Value>,
+        ),
+        String,
+    > {
+        let kind = self.register_kind(reg)?;
+        let raw = self.reg_value(builder, reg)?;
+        if kind == RawKind::OwnedVal {
+            Ok((raw, None))
+        } else {
+            let promoted = promote_to_owned(builder, &self.helper_refs, kind, raw)?;
+            Ok((promoted, Some(promoted)))
+        }
+    }
+
+    /// Release any temporaries produced by [`Self::owned_operand`].
+    fn drop_owned_temps(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        temps: &[Option<cranelift_codegen::ir::Value>],
+    ) {
+        for temp in temps.iter().flatten() {
+            drop_owned_raw(builder, &self.helper_refs, *temp);
+        }
+    }
+
     /// Build arg pairs buffer and emit a call_vm_by_name trampoline invocation
     /// for functions not found in program.functions (builtins like Vec, Str, etc.).
     fn emit_vm_callback_by_name(
@@ -4271,14 +4359,14 @@ impl<'a> EmitCtx<'a> {
             builder
                 .ins()
                 .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
-            let raw_val = if eff_kind == RawKind::OwnedVal {
-                clone_owned_raw(builder, &self.helper_refs, eff_raw)
-            } else {
-                eff_raw
-            };
+            // The trampoline only borrows OwnedVal args (decode_helper_val
+            // clones out of them without consuming a refcount) and the source
+            // register keeps the value alive across the call, so the pointer
+            // is passed as-is. Cloning here leaked one strong count per owned
+            // argument per call.
             builder
                 .ins()
-                .stack_store(raw_val, pairs_slot, (i * 2 * 8 + 8) as i32);
+                .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let name_val = new_owned_val(Val::Str(fn_name.to_string().into()));
@@ -4320,14 +4408,12 @@ impl<'a> EmitCtx<'a> {
             builder
                 .ins()
                 .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
-            let raw_val = if eff_kind == RawKind::OwnedVal {
-                clone_owned_raw(builder, &self.helper_refs, eff_raw)
-            } else {
-                eff_raw
-            };
+            // Borrow convention: the trampoline clones what it needs and the
+            // source register keeps the value alive across the call, so no
+            // extra refcount is taken here (cloning leaked one count per call).
             builder
                 .ins()
-                .stack_store(raw_val, pairs_slot, (i * 2 * 8 + 8) as i32);
+                .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let count_val = builder.ins().iconst(types::I64, count as i64);
@@ -4367,14 +4453,12 @@ impl<'a> EmitCtx<'a> {
             builder
                 .ins()
                 .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
-            let raw_val = if eff_kind == RawKind::OwnedVal {
-                clone_owned_raw(builder, &self.helper_refs, eff_raw)
-            } else {
-                eff_raw
-            };
+            // Borrow convention: the trampoline clones what it needs and the
+            // source register keeps the value alive across the call, so no
+            // extra refcount is taken here (cloning leaked one count per call).
             builder
                 .ins()
-                .stack_store(raw_val, pairs_slot, (i * 2 * 8 + 8) as i32);
+                .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let fn_id_val = builder.ins().iconst(types::I64, called_function_id as i64);
@@ -4403,13 +4487,7 @@ impl<'a> EmitCtx<'a> {
         let fn_name = match resolve_const_function_name(instructions, self.program, ip, fn_reg) {
             Some(name) => name,
             None => {
-                let fn_kind = register_kind(&self.remap, &self.register_kinds, fn_reg)?;
-                let fn_raw = builder.use_var(self.registers[remap_reg(&self.remap, fn_reg)?]);
-                let fn_owned = if fn_kind == RawKind::OwnedVal {
-                    fn_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, fn_kind, fn_raw)?
-                };
+                let (fn_owned, fn_temp) = self.owned_operand(builder, fn_reg)?;
                 self.emit_vm_callback_by_name_raw(
                     builder,
                     dest,
@@ -4418,6 +4496,7 @@ impl<'a> EmitCtx<'a> {
                     args_count,
                     instructions,
                 )?;
+                self.drop_owned_temps(builder, &[fn_temp]);
                 self.jump_to_next(builder, ip)?;
                 return Ok(true);
             }
@@ -4781,22 +4860,37 @@ impl<'a> EmitCtx<'a> {
 
                         let mut capture_names: Vec<cranelift_codegen::ir::Value> = Vec::new();
                         let mut capture_values: Vec<cranelift_codegen::ir::Value> = Vec::new();
+                        // Freshly created owned values (promotions and VM
+                        // lookups) passed to populate_closure, which only
+                        // borrows its arguments; they must be released after
+                        // the call or one Arc leaks per lambda creation.
+                        let mut capture_temps: Vec<Option<cranelift_codegen::ir::Value>> =
+                            Vec::new();
                         for var_name in &lambda_info.capture_vars {
                             let owned = if let Some(&(var, kind)) =
                                 self.locals.get(var_name.as_str())
                             {
                                 let raw = builder.use_var(var);
                                 if kind == RawKind::OwnedVal {
-                                    clone_owned_raw(builder, &self.helper_refs, raw)
+                                    // The local keeps the value alive across
+                                    // the call; the helper clones what it
+                                    // keeps, so pass the pointer as-is.
+                                    capture_temps.push(None);
+                                    raw
                                 } else {
-                                    promote_to_owned(builder, &self.helper_refs, kind, raw)?
+                                    let promoted =
+                                        promote_to_owned(builder, &self.helper_refs, kind, raw)?;
+                                    capture_temps.push(Some(promoted));
+                                    promoted
                                 }
                             } else {
                                 let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
                                 let name_ptr = builder.ins().iconst(types::I64, name_val);
                                 let call =
                                     builder.ins().call(self.helper_refs.lookup_var, &[name_ptr]);
-                                builder.inst_results(call)[0]
+                                let looked_up = builder.inst_results(call)[0];
+                                capture_temps.push(Some(looked_up));
+                                looked_up
                             };
                             let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
                             let name_ptr = builder.ins().iconst(types::I64, name_val);
@@ -4836,6 +4930,7 @@ impl<'a> EmitCtx<'a> {
                                 &[base_lambda, names_ptr, values_ptr, count_val],
                             );
                             let captured = builder.inst_results(call)[0];
+                            self.drop_owned_temps(builder, &capture_temps);
                             (RawKind::OwnedVal, captured)
                         }
                     }
@@ -5081,15 +5176,13 @@ impl<'a> EmitCtx<'a> {
                         self.define_register(builder, *dest, RawKind::Bool, zero_val)?;
                     }
                 } else {
-                    let val_raw = self.reg_value(builder, *value)?;
-                    let val_owned = if value_kind == RawKind::OwnedVal {
-                        val_raw
-                    } else {
-                        promote_to_owned(builder, &self.helper_refs, value_kind, val_raw)?
-                    };
+                    let (val_owned, val_temp) = self.owned_operand(builder, *value)?;
+                    let mut type_temp = None;
                     let type_owned = if matches!(type_kind, RawKind::OwnedVal) {
                         self.reg_value(builder, *type_path)?
                     } else if matches!(type_kind, RawKind::StringConst | RawKind::TypeTag) {
+                        // Baked compile-time constant; alive for the lifetime
+                        // of the compiled code, no per-call release needed.
                         materialize_string_const_for_trampoline(
                             self.program,
                             instructions,
@@ -5098,12 +5191,16 @@ impl<'a> EmitCtx<'a> {
                         )
                     } else {
                         let type_raw = self.reg_value(builder, *type_path)?;
-                        promote_to_owned(builder, &self.helper_refs, type_kind, type_raw)?
+                        let promoted =
+                            promote_to_owned(builder, &self.helper_refs, type_kind, type_raw)?;
+                        type_temp = Some(promoted);
+                        promoted
                     };
                     let call = builder
                         .ins()
                         .call(self.helper_refs.is_type_check, &[val_owned, type_owned]);
                     let result = builder.inst_results(call)[0];
+                    self.drop_owned_temps(builder, &[val_temp, type_temp]);
                     self.define_register(builder, *dest, RawKind::Bool, result)?;
                 }
                 self.jump_to_next(builder, ip)?;
@@ -5139,13 +5236,16 @@ impl<'a> EmitCtx<'a> {
                         };
                     let str_raw = self.reg_value(builder, *string)?;
                     let str_owned = to_owned(builder, string_kind, str_raw, &self.helper_refs)?;
+                    let str_temp = (string_kind != RawKind::OwnedVal).then_some(str_owned);
                     let suffix_raw = self.reg_value(builder, *suffix)?;
                     let suffix_owned =
                         to_owned(builder, suffix_kind, suffix_raw, &self.helper_refs)?;
+                    let suffix_temp = (suffix_kind != RawKind::OwnedVal).then_some(suffix_owned);
                     let call = builder
                         .ins()
                         .call(self.helper_refs.str_ends_with, &[str_owned, suffix_owned]);
                     let result = builder.inst_results(call)[0];
+                    self.drop_owned_temps(builder, &[str_temp, suffix_temp]);
                     self.define_register(builder, *dest, RawKind::Bool, result)?;
                 } else {
                     return Err(format!(
@@ -5301,11 +5401,15 @@ impl<'a> EmitCtx<'a> {
                     let call = builder.ins().call(self.helper_refs.make_vec, &[ptr, one]);
                     builder.inst_results(call)[0]
                 };
+                // A freshly built fn vec is a temporary; call_lib only borrows
+                // it, so it must be released after the call.
+                let fn_temp = (fn_kind != RawKind::OwnedVal).then_some(fn_val);
                 let args_raw = builder.use_var(self.registers[remap_reg(&self.remap, *args)?]);
                 let call = builder
                     .ins()
                     .call(self.helper_refs.call_lib, &[fn_val, args_raw]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[fn_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5315,13 +5419,7 @@ impl<'a> EmitCtx<'a> {
                 object,
                 property,
             } => {
-                let obj_kind = register_kind(&self.remap, &self.register_kinds, *object)?;
-                let obj_raw = builder.use_var(self.registers[remap_reg(&self.remap, *object)?]);
-                let obj_val = if obj_kind == RawKind::OwnedVal {
-                    obj_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, obj_kind, obj_raw)?
-                };
+                let (obj_val, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop_name = constant_string(self.program, *property)?;
                 let prop_val = new_owned_val(Val::Str(prop_name.to_string().into()));
                 let prop_const = builder.ins().iconst(types::I64, prop_val);
@@ -5332,29 +5430,19 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dot_access, &[obj_val, prop_const]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[obj_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
             Instruction::MergeMaps { dest, source } => {
-                let dest_kind = register_kind(&self.remap, &self.register_kinds, *dest)?;
-                let dest_raw = builder.use_var(self.registers[remap_reg(&self.remap, *dest)?]);
-                let dest_val = if dest_kind == RawKind::OwnedVal {
-                    dest_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, dest_kind, dest_raw)?
-                };
-                let src_kind = register_kind(&self.remap, &self.register_kinds, *source)?;
-                let src_raw = builder.use_var(self.registers[remap_reg(&self.remap, *source)?]);
-                let src_val = if src_kind == RawKind::OwnedVal {
-                    src_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, src_kind, src_raw)?
-                };
+                let (dest_val, dest_temp) = self.owned_operand(builder, *dest)?;
+                let (src_val, src_temp) = self.owned_operand(builder, *source)?;
                 let call = builder
                     .ins()
                     .call(self.helper_refs.merge_maps, &[dest_val, src_val]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[dest_temp, src_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5394,33 +5482,23 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::ExtractInnerVal { dest, src } => {
-                let src_kind = self.register_kind(*src)?;
-                let src_raw = self.reg_value(builder, *src)?;
-                let src_val = if src_kind == RawKind::OwnedVal {
-                    src_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, src_kind, src_raw)?
-                };
+                let (src_val, src_temp) = self.owned_operand(builder, *src)?;
                 let call = builder
                     .ins()
                     .call(self.helper_refs.extract_inner_val, &[src_val]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[src_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
             Instruction::EnsureResult { dest, value } => {
-                let val_kind = self.register_kind(*value)?;
-                let val_raw = self.reg_value(builder, *value)?;
-                let val_ptr = if val_kind == RawKind::OwnedVal {
-                    val_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, val_kind, val_raw)?
-                };
+                let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder
                     .ins()
                     .call(self.helper_refs.ensure_result, &[val_ptr]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[val_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5430,33 +5508,15 @@ impl<'a> EmitCtx<'a> {
                 index,
                 value,
             } => {
-                let coll_kind = register_kind(&self.remap, &self.register_kinds, *collection)?;
-                let coll_raw =
-                    builder.use_var(self.registers[remap_reg(&self.remap, *collection)?]);
-                let coll_val = if coll_kind == RawKind::OwnedVal {
-                    coll_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, coll_kind, coll_raw)?
-                };
-                let idx_kind = register_kind(&self.remap, &self.register_kinds, *index)?;
-                let idx_raw = builder.use_var(self.registers[remap_reg(&self.remap, *index)?]);
-                let idx_val = if idx_kind == RawKind::OwnedVal {
-                    idx_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, idx_kind, idx_raw)?
-                };
-                let val_kind = register_kind(&self.remap, &self.register_kinds, *value)?;
-                let val_raw = builder.use_var(self.registers[remap_reg(&self.remap, *value)?]);
-                let val_owned = if val_kind == RawKind::OwnedVal {
-                    val_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, val_kind, val_raw)?
-                };
+                let (coll_val, coll_temp) = self.owned_operand(builder, *collection)?;
+                let (idx_val, idx_temp) = self.owned_operand(builder, *index)?;
+                let (val_owned, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder.ins().call(
                     self.helper_refs.set_element,
                     &[coll_val, idx_val, val_owned],
                 );
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[coll_temp, idx_temp, val_temp]);
                 self.define_register(builder, *collection, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5466,13 +5526,7 @@ impl<'a> EmitCtx<'a> {
                 src,
                 type_info,
             } => {
-                let src_kind = self.register_kind(*src)?;
-                let src_raw = self.reg_value(builder, *src)?;
-                let src_val = if src_kind == RawKind::OwnedVal {
-                    src_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, src_kind, src_raw)?
-                };
+                let (src_val, src_temp) = self.owned_operand(builder, *src)?;
                 let type_info_val = match self.program.constants.get(*type_info as usize) {
                     Some(Constant::Val(v)) => new_owned_val(v.clone()),
                     _ => {
@@ -5487,6 +5541,7 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.construct_typed, &[src_val, type_info_raw]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[src_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5553,13 +5608,7 @@ impl<'a> EmitCtx<'a> {
                 property,
                 default_value,
             } => {
-                let obj_kind = self.register_kind(*object)?;
-                let obj_raw = self.reg_value(builder, *object)?;
-                let obj_ptr = if obj_kind == RawKind::OwnedVal {
-                    obj_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, obj_kind, obj_raw)?
-                };
+                let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop = constant_string(self.program, *property)?;
                 let prop_val = new_owned_val(Val::Str(prop.to_string().into()));
                 let prop_ptr = builder.ins().iconst(types::I64, prop_val);
@@ -5567,6 +5616,7 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dot_access, &[obj_ptr, prop_ptr]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[obj_temp]);
                 let null_sentinel = builder.ins().iconst(types::I64, 0);
                 let is_null = builder.ins().icmp(
                     cranelift_codegen::ir::condcodes::IntCC::Equal,
@@ -5606,24 +5656,13 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::VecAppend { vec, value } => {
-                let vec_kind = self.register_kind(*vec)?;
-                let vec_raw = self.reg_value(builder, *vec)?;
-                let vec_ptr = if vec_kind == RawKind::OwnedVal {
-                    vec_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, vec_kind, vec_raw)?
-                };
-                let val_kind = self.register_kind(*value)?;
-                let val_raw = self.reg_value(builder, *value)?;
-                let val_ptr = if val_kind == RawKind::OwnedVal {
-                    clone_owned_raw(builder, &self.helper_refs, val_raw)
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, val_kind, val_raw)?
-                };
+                let (vec_ptr, vec_temp) = self.owned_operand(builder, *vec)?;
+                let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder
                     .ins()
                     .call(self.helper_refs.vec_push, &[vec_ptr, val_ptr]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[vec_temp, val_temp]);
                 self.define_register(builder, *vec, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5657,13 +5696,7 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::WrapOk { dest, src } => {
-                let src_kind = self.register_kind(*src)?;
-                let src_raw = self.reg_value(builder, *src)?;
-                let src_ptr = if src_kind == RawKind::OwnedVal {
-                    clone_owned_raw(builder, &self.helper_refs, src_raw)
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, src_kind, src_raw)?
-                };
+                let (src_ptr, src_temp) = self.owned_operand(builder, *src)?;
                 let ok_key = new_owned_val(Val::Str("ok".into()));
                 let key_ptr = builder.ins().iconst(types::I64, ok_key);
                 let empty_map = new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new())));
@@ -5675,6 +5708,7 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.set_element, &[map_ptr, key_ptr, src_ptr]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[src_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5686,13 +5720,7 @@ impl<'a> EmitCtx<'a> {
                 args_count,
                 spread_mask,
             } => {
-                let fn_kind = self.register_kind(*function)?;
-                let fn_raw = self.reg_value(builder, *function)?;
-                let fn_ptr = if fn_kind == RawKind::OwnedVal {
-                    fn_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, fn_kind, fn_raw)?
-                };
+                let (fn_ptr, fn_temp) = self.owned_operand(builder, *function)?;
                 let count = usize::from(*args_count);
                 let pairs_slot = builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -5710,14 +5738,13 @@ impl<'a> EmitCtx<'a> {
                     builder
                         .ins()
                         .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
-                    let raw_val = if eff_kind == RawKind::OwnedVal {
-                        clone_owned_raw(builder, &self.helper_refs, eff_raw)
-                    } else {
-                        eff_raw
-                    };
+                    // Borrow convention: the trampoline clones what it needs
+                    // and the source register keeps the value alive across the
+                    // call, so no extra refcount is taken here (cloning leaked
+                    // one count per call).
                     builder
                         .ins()
-                        .stack_store(raw_val, pairs_slot, (i * 2 * 8 + 8) as i32);
+                        .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
                 }
                 let args_buf = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
                 let count_val = builder.ins().iconst(types::I64, count as i64);
@@ -5727,6 +5754,7 @@ impl<'a> EmitCtx<'a> {
                     &[fn_ptr, args_buf, count_val, mask_val],
                 );
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[fn_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5762,11 +5790,14 @@ impl<'a> EmitCtx<'a> {
                     let str_raw = self.reg_value(builder, *string)?;
                     let prefix_raw = self.reg_value(builder, *prefix)?;
                     let str_ptr = to_owned(builder, string_kind, str_raw, &self.helper_refs)?;
+                    let str_temp = (string_kind != RawKind::OwnedVal).then_some(str_ptr);
                     let prefix_ptr = to_owned(builder, prefix_kind, prefix_raw, &self.helper_refs)?;
+                    let prefix_temp = (prefix_kind != RawKind::OwnedVal).then_some(prefix_ptr);
                     let call = builder
                         .ins()
                         .call(self.helper_refs.str_starts_with, &[str_ptr, prefix_ptr]);
                     let result = builder.inst_results(call)[0];
+                    self.drop_owned_temps(builder, &[str_temp, prefix_temp]);
                     self.define_register(builder, *dest, RawKind::Bool, result)?;
                 } else {
                     let raw = builder.ins().iconst(types::I64, 0);
@@ -5780,20 +5811,8 @@ impl<'a> EmitCtx<'a> {
                 object,
                 property,
             } => {
-                let obj_kind = self.register_kind(*object)?;
-                let obj_raw = self.reg_value(builder, *object)?;
-                let obj_ptr = if obj_kind == RawKind::OwnedVal {
-                    obj_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, obj_kind, obj_raw)?
-                };
-                let prop_kind = self.register_kind(*property)?;
-                let prop_raw = self.reg_value(builder, *property)?;
-                let prop_ptr = if prop_kind == RawKind::OwnedVal {
-                    prop_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, prop_kind, prop_raw)?
-                };
+                let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
+                let (prop_ptr, prop_temp) = self.owned_operand(builder, *property)?;
                 if let Ok(idx) = self.remap_reg(*dest) {
                     self.compile_time_owned.insert(idx);
                 }
@@ -5801,6 +5820,7 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dynamic_dot_access, &[obj_ptr, prop_ptr]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[obj_temp, prop_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5810,32 +5830,15 @@ impl<'a> EmitCtx<'a> {
                 property,
                 value,
             } => {
-                let obj_kind = self.register_kind(*object)?;
-                let obj_raw = self.reg_value(builder, *object)?;
-                let obj_ptr = if obj_kind == RawKind::OwnedVal {
-                    obj_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, obj_kind, obj_raw)?
-                };
-                let prop_kind = self.register_kind(*property)?;
-                let prop_raw = self.reg_value(builder, *property)?;
-                let prop_ptr = if prop_kind == RawKind::OwnedVal {
-                    prop_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, prop_kind, prop_raw)?
-                };
-                let val_kind = self.register_kind(*value)?;
-                let val_raw = self.reg_value(builder, *value)?;
-                let val_ptr = if val_kind == RawKind::OwnedVal {
-                    val_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, val_kind, val_raw)?
-                };
+                let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
+                let (prop_ptr, prop_temp) = self.owned_operand(builder, *property)?;
+                let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder.ins().call(
                     self.helper_refs.dynamic_dot_set,
                     &[obj_ptr, prop_ptr, val_ptr],
                 );
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[obj_temp, prop_temp, val_temp]);
                 self.define_register(builder, *object, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5845,27 +5848,16 @@ impl<'a> EmitCtx<'a> {
                 property,
                 value,
             } => {
-                let obj_kind = self.register_kind(*object)?;
-                let obj_raw = self.reg_value(builder, *object)?;
-                let obj_ptr = if obj_kind == RawKind::OwnedVal {
-                    obj_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, obj_kind, obj_raw)?
-                };
+                let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop_name = constant_string(self.program, *property)?;
                 let prop_val = new_owned_val(Val::Str(prop_name.to_string().into()));
                 let prop_ptr = builder.ins().iconst(types::I64, prop_val);
-                let val_kind = self.register_kind(*value)?;
-                let val_raw = self.reg_value(builder, *value)?;
-                let val_ptr = if val_kind == RawKind::OwnedVal {
-                    val_raw
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, val_kind, val_raw)?
-                };
+                let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder
                     .ins()
                     .call(self.helper_refs.dot_set, &[obj_ptr, prop_ptr, val_ptr]);
                 let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[obj_temp, val_temp]);
                 self.define_register(builder, *object, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -5893,14 +5885,13 @@ impl<'a> EmitCtx<'a> {
                     builder
                         .ins()
                         .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
-                    let raw_val = if eff_kind == RawKind::OwnedVal {
-                        clone_owned_raw(builder, &self.helper_refs, eff_raw)
-                    } else {
-                        eff_raw
-                    };
+                    // Borrow convention: the trampoline clones what it needs
+                    // and the source register keeps the value alive across the
+                    // call, so no extra refcount is taken here (cloning leaked
+                    // one count per call).
                     builder
                         .ins()
-                        .stack_store(raw_val, pairs_slot, (i * 2 * 8 + 8) as i32);
+                        .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
                 }
                 let args_buf = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
                 let count_val = builder.ins().iconst(types::I64, n as i64);
@@ -5925,16 +5916,11 @@ impl<'a> EmitCtx<'a> {
                 let name = constant_string(self.program, *var_name)?;
                 let name_val = new_owned_val(Val::Str(name.to_string().into()));
                 let name_ptr = builder.ins().iconst(types::I64, name_val);
-                let val_kind = self.register_kind(*value)?;
-                let val_raw = self.reg_value(builder, *value)?;
-                let val_ptr = if val_kind == RawKind::OwnedVal {
-                    clone_owned_raw(builder, &self.helper_refs, val_raw)
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, val_kind, val_raw)?
-                };
+                let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 builder
                     .ins()
                     .call(self.helper_refs.store_global, &[ns_ptr, name_ptr, val_ptr]);
+                self.drop_owned_temps(builder, &[val_temp]);
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
@@ -5971,14 +5957,13 @@ impl<'a> EmitCtx<'a> {
                     builder
                         .ins()
                         .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
-                    let raw_val = if eff_kind == RawKind::OwnedVal {
-                        clone_owned_raw(builder, &self.helper_refs, eff_raw)
-                    } else {
-                        eff_raw
-                    };
+                    // Borrow convention: the trampoline clones what it needs
+                    // and the source register keeps the value alive across the
+                    // call, so no extra refcount is taken here (cloning leaked
+                    // one count per call).
                     builder
                         .ins()
-                        .stack_store(raw_val, pairs_slot, (i * 2 * 8 + 8) as i32);
+                        .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
                 }
                 let args_buf = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
                 let func_id_val = builder.ins().iconst(types::I64, *function as i64);
@@ -6053,13 +6038,7 @@ impl<'a> EmitCtx<'a> {
         accumulator_var: Option<Variable>,
         flow_result_reg: Option<u32>,
     ) -> Result<EmitResult, String> {
-        let thunk_kind = self.register_kind(thunk)?;
-        let thunk_raw = self.reg_value(builder, thunk)?;
-        let thunk_ptr = if thunk_kind == RawKind::OwnedVal {
-            thunk_raw
-        } else {
-            promote_to_owned(builder, &self.helper_refs, thunk_kind, thunk_raw)?
-        };
+        let (thunk_ptr, thunk_temp) = self.owned_operand(builder, thunk)?;
         let zero_a = builder.ins().iconst(types::I64, 0);
         let zero_b = builder.ins().iconst(types::I64, 0);
         let call = builder.ins().call(
@@ -6067,6 +6046,7 @@ impl<'a> EmitCtx<'a> {
             &[thunk_ptr, zero_a, zero_b],
         );
         let result = builder.inst_results(call)[0];
+        self.drop_owned_temps(builder, &[thunk_temp]);
 
         if let Some(acc_var) = accumulator_var {
             let name_str = constant_string(self.program, var_name)?;
@@ -6293,6 +6273,32 @@ fn build_supported_body(
                 } else {
                     None
                 };
+                // For single-result flows (`One` modifier), all branches store
+                // into one shared register. If those branches produce different
+                // JIT kinds, the register must be forced to a uniform `OwnedVal`
+                // to avoid reinterpreting a raw scalar as an `Arc<Val>` pointer.
+                // Accumulator flows (Map/Vec) already box every branch result.
+                let force_owned_result = accumulator_var.is_none()
+                    && matches!(
+                        flow_type,
+                        FlowType::Cond | FlowType::Match | FlowType::Serial
+                    )
+                    && {
+                        let mut seed: AHashMap<u32, RawKind> = AHashMap::new();
+                        for (&reg, &idx) in ctx.remap.iter() {
+                            if let Some(kind) = ctx.register_kinds[idx] {
+                                seed.insert(reg, kind);
+                            }
+                        }
+                        flow_branches_have_mixed_kinds(
+                            instructions,
+                            program,
+                            ip,
+                            end_ip,
+                            &seed,
+                            &ctx.locals,
+                        )
+                    };
                 active_flows.push(ActiveFlowState {
                     flow_type,
                     result_modifier,
@@ -6303,6 +6309,7 @@ fn build_supported_body(
                     accumulator_var,
                     flow_header_regs: Vec::new(),
                     last_pipe_reg: None,
+                    force_owned_result,
                 });
                 ctx.jump_to_next(builder, ip)?;
             }
@@ -6385,6 +6392,16 @@ fn build_supported_body(
                     let result_reg = flow.result_reg.ok_or_else(|| {
                         "JIT flow result register was not initialized".to_string()
                     })?;
+                    // When the flow's branches produce heterogeneous kinds, force
+                    // every branch result to `OwnedVal` up front so the shared
+                    // result register carries one uniform, memory-safe kind. This
+                    // must happen before the store below, not lazily on the first
+                    // mismatch, because branches are emitted sequentially and an
+                    // earlier branch cannot be retro-promoted once emitted.
+                    if flow.force_owned_result && kind != RawKind::OwnedVal {
+                        raw = promote_to_owned(builder, &ctx.helper_refs, kind, raw)?;
+                        kind = RawKind::OwnedVal;
+                    }
                     if let Some(existing) = flow.merged_result_kind {
                         if existing != kind {
                             if kind != RawKind::OwnedVal {
@@ -6771,6 +6788,168 @@ fn find_matching_end_flow(instructions: &[Instruction], begin_ip: usize) -> Resu
         "No matching EndFlow found for BeginFlow at {}",
         begin_ip
     ))
+}
+
+/// Statically determine whether every top-level branch of the flow beginning at
+/// `begin_ip` produces the *same* JIT value kind. Returns `true` when the branch
+/// results are heterogeneous (or any branch result kind cannot be proven), which
+/// means the shared result register must be forced to a uniform `OwnedVal` so
+/// the merge never reinterprets a raw scalar as an `Arc<Val>` pointer.
+///
+/// The inference is deliberately conservative: a narrow kind (`Int`/`Bool`/
+/// `Dec`/`Null`) is only ever attributed to a branch result when it can be
+/// proven from a constant, a tracked local/param, or an operation whose result
+/// kind is statically fixed (comparisons -> `Bool`, `Int`/`Int` arithmetic ->
+/// `Int`, etc.). Anything else is treated as `OwnedVal`. Because forcing
+/// `OwnedVal` is always memory-safe (every branch is promoted uniformly), the
+/// only outcome an imprecise guess can cause is a slightly slower boxed result,
+/// never an unsafe narrow tag.
+fn flow_branches_have_mixed_kinds(
+    instructions: &[Instruction],
+    program: &BytecodeProgram,
+    begin_ip: usize,
+    end_ip: usize,
+    seed_reg_kinds: &AHashMap<u32, RawKind>,
+    locals: &AHashMap<String, (Variable, RawKind)>,
+) -> bool {
+    let mut reg_kinds: AHashMap<u32, RawKind> = seed_reg_kinds.clone();
+
+    let const_kind = |constant: u32| -> RawKind {
+        match program.constants.get(constant as usize) {
+            Some(Constant::Val(Val::Int(_))) => RawKind::Int,
+            Some(Constant::Val(Val::Bool(_))) => RawKind::Bool,
+            Some(Constant::Val(Val::Null)) => RawKind::Null,
+            Some(Constant::Val(Val::Dec(_))) => RawKind::Dec,
+            _ => RawKind::OwnedVal,
+        }
+    };
+
+    let mut merged: Option<RawKind> = None;
+    let mut depth = 0usize;
+
+    for (ip, inst) in instructions
+        .iter()
+        .enumerate()
+        .take(end_ip)
+        .skip(begin_ip + 1)
+    {
+        // Track nested flows so only this flow's own branch ends are inspected.
+        match inst {
+            Instruction::BeginFlow { .. } => {
+                depth += 1;
+                continue;
+            }
+            Instruction::EndFlow { dest } => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                // A nested flow's result is conservatively an owned value.
+                reg_kinds.insert(*dest, RawKind::OwnedVal);
+                continue;
+            }
+            _ => {}
+        }
+
+        // Update kind tracking for producers regardless of depth so nested
+        // results feed outer branch computations conservatively.
+        match inst {
+            Instruction::LoadConst { dest, constant } => {
+                reg_kinds.insert(*dest, const_kind(*constant));
+            }
+            Instruction::LoadVar { dest, var_name } => {
+                let kind = constant_string(program, *var_name)
+                    .ok()
+                    .and_then(|name| locals.get(name).map(|(_, k)| *k))
+                    .unwrap_or(RawKind::OwnedVal);
+                reg_kinds.insert(*dest, kind);
+            }
+            Instruction::Move { dest, src } => {
+                let kind = reg_kinds.get(src).copied().unwrap_or(RawKind::OwnedVal);
+                reg_kinds.insert(*dest, kind);
+            }
+            Instruction::Add { dest, left, right }
+            | Instruction::Sub { dest, left, right }
+            | Instruction::Mul { dest, left, right } => {
+                let lk = reg_kinds.get(left).copied();
+                let rk = reg_kinds.get(right).copied();
+                let kind = match (lk, rk) {
+                    (Some(RawKind::Dec), _) | (_, Some(RawKind::Dec)) => RawKind::Dec,
+                    (Some(RawKind::Int), Some(RawKind::Int)) => RawKind::Int,
+                    _ => RawKind::OwnedVal,
+                };
+                reg_kinds.insert(*dest, kind);
+            }
+            Instruction::Eq { dest, .. }
+            | Instruction::Lt { dest, .. }
+            | Instruction::Gt { dest, .. }
+            | Instruction::IsType { dest, .. }
+            | Instruction::StrStartsWith { dest, .. }
+            | Instruction::StrEndsWith { dest, .. } => {
+                reg_kinds.insert(*dest, RawKind::Bool);
+            }
+            // Everything else that defines a register yields a value whose kind
+            // we do not statically prove here; treat as owned.
+            other => {
+                if let Some(dest) = single_dest_register(other) {
+                    reg_kinds.insert(dest, RawKind::OwnedVal);
+                }
+            }
+        }
+
+        if let Instruction::CondBranchEnd { result, .. } = inst
+            && depth == 0
+        {
+            let kind = reg_kinds.get(result).copied().unwrap_or(RawKind::OwnedVal);
+            match merged {
+                None => merged = Some(kind),
+                Some(existing) if existing == kind => {}
+                Some(_) => return true,
+            }
+        }
+
+        let _ = ip;
+    }
+
+    false
+}
+
+/// The single destination register an instruction defines, if any. Used by the
+/// conservative flow-kind pre-scan.
+fn single_dest_register(inst: &Instruction) -> Option<u32> {
+    match inst {
+        Instruction::LoadConst { dest, .. }
+        | Instruction::LoadVar { dest, .. }
+        | Instruction::LoadFunctionRef { dest, .. }
+        | Instruction::Move { dest, .. }
+        | Instruction::Add { dest, .. }
+        | Instruction::Sub { dest, .. }
+        | Instruction::Mul { dest, .. }
+        | Instruction::Eq { dest, .. }
+        | Instruction::Lt { dest, .. }
+        | Instruction::Gt { dest, .. }
+        | Instruction::IsType { dest, .. }
+        | Instruction::GetTypePath { dest, .. }
+        | Instruction::StrStartsWith { dest, .. }
+        | Instruction::StrEndsWith { dest, .. }
+        | Instruction::Call { dest, .. }
+        | Instruction::CallUserFunction { dest, .. }
+        | Instruction::CallLambda { dest, .. }
+        | Instruction::CallLibBuiltin { dest, .. }
+        | Instruction::CallNative { dest, .. }
+        | Instruction::CallWithSpread { dest, .. }
+        | Instruction::MakeVec { dest, .. }
+        | Instruction::MakeVecWithSpread { dest, .. }
+        | Instruction::DotAccess { dest, .. }
+        | Instruction::DynamicDotAccess { dest, .. }
+        | Instruction::MergeMaps { dest, .. }
+        | Instruction::TemplateInterpolate { dest, .. }
+        | Instruction::WrapOk { dest, .. }
+        | Instruction::DefineFunction { dest, .. }
+        | Instruction::LoadScoped { dest, .. }
+        | Instruction::CaptureVar { dest, .. } => Some(*dest),
+        _ => None,
+    }
 }
 
 fn find_matching_cond_branch_end(
@@ -8840,6 +9019,127 @@ mod tests {
             val!(2)
         );
         assert!(vm.jit_has_compiled_function(0));
+    }
+
+    /// PoC: a cond flow whose first branch produces a raw Int and whose later
+    /// branch produces a Str (OwnedVal). The CondBranchEnd merge must promote
+    /// every branch to a uniform `OwnedVal` so the earlier branch's raw Int is
+    /// not later reinterpreted as an `Arc<Val>` pointer on the EndFlow/Return
+    /// path (which previously caused a SIGSEGV).
+    #[test]
+    fn jitted_cond_flow_mixed_branch_kinds_memory_safety() {
+        let mut program = BytecodeProgram::new();
+        let null_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(Val::Null));
+        let one_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(1)));
+        let int_result_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(7)));
+        let str_result_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("hello")));
+        let true_const = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!(true)));
+        let n_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("n")));
+        let b0 = program.constants.len() as u32;
+        program.constants.push(Constant::StringRef("b0".into()));
+        let default_branch = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::StringRef("cond_default".into()));
+
+        program.functions.push(FunctionInfo {
+            name: "::test/mixed".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["n".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::BeginFlow {
+                    flow_type: FlowType::Cond,
+                    result_modifier: FlowResultModifier::One,
+                    source: None,
+                },
+                Instruction::LoadConst {
+                    dest: 0,
+                    constant: null_const,
+                },
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: n_name,
+                },
+                Instruction::LoadConst {
+                    dest: 2,
+                    constant: one_const,
+                },
+                Instruction::Lt {
+                    dest: 3,
+                    left: 1,
+                    right: 2,
+                },
+                Instruction::CondBranchStart {
+                    branch_name: b0,
+                    condition: 3,
+                    skip_target: 0,
+                },
+                Instruction::EnterScope {
+                    scope_type: crate::lang::bytecode::ScopeType::Flow,
+                },
+                Instruction::LoadConst {
+                    dest: 4,
+                    constant: int_result_const,
+                },
+                Instruction::ExitScope,
+                Instruction::CondBranchEnd {
+                    branch_name: b0,
+                    result: 4,
+                },
+                Instruction::LoadConst {
+                    dest: 5,
+                    constant: true_const,
+                },
+                Instruction::CondBranchStart {
+                    branch_name: default_branch,
+                    condition: 5,
+                    skip_target: 0,
+                },
+                Instruction::EnterScope {
+                    scope_type: crate::lang::bytecode::ScopeType::Flow,
+                },
+                Instruction::LoadConst {
+                    dest: 6,
+                    constant: str_result_const,
+                },
+                Instruction::ExitScope,
+                Instruction::CondBranchEnd {
+                    branch_name: default_branch,
+                    result: 6,
+                },
+                Instruction::EndFlow { dest: 0 },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 7,
+            source: None,
+        });
+
+        let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+        let mut vm = make_test_vm(program, conf);
+
+        // Warm up + compile with the Str branch (n >= 1).
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(5)]).unwrap(),
+            val!("hello")
+        );
+        assert!(vm.jit_has_compiled_function(0));
+        // Now take the Int branch through the compiled code.
+        assert_eq!(
+            vm.execute_compiled_user_function(0, &[val!(-1)]).unwrap(),
+            val!(7)
+        );
     }
 
     #[test]
