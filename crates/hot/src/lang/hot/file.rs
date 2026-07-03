@@ -4,7 +4,7 @@
 // - "direct": Simple filesystem operations without database (default for CLI)
 // - "service": Managed storage with database tracking, org isolation (default for projects)
 
-use crate::file_storage::{FileStorage, FileStorageContext};
+use crate::file_storage::{FileRunProvenance, FileStorage, FileStorageContext};
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
@@ -65,12 +65,24 @@ fn get_file_context(vm: &VirtualMachine) -> Result<FileStorageContext, String> {
         .user_id
         .ok_or("User ID not available in execution context")?;
 
+    // Only pre-insert placeholder run rows when an emitter will later deliver
+    // the authoritative run:start/run:stop. Without an emitter the placeholder
+    // would sit as a zombie "running" run forever; the FK-retry fallback in
+    // insert_file_record (NULL run id) covers that case instead.
+    let run_provenance = vm.get_emitter().as_ref().map(|_| FileRunProvenance {
+        stream_id: exec_ctx.stream_id,
+        build_id: exec_ctx.build_id,
+        run_type_id: exec_ctx.run_type_id,
+        access_id: exec_ctx.access_id,
+    });
+
     Ok(FileStorageContext {
         db,
         org_id,
         env_id: exec_ctx.env_id,
         user_id,
         run_id: Some(exec_ctx.run_id),
+        run_provenance,
         file_max_bytes_conf: FileStorageContext::conf_file_max_bytes(vm.get_conf()),
     })
 }

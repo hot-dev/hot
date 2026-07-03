@@ -253,6 +253,7 @@ impl MaintenanceMessage {
                     "zombie_run_cleanup".to_string(),
                     "call_retention_cleanup".to_string(),
                     "blob_cleanup".to_string(),
+                    "sqlite_maintenance".to_string(),
                 ],
             },
         }
@@ -817,7 +818,12 @@ impl EventPublisher for QueueAndDatabaseEventPublisher {
 
         // Step 1: Write to database and WAIT for completion
         if let Err(e) = self.database_publisher.publish_and_wait(ctx, event.clone()) {
-            tracing::error!("Failed to write event to database: {}", e);
+            tracing::error!(
+                event_id = %event.event_id,
+                event_type = %event.event_type,
+                "Failed to write event to database; event will NOT be enqueued: {}",
+                e
+            );
             // Don't enqueue if database write failed - this prevents orphaned queue messages
             return;
         }

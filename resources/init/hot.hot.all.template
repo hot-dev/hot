@@ -71,6 +71,25 @@ hot.db.schema "hot"
 // Automatically trims call/trace data older than this in local development.
 hot.db.local.retention.call.days Int(::env/get("HOT_DB_LOCAL_RETENTION_CALL_DAYS", "7"))
 
+// SQLite performance tuning (applied on every connection when db.uri is sqlite:...)
+// cache-size-kb: page cache in KiB (negative PRAGMA cache_size value).
+hot.db.sqlite.cache-size-kb Int(::env/get("HOT_DB_SQLITE_CACHE_SIZE_KB", "65536"))
+// mmap-size-bytes: bytes of the DB file to memory-map for reads (0 disables).
+hot.db.sqlite.mmap-size-bytes Int(::env/get("HOT_DB_SQLITE_MMAP_SIZE_BYTES", "268435456"))
+// wal-autocheckpoint-pages: checkpoint after this many WAL pages (~16MB at 4KB pages).
+hot.db.sqlite.wal-autocheckpoint-pages Int(::env/get("HOT_DB_SQLITE_WAL_AUTOCHECKPOINT_PAGES", "4000"))
+// journal-size-limit-kb: soft WAL size cap during checkpoint (KiB).
+hot.db.sqlite.journal-size-limit-kb Int(::env/get("HOT_DB_SQLITE_JOURNAL_SIZE_LIMIT_KB", "65536"))
+// synchronous: normal (default), full, or off.
+hot.db.sqlite.synchronous ::env/get("HOT_DB_SQLITE_SYNCHRONOUS", "normal")
+// temp-store: memory (default), file, or default.
+hot.db.sqlite.temp-store ::env/get("HOT_DB_SQLITE_TEMP_STORE", "memory")
+// auto-vacuum: incremental (default) or none. Existing DBs may need a full VACUUM once.
+hot.db.sqlite.auto-vacuum ::env/get("HOT_DB_SQLITE_AUTO_VACUUM", "incremental")
+// Daily maintenance: WAL truncate checkpoint and incremental page reclaim.
+hot.db.sqlite.maintenance.wal-checkpoint Bool(::env/get("HOT_DB_SQLITE_MAINTENANCE_WAL_CHECKPOINT", "true"))
+hot.db.sqlite.maintenance.incremental-vacuum-pages Int(::env/get("HOT_DB_SQLITE_MAINTENANCE_INCREMENTAL_VACUUM_PAGES", "1000"))
+
 // File Storage Configuration
 // Mode: "direct" (simple filesystem) or "service" (managed storage with DB tracking)
 // Defaults: "service" in project/managed runtimes, "direct" for ad hoc local CLI.
@@ -92,11 +111,10 @@ hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
 // Mode: "service" or "disabled". Defaults to "service" inside a project and
 // "disabled" for ad hoc runs outside a project.
 // hot.blob.mode "service"
-// hot.blob.spill.threshold-bytes 65536
+// Spill threshold defaults to 16384 (16KB) in local dev (HOT_ENV unset or
+// "development") and 65536 (64KB) in deployed environments.
+// hot.blob.spill.threshold-bytes 16384
 // hot.blob.preview.max-bytes 256
-// hot.blob.spill.calls true
-// hot.blob.spill.runs false   // keep off until run-result reads rehydrate
-// hot.blob.spill.events false // keep off until worker rehydration is enabled
 
 // Store Configuration
 // ::hot::store data lives in the main Hot database and is scoped by org/env.

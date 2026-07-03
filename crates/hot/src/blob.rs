@@ -120,17 +120,21 @@ impl std::str::FromStr for BlobMode {
     }
 }
 
+/// Default spill threshold for deployed (non-local-dev) environments.
+pub const SPILL_THRESHOLD_DEFAULT_BYTES: usize = 64 * 1024;
+
+/// Default spill threshold for local development (`HOT_ENV` unset or
+/// "development"). Local dev typically runs on SQLite, where large call
+/// payloads dominate database file size; spilling at 16KB keeps the DB small
+/// while dedupe and compression make the spilled bytes cheap on disk.
+pub const SPILL_THRESHOLD_LOCAL_DEV_BYTES: usize = 16 * 1024;
+
 /// Blob configuration, read from the `blob` section of hot config.
 #[derive(Debug, Clone)]
 pub struct BlobConfig {
     pub mode: BlobMode,
     pub spill_threshold_bytes: usize,
     pub preview_max_bytes: usize,
-    pub spill_bytes: bool,
-    pub spill_strings: bool,
-    pub spill_calls: bool,
-    pub spill_runs: bool,
-    pub spill_events: bool,
     pub storage_prefix: String,
     pub rehydrate_max_refs: usize,
     pub rehydrate_max_total_bytes: usize,
@@ -140,13 +144,8 @@ impl Default for BlobConfig {
     fn default() -> Self {
         Self {
             mode: BlobMode::Disabled,
-            spill_threshold_bytes: 65536,
+            spill_threshold_bytes: SPILL_THRESHOLD_DEFAULT_BYTES,
             preview_max_bytes: 256,
-            spill_bytes: true,
-            spill_strings: true,
-            spill_calls: true,
-            spill_runs: false,
-            spill_events: false,
             storage_prefix: "__hot/blobs".to_string(),
             rehydrate_max_refs: 1000,
             rehydrate_max_total_bytes: 512 * 1024 * 1024,
@@ -154,15 +153,26 @@ impl Default for BlobConfig {
     }
 }
 
+/// Default spill threshold for the current environment: 16KB in local dev,
+/// 64KB otherwise. See the constants above for rationale.
+pub fn default_spill_threshold_bytes(local_dev: bool) -> usize {
+    if local_dev {
+        SPILL_THRESHOLD_LOCAL_DEV_BYTES
+    } else {
+        SPILL_THRESHOLD_DEFAULT_BYTES
+    }
+}
+
 impl BlobConfig {
     /// Parse from the hot config root (the same Val that `file.*` config is
     /// read from). Missing keys fall back to conservative defaults.
+    ///
+    /// The spill threshold default is environment-dependent (16KB in local
+    /// dev, 64KB in deployed environments); an explicit
+    /// `blob.spill.threshold-bytes` always wins.
     pub fn from_conf(conf: &Val) -> Self {
         let d = Self::default();
-        let get_bool = |path: &str, default: bool| match conf.get(path) {
-            Some(Val::Bool(b)) => b,
-            _ => default,
-        };
+        let threshold_default = default_spill_threshold_bytes(crate::env::is_local_dev());
         let get_usize = |path: &str, default: usize| match conf.get(path) {
             Some(Val::Int(i)) if i >= 0 => i as usize,
             _ => default,
@@ -184,13 +194,8 @@ impl BlobConfig {
         };
         Self {
             mode,
-            spill_threshold_bytes: get_usize("blob.spill.threshold-bytes", d.spill_threshold_bytes),
+            spill_threshold_bytes: get_usize("blob.spill.threshold-bytes", threshold_default),
             preview_max_bytes: get_usize("blob.preview.max-bytes", d.preview_max_bytes),
-            spill_bytes: get_bool("blob.spill.bytes", d.spill_bytes),
-            spill_strings: get_bool("blob.spill.strings", d.spill_strings),
-            spill_calls: get_bool("blob.spill.calls", d.spill_calls),
-            spill_runs: get_bool("blob.spill.runs", d.spill_runs),
-            spill_events: get_bool("blob.spill.events", d.spill_events),
             storage_prefix,
             rehydrate_max_refs: get_usize("blob.rehydrate.max-refs", d.rehydrate_max_refs),
             rehydrate_max_total_bytes: get_usize(
@@ -200,24 +205,10 @@ impl BlobConfig {
         }
     }
 
-    /// Whether the blob subsystem is active at all.
+    /// Whether the blob subsystem is active at all. When enabled, spill
+    /// applies uniformly to every source kind; there are no per-source knobs.
     pub fn enabled(&self) -> bool {
         self.mode == BlobMode::Service
-    }
-
-    /// Whether spill is enabled for a given source kind.
-    pub fn spill_enabled_for(&self, source: SpillSource) -> bool {
-        if !self.enabled() {
-            return false;
-        }
-        match source {
-            SpillSource::CallArgs | SpillSource::CallReturn | SpillSource::CallFlow => {
-                self.spill_calls
-            }
-            SpillSource::RunResult | SpillSource::RunFailure => self.spill_runs,
-            SpillSource::EventData => self.spill_events,
-            _ => true,
-        }
     }
 }
 
@@ -422,6 +413,7 @@ impl BlobStore {
             env_id: scope.env_id,
             user_id: Uuid::nil(),
             run_id: scope.run_id,
+            run_provenance: None,
             file_max_bytes_conf: None,
         }
     }
@@ -443,7 +435,7 @@ impl BlobStore {
         source: SpillSource,
         source_id: Option<&str>,
     ) -> Result<Val, BlobError> {
-        if !self.config.spill_enabled_for(source) {
+        if !self.config.enabled() {
             return Ok(val);
         }
         let mut stats = SpillStats {
@@ -478,7 +470,7 @@ impl BlobStore {
         Box::pin(async move {
             let threshold = self.config.spill_threshold_bytes;
             match val {
-                Val::Bytes(bytes) if self.config.spill_bytes && bytes.len() >= threshold => {
+                Val::Bytes(bytes) if bytes.len() >= threshold => {
                     let bytes = std::mem::take(bytes);
                     let blob_ref = self
                         .spill_leaf(
@@ -493,7 +485,7 @@ impl BlobStore {
                         .await?;
                     *val = blob_ref;
                 }
-                Val::Str(s) if self.config.spill_strings && s.len() >= threshold => {
+                Val::Str(s) if s.len() >= threshold => {
                     let text: Arc<str> = std::mem::replace(s, Arc::from(""));
                     let blob_ref = self
                         .spill_leaf(
@@ -923,8 +915,6 @@ mod tests {
         BlobConfig {
             mode: BlobMode::Service,
             spill_threshold_bytes: 1024,
-            spill_runs: true,
-            spill_events: true,
             ..BlobConfig::default()
         }
     }
@@ -1313,39 +1303,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spill_runs_gated_separately() {
-        let (mut_store, scope, _tmp) = {
-            let db = Arc::new(crate::db::test_db().await);
-            let temp_dir = tempfile::TempDir::new().unwrap();
-            let storage = Arc::new(LocalFileStorage::new(temp_dir.path().to_path_buf()));
-            let config = BlobConfig {
-                mode: BlobMode::Service,
-                spill_threshold_bytes: 1024,
-                spill_runs: false,
-                ..BlobConfig::default()
-            };
-            (
-                BlobStore::new(db, storage, config),
-                BlobScope {
-                    org_id: Uuid::now_v7(),
-                    env_id: None,
-                    run_id: None,
-                },
-                temp_dir,
-            )
-        };
+    async fn test_spill_applies_to_all_sources_when_enabled() {
+        let (store, scope, _tmp) = test_store().await;
         let original = val!({"result": Val::Bytes(large_bytes(1, 8192))});
-        let run_result = mut_store
-            .spill_large_val(original.clone(), scope, SpillSource::RunResult, Some("r9"))
-            .await
-            .unwrap();
-        assert_eq!(run_result, original);
-
-        let call_args = mut_store
-            .spill_large_val(original.clone(), scope, SpillSource::CallArgs, Some("c9"))
-            .await
-            .unwrap();
-        assert!(contains_blob_ref(&call_args));
+        for (source, id) in [
+            (SpillSource::RunResult, "r9"),
+            (SpillSource::CallArgs, "c9"),
+            (SpillSource::EventData, "e9"),
+        ] {
+            let spilled = store
+                .spill_large_val(original.clone(), scope, source, Some(id))
+                .await
+                .unwrap();
+            assert!(
+                contains_blob_ref(&spilled),
+                "{} should spill",
+                source.as_str()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1523,10 +1498,7 @@ mod tests {
         let conf = val!({
             "blob": {
                 "mode": "service",
-                "spill": {
-                    "threshold-bytes": 1000,
-                    "runs": false,
-                },
+                "spill": {"threshold-bytes": 1000},
                 "preview": {"max-bytes": 64},
             },
         });
@@ -1535,10 +1507,23 @@ mod tests {
         assert!(config.enabled());
         assert_eq!(config.spill_threshold_bytes, 1000);
         assert_eq!(config.preview_max_bytes, 64);
-        assert!(!config.spill_runs);
         // Defaults preserved.
-        assert!(config.spill_bytes);
         assert_eq!(config.storage_prefix, "__hot/blobs");
+    }
+
+    #[test]
+    fn test_default_spill_threshold_by_environment() {
+        assert_eq!(
+            default_spill_threshold_bytes(true),
+            SPILL_THRESHOLD_LOCAL_DEV_BYTES
+        );
+        assert_eq!(
+            default_spill_threshold_bytes(false),
+            SPILL_THRESHOLD_DEFAULT_BYTES
+        );
+        // An explicit threshold always wins over the environment default.
+        let conf = val!({"blob": {"spill": {"threshold-bytes": 2048}}});
+        assert_eq!(BlobConfig::from_conf(&conf).spill_threshold_bytes, 2048);
     }
 
     #[test]

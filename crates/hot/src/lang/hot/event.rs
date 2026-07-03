@@ -64,17 +64,40 @@ pub fn send_event(
                         }
                     };
 
-                    // CRITICAL: Flush emitter before publishing to ensure the current run's
-                    // run:start is in the database before any child events are queued.
-                    // This prevents FK violations when the child run references this run as origin.
-                    if let Some(emitter) = vm.get_emitter()
-                        && let Err(e) = emitter.flush()
-                    {
-                        tracing::warn!(
-                            "send_event: failed to flush emitter before publishing: {}",
-                            e
-                        );
-                        // Continue anyway - the retry logic in write_run_start will handle it
+                    // Flush the current run's pending emitter writes before publishing so
+                    // this run's run:start is in the database before any child events are
+                    // queued (the child run references this run as origin).
+                    //
+                    // The flush is scoped to this run and bounded by a timeout: a global,
+                    // unbounded flush can wedge the VM thread (and the whole serial event
+                    // stream behind it) for minutes when the database writer is backlogged.
+                    // On timeout or failure we continue anyway - the FK retry logic in
+                    // write_run_start handles the rare out-of-order case.
+                    const EMITTER_FLUSH_TIMEOUT: std::time::Duration =
+                        std::time::Duration::from_secs(5);
+                    if let Some(emitter) = vm.get_emitter() {
+                        let run_id = ctx.run_id;
+                        let flush_result = tokio::runtime::Handle::current().block_on(async {
+                            tokio::time::timeout(EMITTER_FLUSH_TIMEOUT, emitter.flush_run(run_id))
+                                .await
+                        });
+                        match flush_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    "send_event: failed to flush emitter before publishing: {}",
+                                    e
+                                );
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    "send_event: emitter flush timed out after {:?} (database \
+                                     writer backlog); publishing anyway",
+                                    EMITTER_FLUSH_TIMEOUT
+                                );
+                            }
+                        }
                     }
 
                     // Get stream_id and project context to propagate through the execution chain

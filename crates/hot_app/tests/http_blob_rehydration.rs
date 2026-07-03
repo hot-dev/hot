@@ -18,10 +18,7 @@ fn blob_conf(storage_path: &str) -> Val {
         "app": {"host": "localhost", "port": 4680},
         "blob": {
             "mode": "service",
-            "spill": {
-                "threshold-bytes": 1024,
-                "runs": true,
-            },
+            "spill": {"threshold-bytes": 1024},
         },
         "file": {"storage": {"path": storage_path}},
     })

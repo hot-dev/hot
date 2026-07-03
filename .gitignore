@@ -29,6 +29,7 @@ profile.json.gz
 # Generated at build time
 resources/git-revision.txt
 resources/pkg-docs/
+resources/bin/
 crates/hot_cli/resources/
 cdn-output/
 .env

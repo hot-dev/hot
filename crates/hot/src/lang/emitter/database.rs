@@ -434,7 +434,7 @@ impl DatabaseEngineEventEmitterProcessor {
         let Some(store) = &self.blob_store else {
             return val;
         };
-        if !store.config().spill_enabled_for(source) {
+        if !store.config().enabled() {
             return val;
         }
         let Some(org_id) = ctx.org_id else {
@@ -484,9 +484,7 @@ impl DatabaseEngineEventEmitterProcessor {
             return masked;
         };
         let masked = masked?;
-        if !store.config().spill_enabled_for(source)
-            || masked.len() < store.config().spill_threshold_bytes
-        {
+        if !store.config().enabled() || masked.len() < store.config().spill_threshold_bytes {
             return Some(masked);
         }
         let Some(org_id) = ctx.org_id else {
@@ -1112,7 +1110,6 @@ mod tests {
 
     fn test_blob_store(
         db: &crate::db::DatabasePool,
-        spill_runs: bool,
     ) -> (Arc<crate::blob::BlobStore>, tempfile::TempDir) {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(crate::file_storage::LocalFileStorage::new(
@@ -1121,7 +1118,6 @@ mod tests {
         let config = crate::blob::BlobConfig {
             mode: crate::blob::BlobMode::Service,
             spill_threshold_bytes: 1024,
-            spill_runs,
             ..crate::blob::BlobConfig::default()
         };
         (
@@ -1150,7 +1146,7 @@ mod tests {
     #[tokio::test]
     async fn test_database_emitter_spills_large_call_args_to_blob() {
         let db = crate::db::test_db().await;
-        let (blob_store, _tmp) = test_blob_store(&db, false);
+        let (blob_store, _tmp) = test_blob_store(&db);
         let emitter =
             DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
         let execution_context = execution_context_with_org();
@@ -1220,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn test_database_emitter_spills_large_run_result_when_enabled() {
         let db = crate::db::test_db().await;
-        let (blob_store, _tmp) = test_blob_store(&db, true);
+        let (blob_store, _tmp) = test_blob_store(&db);
         let emitter =
             DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
         let execution_context = execution_context_with_org();
@@ -1252,38 +1248,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_database_emitter_run_result_inline_when_run_spill_disabled() {
-        let db = crate::db::test_db().await;
-        let (blob_store, _tmp) = test_blob_store(&db, false);
-        let emitter =
-            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
-        let execution_context = execution_context_with_org();
-
-        emitter.emit(EngineEvent::run_start(&execution_context));
-        emitter.emit(EngineEvent::run_stop(
-            &execution_context,
-            Val::Bytes(vec![9u8; 8192]),
-        ));
-        emitter.shutdown().await.unwrap();
-
-        let crate::db::DatabasePool::Sqlite(pool) = db else {
-            panic!("test_db should return SQLite");
-        };
-        let result: String = sqlx::query("SELECT result FROM run WHERE run_id = ?")
-            .bind(execution_context.run_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-            .get("result");
-
-        // Gated off: result stays inline.
-        assert!(!result.contains("::hot::blob/BlobRef"));
-    }
-
-    #[tokio::test]
     async fn test_database_emitter_masks_secrets_before_spill() {
         let db = crate::db::test_db().await;
-        let (blob_store, tmp) = test_blob_store(&db, false);
+        let (blob_store, tmp) = test_blob_store(&db);
         let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
             db.clone(),
             Some(blob_store.clone()),

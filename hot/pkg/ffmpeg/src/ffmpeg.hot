@@ -152,7 +152,7 @@ meta {
 
     **Fields**
     - `fps` — Frame extraction rate, e.g. `"1/2"` for one frame every two seconds (default: `"1/2"`)
-    - `start` — Optional seek position, e.g. `"00:00:05"`
+    - `start` — Optional start position, e.g. `"00:00:05"` or `"8.5"`. Applied as a `trim` filter (accurate on index-less streaming inputs), so the whole input up to this point is still decoded.
     - `duration` — Optional extraction duration in seconds
     - `width` — Output width in pixels (default: source width)
     - `height` — Output height in pixels (default: source height)
@@ -261,37 +261,42 @@ meta {
     doc: "Build ffmpeg CLI arguments for multi-frame image extraction."
 }
 fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?, keyframes-only: Bool?): Vec<Str> {
-    seek-args if(is-some(start), ["-ss", start], [])
     input-args cond {
         eq(keyframes-only, true) => { ["-skip_frame", "nokey"] }
         => { [] }
     }
-    base ["-y", ...seek-args, ...input-args, "-i", input-path]
+    base ["-y", ...input-args, "-i", input-path]
     duration-args if(is-some(duration), ["-t", Str(duration)], [])
 
-    scale cond {
+    // `start` trims in the filter graph rather than input-seeking with -ss:
+    // streaming inputs (e.g. MediaRecorder WebM) carry no cue index, so an
+    // input seek lands at EOF and extracts nothing. trim decodes linearly,
+    // drops frames before the start point, and keeps original timestamps so
+    // the fps sampling that follows stays anchored at the requested start.
+    trim-filter if(is-some(start), `trim=start=${start}`, "")
+    fps-filter cond {
+        eq(keyframes-only, true) => { "" }
+        => { `fps=${fps}` }
+    }
+    scale-filter cond {
         and(is-some(width), is-some(height)) => {
-            `,scale=${Str(width)}:${Str(height)}`
+            `scale=${Str(width)}:${Str(height)}`
         }
 
         is-some(width) => {
-            `,scale=${Str(width)}:-1`
+            `scale=${Str(width)}:-1`
         }
 
         is-some(height) => {
-            `,scale=-1:${Str(height)}`
+            `scale=-1:${Str(height)}`
         }
         => { "" }
     }
 
+    filters filter([trim-filter, fps-filter, scale-filter], (part) { ne(part, "") })
     filter-args cond {
-        eq(keyframes-only, true) => {
-            cond {
-                ne(scale, "") => { ["-vf", slice(scale, 1)] }
-                => { [] }
-            }
-        }
-        => { ["-vf", `fps=${fps}${scale}`] }
+        is-zero(length(filters)) => { [] }
+        => { ["-vf", join(filters, ",")] }
     }
     quality-args ["-q:v", Str(quality)]
     extra or(extra-args, [])

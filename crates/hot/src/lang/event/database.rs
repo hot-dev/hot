@@ -228,7 +228,7 @@ impl DatabaseEventProcessor {
             // silently persisting a partially-spilled value.
             let event_data_val = match (&self.blob_store, ctx.org_id) {
                 (Some(store), Some(org_id))
-                    if store.config().spill_enabled_for(SpillSource::EventData)
+                    if store.config().enabled()
                         && crate::blob::estimate_val_size(&event.event_data)
                             >= store.config().spill_threshold_bytes =>
                 {
@@ -275,10 +275,27 @@ impl DatabaseEventProcessor {
     }
 }
 
+/// Maximum time a publisher will wait for the serial database processor to
+/// acknowledge an event insert. The processor is a single serial task, so one
+/// slow/stuck insert (network outage, database contention) would otherwise
+/// wedge every publisher - and the worker's serial event pipeline behind it -
+/// indefinitely.
+const PUBLISH_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl DatabaseEventPublisher {
     /// Publish an event and wait for database write to complete
-    /// This blocks until the event has been written to the database
+    /// This blocks until the event has been written to the database, bounded
+    /// by [`PUBLISH_ACK_TIMEOUT`].
     pub fn publish_and_wait(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
+        self.publish_and_wait_with_timeout(ctx, event, PUBLISH_ACK_TIMEOUT)
+    }
+
+    fn publish_and_wait_with_timeout(
+        &self,
+        ctx: &ExecutionContext,
+        event: Event,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
         // Validate that ExecutionContext has required fields
         if ctx.env_id.is_none() {
             return Err("Cannot publish event - missing env_id in ExecutionContext".to_string());
@@ -301,9 +318,15 @@ impl DatabaseEventPublisher {
         // correct sync-to-async bridge. Do not use `block_in_place` here:
         // this path is called from Hot VM execution, not from async worker code.
         tokio::runtime::Handle::current().block_on(async {
-            ack_receiver
-                .await
-                .map_err(|_| "Database write acknowledgment was dropped".to_string())?
+            match tokio::time::timeout(timeout, ack_receiver).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("Database write acknowledgment was dropped".to_string()),
+                Err(_) => Err(format!(
+                    "Timed out after {:?} waiting for event database write (writer backlog or \
+                     database outage)",
+                    timeout
+                )),
+            }
         })
     }
 }
@@ -401,7 +424,6 @@ mod tests {
             crate::blob::BlobConfig {
                 mode: crate::blob::BlobMode::Service,
                 spill_threshold_bytes: 1024,
-                spill_events: true,
                 ..Default::default()
             },
         ));
@@ -455,5 +477,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rehydrated.get_str("body"), payload);
+    }
+
+    /// A wedged database processor must not block publishers forever: the ack
+    /// wait times out and returns an error instead of hanging the caller (and
+    /// the worker's serial event pipeline behind it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_publish_and_wait_times_out_when_processor_is_stuck() {
+        let (event_sender, event_receiver) = mpsc::unbounded_channel::<EventWrite>();
+        let (shutdown_sender, _shutdown_receiver) =
+            mpsc::unbounded_channel::<oneshot::Sender<()>>();
+
+        // No processor task drains the channel: simulates a stuck insert.
+        let publisher = DatabaseEventPublisher {
+            db: Arc::new(RwLock::new(None)),
+            event_sender,
+            shutdown_sender,
+            shutdown_initiated: Arc::new(AtomicBool::new(false)),
+        };
+
+        let stream_id = Uuid::now_v7();
+        let event = Event::new(
+            Uuid::now_v7(),
+            stream_id,
+            "test_event".to_string(),
+            crate::val::Val::from("test_data"),
+        );
+        let ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            stream_id,
+            crate::db::run::RunType::Run.as_id(),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+
+        // publish_and_wait uses Handle::block_on, which is only legal from a
+        // blocking (non-core) thread - same as the real VM execution path.
+        let result = tokio::task::spawn_blocking(move || {
+            publisher.publish_and_wait_with_timeout(
+                &ctx,
+                event,
+                std::time::Duration::from_millis(200),
+            )
+        })
+        .await
+        .unwrap();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("Timed out"), "unexpected error: {err}");
+        drop(event_receiver);
     }
 }

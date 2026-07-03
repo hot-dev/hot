@@ -5029,6 +5029,20 @@ pub async fn run_with_components_shared_context(
                     }
                 }
             }
+            if let hot::db::DatabasePool::Sqlite(pool) = cleanup_db.as_ref() {
+                match hot::db::sqlite::run_maintenance(pool, &cleanup_conf).await {
+                    Ok(stats) if stats.wal_checkpointed_pages > 0 => {
+                        info!(
+                            "hot.dev: WORKER startup sqlite maintenance checkpointed {} WAL page(s)",
+                            stats.wal_checkpointed_pages
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("hot.dev: WORKER startup sqlite maintenance failed: {}", e);
+                    }
+                }
+            }
         });
     }
 
@@ -6574,6 +6588,36 @@ pub async fn run_with_components_shared_context(
                                                                 }
                                                             }
                                                         }
+                                                        "sqlite_maintenance" => {
+                                                            if let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() {
+                                                                match hot::db::sqlite::run_maintenance(
+                                                                    pool,
+                                                                    &worker_conf_ref,
+                                                                )
+                                                                .await
+                                                                {
+                                                                    Ok(stats) => {
+                                                                        if stats.wal_checkpointed_pages > 0
+                                                                            || stats.incremental_vacuum_pages_freed
+                                                                                > 0
+                                                                        {
+                                                                            info!(
+                                                                                "hot.dev: WORKER {} maintenance: sqlite checkpointed {} WAL page(s), incremental_vacuum {} page(s)",
+                                                                                worker_id,
+                                                                                stats.wal_checkpointed_pages,
+                                                                                stats.incremental_vacuum_pages_freed
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error!(
+                                                                            "hot.dev: WORKER {} maintenance: sqlite_maintenance failed: {}",
+                                                                            worker_id, e
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                         other => {
                                                             warn!("hot.dev: WORKER {} maintenance: unknown task '{}'", worker_id, other);
                                                         }
@@ -6981,7 +7025,6 @@ mod tests {
             BlobConfig {
                 mode: hot::blob::BlobMode::Service,
                 spill_threshold_bytes: 1024,
-                spill_events: true,
                 ..BlobConfig::default()
             },
         ));

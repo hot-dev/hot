@@ -50,6 +50,23 @@ case "$(uname -s)" in
     Darwin)
         echo "Building and packaging Hot Dev for native macOS..."
         "$SCRIPT_DIR/build-mac.sh" --arch native
+
+        # Cross-compile the hotbox Linux binary and stage it in resources/bin/
+        # so package-mac.sh includes it in the installer payload
+        # (/usr/local/share/hot/bin/). Without it, installed builds cannot
+        # bind-mount hotbox into Docker container tasks (ffmpeg, whisper, ...)
+        # and those tasks fail. CI release builds get these binaries from the
+        # Linux runners; locally we must build them here.
+        if docker info >/dev/null 2>&1; then
+            "$SCRIPT_DIR/build-hotbox.sh"
+            mkdir -p "$REPO_ROOT/resources/bin"
+            cp "$REPO_ROOT"/target/hotbox-linux-* "$REPO_ROOT/resources/bin/"
+            chmod +x "$REPO_ROOT/resources/bin/hotbox-linux-"*
+        else
+            echo "Warning: Docker is not available — skipping hotbox cross-compile."
+            echo "Container tasks (ffmpeg, whisper, ...) will not work with this package."
+        fi
+
         "$SCRIPT_DIR/package-mac.sh" --arch native
 
         VERSION=$(head -1 resources/version.txt | tr -d '[:space:]')

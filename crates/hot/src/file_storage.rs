@@ -94,9 +94,26 @@ pub struct FileStorageContext {
     pub env_id: Option<Uuid>,
     pub user_id: Uuid,
     pub run_id: Option<Uuid>,
+    /// When set alongside `run_id`, used to insert the run row synchronously
+    /// before file metadata so `created_by_run_id` FK retries are unnecessary.
+    pub run_provenance: Option<FileRunProvenance>,
     /// Config-level ceiling for file size (`hot.file.max-bytes`).
     /// Negative or None = no config ceiling, defer to plan limits.
     pub file_max_bytes_conf: Option<i64>,
+}
+
+/// Fields required to upsert a run row before a file metadata write.
+///
+/// Deliberately excludes `origin_run_id` and `event_id`: the parent run row
+/// may itself be unflushed (same emitter backlog), so the placeholder insert
+/// must not carry FKs that can cascade-fail. The authoritative `run:start`
+/// write backfills those fields on placeholder rows.
+#[derive(Clone, Debug)]
+pub struct FileRunProvenance {
+    pub stream_id: Uuid,
+    pub build_id: Option<Uuid>,
+    pub run_type_id: i16,
+    pub access_id: Option<Uuid>,
 }
 
 impl FileStorageContext {
@@ -117,7 +134,13 @@ impl FileStorageContext {
             org_id,
             env_id: exec_ctx.env_id,
             user_id,
-            run_id: None,
+            run_id: Some(exec_ctx.run_id),
+            run_provenance: Some(FileRunProvenance {
+                stream_id: exec_ctx.stream_id,
+                build_id: exec_ctx.build_id,
+                run_type_id: exec_ctx.run_type_id,
+                access_id: exec_ctx.access_id,
+            }),
             file_max_bytes_conf: None,
         })
     }
@@ -135,8 +158,37 @@ impl FileStorageContext {
             env_id,
             user_id,
             run_id: None,
+            run_provenance: None,
             file_max_bytes_conf: None,
         }
+    }
+
+    /// Ensure the current run row exists before writing file metadata that
+    /// references it. Mirrors `::hot::task/start` — the emitter pipeline is
+    /// async, so run:start may not be committed yet when user file I/O runs.
+    pub async fn ensure_run_row(&self) -> Result<(), String> {
+        let (Some(run_id), Some(env_id), Some(provenance)) =
+            (self.run_id, self.env_id, self.run_provenance.as_ref())
+        else {
+            return Ok(());
+        };
+
+        crate::db::run::Run::ensure_run_exists(
+            &self.db,
+            &run_id,
+            &env_id,
+            &provenance.stream_id,
+            provenance.build_id.as_ref(),
+            provenance.run_type_id,
+            // No origin_run_id: the parent run row may be equally unflushed,
+            // and a cascading FK failure here would defeat the placeholder.
+            // The real run:start backfills origin on placeholder rows.
+            None,
+            &self.user_id,
+            provenance.access_id.as_ref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
 
     /// Set the config-level file size ceiling.
@@ -536,6 +588,14 @@ impl FileStorage for LocalFileStorage {
         let storage_path = full_path.to_string_lossy().to_string();
 
         // Step 5: Create or update database record
+        if let Err(e) = ctx.ensure_run_row().await {
+            tracing::debug!(
+                run_id = ?ctx.run_id,
+                path = %normalized_path,
+                "Local file write: could not ensure run row before metadata insert: {}",
+                e
+            );
+        }
         let file_metadata =
             match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
                 Ok(existing) => {
@@ -772,6 +832,14 @@ impl FileStorage for LocalFileStorage {
 
         let storage_path = full_path.to_string_lossy().to_string();
 
+        if let Err(e) = ctx.ensure_run_row().await {
+            tracing::debug!(
+                run_id = ?ctx.run_id,
+                path = %normalized_path,
+                "Multipart complete: could not ensure run row before metadata insert: {}",
+                e
+            );
+        }
         let file_metadata =
             match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
                 Ok(existing) => {
@@ -1110,6 +1178,14 @@ pub mod s3 {
             let storage_path = format!("s3://{}/{}", self.bucket, key);
 
             // Step 5: Create or update database record
+            if let Err(e) = ctx.ensure_run_row().await {
+                tracing::debug!(
+                    run_id = ?ctx.run_id,
+                    path = %normalized_path,
+                    "S3 file write: could not ensure run row before metadata insert: {}",
+                    e
+                );
+            }
             let file_metadata =
                 match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
                     Ok(existing) => {
@@ -1423,6 +1499,14 @@ pub mod s3 {
 
             let storage_path = format!("s3://{}/{}", self.bucket, key);
 
+            if let Err(e) = ctx.ensure_run_row().await {
+                tracing::debug!(
+                    run_id = ?ctx.run_id,
+                    path = %normalized_path,
+                    "Multipart complete: could not ensure run row before metadata insert: {}",
+                    e
+                );
+            }
             let file_metadata =
                 match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
                     Ok(existing) => {
@@ -1793,6 +1877,7 @@ mod tests {
             env_id: Some(env_id),
             user_id,
             run_id: None,
+            run_provenance: None,
             file_max_bytes_conf: None,
         };
 

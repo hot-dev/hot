@@ -86,12 +86,22 @@ meta ["test"] fn () {
 test-extract-frames-args-with-window-and-scale
 meta ["test"] fn () {
     args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "2", "00:00:03", 10, 640, null, 3, null, null)
-    assert(in("-ss", args), "should include seek flag")
-    assert(in("00:00:03", args), "should include seek value")
+    // start trims in the filter graph (not -ss input seeking, which fails on
+    // index-less streaming WebM), ordered before fps so sampling anchors at
+    // the trimmed start.
+    assert(not(in("-ss", args)), "should not input-seek")
+    assert(in("trim=start=00:00:03,fps=2,scale=640:-1", args), "should trim, sample, then scale")
     assert(in("-t", args), "should include duration flag")
     assert(in("10", args), "should include duration value")
-    assert(in("fps=2,scale=640:-1", args), "should include fps and scale")
     assert(in("3", args), "should include quality value")
+}
+
+test-extract-frames-args-keyframes-only-with-start
+meta ["test"] fn () {
+    args build-extract-frames-args("/tmp/input.webm", "/tmp/frames/frame-%03d.jpg", "1/2", "8.5", null, null, null, 2, null, true)
+    assert(in("-skip_frame", args), "should skip non-keyframes before decode")
+    assert(in("trim=start=8.5", args), "should trim from the start point")
+    assert(not(in("trim=start=8.5,fps=1/2", args)), "should not subsample with fps when keyframes-only")
 }
 
 test-extract-frames-args-keyframes-only

@@ -3083,7 +3083,6 @@ async fn build_blob_store(
         hot::blob::BlobConfig {
             mode: hot::blob::BlobMode::Service,
             spill_threshold_bytes: 1024,
-            spill_runs: true,
             ..hot::blob::BlobConfig::default()
         },
     ));

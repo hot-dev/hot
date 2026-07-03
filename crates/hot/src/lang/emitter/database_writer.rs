@@ -11,6 +11,7 @@ use crate::lang::emitter::postgres_safety::{sanitize_json_for_jsonb, sanitize_te
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
 use ahash::AHashMap;
+use sqlx::Sqlite;
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicU64, Ordering},
@@ -40,8 +41,8 @@ fn duration_ms_between(
 /// Maximum number of pending writes before backpressure warning
 const BACKPRESSURE_THRESHOLD: usize = 1000;
 
-/// Batch size for PostgreSQL transaction batching
-const POSTGRES_BATCH_SIZE: usize = 100;
+/// Batch size before the writer shard flushes pending call writes (SQLite and Postgres).
+const WRITE_BATCH_SIZE: usize = 100;
 
 /// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id)
 type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16, i16);
@@ -353,13 +354,13 @@ impl DatabaseWriter {
                                     });
 
                                     let should_flush = has_run_write
-                                        || pending_writes.len() >= POSTGRES_BATCH_SIZE
+                                        || pending_writes.len() >= WRITE_BATCH_SIZE
                                         || write_receiver.is_empty();
 
                                     if should_flush {
                                         let trigger = if has_run_write {
                                             DatabaseWriterFlushTrigger::AutoRunWrite
-                                        } else if pending_writes.len() >= POSTGRES_BATCH_SIZE {
+                                        } else if pending_writes.len() >= WRITE_BATCH_SIZE {
                                             DatabaseWriterFlushTrigger::BatchSize
                                         } else {
                                             DatabaseWriterFlushTrigger::ChannelEmpty
@@ -368,7 +369,7 @@ impl DatabaseWriter {
                                             shard_idx,
                                             pending = pending_writes.len(),
                                             has_run_write,
-                                            batch_size = pending_writes.len() >= POSTGRES_BATCH_SIZE,
+                                            batch_size = pending_writes.len() >= WRITE_BATCH_SIZE,
                                             channel_empty = write_receiver.is_empty(),
                                             trigger = trigger.as_str(),
                                             "DatabaseWriter shard flushing writes"
@@ -772,20 +773,60 @@ impl DatabaseWriter {
 
         let other_write_started = Instant::now();
         match pool {
-            DatabasePool::Sqlite(_) => {
-                // SQLite: Process each write sequentially (no transaction batching)
-                // SQLite has single-writer bottleneck, transactions don't help here
-                for write in other_writes {
-                    if let Err(e) = Self::execute_write(pool, &write).await {
-                        tracing::error!("DatabaseWriter: SQLite write failed: {}", e);
-                        other_write_errors += 1;
+            DatabasePool::Sqlite(sqlite_pool) => {
+                // Batch call writes in a single transaction so SQLite pays one
+                // commit/fsync per flush instead of one per row.
+                match sqlite_pool.begin().await {
+                    Ok(mut tx) => {
+                        let mut failed = false;
+
+                        for write in &other_writes {
+                            if let Err(e) = Self::execute_write_sqlite(&mut *tx, write).await {
+                                tracing::error!(
+                                    "DatabaseWriter: SQLite write failed in transaction: {}",
+                                    e
+                                );
+                                other_write_errors += 1;
+                                failed = true;
+                                break;
+                            }
+                        }
+
+                        if failed {
+                            if let Err(e) = tx.rollback().await {
+                                tracing::error!("DatabaseWriter: SQLite rollback failed: {}", e);
+                                outcome = "rollback_failed";
+                            } else {
+                                outcome = "rolled_back";
+                            }
+                        } else if let Err(e) = tx.commit().await {
+                            tracing::error!("DatabaseWriter: SQLite commit failed: {}", e);
+                            outcome = "commit_failed";
+                        } else {
+                            outcome = "committed";
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "DatabaseWriter: Failed to begin SQLite transaction: {}",
+                            e
+                        );
+                        for write in other_writes {
+                            if let Err(e) = Self::execute_write(pool, &write).await {
+                                tracing::error!(
+                                    "DatabaseWriter: SQLite write failed (no transaction): {}",
+                                    e
+                                );
+                                other_write_errors += 1;
+                            }
+                        }
+                        outcome = if other_write_errors > 0 {
+                            "fallback_partial_failure"
+                        } else {
+                            "fallback_ok"
+                        };
                     }
                 }
-                outcome = if other_write_errors > 0 {
-                    "best_effort_partial_failure"
-                } else {
-                    "best_effort_ok"
-                };
             }
             DatabasePool::Postgres(pg_pool) => {
                 // PostgreSQL: Use transaction for batch atomicity and performance
@@ -1054,6 +1095,70 @@ ON CONFLICT (call_id) DO UPDATE SET
         }
     }
 
+    /// Execute a call write on a SQLite executor (pool connection or transaction).
+    async fn execute_write_sqlite<'e, E>(
+        executor: E,
+        write: &DatabaseWrite,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = Sqlite>,
+    {
+        match write {
+            DatabaseWrite::Call {
+                execution_context,
+                call_id,
+                parent_call_id,
+                function_name,
+                static_scope,
+                runtime_path,
+                call_depth,
+                args,
+                return_value,
+                error,
+                flow,
+                file,
+                line,
+                column,
+                position,
+                start_time,
+                stop_time,
+                duration_us,
+            } => {
+                Self::write_call_sqlite(
+                    executor,
+                    execution_context,
+                    *call_id,
+                    *parent_call_id,
+                    function_name,
+                    static_scope,
+                    runtime_path,
+                    *call_depth,
+                    args.as_deref(),
+                    return_value.as_deref(),
+                    error.as_deref(),
+                    flow.as_deref(),
+                    file.as_deref(),
+                    *line,
+                    *column,
+                    *position,
+                    *start_time,
+                    *stop_time,
+                    *duration_us,
+                )
+                .await
+            }
+            other => {
+                tracing::warn!(
+                    "DatabaseWriter: Unexpected write type in SQLite transaction batch: {:?}",
+                    other
+                );
+                Err(sqlx::Error::Protocol(
+                    "unexpected write type in SQLite batch".into(),
+                ))
+            }
+        }
+    }
+
     /// Write a run:start record
     /// Includes retry logic for foreign key violations on origin_run_id, which can happen
     /// due to race conditions when a child run is processed before the parent run's
@@ -1168,6 +1273,20 @@ ON CONFLICT (call_id) DO UPDATE SET
                                     e
                                 ))
                             })?;
+                    } else {
+                        // Row already exists: either a placeholder from
+                        // ensure_run_exists (task/file provenance) or a
+                        // duplicate run:start. Backfill authoritative fields
+                        // the placeholder lacks; idempotent for duplicates.
+                        // Best-effort: origin_run_id can FK-fail if the parent
+                        // run is also still unflushed.
+                        if let Err(e) = Self::backfill_run_provenance(pool, ctx, start_time).await {
+                            tracing::warn!(
+                                "DatabaseWriter: run provenance backfill failed for {}: {}",
+                                ctx.run_id,
+                                e
+                            );
+                        }
                     }
                     last_error = None;
                     break;
@@ -1212,6 +1331,59 @@ ON CONFLICT (call_id) DO UPDATE SET
             );
         }
 
+        Ok(())
+    }
+
+    /// Backfill provenance on a pre-existing run row.
+    ///
+    /// `Run::ensure_run_exists` (used by `::hot::task/start`, `::hot::box/start`,
+    /// and file-metadata writes) inserts placeholder rows before the emitter's
+    /// authoritative `run:start` lands. Those placeholders lack `event_id`,
+    /// `origin_run_id`, and `agent_type`, and carry an approximate
+    /// `start_time`. When the real run:start hits the insert-or-ignore
+    /// conflict, this fills in what the placeholder is missing. COALESCE keeps
+    /// it idempotent for genuine duplicate run:start events.
+    async fn backfill_run_provenance(
+        pool: &DatabasePool,
+        ctx: &ExecutionContext,
+        start_time: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error> {
+        match pool {
+            DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE hot.run SET
+                         origin_run_id = COALESCE(origin_run_id, $2),
+                         event_id = COALESCE(event_id, $3),
+                         agent_type = COALESCE(agent_type, $4),
+                         start_time = LEAST(start_time, $5)
+                     WHERE run_id = $1",
+                )
+                .bind(ctx.run_id)
+                .bind(ctx.origin_run_id)
+                .bind(ctx.event_id)
+                .bind(&ctx.agent_type)
+                .bind(start_time)
+                .execute(pg_pool)
+                .await?;
+            }
+            DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE run SET
+                         origin_run_id = COALESCE(origin_run_id, ?2),
+                         event_id = COALESCE(event_id, ?3),
+                         agent_type = COALESCE(agent_type, ?4),
+                         start_time = MIN(start_time, ?5)
+                     WHERE run_id = ?1",
+                )
+                .bind(ctx.run_id)
+                .bind(ctx.origin_run_id)
+                .bind(ctx.event_id)
+                .bind(&ctx.agent_type)
+                .bind(start_time)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -1289,6 +1461,17 @@ ON CONFLICT (call_id) DO UPDATE SET
         };
 
         if rows_affected == 0 {
+            // Placeholder row exists (ensure_run_exists): backfill provenance
+            // the placeholder lacks before finalizing the terminal status.
+            // Best-effort: origin_run_id can FK-fail if the parent run is
+            // also still unflushed.
+            if let Err(e) = Self::backfill_run_provenance(pool, ctx, start_time).await {
+                tracing::warn!(
+                    "DatabaseWriter: run provenance backfill failed for {}: {}",
+                    ctx.run_id,
+                    e
+                );
+            }
             Self::write_run_stop(pool, ctx.run_id, stop_time, result).await?;
         } else {
             crate::db::stream::Stream::record_run_started_and_finished(
@@ -1951,6 +2134,91 @@ ON CONFLICT (call_id) DO UPDATE SET
         }
     }
 
+    /// Write a call record to SQLite using UPSERT (pool connection or transaction).
+    #[allow(clippy::too_many_arguments)]
+    async fn write_call_sqlite<'e, E>(
+        executor: E,
+        ctx: &ExecutionContext,
+        call_id: Uuid,
+        parent_call_id: Option<Uuid>,
+        function_name: &str,
+        static_scope: &str,
+        runtime_path: &str,
+        call_depth: i64,
+        args: Option<&str>,
+        return_value: Option<&str>,
+        error: Option<&str>,
+        flow: Option<&str>,
+        file: Option<&str>,
+        line: Option<i64>,
+        column: Option<i64>,
+        position: Option<i64>,
+        start_time: Option<chrono::DateTime<chrono::Utc>>,
+        stop_time: Option<chrono::DateTime<chrono::Utc>>,
+        duration_us: Option<i64>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = Sqlite>,
+    {
+        let size: i64 = args.map_or(0, |s| s.len() as i64)
+            + return_value.map_or(0, |s| s.len() as i64)
+            + flow.map_or(0, |s| s.len() as i64)
+            + 50;
+
+        let args_safe = args.map(sanitize_json_for_jsonb);
+        let return_value_safe = return_value.map(sanitize_json_for_jsonb);
+        let error_safe = error.map(sanitize_text_for_postgres);
+        let flow_safe = flow.map(sanitize_json_for_jsonb);
+
+        sqlx::query(
+            "INSERT INTO call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, start_time, stop_time, duration_us, file, line, \"column\", position, size)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (call_id) DO UPDATE SET
+                 stop_time = COALESCE(excluded.stop_time, call.stop_time),
+                 return_value = COALESCE(excluded.return_value, call.return_value),
+                 error = COALESCE(excluded.error, call.error),
+                 flow = COALESCE(excluded.flow, call.flow),
+                 duration_us = COALESCE(excluded.duration_us, call.duration_us),
+                 start_time = COALESCE(excluded.start_time, call.start_time),
+                 parent_call_id = COALESCE(excluded.parent_call_id, call.parent_call_id),
+                 -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
+                 function_name = COALESCE(NULLIF(excluded.function_name, 'unknown'), NULLIF(call.function_name, 'unknown'), 'unknown'),
+                 static_scope = COALESCE(NULLIF(excluded.static_scope, 'unknown'), NULLIF(call.static_scope, 'unknown'), 'unknown'),
+                 runtime_path = COALESCE(NULLIF(excluded.runtime_path, 'unknown'), NULLIF(call.runtime_path, 'unknown'), 'unknown'),
+                 call_depth = CASE WHEN excluded.call_depth = 0 AND call.call_depth != 0 THEN call.call_depth ELSE COALESCE(excluded.call_depth, call.call_depth) END,
+                 args = COALESCE(excluded.args, call.args),
+                 file = COALESCE(excluded.file, call.file),
+                 line = COALESCE(excluded.line, call.line),
+                 \"column\" = COALESCE(excluded.\"column\", call.\"column\"),
+                 position = COALESCE(excluded.position, call.position),
+                 size = COALESCE(length(COALESCE(excluded.args, call.args)), 0) +
+                        COALESCE(length(COALESCE(excluded.return_value, call.return_value)), 0) +
+                        COALESCE(length(COALESCE(excluded.flow, call.flow)), 0) + 50",
+        )
+        .bind(call_id)
+        .bind(ctx.run_id)
+        .bind(parent_call_id)
+        .bind(function_name)
+        .bind(static_scope)
+        .bind(runtime_path)
+        .bind(call_depth as i32)
+        .bind(args_safe.as_deref())
+        .bind(return_value_safe.as_deref())
+        .bind(error_safe.as_deref())
+        .bind(flow_safe.as_deref())
+        .bind(start_time)
+        .bind(stop_time)
+        .bind(duration_us)
+        .bind(file)
+        .bind(line)
+        .bind(column)
+        .bind(position)
+        .bind(size)
+        .execute(executor)
+        .await?;
+        Ok(())
+    }
+
     /// Write a call record using UPSERT to handle both INSERT and UPDATE
     #[allow(clippy::too_many_arguments)]
     async fn write_call(
@@ -2039,52 +2307,27 @@ ON CONFLICT (call_id) DO UPDATE SET
                 .await?;
             }
             DatabasePool::Sqlite(sqlite_pool) => {
-                // SQLite UPSERT
-                sqlx::query(
-                    "INSERT INTO call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, start_time, stop_time, duration_us, file, line, \"column\", position, size)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                     ON CONFLICT (call_id) DO UPDATE SET
-                         stop_time = COALESCE(excluded.stop_time, call.stop_time),
-                         return_value = COALESCE(excluded.return_value, call.return_value),
-                         error = COALESCE(excluded.error, call.error),
-                         flow = COALESCE(excluded.flow, call.flow),
-                         duration_us = COALESCE(excluded.duration_us, call.duration_us),
-                         start_time = COALESCE(excluded.start_time, call.start_time),
-                         parent_call_id = COALESCE(excluded.parent_call_id, call.parent_call_id),
-                         -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
-                         function_name = COALESCE(NULLIF(excluded.function_name, 'unknown'), NULLIF(call.function_name, 'unknown'), 'unknown'),
-                         static_scope = COALESCE(NULLIF(excluded.static_scope, 'unknown'), NULLIF(call.static_scope, 'unknown'), 'unknown'),
-                         runtime_path = COALESCE(NULLIF(excluded.runtime_path, 'unknown'), NULLIF(call.runtime_path, 'unknown'), 'unknown'),
-                         call_depth = CASE WHEN excluded.call_depth = 0 AND call.call_depth != 0 THEN call.call_depth ELSE COALESCE(excluded.call_depth, call.call_depth) END,
-                         args = COALESCE(excluded.args, call.args),
-                         file = COALESCE(excluded.file, call.file),
-                         line = COALESCE(excluded.line, call.line),
-                         \"column\" = COALESCE(excluded.\"column\", call.\"column\"),
-                         position = COALESCE(excluded.position, call.position),
-                         size = COALESCE(length(COALESCE(excluded.args, call.args)), 0) +
-                                COALESCE(length(COALESCE(excluded.return_value, call.return_value)), 0) +
-                                COALESCE(length(COALESCE(excluded.flow, call.flow)), 0) + 50"
+                Self::write_call_sqlite(
+                    sqlite_pool,
+                    ctx,
+                    call_id,
+                    parent_call_id,
+                    function_name,
+                    static_scope,
+                    runtime_path,
+                    call_depth,
+                    args,
+                    return_value,
+                    error,
+                    flow,
+                    file,
+                    line,
+                    column,
+                    position,
+                    start_time,
+                    stop_time,
+                    duration_us,
                 )
-                .bind(call_id)
-                .bind(ctx.run_id)
-                .bind(parent_call_id)
-                .bind(function_name)
-                .bind(static_scope)
-                .bind(runtime_path)
-                .bind(call_depth as i32)
-                .bind(args_safe.as_deref())
-                .bind(return_value_safe.as_deref())
-                .bind(error_safe.as_deref())
-                .bind(flow_safe.as_deref())
-                .bind(start_time)
-                .bind(stop_time)
-                .bind(duration_us)
-                .bind(file)
-                .bind(line)
-                .bind(column)
-                .bind(position)
-                .bind(size)
-                .execute(sqlite_pool)
                 .await?;
             }
         }
