@@ -125,7 +125,7 @@ jobs:
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
       with:
-        rust-toolchain: 1.96.0
+        rust-toolchain: 1.96.1
         tailwind-version: ${{ env.TAILWIND_VERSION }}
 
     - name: Generate package docs
@@ -374,7 +374,7 @@ jobs:
           -f - \
           --output "type=local,dest=target/hotbox-musl-build" \
           . <<'DOCKERFILE'
-        FROM rust:1.96.0-slim AS builder
+        FROM rust:1.96.1-slim AS builder
         RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*

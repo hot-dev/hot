@@ -38,7 +38,7 @@ DOCKER_BUILDKIT=1 docker build --progress=plain \
     --output "type=local,dest=target/hotbox-build" \
     . <<'DOCKERFILE'
 # syntax=docker/dockerfile:1.4
-FROM rust:1.96.0-slim AS builder
+FROM rust:1.96.1-slim AS builder
 
 RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
 
