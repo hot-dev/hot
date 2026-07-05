@@ -225,8 +225,9 @@ fn spawn_worker_queue_claimer(
 }
 
 // Add imports for database operations and event handler execution
-use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project};
+use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project, Schedule};
 use hot::lang::event::ExecutionContext;
+use serde_json::Value as JsonValue;
 
 // Add import for context encryption
 use hot::context_encryption::ContextEncryption;
@@ -2172,14 +2173,88 @@ fn recompile_live_build_cache(
     }
 }
 
+/// Build the qualified agent type name stored on runs from handler/schedule meta.
+///
+/// Hot source writes `meta {agent: TeamAgent}`; manifest meta resolves the type
+/// reference to a short name like `"TeamAgent"`. Agent health matches runs using
+/// `{namespace}/{type_name}` from the deployed agent table.
+fn agent_type_from_meta(meta: &JsonValue, namespace: &str) -> Option<String> {
+    let agent_name = meta.get("agent")?.as_str()?;
+    if agent_name.contains('/') {
+        Some(agent_name.to_string())
+    } else {
+        Some(format!("{}/{}", namespace, agent_name))
+    }
+}
+
 /// Extract the qualified agent type name from an event handler's meta.
-/// If the handler has `meta {agent: "SupportAgent"}`, returns the qualified name
-/// by combining the handler's namespace with the type name.
 fn extract_agent_type_from_handler(handler: &EventHandler) -> Option<String> {
-    let meta = handler.meta.as_ref()?;
-    let agent_val = meta.get("agent")?;
-    let agent_name = agent_val.as_str()?;
-    Some(format!("{}/{}", handler.ns, agent_name))
+    handler
+        .meta
+        .as_ref()
+        .and_then(|meta| agent_type_from_meta(meta, &handler.ns))
+}
+
+/// Read `schedule_id` from the synthetic schedule arg bundled into hot:schedule events.
+fn extract_schedule_id_from_event_data(event_data: &Val) -> Option<Uuid> {
+    let args = event_data.get("args")?;
+    let Val::Vec(args_vec) = args else {
+        return None;
+    };
+    let first = args_vec.first()?;
+    match first.get("schedule_id")? {
+        Val::Str(s) => Uuid::parse_str(s.as_ref()).ok(),
+        _ => None,
+    }
+}
+
+/// Scheduled runs execute through the generic `schedule-event-handler`, but they
+/// should attribute agent health to the target scheduled function's meta.
+async fn extract_agent_type_from_scheduled_event(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    event_data: &Val,
+) -> Option<String> {
+    if let Some(schedule_id) = extract_schedule_id_from_event_data(event_data)
+        && let Ok(schedule) = Schedule::get_schedule(db, &schedule_id).await
+        && let Some(ref meta) = schedule.meta
+        && let Some(agent_type) = agent_type_from_meta(meta, &schedule.ns)
+    {
+        return Some(agent_type);
+    }
+
+    let target_fn = extract_target_function_from_event(event_data)?;
+    let (ns, var) = target_fn.rsplit_once('/')?;
+
+    if let Ok(schedule) = Schedule::get_active_schedule_by_build_fn(db, build_id, ns, var).await
+        && let Some(ref meta) = schedule.meta
+    {
+        return agent_type_from_meta(meta, &schedule.ns);
+    }
+
+    None
+}
+
+async fn resolve_agent_type_for_execution(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    event_handler: &EventHandler,
+    event_message: &EventMessage,
+) -> Option<String> {
+    if let Some(agent_type) = extract_agent_type_from_handler(event_handler) {
+        return Some(agent_type);
+    }
+
+    if event_message.body.event.event_type == "hot:schedule" {
+        return extract_agent_type_from_scheduled_event(
+            db,
+            build_id,
+            &event_message.body.event.event_data,
+        )
+        .await;
+    }
+
+    None
 }
 
 /// Check if an event handler has the `once: true` metadata flag
@@ -2850,7 +2925,9 @@ async fn execute_single_event_handler(
     .with_retry_attempt(retry_attempt)
     .with_env_name(env_name)
     .with_org_slug(org_slug)
-    .with_agent_type(extract_agent_type_from_handler(event_handler));
+    .with_agent_type(
+        resolve_agent_type_for_execution(db, &build.build_id, event_handler, event_message).await,
+    );
 
     let emitter_for_events = emitter.clone();
 
@@ -6870,6 +6947,114 @@ mod tests {
                 "ok": true,
             }),
         }
+    }
+
+    #[test]
+    fn agent_type_from_meta_uses_namespace_for_short_agent_names() {
+        let meta = serde_json::json!({"agent": "TeamAgent"});
+        assert_eq!(
+            agent_type_from_meta(&meta, "team-agent/agent").as_deref(),
+            Some("team-agent/agent/TeamAgent")
+        );
+    }
+
+    #[test]
+    fn agent_type_from_meta_preserves_qualified_agent_names() {
+        let meta = serde_json::json!({"agent": "demo/agents/LeadQualifier"});
+        assert_eq!(
+            agent_type_from_meta(&meta, "demo/agents").as_deref(),
+            Some("demo/agents/LeadQualifier")
+        );
+    }
+
+    #[test]
+    fn extract_schedule_id_from_event_data_reads_first_arg() {
+        let schedule_id = Uuid::now_v7();
+        let event_data = val!({
+            "fn": "demo/agents/tick",
+            "args": [{
+                "type": "hot:schedule",
+                "schedule_id": schedule_id.to_string(),
+            }],
+        });
+
+        assert_eq!(
+            extract_schedule_id_from_event_data(&event_data),
+            Some(schedule_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_event_agent_type_uses_schedule_id_meta() {
+        let (db, _db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let schedule_id = Uuid::now_v7();
+        let meta = serde_json::json!({"agent": "LeadQualifier"});
+
+        Schedule::insert_dynamic_schedule(
+            &db,
+            &schedule_id,
+            &test_data.build_id,
+            &hot::db::ScheduleType::Cron("0 * * * * *".to_string()),
+            Some(&test_data.org_id),
+            hot::db::SchedulePolicy::self_hosted_default(),
+            "demo/agents",
+            "tick",
+            Some(&meta),
+            None,
+        )
+        .await
+        .expect("schedule should insert");
+
+        let event_data = val!({
+            "fn": "demo/agents/tick",
+            "args": [{
+                "type": "hot:schedule",
+                "schedule_id": schedule_id.to_string(),
+            }],
+        });
+
+        assert_eq!(
+            extract_agent_type_from_scheduled_event(&db, &test_data.build_id, &event_data).await,
+            Some("demo/agents/LeadQualifier".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_event_agent_type_falls_back_to_target_fn_meta() {
+        let (db, _db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let schedule_id = Uuid::now_v7();
+        let meta = serde_json::json!({"agent": "LeadQualifier"});
+
+        Schedule::insert_dynamic_schedule(
+            &db,
+            &schedule_id,
+            &test_data.build_id,
+            &hot::db::ScheduleType::Cron("0 * * * * *".to_string()),
+            Some(&test_data.org_id),
+            hot::db::SchedulePolicy::self_hosted_default(),
+            "demo/agents",
+            "tick",
+            Some(&meta),
+            None,
+        )
+        .await
+        .expect("schedule should insert");
+
+        let event_data = val!({
+            "fn": "demo/agents/tick",
+            "args": [],
+        });
+
+        assert_eq!(
+            extract_agent_type_from_scheduled_event(&db, &test_data.build_id, &event_data).await,
+            Some("demo/agents/LeadQualifier".to_string())
+        );
     }
 
     #[test]
