@@ -90,16 +90,45 @@ fn empty_dashboard(session: &Session) -> templates::Dashboard<'static> {
 #[derive(Template)]
 #[template(path = "partials/dashboard_agent_health.html")]
 struct AgentHealthPartial {
-    agent_health_cards: Vec<templates::AgentHealthCard>,
+    total_agents: usize,
+    healthy_count: usize,
+    degraded_count: usize,
+    failing_count: usize,
+    idle_count: usize,
+    /// Failing agents first, then degraded, capped at MAX_PROBLEM_ROWS.
+    problem_agents: Vec<templates::AgentHealthCard>,
+    /// Problem agents beyond the cap ("+N more" link).
+    more_problem_count: usize,
+    /// Short label for the selected time window, e.g. "24h" or "all time".
+    window_label: String,
 }
 
-/// GET /dashboard/widgets/agent-health - Render the Agent Health table partial.
+/// Short display label for the dashboard `time_range` dropdown values.
+fn time_range_label(raw: Option<&str>) -> &'static str {
+    match raw {
+        None | Some("") | Some("PT24H") | Some("P1D") => "24h",
+        Some("PT1H") => "1h",
+        Some("P7D") => "7d",
+        Some("P30D") => "30d",
+        Some("P90D") => "90d",
+        Some("all") => "all time",
+        Some(_) => "period",
+    }
+}
+
+/// Maximum problem-agent rows shown on the dashboard widget; the full list
+/// lives on /workflows.
+const MAX_PROBLEM_ROWS: usize = 5;
+
+/// GET /dashboard/widgets/agent-health - Render the Agent Health rollup partial.
 ///
-/// Returns an empty body when there are no agent runs in the window so the
-/// section stays hidden — matching the original SSR conditional behavior.
+/// Renders a one-line rollup (healthy/degraded/failing/idle counts) plus rows
+/// for problem agents only, capped at MAX_PROBLEM_ROWS. Follows the dashboard
+/// `time_range` and `project` filters like the other widgets. Returns an empty
+/// body when no agents are deployed so the section stays hidden.
 pub async fn agent_health_widget_handler(
     State(db): State<Arc<DatabasePool>>,
-    _params: Query<AHashMap<String, String>>,
+    params: Query<AHashMap<String, String>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     let env_id = match session.current_env_id() {
@@ -107,28 +136,80 @@ pub async fn agent_health_widget_handler(
         None => return Html("").into_response(),
     };
 
-    let agent_health_cards: Vec<templates::AgentHealthCard> =
-        AgentStats::get_per_agent_health(&db, &env_id, 24)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to get agent health for env {}: {}", env_id, e);
-                Vec::new()
-            })
-            .into_iter()
-            .map(|a| {
-                let sr = a.success_rate();
-                let hc = a.health_color().to_string();
-                templates::AgentHealthCard {
-                    qualified_name: super::agents::qualified_name_to_url_path(&a.qualified_name),
-                    display_name: a.display_name,
-                    total_runs: a.total_runs,
-                    success_rate: sr,
-                    health_color: hc,
-                }
-            })
-            .collect();
+    let time_range_raw = params.get("time_range").map(String::as_str);
+    let cutoff = parse_time_range_cutoff(time_range_raw, chrono::Utc::now());
+    let project_id = params
+        .get("project")
+        .and_then(|p| uuid::Uuid::parse_str(p).ok());
+    let window_label = time_range_label(time_range_raw).to_string();
 
-    let template = AgentHealthPartial { agent_health_cards };
+    let summaries = AgentStats::get_per_agent_health(&db, &env_id, cutoff, project_id.as_ref())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to get agent health for env {}: {}", env_id, e);
+            Vec::new()
+        });
+
+    if summaries.is_empty() {
+        return Html("").into_response();
+    }
+
+    let total_agents = summaries.len();
+    let mut healthy_count = 0;
+    let mut degraded_count = 0;
+    let mut failing_count = 0;
+    let mut idle_count = 0;
+    let mut problems: Vec<_> = Vec::new();
+
+    for a in summaries {
+        match a.health_color() {
+            "green" => healthy_count += 1,
+            "yellow" => {
+                degraded_count += 1;
+                problems.push(a);
+            }
+            "red" => {
+                failing_count += 1;
+                problems.push(a);
+            }
+            _ => idle_count += 1,
+        }
+    }
+
+    // Failing before degraded, then by run volume so the busiest problem
+    // agents surface first.
+    problems.sort_by(|a, b| {
+        let sev = |s: &hot::db::AgentHealthSummary| if s.health_color() == "red" { 0 } else { 1 };
+        sev(a).cmp(&sev(b)).then(b.total_runs.cmp(&a.total_runs))
+    });
+
+    let more_problem_count = problems.len().saturating_sub(MAX_PROBLEM_ROWS);
+    let problem_agents: Vec<templates::AgentHealthCard> = problems
+        .into_iter()
+        .take(MAX_PROBLEM_ROWS)
+        .map(|a| {
+            let sr = a.success_rate();
+            let hc = a.health_color().to_string();
+            templates::AgentHealthCard {
+                qualified_name: super::agents::qualified_name_to_url_path(&a.qualified_name),
+                display_name: a.display_name,
+                total_runs: a.total_runs,
+                success_rate: sr,
+                health_color: hc,
+            }
+        })
+        .collect();
+
+    let template = AgentHealthPartial {
+        total_agents,
+        healthy_count,
+        degraded_count,
+        failing_count,
+        idle_count,
+        problem_agents,
+        more_problem_count,
+        window_label,
+    };
     Html(template.render().unwrap()).into_response()
 }
 

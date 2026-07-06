@@ -106,19 +106,20 @@ document.addEventListener('alpine:init', () => {
     </div>
 
     <!-- ========================================
+         AGENT HEALTH (Deployed Agents Overview)
+         Loaded async via /dashboard/widgets/agent-health. Container is empty
+         on first paint; the widget either fills it with the rollup strip or
+         leaves it empty (when no agents are deployed). Bottom margin lives on
+         the widget root inside the partial so an empty container adds no gap.
+         ======================================== -->
+    <div id="agent-health-container"></div>
+
+    <!-- ========================================
          ISSUES BANNER (Alert when failures exist)
          ======================================== -->
     <div class="mb-6">
         {% include "components/dashboard_issues_banner.html" %}
     </div>
-
-    <!-- ========================================
-         AGENT HEALTH (Deployed Agents Overview)
-         Loaded async via /dashboard/widgets/agent-health. Container is empty
-         on first paint; the widget either fills it with the agent table or
-         leaves it empty (when there are no agents in the time window).
-         ======================================== -->
-    <div id="agent-health-container" class="mb-6"></div>
 
     <!-- ========================================
          ACTIVITY OVERVIEW (Charts)
@@ -1777,13 +1778,45 @@ async function updateGettingStarted() {
 // Agent Health (hides when no agent runs in window)
 // ============================================
 async function updateAgentHealth() {
+    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
+    if (!filtersElement) return;
+    const filters = Alpine.$data(filtersElement);
+    if (!filters) return;
+
+    const params = new URLSearchParams();
+    if (filters.selectedProject) params.append('project', filters.selectedProject);
+    if (filters.timeRange) params.append('time_range', filters.timeRange);
+
     const container = document.getElementById('agent-health-container');
     if (container) {
         try {
-            container.innerHTML = await fetchWidgetHtml('/dashboard/widgets/agent-health');
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/agent-health?${params.toString()}`);
             applyFormatting(container);
+            updateFailingAgentsBannerChip(container);
         } catch (e) {
             console.error('Failed to load agent health widget:', e);
+        }
+    }
+}
+
+// Fold failing agents into the issues banner. Hero metrics set the banner's
+// base visibility earlier in the refresh queue; this only ever adds to it.
+function updateFailingAgentsBannerChip(container) {
+    const widget = container.querySelector('[data-failing-agents]');
+    const failingAgents = widget ? (parseInt(widget.dataset.failingAgents, 10) || 0) : 0;
+
+    const chip = document.getElementById('issues-banner-failing-agents');
+    if (chip) {
+        chip.classList.toggle('hidden', failingAgents === 0);
+        chip.classList.toggle('inline-flex', failingAgents > 0);
+        chip.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full bg-purple-500/80"></span> ${formatNumber(failingAgents)} Failing Agent${failingAgents === 1 ? '' : 's'}`;
+    }
+
+    if (failingAgents > 0) {
+        const issuesBanner = document.getElementById('issues-banner');
+        if (issuesBanner) {
+            issuesBanner.classList.remove('hidden');
+            issuesBanner.classList.add('flex');
         }
     }
 }

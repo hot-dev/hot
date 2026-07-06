@@ -5,11 +5,13 @@
   (and each child link) once the hero-metrics fetch returns counts > 0.
   No SSR data is needed.
 -->
-<div id="issues-banner" class="hidden bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm rounded-lg px-4 py-3 flex-wrap items-center gap-4">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4 text-red-500/80 dark:text-red-400/80 flex-shrink-0">
-        <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
-    </svg>
-    <span class="text-sm font-medium text-red-500/80 dark:text-red-400/80">Issues:</span>
+<div id="issues-banner" class="hidden bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm rounded-lg px-4 py-3 flex-wrap items-center gap-x-4 gap-y-2">
+    <span class="text-base font-medium text-red-500/80 dark:text-red-400/80 flex items-center gap-1.5 flex-shrink-0">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4 flex-shrink-0">
+            <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
+        </svg>
+        Issues:
+    </span>
     <a id="issues-banner-failed-runs" href="#issues-failed-runs" class="hidden items-center gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-red-700 dark:hover:text-red-300 hover:underline">
         <span class="inline-block w-1.5 h-1.5 rounded-full bg-red-500/80"></span>
         0 Failed Runs
@@ -25,5 +27,9 @@
     <a id="issues-banner-build-version-warnings" href="/projects" class="hidden items-center gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-yellow-700 dark:hover:text-yellow-300 hover:underline">
         <span class="inline-block w-1.5 h-1.5 rounded-full bg-yellow-500/80"></span>
         0 Build Version Warnings
+    </a>
+    <a id="issues-banner-failing-agents" href="#agent-health-container" class="hidden items-center gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-purple-700 dark:hover:text-purple-300 hover:underline">
+        <span class="inline-block w-1.5 h-1.5 rounded-full bg-purple-500/80"></span>
+        0 Failing Agents
     </a>
 </div>
