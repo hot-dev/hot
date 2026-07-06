@@ -176,9 +176,7 @@
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Dashboard</span>
                 </a>
 
-                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Build</span></div>
-
-<!-- Workflows Link -->
+                <!-- Workflows Link -->
                 <a href="/workflows" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "workflows" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Workflows &amp; Agents">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
@@ -189,31 +187,16 @@
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Workflows &amp; Agents</span>
                 </a>
-<!-- Projects Link -->
-                <a href="/projects" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "projects" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Projects">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 14.15v4.25c0 1.094-.787 2.036-1.872 2.18-2.087.277-4.216.42-6.378.42s-4.291-.143-6.378-.42c-1.085-.144-1.872-1.086-1.872-2.18v-4.25m16.5 0a2.18 2.18 0 00.75-1.661V8.706c0-1.081-.768-2.015-1.837-2.175a48.114 48.114 0 00-3.413-.387m4.5 8.006c-.194.165-.42.295-.673.38A23.978 23.978 0 0112 15.75c-2.648 0-5.195-.429-7.577-1.22a2.016 2.016 0 01-.673-.38m0 0A2.18 2.18 0 013 12.489V8.706c0-1.081.768-2.015 1.837-2.175a48.111 48.111 0 013.413-.387m7.5 0V5.25A2.25 2.25 0 0013.5 3h-3a2.25 2.25 0 00-2.25 2.25v.894m7.5 0a48.667 48.667 0 00-7.5 0M12 12.75h.008v.008H12v-.008z" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Projects</span>
-                </a>
-<!-- Context Variables Link -->
-                <a href="/contexts" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "contexts" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Context Variables">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5A1.125 1.125 0 0 0 12 9.375m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Context Variables</span>
-                </a>
 
-                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Observe</span></div>
-
-<!-- Runs Link -->
+                <!-- Runs Link -->
                 <a href="/runs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "runs" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Runs">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Runs</span>
                 </a>
-<!-- Tasks Link -->
+
+                <!-- Tasks Link -->
                 <a href="/tasks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "tasks" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Tasks">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <rect x="3" y="3" width="18" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" />
@@ -221,14 +204,16 @@
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Tasks</span>
                 </a>
-<!-- Events Link -->
+
+                <!-- Events Link -->
                 <a href="/events" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "events" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Events">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Events</span>
                 </a>
-<!-- Streams Link -->
+
+                <!-- Streams Link -->
                 <a href="/streams" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "streams" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Streams">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
@@ -236,16 +221,15 @@
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Streams</span>
                 </a>
 
-                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Data</span></div>
-
-<!-- Files Link -->
+                <!-- Files Link -->
                 <a href="/files" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "files" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Files">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Files</span>
                 </a>
-<!-- Stores Link -->
+
+                <!-- Stores Link -->
                 <a href="/stores" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "stores" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Stores">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
@@ -253,9 +237,7 @@
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Stores</span>
                 </a>
 
-                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Triggers</span></div>
-
-<!-- Scheduled Runs Link -->
+                <!-- Scheduled Runs Link -->
                 <a href="/schedules" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "schedules" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Scheduled Runs">
                     <!-- Clock + play triangle composite -->
                     <div class="relative w-6 h-6 flex-shrink-0">
@@ -268,7 +250,8 @@
                     </div>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Scheduled Runs</span>
                 </a>
-<!-- Event Handlers Link -->
+
+                <!-- Event Handlers Link -->
                 <a href="/event-handlers" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "event_handlers" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Event Handlers">
                     <!-- Sparkles + play triangle composite -->
                     <div class="relative w-6 h-6 flex-shrink-0">
@@ -281,14 +264,16 @@
                     </div>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Event Handlers</span>
                 </a>
-<!-- MCP Services Link -->
+
+                <!-- MCP Services Link -->
                 <a href="/mcp" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "mcp_services" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="MCP Services">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">MCP Services</span>
                 </a>
-<!-- Webhooks Link -->
+
+                <!-- Webhooks Link -->
                 <a href="/webhooks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "webhook_services" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Webhooks">
                     <!-- Webhook icon (CC0, svgrepo.com/svg/361957/webhooks) -->
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="-65 -57 1144 1144" fill="currentColor" class="w-6 h-6 flex-shrink-0">
@@ -297,16 +282,53 @@
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Webhooks</span>
                 </a>
 
-                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Access</span></div>
+                <!-- Alerts Link -->
+                <a href="/settings/alerts/destinations" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "alerts" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Alerts">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Alerts</span>
+                </a>
 
-<!-- API Keys Link -->
+                <!-- Separator -->
+                <div class="my-3 mx-4 border-t border-gray-200 dark:border-gray-700"></div>
+
+                <!-- Projects Link -->
+                <a href="/projects" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "projects" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Projects">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 14.15v4.25c0 1.094-.787 2.036-1.872 2.18-2.087.277-4.216.42-6.378.42s-4.291-.143-6.378-.42c-1.085-.144-1.872-1.086-1.872-2.18v-4.25m16.5 0a2.18 2.18 0 00.75-1.661V8.706c0-1.081-.768-2.015-1.837-2.175a48.114 48.114 0 00-3.413-.387m4.5 8.006c-.194.165-.42.295-.673.38A23.978 23.978 0 0112 15.75c-2.648 0-5.195-.429-7.577-1.22a2.016 2.016 0 01-.673-.38m0 0A2.18 2.18 0 013 12.489V8.706c0-1.081.768-2.015 1.837-2.175a48.111 48.111 0 013.413-.387m7.5 0V5.25A2.25 2.25 0 0013.5 3h-3a2.25 2.25 0 00-2.25 2.25v.894m7.5 0a48.667 48.667 0 00-7.5 0M12 12.75h.008v.008H12v-.008z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Projects</span>
+                </a>
+
+                <!-- Context Variables Link -->
+                <a href="/contexts" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "contexts" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Context Variables">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5A1.125 1.125 0 0 0 12 9.375m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Context Variables</span>
+                </a>
+
+                <!-- Docs Link -->
+                <a href="/docs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "docs" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Documentation">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Docs</span>
+                </a>
+
+                <!-- Divider -->
+                <div class="border-t border-gray-200 dark:border-gray-700 mx-4 my-4"></div>
+
+                <!-- API Keys Link -->
                 <a href="/keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "keys" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="API Keys">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">API Keys</span>
                 </a>
-<!-- Service Keys Link -->
+
+                <!-- Service Keys Link -->
                 <a href="/service-keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "service_keys" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Service Keys">
                     <!-- Key with user badge icon -->
                     <div class="relative w-6 h-6 flex-shrink-0">
@@ -319,37 +341,21 @@
                     </div>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Service Keys</span>
                 </a>
-<!-- Domains Link -->
+
+                <!-- Domains Link -->
                 <a href="/domains" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "domains" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Domains">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Domains</span>
                 </a>
-<!-- Alerts Link -->
-                <a href="/settings/alerts/destinations" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "alerts" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Alerts">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Alerts</span>
-                </a>
 
-<!-- Divider -->
-                <div class="border-t border-gray-200 dark:border-gray-700 mx-4 my-4"></div>
-<!-- Docs Link -->
-                <a href="/docs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "docs" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Documentation">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Docs</span>
-                </a>
-
-<!-- Footer at bottom of sidebar -->
+                <!-- Footer at bottom of sidebar -->
                 <div class="mt-auto pt-3 px-4 pb-3 border-t border-gray-200 dark:border-gray-700 sidebar-text">
                     <a href="{{ page_context.web_url }}" class="text-red-600 dark:text-red-400 hover:underline text-xs block mb-0.5">hot.dev</a>
                     <p class="text-xs text-gray-600 dark:text-gray-400">&copy; {{ page_context.current_year }} Hot Dev, LLC</p>
                 </div>
-</nav>
+            </nav>
         </aside>
 
         <!-- Main Content Area -->
