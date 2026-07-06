@@ -1,6 +1,6 @@
 <!-- Recent Runs Table Rows (for HTMX refresh) -->
 {% for run in recent_runs %}
-<tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors">
+<tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
     <td class="px-3 py-2 whitespace-nowrap">
         <div class="uuid-container inline-flex items-center gap-1">
             <a href="/runs/{{ run.run_id }}" class="uuid-display uuid-link link transition-all font-mono text-xs" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</a>

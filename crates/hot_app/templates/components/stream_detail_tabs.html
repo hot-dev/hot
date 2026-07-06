@@ -221,7 +221,7 @@
                 </thead>
                 <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
                     {% for run in runs %}
-                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222]">
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700">
                         <td class="px-6 py-4 whitespace-nowrap text-xs font-mono">
                             <div class="uuid-container inline-flex items-center gap-1">
                                 <a href="/runs/{{ run.run_id }}" class="uuid-display uuid-link link transition-all" data-full-uuid="{{ run.run_id }}" title="{{ run.run_id }}">{{ run.run_id|shortuuid }}</a>
@@ -401,7 +401,7 @@
                 </thead>
                 <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
                     {% for event in events %}
-                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222]">
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700">
                         <td class="px-6 py-4 whitespace-nowrap text-xs font-mono">
                             <div class="uuid-container inline-flex items-center gap-1">
                                 <a href="/events/{{ event.event_id }}" class="uuid-display uuid-link link transition-all" data-full-uuid="{{ event.event_id }}" title="{{ event.event_id }}">{{ event.event_id|shortuuid }}</a>
@@ -545,7 +545,7 @@
                 </thead>
                 <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
                     {% for task in tasks %}
-                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222]">
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700">
                         <td class="px-6 py-4 whitespace-nowrap text-xs font-mono">
                             <div class="uuid-container inline-flex items-center gap-1">
                                 <a href="/tasks/{{ task.task_id }}" class="uuid-display uuid-link text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-all" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</a>

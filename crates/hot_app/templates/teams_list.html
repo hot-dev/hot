@@ -56,7 +56,7 @@
                             </thead>
                             <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                                 {% for team in teams %}
-                                <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                                <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                                     <td class="px-6 py-4 whitespace-nowrap">
                                         <div class="flex items-center">
                                             <div class="flex-shrink-0 h-8 w-8">
@@ -92,10 +92,10 @@
                         <div class="flex items-center justify-between">
                             <div class="flex-1 flex justify-between sm:hidden">
                                 {% if has_prev_page %}
-                                <a href="/@{{ org.slug }}/teams?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
+                                <a href="/@{{ org.slug }}/teams?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</a>
                                 {% endif %}
                                 {% if has_next_page %}
-                                <a href="/@{{ org.slug }}/teams?p={{ current_page_num + 1 }}" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
+                                <a href="/@{{ org.slug }}/teams?p={{ current_page_num + 1 }}" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700">Next</a>
                                 {% endif %}
                             </div>
                             <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
@@ -107,7 +107,7 @@
                                 <div>
                                     <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                                         {% if has_prev_page %}
-                                        <a href="/@{{ org.slug }}/teams?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                        <a href="/@{{ org.slug }}/teams?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                                             <span class="sr-only">Previous</span>
                                             <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                                 <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
@@ -119,12 +119,12 @@
                                         {% if page_num == current_page_num %}
                                         <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
                                         {% else %}
-                                        <a href="/@{{ org.slug }}/teams?p={{ page_num }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
+                                        <a href="/@{{ org.slug }}/teams?p={{ page_num }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</a>
                                         {% endif %}
                                         {% endfor %}
 
                                         {% if has_next_page %}
-                                        <a href="/@{{ org.slug }}/teams?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
+                                        <a href="/@{{ org.slug }}/teams?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                                             <span class="sr-only">Next</span>
                                             <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                                 <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />

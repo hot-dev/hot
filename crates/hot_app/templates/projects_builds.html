@@ -91,7 +91,7 @@
                                 </thead>
                                 <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                                     {% for build in builds %}
-                                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                                         <td class="px-3 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
                                             <div class="uuid-container inline-flex items-center gap-1">
                                                 <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ build.build_id }}" title="{{ build.build_id }}">{{ build.build_id|shortuuid }}</span>
@@ -204,7 +204,7 @@
                         <!-- Mobile Card View -->
                         <div class="block md:hidden">
                             {% for build in builds %}
-                            <div class="border-b border-gray-200 dark:border-gray-700 last:border-b-0 p-4 hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                            <div class="border-b border-gray-200 dark:border-gray-700 last:border-b-0 p-4 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                                 <!-- Header with Type/Status and Deploy Button -->
                                 <div class="flex items-start justify-between mb-4">
                                     <div class="flex items-center space-x-2">

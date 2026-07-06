@@ -51,10 +51,10 @@
 
         /* Sidebar selected item - lighter red for dark mode, darker for light */
         .sidebar-active {
-            color: #dc2626; /* red-600 for light mode */
+            color: var(--color-hot-red-700);
         }
         .dark .sidebar-active {
-            color: #f87171; /* red-400 for dark mode */
+            color: var(--color-hot-red-400);
         }
     </style>
     <script src="{{ page_context.asset("js/htmx.min.js") }}" defer></script>
@@ -72,11 +72,12 @@
     {% block head %}{% endblock %}
 </head>
 <body class="flex flex-col h-screen overflow-hidden bg-gray-50 dark:bg-gray-900 grid-bg">
+    <a href="#main-content" class="skip-link">Skip to main content</a>
     <!-- Top Bar -->
     <header class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 text-gray-800 dark:text-white py-1 px-6 flex justify-between items-center z-20 flex-shrink-0 border-b border-gray-200 dark:border-gray-800" style="backdrop-filter: blur(10px);">
         <div class="flex items-center transition-all duration-300 ease-in-out" id="header-left-section" style="width: 240px;">
             <!-- Sidebar toggle button — ml-[-6px] aligns with nav icons (px-4 + 2px border) -->
-            <button id="sidebar-toggle-button" aria-label="Toggle sidebar" class="ml-[-6px] mr-2 text-gray-800 dark:text-white focus-ring hover:text-red-600 dark:hover:text-red-400 transition-colors flex-shrink-0">
+            <button id="sidebar-toggle-button" aria-label="Toggle sidebar" class="ml-[-6px] mr-2 text-gray-800 dark:text-white focus-ring hover:text-hot-red-600 dark:hover:text-hot-red-400 transition-colors flex-shrink-0">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
@@ -137,18 +138,18 @@
                 </button>
 
                 <div x-cloak x-show="open" @click.away="open = false" id="user-dropdown" class="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
-                    <a href="/account" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                    <a href="/account" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                         Account
                     </a>
                     {% match page_context.current_org %}{% when Some with (org) %}
-                    <a href="/@{{ org.slug }}" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                    <a href="/@{{ org.slug }}" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                         Organization
                     </a>
                     {% when None %}{% endmatch %}
                     {% if !page_context.is_local_dev %}
                     <div class="border-t border-gray-200 dark:border-gray-700"></div>
                     <form action="/signout" method="post">
-                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                             Sign Out
                         </button>
                     </form>
@@ -167,15 +168,17 @@
         <aside id="sidebar" class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 border-r border-gray-200 dark:border-gray-800 transition-all duration-300 ease-in-out flex-shrink-0 overflow-hidden flex flex-col" style="backdrop-filter: blur(10px); width: 240px;">
             <nav class="pt-2 pb-4 h-full overflow-y-auto custom-scrollbar flex flex-col">
                 <!-- Dashboard Link -->
-                <a href="/" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "dashboard" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Dashboard">
+                <a href="/" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "dashboard" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Dashboard">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Dashboard</span>
                 </a>
 
-                <!-- Workflows Link -->
-                <a href="/workflows" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "workflows" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Workflows &amp; Agents">
+                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Build</span></div>
+
+<!-- Workflows Link -->
+                <a href="/workflows" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "workflows" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Workflows &amp; Agents">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
@@ -185,58 +188,74 @@
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Workflows &amp; Agents</span>
                 </a>
+<!-- Projects Link -->
+                <a href="/projects" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "projects" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Projects">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 14.15v4.25c0 1.094-.787 2.036-1.872 2.18-2.087.277-4.216.42-6.378.42s-4.291-.143-6.378-.42c-1.085-.144-1.872-1.086-1.872-2.18v-4.25m16.5 0a2.18 2.18 0 00.75-1.661V8.706c0-1.081-.768-2.015-1.837-2.175a48.114 48.114 0 00-3.413-.387m4.5 8.006c-.194.165-.42.295-.673.38A23.978 23.978 0 0112 15.75c-2.648 0-5.195-.429-7.577-1.22a2.016 2.016 0 01-.673-.38m0 0A2.18 2.18 0 013 12.489V8.706c0-1.081.768-2.015 1.837-2.175a48.111 48.111 0 013.413-.387m7.5 0V5.25A2.25 2.25 0 0013.5 3h-3a2.25 2.25 0 00-2.25 2.25v.894m7.5 0a48.667 48.667 0 00-7.5 0M12 12.75h.008v.008H12v-.008z" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Projects</span>
+                </a>
+<!-- Context Variables Link -->
+                <a href="/contexts" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "contexts" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Context Variables">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5A1.125 1.125 0 0 0 12 9.375m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Context Variables</span>
+                </a>
 
-                <!-- Runs Link -->
-                <a href="/runs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "runs" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Runs">
+                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Observe</span></div>
+
+<!-- Runs Link -->
+                <a href="/runs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "runs" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Runs">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Runs</span>
                 </a>
-
-                <!-- Tasks Link -->
-                <a href="/tasks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "tasks" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Tasks">
+<!-- Tasks Link -->
+                <a href="/tasks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "tasks" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Tasks">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <rect x="3" y="3" width="18" height="18" rx="3" stroke-linecap="round" stroke-linejoin="round" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M9.5 7.5v9l7.5-4.5-7.5-4.5z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Tasks</span>
                 </a>
-
-                <!-- Events Link -->
-                <a href="/events" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "events" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Events">
+<!-- Events Link -->
+                <a href="/events" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "events" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Events">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Events</span>
                 </a>
-
-                <!-- Streams Link -->
-                <a href="/streams" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "streams" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Streams">
+<!-- Streams Link -->
+                <a href="/streams" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "streams" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Streams">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Streams</span>
                 </a>
 
-                <!-- Files Link -->
-                <a href="/files" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "files" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Files">
+                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Data</span></div>
+
+<!-- Files Link -->
+                <a href="/files" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "files" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Files">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Files</span>
                 </a>
-
-                <!-- Stores Link -->
-                <a href="/stores" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "stores" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Stores">
+<!-- Stores Link -->
+                <a href="/stores" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "stores" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Stores">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Stores</span>
                 </a>
 
-                <!-- Scheduled Runs Link -->
-                <a href="/schedules" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "schedules" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Scheduled Runs">
+                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Triggers</span></div>
+
+<!-- Scheduled Runs Link -->
+                <a href="/schedules" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "schedules" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Scheduled Runs">
                     <!-- Clock + play triangle composite -->
                     <div class="relative w-6 h-6 flex-shrink-0">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
@@ -248,9 +267,8 @@
                     </div>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Scheduled Runs</span>
                 </a>
-
-                <!-- Event Handlers Link -->
-                <a href="/event-handlers" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "event_handlers" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Event Handlers">
+<!-- Event Handlers Link -->
+                <a href="/event-handlers" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "event_handlers" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Event Handlers">
                     <!-- Sparkles + play triangle composite -->
                     <div class="relative w-6 h-6 flex-shrink-0">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
@@ -262,17 +280,15 @@
                     </div>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Event Handlers</span>
                 </a>
-
-                <!-- MCP Services Link -->
-                <a href="/mcp" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "mcp_services" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="MCP Services">
+<!-- MCP Services Link -->
+                <a href="/mcp" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "mcp_services" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="MCP Services">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008Z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">MCP Services</span>
                 </a>
-
-                <!-- Webhooks Link -->
-                <a href="/webhooks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "webhook_services" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Webhooks">
+<!-- Webhooks Link -->
+                <a href="/webhooks" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "webhook_services" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Webhooks">
                     <!-- Webhook icon (CC0, svgrepo.com/svg/361957/webhooks) -->
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="-65 -57 1144 1144" fill="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path d="M482 226h-1l-10 2q-33 4-64.5 18.5t-55.5 38.5q-41 37-57 91q-9 30-8 63t12 63q17 45 52 78l13 12l-83 135q-26-1-45 7q-30 13-45 40q-7 15-9 31t2 32q8 30 33 48q15 10 33 14.5t36 2t34.5-12.5t27.5-25q12-17 14.5-39t-5.5-41q-1-5-7-14l-3-6l118-192q6-9 8-14l-10-3q-9-2-13-4q-23-10-41.5-27.5t-28.5-39.5q-17-36-9-75q4-23 17-43t31-34q37-27 82-27q27-1 52.5 9.5t44.5 30.5q17 16 26.5 38.5t10.5 45.5q0 17-6 42l70 19l8 1q14-43 7-86q-4-33-19.5-63.5t-39.5-53.5q-42-42-103-56q-6-2-18-4l-14-2h-37zM500 350q-17 0-34 7t-30.5 20.5t-19.5 31.5q-8 20-4 44q3 18 14 34t28 25q24 15 56 13q3 4 5 8l112 191q3 6 6 9q27-26 58.5-35.5t65-3.5t58.5 26q32 25 43.5 61.5t0.5 73.5q-8 28-28.5 50t-48.5 33q-31 13-66.5 8.5t-63.5-24.5q-4-3-13-10l-5-6q-4 3-11 10l-47 46q23 23 52 38.5t61 21.5l22 4h39l28-5q64-13 110-60q22-22 36.5-50.5t19.5-59.5q5-36-2-71.5t-25-64.5t-44-51t-57-35q-34-14-70.5-16t-71.5 7l-17 5l-81-137q13-19 16-37q5-32-13-60q-16-25-44-35q-17-6-35-6zM218 614q-58 13-100 53q-47 44-61 105l-4 24v37l2 11q2 13 4 20q7 31 24.5 59t42.5 49q50 41 115 49q38 4 76-4.5t70-28.5q53-34 78-91q7-17 14-45q6-1 18 0l125 2q14 0 20 1q11 20 25 31t31.5 16t35.5 4q28-3 50-20q27-21 32-54q2-17-1.5-33t-13.5-30q-16-22-41-32q-17-7-35.5-6.5t-35.5 7.5q-28 12-43 37l-3 6q-14 0-42-1l-113-1q-15-1-43-1l-50-1l3 17q8 43-13 81q-14 27-40 45t-57 22q-35 6-70-7.5t-57-42.5q-28-35-27-79q1-37 23-69q13-19 32-32t41-19l9-3z"/>
@@ -280,54 +296,17 @@
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Webhooks</span>
                 </a>
 
-                <!-- Alerts Link -->
-                <a href="/settings/alerts/destinations" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "alerts" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Alerts">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Alerts</span>
-                </a>
+                <div class="sidebar-group-label"><span class="sidebar-text whitespace-nowrap">Access</span></div>
 
-                <!-- Separator -->
-                <div class="my-3 mx-4 border-t border-gray-200 dark:border-gray-700"></div>
-
-                <!-- Projects Link -->
-                <a href="/projects" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "projects" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Projects">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 14.15v4.25c0 1.094-.787 2.036-1.872 2.18-2.087.277-4.216.42-6.378.42s-4.291-.143-6.378-.42c-1.085-.144-1.872-1.086-1.872-2.18v-4.25m16.5 0a2.18 2.18 0 00.75-1.661V8.706c0-1.081-.768-2.015-1.837-2.175a48.114 48.114 0 00-3.413-.387m4.5 8.006c-.194.165-.42.295-.673.38A23.978 23.978 0 0112 15.75c-2.648 0-5.195-.429-7.577-1.22a2.016 2.016 0 01-.673-.38m0 0A2.18 2.18 0 013 12.489V8.706c0-1.081.768-2.015 1.837-2.175a48.111 48.111 0 013.413-.387m7.5 0V5.25A2.25 2.25 0 0013.5 3h-3a2.25 2.25 0 00-2.25 2.25v.894m7.5 0a48.667 48.667 0 00-7.5 0M12 12.75h.008v.008H12v-.008z" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Projects</span>
-                </a>
-
-                <!-- Context Variables Link -->
-                <a href="/contexts" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "contexts" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Context Variables">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5A1.125 1.125 0 0 0 12 9.375m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Context Variables</span>
-                </a>
-
-                <!-- Docs Link -->
-                <a href="/docs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "docs" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Documentation">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
-                    </svg>
-                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Docs</span>
-                </a>
-
-                <!-- Divider -->
-                <div class="border-t border-gray-200 dark:border-gray-700 mx-4 my-4"></div>
-
-                <!-- API Keys Link -->
-                <a href="/keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "keys" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="API Keys">
+<!-- API Keys Link -->
+                <a href="/keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "keys" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="API Keys">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">API Keys</span>
                 </a>
-
-                <!-- Service Keys Link -->
-                <a href="/service-keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "service_keys" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Service Keys">
+<!-- Service Keys Link -->
+                <a href="/service-keys" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "service_keys" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Service Keys">
                     <!-- Key with user badge icon -->
                     <div class="relative w-6 h-6 flex-shrink-0">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
@@ -339,27 +318,43 @@
                     </div>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Service Keys</span>
                 </a>
-
-                <!-- Domains Link -->
-                <a href="/domains" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "domains" %}sidebar-active border-l-2 border-red-500 dark:border-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-red-600 dark:hover:text-red-400 hover:translate-x-0.5 transition-all duration-200" title="Domains">
+<!-- Domains Link -->
+                <a href="/domains" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "domains" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Domains">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
                     </svg>
                     <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Domains</span>
                 </a>
+<!-- Alerts Link -->
+                <a href="/settings/alerts/destinations" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "alerts" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Alerts">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Alerts</span>
+                </a>
 
-                <!-- Footer at bottom of sidebar -->
+<!-- Divider -->
+                <div class="border-t border-gray-200 dark:border-gray-700 mx-4 my-4"></div>
+<!-- Docs Link -->
+                <a href="/docs" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "docs" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Documentation">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 flex-shrink-0">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                    </svg>
+                    <span class="ml-3 sidebar-text whitespace-nowrap text-sm">Docs</span>
+                </a>
+
+<!-- Footer at bottom of sidebar -->
                 <div class="mt-auto pt-3 px-4 pb-3 border-t border-gray-200 dark:border-gray-700 sidebar-text">
                     <a href="{{ page_context.web_url }}" class="text-red-600 dark:text-red-400 hover:underline text-xs block mb-0.5">hot.dev</a>
                     <p class="text-xs text-gray-600 dark:text-gray-400">&copy; {{ page_context.current_year }} Hot Dev, LLC</p>
                 </div>
-            </nav>
+</nav>
         </aside>
 
         <!-- Main Content Area -->
         <div class="flex-1 flex flex-col overflow-hidden">
             <!-- Main Content -->
-            <main class="flex-1 overflow-y-auto px-4 pb-4 dark:text-gray-200 custom-scrollbar">
+            <main id="main-content" tabindex="-1" class="flex-1 overflow-y-auto px-4 pb-4 dark:text-gray-200 custom-scrollbar outline-none">
         <!-- Global Notices -->
         {% for notice in page_context.global_notices %}
         <div class="mb-4 {{ notice.notice_type.bg_class() }} border rounded-lg px-4 py-3 flex items-center justify-between">
@@ -396,7 +391,7 @@
                     <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for org in page_context.user_orgs %}
                         <form action="/switch-org/{{ org.org_id }}" method="post">
-                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <div class="min-w-0">
                                         <span class="truncate block">{{ org.name }}{% if org.is_individual() %} <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>{% endif %}</span>
@@ -412,7 +407,7 @@
                         </form>
                         {% endfor %}
                         <div class="border-t border-gray-200 dark:border-gray-700 my-1"></div>
-                        <a href="/orgs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                        <a href="/orgs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                             <div class="flex items-center gap-2">
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
                                     <path fill-rule="evenodd" d="M11.828 2.25c-.916 0-1.699.663-1.85 1.567l-.091.549a.798.798 0 0 1-.517.608 7.45 7.45 0 0 0-.478.198.798.798 0 0 1-.796-.064l-.453-.324a1.875 1.875 0 0 0-2.416.2l-.243.243a1.875 1.875 0 0 0-.2 2.416l.324.453a.798.798 0 0 1 .064.796 7.448 7.448 0 0 0-.198.478.798.798 0 0 1-.608.517l-.55.092a1.875 1.875 0 0 0-1.566 1.849v.344c0 .916.663 1.699 1.567 1.85l.549.091c.281.047.508.25.608.517.06.162.127.321.198.478a.798.798 0 0 1-.064.796l-.324.453a1.875 1.875 0 0 0 .2 2.416l.243.243c.648.648 1.67.733 2.416.2l.453-.324a.798.798 0 0 1 .796-.064c.157.071.316.137.478.198.267.1.47.327.517.608l.092.55c.15.903.932 1.566 1.849 1.566h.344c.916 0 1.699-.663 1.85-1.567l.091-.549a.798.798 0 0 1 .517-.608 7.52 7.52 0 0 0 .478-.198.798.798 0 0 1 .796.064l.453.324a1.875 1.875 0 0 0 2.416-.2l.243-.243c.648-.648.733-1.67.2-2.416l-.324-.453a.798.798 0 0 1-.064-.796c.071-.157.137-.316.198-.478.1-.267.327-.47.608-.517l.55-.091a1.875 1.875 0 0 0 1.566-1.85v-.344c0-.916-.663-1.699-1.567-1.85l-.549-.091a.798.798 0 0 1-.608-.517 7.507 7.507 0 0 0-.198-.478.798.798 0 0 1 .064-.796l.324-.453a1.875 1.875 0 0 0-.2-2.416l-.243-.243a1.875 1.875 0 0 0-2.416-.2l-.453.324a.798.798 0 0 1-.796.064 7.462 7.462 0 0 0-.478-.198.798.798 0 0 1-.517-.608l-.091-.55a1.875 1.875 0 0 0-1.85-1.566h-.344ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd" />
@@ -439,7 +434,7 @@
                     <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for env in page_context.current_org_envs %}
                         <form action="/envs/{{ env.env_id }}/switch" method="post">
-                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200 focus-ring {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <span class="truncate">{{ env.name }}</span>
                                     {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}
@@ -452,7 +447,7 @@
                         </form>
                         {% endfor %}
                         <div class="border-t border-gray-200 dark:border-gray-700 my-1"></div>
-                        <a href="/envs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-200">
+                        <a href="/envs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                             <div class="flex items-center gap-2">
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
                                     <path fill-rule="evenodd" d="M11.828 2.25c-.916 0-1.699.663-1.85 1.567l-.091.549a.798.798 0 0 1-.517.608 7.45 7.45 0 0 0-.478.198.798.798 0 0 1-.796-.064l-.453-.324a1.875 1.875 0 0 0-2.416.2l-.243.243a1.875 1.875 0 0 0-.2 2.416l.324.453a.798.798 0 0 1 .064.796 7.448 7.448 0 0 0-.198.478.798.798 0 0 1-.608.517l-.55.092a1.875 1.875 0 0 0-1.566 1.849v.344c0 .916.663 1.699 1.567 1.85l.549.091c.281.047.508.25.608.517.06.162.127.321.198.478a.798.798 0 0 1-.064.796l-.324.453a1.875 1.875 0 0 0 .2 2.416l.243.243c.648.648 1.67.733 2.416.2l.453-.324a.798.798 0 0 1 .796-.064c.157.071.316.137.478.198.267.1.47.327.517.608l.092.55c.15.903.932 1.566 1.849 1.566h.344c.916 0 1.699-.663 1.85-1.567l.091-.549a.798.798 0 0 1 .517-.608 7.52 7.52 0 0 0 .478-.198.798.798 0 0 1 .796.064l.453.324a1.875 1.875 0 0 0 2.416-.2l.243-.243c.648-.648.733-1.67.2-2.416l-.324-.453a.798.798 0 0 1-.064-.796c.071-.157.137-.316.198-.478.1-.267.327-.47.608-.517l.55-.091a1.875 1.875 0 0 0 1.566-1.85v-.344c0-.916-.663-1.699-1.567-1.85l-.549-.091a.798.798 0 0 1-.608-.517 7.507 7.507 0 0 0-.198-.478.798.798 0 0 1 .064-.796l.324-.453a1.875 1.875 0 0 0-.2-2.416l-.243-.243a1.875 1.875 0 0 0-2.416-.2l-.453.324a.798.798 0 0 1-.796.064 7.462 7.462 0 0 0-.478-.198.798.798 0 0 1-.517-.608l-.091-.55a1.875 1.875 0 0 0-1.85-1.566h-.344ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" clip-rule="evenodd" />

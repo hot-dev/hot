@@ -26,7 +26,7 @@
         </thead>
         <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
             {% for task in tasks %}
-            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150 cursor-pointer"
+            <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150 cursor-pointer"
                 onclick="window.location.href='/tasks/{{ task.task_id }}'">
                 <td class="px-3 md:px-4 py-3 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
                     <div class="uuid-container inline-flex items-center gap-1">

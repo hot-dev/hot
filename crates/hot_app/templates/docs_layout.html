@@ -935,7 +935,7 @@ function renderSearchResults() {
                     'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
 
     html += '<li>';
-    html += '<a href="' + item.path + '" class="block px-4 py-3 hover:bg-gray-100 dark:hover:bg-[#222]/50 ' + (isSelected ? 'bg-gray-50 dark:bg-gray-700/50' : '') + '" data-index="' + i + '">';
+    html += '<a href="' + item.path + '" class="block px-4 py-3 hover:bg-gray-100 dark:hover:bg-gray-700/50 ' + (isSelected ? 'bg-gray-50 dark:bg-gray-700/50' : '') + '" data-index="' + i + '">';
     html += '<div class="flex items-center gap-2">';
     html += '<span class="text-xs font-medium px-1.5 py-0.5 rounded ' + kindClass + '">' + kindBadge + '</span>';
     html += '<span class="font-medium text-gray-900 dark:text-white">' + highlightText(item.name, currentQuery) + '</span>';

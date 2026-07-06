@@ -2681,7 +2681,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         files.forEach(file => {
             const contentType = file.content_type || '-';
             html += `
-                <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                     <td class="px-4 py-3 text-xs font-medium text-gray-900 dark:text-white">
                         <div class="inline-flex items-center gap-2">
                             <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-hot-red-600 dark:text-gray-500 dark:hover:text-hot-red-400 transition-colors" title="Download">

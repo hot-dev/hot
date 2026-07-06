@@ -14,7 +14,7 @@
         </thead>
         <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
             {% for event in events %}
-            <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors">
+            <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                 <td class="px-3 py-2 whitespace-nowrap">
                     <div class="uuid-container inline-flex items-center gap-1">
                         <a href="/events/{{ event.event_id }}" class="uuid-display uuid-link link transition-all font-mono text-xs" data-full-uuid="{{ event.event_id }}" title="{{ event.event_id }}">{{ event.event_id|shortuuid }}</a>

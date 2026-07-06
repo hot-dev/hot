@@ -661,7 +661,7 @@ html.dark .docs-content pre.deps-code-block {
                 <a href="{{ item_path }}"
                    style="padding-left: calc(0.5rem + {{ item.indent }} * 0.75rem)"
                    class="flex items-center pr-2 py-1 text-sm rounded-r-md transition-all duration-200
-                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500 -ml-px{% else %}text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:bg-gray-100 dark:hover:bg-[#222]/50{% endif %}">
+                          {% if current_path == item_path.as_str() %}text-red-600 dark:text-red-400 bg-gray-100 dark:bg-gray-700/50 font-medium border-l-2 border-red-500 -ml-px{% else %}text-gray-600 dark:text-gray-400 hover:text-hot-red-600 dark:hover:text-hot-red-400 hover:bg-gray-100 dark:hover:bg-gray-700/50{% endif %}">
                     {{ item.title }}
                 </a>
                 {% else %}
@@ -885,7 +885,7 @@ function renderSearchResults() {
         var kindBadge = getKindBadge(item.kind);
 
         html += '<a href="' + item.path + '" class="block px-4 py-3 ' +
-            (isSelected ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-100 dark:hover:bg-[#222]/50') +
+            (isSelected ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-100 dark:hover:bg-gray-700/50') +
             ' transition-colors cursor-pointer" data-index="' + i + '">' +
             '<div class="flex items-start gap-3">' +
             '<span class="flex-shrink-0 mt-0.5">' + kindIcon + '</span>' +
