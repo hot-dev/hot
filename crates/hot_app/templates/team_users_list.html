@@ -188,14 +188,14 @@
             {% else %}
             <!-- Empty State -->
             <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
-                <div class="text-center">
-                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+                <div class="empty-state">
+                    <div class="empty-state-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
                         </svg>
                     </div>
-                    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No team users yet</h3>
-                    <p class="text-gray-500 dark:text-gray-400 mb-4">
+                    <h3 class="empty-state-title">No team users yet</h3>
+                    <p class="empty-state-message">
                         {% if can_manage %}
                         Get started by adding users to this team.
                         {% else %}

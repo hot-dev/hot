@@ -433,6 +433,61 @@ pre,
   background-repeat: repeat;
 }
 
+/* ===================================================================
+   Empty state — the canonical "nothing here yet" block.
+   Compose: .empty-state wrapper > .empty-state-icon (circle w/ svg)
+   > .empty-state-title > .empty-state-message > optional .btn CTA.
+   Or use the ui_macros.html empty_state_header macro.
+   =================================================================== */
+
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+.empty-state-icon {
+  margin: 0 auto 1rem;
+  width: 3rem;
+  height: 3rem;
+  border-radius: var(--radius-pill);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-gray-100);
+  color: var(--color-gray-400);
+}
+
+.empty-state-icon svg {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.dark .empty-state-icon {
+  background: var(--color-gray-800);
+  color: var(--color-gray-500);
+}
+
+.empty-state-title {
+  font-size: 1rem;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  color: var(--color-gray-900);
+}
+
+.dark .empty-state-title {
+  color: #ffffff;
+}
+
+.empty-state-message {
+  font-size: 0.875rem;
+  color: var(--color-gray-500);
+  margin-bottom: 1rem;
+}
+
+.dark .empty-state-message {
+  color: var(--color-gray-400);
+}
+
 /* Skip-to-content link: first tab stop on every page, invisible until focused. */
 .skip-link {
   position: absolute;

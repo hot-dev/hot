@@ -1,0 +1,23 @@
+{# Shared UI macros.
+
+   Import with:
+     {%- import "components/ui_macros.html" as ui -%}
+
+   empty_state_header renders the icon + title + message portion of the
+   canonical empty state (see .empty-state in input.css). Wrap it and any
+   CTA in a `<div class="empty-state">`:
+
+     <div class="empty-state">
+         {% call ui::empty_state_header("M12 6v6m0 0v6m0-6h6m-6 0H6", "No widgets", "Get started by creating your first widget.") %}
+         <a href="/widgets/new" class="btn btn-primary">Create Widget</a>
+     </div>
+#}
+{% macro empty_state_header(icon_path, title, message) %}
+<div class="empty-state-icon">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="{{ icon_path }}" />
+    </svg>
+</div>
+<h3 class="empty-state-title">{{ title }}</h3>
+<p class="empty-state-message">{{ message }}</p>
+{% endmacro %}
