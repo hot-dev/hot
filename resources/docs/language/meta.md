@@ -131,8 +131,12 @@ fn (event) {
 ```
 
 Schedule formats:
-- `"@daily"`, `"@hourly"`, `"@weekly"`
-- `"every N seconds"`, `"every N minutes"`, `"every N hours"`
+- Cron expressions: `"0 2 * * *"`, `"*/5 * * * *"` (5, 6, or 7 fields)
+- Nicknames: `"@daily"`, `"@hourly"`, `"@weekly"`
+- Intervals: `"every N seconds"`, `"every N minutes"`, `"every N hours"`
+- Natural language: `"every day at 9:00 am"`, `"on Sunday at 12:00"`
+
+All times are UTC. See [Schedules](/docs/schedules) for the full format reference and dynamic (runtime-created) schedules.
 
 ## MCP Tools
 

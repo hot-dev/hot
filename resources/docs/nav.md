@@ -6,6 +6,11 @@ Format: - [Title](path) where path is relative (e.g. api)
 
 Nested items create sections. The first item in a section
 can link to a section overview page.
+
+Ordering follows the new-user journey: install and try it,
+learn the language, understand the platform, integrate via
+the API, then operate and maintain (config, packages, CI/CD,
+migrations, editor reference).
 -->
 
 - [Getting Started](getting-started)
@@ -20,14 +25,6 @@ can link to a section overview page.
   - [Error Handling](language/errors)
   - [Flows](language/flows)
   - [What Hot Doesn't Have](language/not-supported)
-- [Hot Configuration](configuration)
-  - [Dependencies](configuration/dependencies)
-  - [Projects](configuration/projects)
-- [Migrations and Upgrades](migrations)
-- [Hot Packages](packages)
-  - [Package Manifest](packages/manifest)
-  - [Package Dependencies](packages/dependencies)
-  - [Publishing Packages](packages/publishing)
 - [Hot Platform](platform)
   - [Runs, Events & Streams](platform/runs-events-streams)
   - [Durable Execution](platform/durability)
@@ -44,7 +41,15 @@ can link to a section overview page.
   - [Webhooks](webhooks)
   - [Custom Domains](domains)
   - [Authentication](authentication)
-- [Hot CLI](cli)
-- [CI/CD](ci-cd)
 - [Hot App](app)
+- [Hot CLI](cli)
+- [Hot Configuration](configuration)
+  - [Dependencies](configuration/dependencies)
+  - [Projects](configuration/projects)
+- [Hot Packages](packages)
+  - [Package Manifest](packages/manifest)
+  - [Package Dependencies](packages/dependencies)
+  - [Publishing Packages](packages/publishing)
+- [CI/CD](ci-cd)
+- [Migrations and Upgrades](migrations)
 - [VS Code & LSP](editor)

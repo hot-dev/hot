@@ -42,7 +42,7 @@ Use the filters at the top (project, time range, granularity) to scope the data.
 
 The **Runs** view shows all executions of your Hot code:
 
-- **Status** - Running, succeeded, failed, or cancelled
+- **Status** - Running, succeeded, failed, cancelled, or pending retry
 - **Type** - How it was triggered (call, event, schedule, run, eval, repl)
 - **Duration** - How long the run took
 - **Timestamp** - When the run started
@@ -65,12 +65,13 @@ You can **retry** failed runs or **rerun** any completed run directly from the d
 | `succeeded` | Run completed successfully |
 | `failed` | Run failed with an error |
 | `cancelled` | Run was cancelled |
+| `pending_retry` | Run failed and is waiting for an automatic [retry](/docs/retries) |
 
 ## Tasks
 
 The **Tasks** view shows asynchronous and container-based jobs:
 
-- **Status** - Queued, running, completed, or failed
+- **Status** - Queued, running, completed, failed, timed out, or cancelled
 - **Duration** - How long the task ran
 - **CUS** - Compute units consumed by the task
 - **Timestamp** - When the task was created
@@ -91,6 +92,8 @@ Click any task to see:
 | `running` | Task is currently executing |
 | `completed` | Task finished successfully |
 | `failed` | Task failed with an error |
+| `timed_out` | Task exceeded its timeout |
+| `cancelled` | Task was cancelled before completion |
 
 ## Events
 

@@ -12,49 +12,65 @@ A **Run** is a single execution of a Hot function. Every function call creates a
 
 ### Run Lifecycle
 
-<svg viewBox="0 0 340 160" class="w-full max-w-sm mx-auto my-6" style="font-family: system-ui, sans-serif;">
+<svg viewBox="0 0 500 210" class="w-full max-w-md mx-auto my-6" style="font-family: system-ui, sans-serif;">
+  <!-- Uses `.dark` selectors: the Hot App toggles dark mode via a class, not the OS setting. -->
+  <!-- Neutral grays matching the app palette (input.css) — no blue tint. -->
   <style>
-    .box-running { fill: #fef9c3; stroke: #ca8a04; stroke-width: 1.5; }
-    .box-success { fill: #dcfce7; stroke: #16a34a; stroke-width: 1.5; }
-    .box-failed { fill: #fee2e2; stroke: #dc2626; stroke-width: 1.5; }
-    .box-cancelled { fill: #f3f4f6; stroke: #6b7280; stroke-width: 1.5; }
-    .text { fill: #334155; font-size: 12px; font-weight: 500; }
-    .arrow { stroke: #94a3b8; stroke-width: 1.5; fill: none; }
-    @media (prefers-color-scheme: dark) {
-      .box-running { fill: #422006; stroke: #ca8a04; }
-      .box-success { fill: #052e16; stroke: #16a34a; }
-      .box-failed { fill: #450a0a; stroke: #dc2626; }
-      .box-cancelled { fill: #1f2937; stroke: #6b7280; }
-      .text { fill: #e2e8f0; }
-      .arrow { stroke: #64748b; }
-    }
+    .rls-running { fill: #fef9c3; stroke: #ca8a04; stroke-width: 1.5; }
+    .rls-success { fill: #dcfce7; stroke: #16a34a; stroke-width: 1.5; }
+    .rls-failed { fill: #fee2e2; stroke: #dc2626; stroke-width: 1.5; }
+    .rls-cancelled { fill: #f8f8f8; stroke: #888888; stroke-width: 1.5; }
+    .rls-retry { fill: #ffedd5; stroke: #ea580c; stroke-width: 1.5; }
+    .rls-text { fill: #444444; font-size: 12px; font-weight: 500; }
+    .rls-label { fill: #888888; font-size: 10px; font-style: italic; }
+    .rls-arrow { stroke: #aaaaaa; stroke-width: 1.5; fill: none; }
+    .rls-arrow-dashed { stroke: #aaaaaa; stroke-width: 1.5; fill: none; stroke-dasharray: 4 4; }
+    .dark .rls-running { fill: #422006; }
+    .dark .rls-success { fill: #052e16; }
+    .dark .rls-failed { fill: #450a0a; }
+    .dark .rls-cancelled { fill: #212126; stroke: #666666; }
+    .dark .rls-retry { fill: #431407; stroke: #fb923c; }
+    .dark .rls-text { fill: #f0f0f0; }
+    .dark .rls-label { fill: #aaaaaa; }
   </style>
   <defs>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L7,3 z" fill="#94a3b8"/>
+    <marker id="rls-arrow-head" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L7,3 z" fill="#aaaaaa"/>
     </marker>
   </defs>
 
   <!-- Running -->
-  <rect x="30" y="62" width="80" height="32" rx="5" class="box-running"/>
-  <text x="70" y="83" text-anchor="middle" class="text">running</text>
+  <rect x="30" y="96" width="84" height="32" rx="5" class="rls-running"/>
+  <text x="72" y="117" text-anchor="middle" class="rls-text">running</text>
 
-  <!-- Arrows -->
-  <path d="M 115 70 L 165 35" class="arrow" marker-end="url(#arrow)"/>
-  <path d="M 115 78 L 165 78" class="arrow" marker-end="url(#arrow)"/>
-  <path d="M 115 86 L 165 121" class="arrow" marker-end="url(#arrow)"/>
+  <!-- Arrows to terminal states -->
+  <path d="M 118 104 L 186 61" class="rls-arrow" marker-end="url(#rls-arrow-head)"/>
+  <path d="M 118 112 L 186 112" class="rls-arrow" marker-end="url(#rls-arrow-head)"/>
+  <path d="M 118 120 L 186 163" class="rls-arrow" marker-end="url(#rls-arrow-head)"/>
 
   <!-- Succeeded -->
-  <rect x="175" y="18" width="90" height="32" rx="5" class="box-success"/>
-  <text x="220" y="39" text-anchor="middle" class="text">succeeded</text>
+  <rect x="192" y="44" width="94" height="32" rx="5" class="rls-success"/>
+  <text x="239" y="65" text-anchor="middle" class="rls-text">succeeded</text>
 
   <!-- Failed -->
-  <rect x="175" y="62" width="90" height="32" rx="5" class="box-failed"/>
-  <text x="220" y="83" text-anchor="middle" class="text">failed</text>
+  <rect x="192" y="96" width="94" height="32" rx="5" class="rls-failed"/>
+  <text x="239" y="117" text-anchor="middle" class="rls-text">failed</text>
 
   <!-- Cancelled -->
-  <rect x="175" y="106" width="90" height="32" rx="5" class="box-cancelled"/>
-  <text x="220" y="127" text-anchor="middle" class="text">cancelled</text>
+  <rect x="192" y="148" width="94" height="32" rx="5" class="rls-cancelled"/>
+  <text x="239" y="169" text-anchor="middle" class="rls-text">cancelled</text>
+
+  <!-- Failed -> pending_retry (when retry is configured) -->
+  <path d="M 290 112 L 352 112" class="rls-arrow" marker-end="url(#rls-arrow-head)"/>
+  <text x="296" y="104" class="rls-label">retry left?</text>
+
+  <!-- Pending retry -->
+  <rect x="358" y="96" width="112" height="32" rx="5" class="rls-retry"/>
+  <text x="414" y="117" text-anchor="middle" class="rls-text">pending_retry</text>
+
+  <!-- pending_retry -> new run (back to running) -->
+  <path d="M 414 96 L 414 20 L 72 20 L 72 92" class="rls-arrow-dashed" marker-end="url(#rls-arrow-head)"/>
+  <text x="120" y="14" class="rls-label">retries as a new run (linked via origin_run_id)</text>
 </svg>
 
 | State | Description |
@@ -128,7 +144,7 @@ fn (event) {
 ```hot
 daily-report
 meta {schedule: "0 0 * * *"}
-fn () {
+fn (event) {
   generate-report()
 }
 ```
