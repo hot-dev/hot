@@ -1,0 +1,215 @@
+{# API-reference-only docs styles (type links, namespace badges, ctx-*
+   requirement blocks). Rendered only by hot_app's generated API docs. #}
+<style>
+/* Type links in signatures */
+.docs-content .type-link {
+  color: #953800 !important;
+  text-decoration: none;
+  font-weight: 600;
+}
+.docs-content .type-link:hover {
+  text-decoration: underline;
+}
+.dark .docs-content .type-link {
+  color: #ffa657 !important;
+}
+/* Anchor link for headings */
+.docs-content h3[id] .anchor-link {
+  opacity: 0;
+  margin-left: 0.5rem;
+  color: rgb(156 163 175);
+  cursor: pointer;
+  font-size: 0.875rem;
+  transition: opacity 0.15s;
+}
+.docs-content h3[id]:hover .anchor-link {
+  opacity: 1;
+}
+.docs-content h3[id] .anchor-link:hover {
+  color: rgb(59 130 246);
+}
+.dark .docs-content h3[id] .anchor-link {
+  color: rgb(107 114 128);
+}
+.dark .docs-content h3[id] .anchor-link:hover {
+  color: rgb(96 165 250);
+}
+/* Namespace badge in tables */
+.docs-content code.namespace-badge {
+  background: rgb(243 244 246);
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  display: inline-block;
+}
+.dark .docs-content code.namespace-badge {
+  background: #333;
+}
+.docs-content code.namespace-badge a:hover {
+  text-decoration: underline;
+}
+.docs-content .alias-target {
+  font-size: 0.875rem;
+  font-weight: 500;
+  letter-spacing: normal;
+}
+.docs-content .alias-target-label {
+  color: rgb(107 114 128);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.dark .docs-content .alias-target-label { color: rgb(156 163 175); }
+/* Context Variables section styling */
+.docs-content .ctx-requirements {
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-left: 3px solid #22c55e;
+  border-radius: 0.375rem;
+  padding: 1rem;
+  margin: 0.5rem 0 1.5rem 0;
+}
+.dark .docs-content .ctx-requirements {
+  background: #052e16;
+  border-color: #166534;
+  border-left-color: #22c55e;
+}
+.docs-content .ctx-section {
+  margin-bottom: 0.5rem;
+}
+.docs-content .ctx-section:last-child {
+  margin-bottom: 0;
+}
+.docs-content .ctx-label {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  margin-bottom: 0.25rem;
+}
+.docs-content .ctx-required {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.dark .docs-content .ctx-required {
+  background: #450a0a;
+  color: #fca5a5;
+}
+.docs-content .ctx-optional {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.dark .docs-content .ctx-optional {
+  background: #172554;
+  color: #93c5fd;
+}
+.docs-content .ctx-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 0.25rem 0 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.docs-content .ctx-list li {
+  margin: 0;
+}
+.docs-content .ctx-list code {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.85rem;
+}
+.dark .docs-content .ctx-list code {
+  background: rgba(255, 255, 255, 0.1);
+}
+/* Function-level context vars (inline) */
+.docs-content .ctx-fn-requirements {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin: 0.5rem 0;
+  padding: 0.25rem 0;
+}
+.dark .docs-content .ctx-fn-requirements {
+  color: #9ca3af;
+}
+.docs-content .ctx-fn-label {
+  font-weight: 600;
+  color: #374151;
+}
+.dark .docs-content .ctx-fn-label {
+  color: #d1d5db;
+}
+.docs-content .ctx-fn-requirements code.ctx-req {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+}
+.dark .docs-content .ctx-fn-requirements code.ctx-req {
+  background: #450a0a;
+  color: #fca5a5;
+}
+.docs-content .ctx-fn-requirements code.ctx-opt {
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+}
+.dark .docs-content .ctx-fn-requirements code.ctx-opt {
+  background: #172554;
+  color: #93c5fd;
+}
+
+/* API reference typography — generated API pages use a denser scale
+   (bordered h2 sections per symbol) than the prose docs defaults in
+   docs_shared_styles.html. Loaded after it, so these win. */
+.docs-content {
+  color: rgb(55 65 81);
+  line-height: 1.7;
+}
+
+.docs-content h1 {
+  font-size: 1.875rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  color: rgb(17 24 39);
+}
+
+.dark .docs-content h1 {
+  color: rgb(255 255 255);
+}
+
+.docs-content h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgb(229 231 235);
+  color: rgb(17 24 39);
+}
+
+.dark .docs-content h2 {
+  border-bottom-color: #333;
+  color: rgb(255 255 255);
+}
+
+.docs-content h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: rgb(17 24 39);
+}
+
+.dark .docs-content h3 {
+  color: rgb(255 255 255);
+}
+
+.docs-content p {
+  margin: 1rem 0;
+}
+</style>
