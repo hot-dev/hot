@@ -22,13 +22,13 @@
                     <div class="flex gap-4">
                         <label class="flex items-center">
                             <input type="radio" name="billing_period" value="monthly"
-                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
                                    {% if selected_billing != "annual" %}checked{% endif %}>
                             <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Monthly</span>
                         </label>
                         <label class="flex items-center">
                             <input type="radio" name="billing_period" value="annual"
-                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
                                    {% if selected_billing == "annual" %}checked{% endif %}>
                             <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-600">(Save ~17%)</span></span>
                         </label>
@@ -47,7 +47,7 @@
                         {% let pid = plan.plan_id.as_ref().unwrap() %}
                         <label class="relative flex items-start p-4 border rounded-lg cursor-pointer hover:border-red-500 transition-colors {% if selected_plan == pid.as_str() %}border-red-500 bg-red-50 dark:bg-red-900/20{% else %}border-gray-300 dark:border-gray-700{% endif %}">
                             <input type="radio" name="plan_id" value="{{ pid }}"
-                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500 mt-0.5"
+                                   class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500 mt-0.5"
                                    {% if selected_plan == pid.as_str() %}checked{% endif %}
                                    required>
                             <div class="ml-3 flex-1">

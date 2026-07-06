@@ -47,7 +47,7 @@
 
                     <div>
                         <label for="role_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Role</label>
-                        <select name="role_id" id="role_id" required class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 sm:text-sm dark:text-white">
+                        <select name="role_id" id="role_id" required class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 sm:text-sm dark:text-white">
                             <option value="1" {% if team_user.team_user_role_id == 1 %}selected{% endif %}>Member</option>
                             <option value="2" {% if team_user.team_user_role_id == 2 %}selected{% endif %}>Admin</option>
                         </select>

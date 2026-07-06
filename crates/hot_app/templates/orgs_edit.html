@@ -23,7 +23,7 @@
                             Organization Name <span class="text-red-500">*</span>
                         </label>
                         <input type="text" id="name" name="name" value="{{ org.name }}"
-                               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white"
+                               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white"
                                placeholder="Enter organization name" required>
                         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                             The display name for your organization.
@@ -37,7 +37,7 @@
                         <div class="flex items-center">
                             <span class="text-sm text-gray-500 dark:text-gray-400 mr-1 font-mono">@</span>
                             <input type="text" id="slug" name="slug" value="{{ org.slug }}"
-                                   class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white font-mono"
+                                   class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white font-mono"
                                    placeholder="your-handle"
                                    pattern="[a-z0-9\-]+"
                                    title="Only lowercase letters, numbers, and hyphens are allowed"
@@ -62,7 +62,7 @@
                             Default Time Zone
                         </label>
                         <select id="display_timezone" name="display_timezone"
-                               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 dark:bg-gray-900 dark:text-white">
+                               class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white">
                             <option value="UTC" {% if org_timezone == "UTC" %}selected{% endif %}>UTC (Coordinated Universal Time)</option>
                             <option value="America/New_York" {% if org_timezone == "America/New_York" %}selected{% endif %}>America/New_York (Eastern Time)</option>
                             <option value="America/Chicago" {% if org_timezone == "America/Chicago" %}selected{% endif %}>America/Chicago (Central Time)</option>

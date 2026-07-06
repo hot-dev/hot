@@ -63,7 +63,7 @@
                                     Active
                                 </span>
                                 <form id="deactivate-project-form" method="post" action="/projects/{{ project.name }}/toggle-active" class="inline">
-                                    <button type="button" class="inline-flex items-center px-2.5 py-1 border border-gray-300 dark:border-gray-600 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-red-50 hover:border-red-300 hover:text-red-700 dark:hover:bg-red-900/20 dark:hover:border-red-700 dark:hover:text-red-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors" onclick="confirmDeactivateProject()">
+                                    <button type="button" class="inline-flex items-center px-2.5 py-1 border border-gray-300 dark:border-gray-600 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-red-50 hover:border-red-300 hover:text-red-700 dark:hover:bg-red-900/20 dark:hover:border-red-700 dark:hover:text-red-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500 transition-colors" onclick="confirmDeactivateProject()">
                                         Deactivate
                                     </button>
                                 </form>
@@ -72,7 +72,7 @@
                                     Inactive
                                 </span>
                                 <form method="post" action="/projects/{{ project.name }}/toggle-active" class="inline">
-                                    <button type="submit" class="inline-flex items-center px-2.5 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-green-600 hover:bg-green-700 dark:bg-green-700 dark:hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition-colors">
+                                    <button type="submit" class="inline-flex items-center px-2.5 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-green-600 hover:bg-green-700 dark:bg-green-700 dark:hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500 transition-colors">
                                         Activate
                                     </button>
                                 </form>
