@@ -127,7 +127,7 @@ window.sseRefreshCallback = function() {
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -141,26 +141,26 @@ window.sseRefreshCallback = function() {
                     </button>
 
                     <!-- Dropdown Menu -->
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="project = ''; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="project = ''; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>All Projects</span>
                                     <svg x-show="project === ''" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                             {% for proj in projects %}
-                            <a @click="project = '{{ proj.project_id }}'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="project = '{{ proj.project_id }}'; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>{{ proj.name }}</span>
                                     <svg x-show="project === '{{ proj.project_id }}'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                             {% endfor %}
                         </div>
                     </div>
@@ -170,7 +170,7 @@ window.sseRefreshCallback = function() {
             <!-- Time Range Filter -->
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -184,49 +184,49 @@ window.sseRefreshCallback = function() {
                         </svg>
                     </button>
 
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="timeRange = 'all'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="timeRange = 'all'; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>All Time</span>
                                     <svg x-show="timeRange === 'all'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="timeRange = 'P1D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="timeRange = 'P1D'; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 24 Hours</span>
                                     <svg x-show="timeRange === 'P1D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="timeRange = 'P7D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="timeRange = 'P7D'; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 7 Days</span>
                                     <svg x-show="timeRange === 'P7D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="timeRange = 'P30D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="timeRange = 'P30D'; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 30 Days</span>
                                     <svg x-show="timeRange === 'P30D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="timeRange = 'P90D'; open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="timeRange = 'P90D'; open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 90 Days</span>
                                     <svg x-show="timeRange === 'P90D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                         </div>
                     </div>
                 </div>

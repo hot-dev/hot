@@ -37,7 +37,7 @@
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -51,26 +51,26 @@
                     </button>
 
                     <!-- Dropdown Menu -->
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="setProject(''); open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="setProject(''); open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>All Projects</span>
                                     <svg x-show="selectedProject === ''" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                             {% for project in projects %}
-                            <a @click="setProject('{{ project.project_id }}'); open = false;" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="setProject('{{ project.project_id }}'); open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>{{ project.name }}</span>
                                     <svg x-show="selectedProject === '{{ project.project_id }}'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                             {% endfor %}
                         </div>
                     </div>
@@ -81,7 +81,7 @@
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -96,49 +96,49 @@
                     </button>
 
                     <!-- Dropdown Menu -->
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="toggleStatus('running')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="toggleStatus('running')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Running</span>
                                     <svg x-show="selectedStatuses.includes('running')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleStatus('succeeded')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleStatus('succeeded')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Succeeded</span>
                                     <svg x-show="selectedStatuses.includes('succeeded')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleStatus('failed')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleStatus('failed')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Failed</span>
                                     <svg x-show="selectedStatuses.includes('failed')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleStatus('cancelled')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleStatus('cancelled')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Cancelled</span>
                                     <svg x-show="selectedStatuses.includes('cancelled')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleStatus('pending_retry')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleStatus('pending_retry')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Pending Retry</span>
                                     <svg x-show="selectedStatuses.includes('pending_retry')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -148,7 +148,7 @@
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -162,57 +162,57 @@
                     </button>
 
                     <!-- Dropdown Menu -->
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="toggleType('call')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="toggleType('call')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Call</span>
                                     <svg x-show="selectedTypes.includes('call')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleType('event')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleType('event')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Event</span>
                                     <svg x-show="selectedTypes.includes('event')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleType('schedule')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleType('schedule')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Schedule</span>
                                     <svg x-show="selectedTypes.includes('schedule')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleType('run')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleType('run')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Run</span>
                                     <svg x-show="selectedTypes.includes('run')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleType('eval')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleType('eval')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Eval</span>
                                     <svg x-show="selectedTypes.includes('eval')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="toggleType('repl')" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="toggleType('repl')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>REPL</span>
                                     <svg x-show="selectedTypes.includes('repl')" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -221,7 +221,7 @@
             <!-- Time Range Filter -->
             <div class="w-full">
                 <div x-data="{ open: false, selectedText: getTimeRangeText() }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -235,65 +235,65 @@
                         </svg>
                     </button>
 
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="setTimeRange('all', 'All Time'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            <button type="button" @click="setTimeRange('all', 'All Time'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>All Time</span>
                                     <svg x-show="timeRange === 'all'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="setTimeRange('P90D', 'Last 90 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="setTimeRange('P90D', 'Last 90 Days'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 90 Days</span>
                                     <svg x-show="timeRange === 'P90D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="setTimeRange('P60D', 'Last 60 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="setTimeRange('P60D', 'Last 60 Days'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 60 Days</span>
                                     <svg x-show="timeRange === 'P60D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="setTimeRange('P30D', 'Last 30 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="setTimeRange('P30D', 'Last 30 Days'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 30 Days</span>
                                     <svg x-show="timeRange === 'P30D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="setTimeRange('P15D', 'Last 15 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="setTimeRange('P15D', 'Last 15 Days'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 15 Days</span>
                                     <svg x-show="timeRange === 'P15D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="setTimeRange('P7D', 'Last 7 Days'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="setTimeRange('P7D', 'Last 7 Days'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 7 Days</span>
                                     <svg x-show="timeRange === 'P7D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="setTimeRange('P1D', 'Last 24 Hours'); open = false" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
+                            </button>
+                            <button type="button" @click="setTimeRange('P1D', 'Last 24 Hours'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Last 24 Hours</span>
                                     <svg x-show="timeRange === 'P1D'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                         </div>
                     </div>
                 </div>

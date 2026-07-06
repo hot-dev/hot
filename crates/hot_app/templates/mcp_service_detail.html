@@ -18,7 +18,7 @@
             <span class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider flex-shrink-0">Endpoint</span>
             {% if !custom_domains.is_empty() %}
             <div class="relative flex-shrink-0" x-data="{ open: false }">
-                <button @click="open = !open" @click.outside="open = false"
+                <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" @click.outside="open = false"
                     class="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
                     <span x-text="selectedLabel"></span>
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>

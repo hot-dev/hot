@@ -18,7 +18,7 @@
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="w-full sm:w-64">
                 <div x-data="{ open: false }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -31,7 +31,7 @@
                         </svg>
                     </button>
 
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600 max-h-60 overflow-y-auto">
                         <div class="py-1">
                             {% for project in projects %}

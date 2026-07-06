@@ -73,6 +73,7 @@
 </head>
 <body class="flex flex-col h-screen overflow-hidden bg-gray-50 dark:bg-gray-900 grid-bg">
     <a href="#main-content" class="skip-link">Skip to main content</a>
+    <div id="sr-announcer" class="sr-only" aria-live="polite"></div>
     <!-- Top Bar -->
     <header class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 text-gray-800 dark:text-white py-1 px-6 flex justify-between items-center z-20 flex-shrink-0 border-b border-gray-200 dark:border-gray-800" style="backdrop-filter: blur(10px);">
         <div class="flex items-center transition-all duration-300 ease-in-out" id="header-left-section" style="width: 240px;">
@@ -101,7 +102,7 @@
         </div>
         <div class="flex items-center space-x-4">
             <!-- Theme Toggle -->
-            <div class="flex flex-col items-center cursor-pointer" id="theme-toggle-container">
+            <button type="button" aria-label="Toggle color theme" class="flex flex-col items-center cursor-pointer focus-ring rounded" id="theme-toggle-container">
                 <div class="w-14 flex justify-between text-gray-300 text-[10px] mb-1 pointer-events-none">
                     <span class="group relative inline-flex">
                         <svg aria-label="Light" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
@@ -116,11 +117,11 @@
                     <div class="w-14 h-3 bg-gray-500 dark:bg-gray-700 rounded-full"></div>
                     <div id="theme-thumb" class="absolute top-0 left-0 h-3 w-7 bg-white dark:bg-gray-300 rounded-full transition-transform duration-200 shadow-sm"></div>
                 </div>
-            </div>
+            </button>
 
             <!-- User Menu Dropdown -->
             <div class="relative" x-data="{ open: false }">
-                <button @click="open = !open" aria-label="User menu" class="flex items-center space-x-2 focus-ring rounded">
+                <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="User menu" class="flex items-center space-x-2 focus-ring rounded">
                     <div class="w-7 h-7 rounded-full bg-hot-red-500 flex items-center justify-center text-white">
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5" aria-hidden="true">
                             <!-- Hot flame head with inner cutout -->
@@ -137,7 +138,7 @@
                     </svg>
                 </button>
 
-                <div x-cloak x-show="open" @click.away="open = false" id="user-dropdown" class="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" id="user-dropdown" class="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                     <a href="/account" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                         Account
                     </a>
@@ -382,13 +383,13 @@
                 <!-- Organization Selector -->
                 {% if page_context.user_orgs.len() > 0 %}
                 <div class="relative inline-flex items-center" x-data="{ open: false }">
-                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_org %}{% when Some with (org) %}{{ org.name }}{% when None %}Select Org{% endmatch %}</span>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
                             <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
                         </svg>
                     </button>
-                    <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for org in page_context.user_orgs %}
                         <form action="/switch-org/{{ org.org_id }}" method="post">
                             <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
@@ -425,13 +426,13 @@
                 {% if page_context.show_env_selector %}
                 <span class="text-lg text-gray-400 dark:text-gray-500 mx-1">/</span>
                 <div class="relative inline-flex items-center" x-data="{ open: false }">
-                    <button @click="open = !open" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_env %}{% when Some with (env) %}{{ env.name }}{% when None %}Select Env{% endmatch %}</span>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
                             <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
                         </svg>
                     </button>
-                    <div x-cloak x-show="open" @click.away="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for env in page_context.current_org_envs %}
                         <form action="/envs/{{ env.env_id }}/switch" method="post">
                             <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
@@ -867,6 +868,26 @@
 
     <!-- Global Formatting Functions -->
     <script>
+    // Visible + announced copy feedback: swap the icon for a green check
+    // briefly and announce via the live region (title-only feedback is
+    // invisible to touch and screen-reader users).
+    function showCopiedFeedback(btn) {
+        if (btn.dataset.copied) return;
+        btn.dataset.copied = 'true';
+        const svg = btn.querySelector('svg');
+        const sizeClass = svg ? svg.getAttribute('class') : 'w-3.5 h-3.5';
+        const original = btn.innerHTML;
+        btn.innerHTML = '<svg class="' + sizeClass + ' text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+        const announcer = document.getElementById('sr-announcer');
+        if (announcer) announcer.textContent = 'Copied to clipboard';
+        setTimeout(() => {
+            btn.innerHTML = original;
+            delete btn.dataset.copied;
+            if (announcer) announcer.textContent = '';
+        }, 1200);
+    }
+    window.showCopiedFeedback = showCopiedFeedback;
+
     // Shorten UUID to last 12 hex characters (hyphens removed)
     function truncateUuid(uuid) {
         if (!uuid) return uuid;
@@ -908,9 +929,7 @@
                 const uuid = this.dataset.uuid;
                 if (uuid) {
                     navigator.clipboard.writeText(uuid).then(() => {
-                        const originalTitle = this.title;
-                        this.title = 'Copied!';
-                        setTimeout(() => { this.title = originalTitle; }, 1000);
+                        showCopiedFeedback(this);
                     });
                 }
             });
