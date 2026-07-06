@@ -17,7 +17,7 @@
     <div class="flex justify-end items-center mb-4 sm:mb-6">
                     {% if is_admin %}
                         {% if page_context.is_local_dev %}
-                        <button type="button" data-local-dev-restricted class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200 cursor-pointer">
+                        <button type="button" data-local-dev-restricted class="btn btn-primary">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                             </svg>
@@ -25,7 +25,7 @@
                             <span class="sm:hidden">Create</span>
                         </button>
                         {% else %}
-                        <a href="/@{{ org.slug }}/teams/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                        <a href="/@{{ org.slug }}/teams/new" class="btn btn-primary">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                             </svg>
@@ -187,14 +187,14 @@
                         </p>
                         {% if is_admin %}
                             {% if page_context.is_local_dev %}
-                            <button type="button" data-local-dev-restricted class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200 cursor-pointer">
+                            <button type="button" data-local-dev-restricted class="btn btn-primary">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                                 </svg>
                                 Create Team
                             </button>
                             {% else %}
-                            <a href="/@{{ org.slug }}/teams/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                            <a href="/@{{ org.slug }}/teams/new" class="btn btn-primary">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                                 </svg>

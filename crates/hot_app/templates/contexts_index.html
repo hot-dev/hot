@@ -57,7 +57,7 @@
             </p>
         </div>
         {% if is_admin %}
-        <a href="/contexts/env/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+        <a href="/contexts/env/new" class="btn btn-primary">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -132,7 +132,7 @@
                 Environment-level variables are shared across all projects in this environment.
             </p>
             {% if is_admin %}
-            <a href="/contexts/env/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <a href="/contexts/env/new" class="btn btn-primary">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                 </svg>
@@ -189,7 +189,7 @@
 
             {% if selected_project.is_some() && is_admin %}
             <div class="sm:self-end">
-                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new" class="btn btn-primary">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                     </svg>
@@ -314,7 +314,7 @@
                     Project-level variables override environment variables for this specific project.
                 </p>
                 {% if is_admin %}
-                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new" class="btn btn-primary">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                     </svg>

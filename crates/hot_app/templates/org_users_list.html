@@ -42,7 +42,7 @@
                    send people to. #}
                 {% if !page_context.is_local_dev %}
                 <a href="/@{{ org.slug }}/billing/checkout"
-                   class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200"
+                   class="btn btn-primary"
                    title="Your plan's team-member limit has been reached. Upgrade to invite more.">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18" />
@@ -56,7 +56,7 @@
                 </span>
                 {% endif %}
             {% else if page_context.is_local_dev %}
-                <button type="button" data-local-dev-restricted class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200 cursor-pointer">
+                <button type="button" data-local-dev-restricted class="btn btn-primary">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                     </svg>
@@ -64,7 +64,7 @@
                     <span class="sm:hidden">Invite</span>
                 </button>
             {% else %}
-                <a href="/@{{ org.slug }}/users/invite" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                <a href="/@{{ org.slug }}/users/invite" class="btn btn-primary">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                     </svg>
@@ -157,7 +157,7 @@
                         This organization doesn't have any users yet.
                     </p>
                     {% if is_admin && !team_members_at_limit %}
-                    <a href="/@{{ org.slug }}/users/invite" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    <a href="/@{{ org.slug }}/users/invite" class="btn btn-primary">
                         Invite First User
                     </a>
                     {% endif %}
@@ -238,7 +238,7 @@
                         This organization doesn't have any users yet.
                     </p>
                     {% if is_admin && !team_members_at_limit %}
-                    <a href="/@{{ org.slug }}/users/invite" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    <a href="/@{{ org.slug }}/users/invite" class="btn btn-primary">
                         Invite First User
                     </a>
                     {% endif %}
