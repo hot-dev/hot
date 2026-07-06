@@ -97,7 +97,7 @@ function initScrollSpy() {
 window.addEventListener('load', function() {
   if (typeof Prism !== 'undefined') {
     // Site hook: define the Hot grammar if this page hasn't loaded it
-    // (hot_app loads prism-hot.js; hot_web defines initHotPrismGrammar).
+    // (hot_app loads prism-hot.js; other consumers define initHotPrismGrammar).
     if (!Prism.languages.hot && typeof initHotPrismGrammar === 'function') {
       initHotPrismGrammar();
     }
