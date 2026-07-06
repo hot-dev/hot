@@ -236,6 +236,16 @@ fn (identity: Identity, text: Str): Str {
     }
 }
 
+tick
+meta {
+    doc: "Periodic heartbeat for agent health and observability.",
+    agent: PersonalAgent,
+    schedule: "every 5 minutes",
+}
+fn (event) {
+  {ts: now-epoch-secs()}
+}
+
 on-web-message
 meta {
     doc: "Custom web transport entry point for the PersonalAgent demo.",

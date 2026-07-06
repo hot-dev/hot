@@ -8,7 +8,7 @@
 -->
 <div class="space-y-6">
     <!-- Failed Runs -->
-    <div id="issues-failed-runs" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4">
+    <div id="issues-failed-runs" class="relative bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4 pb-12">
         <div class="flex items-center space-x-3 mb-4">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-red-600 dark:text-red-400">
                 <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
@@ -59,10 +59,13 @@
                 </div>
             </div>
         </div>
+        <a href="/runs?statuses=failed" class="absolute bottom-3 right-3 p-1 rounded text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors" title="View all failed runs" aria-label="View all failed runs">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+        </a>
     </div>
 
     <!-- Failed Tasks -->
-    <div id="issues-failed-tasks" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4">
+    <div id="issues-failed-tasks" class="relative bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4 pb-12">
         <div class="flex items-center space-x-3 mb-4">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-pink-600 dark:text-pink-400">
                 <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
@@ -117,10 +120,13 @@
                 </div>
             </div>
         </div>
+        <a href="/tasks?statuses=failed" class="absolute bottom-3 right-3 p-1 rounded text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors" title="View all failed tasks" aria-label="View all failed tasks">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+        </a>
     </div>
 
     <!-- Unhandled Events -->
-    <div id="issues-unhandled-events" class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4">
+    <div id="issues-unhandled-events" class="relative bg-white dark:bg-gray-800 shadow rounded-lg p-6 scroll-mt-4 pb-12">
         <div class="flex items-center space-x-3 mb-4">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-orange-600 dark:text-orange-400">
                 <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clip-rule="evenodd" />
@@ -171,5 +177,8 @@
                 </div>
             </div>
         </div>
+        <a href="/events?handled=unhandled" class="absolute bottom-3 right-3 p-1 rounded text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors" title="View all unhandled events" aria-label="View all unhandled events">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+        </a>
     </div>
 </div>

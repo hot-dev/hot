@@ -55,6 +55,7 @@ fn
         headers: final-headers
       }))
     }
+
     is-bytes(body) => {
       final-headers {...default-headers, ...additional-headers}
       ::hot::http/request(HttpRequest({

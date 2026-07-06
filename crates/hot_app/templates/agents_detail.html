@@ -45,6 +45,34 @@
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ agent.project_name }}</span>
             </div>
         </div>
+
+        <!-- Health stats strip (24h window) -->
+        <div class="mt-4 pt-3 border-t border-gray-200 dark:border-gray-800 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <span class="inline-flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full
+                    {% if health_color == "green" %}bg-green-500
+                    {% else if health_color == "yellow" %}bg-amber-500
+                    {% else if health_color == "red" %}bg-red-500
+                    {% else %}bg-gray-400 dark:bg-gray-500{% endif %}"></span>
+                <span class="font-medium
+                    {% if health_color == "green" %}text-green-600 dark:text-green-400
+                    {% else if health_color == "yellow" %}text-amber-600 dark:text-amber-400
+                    {% else if health_color == "red" %}text-red-600 dark:text-red-400
+                    {% else %}text-gray-500 dark:text-gray-400{% endif %}">{{ health_label }}</span>
+            </span>
+            <span class="text-gray-600 dark:text-gray-400">
+                Success (24h):
+                <span class="tabular-nums font-medium text-gray-900 dark:text-white">{% if health_color == "idle" %}—{% else %}{{ success_rate|fmt("{:.0}") }}%{% endif %}</span>
+            </span>
+            <span class="text-gray-600 dark:text-gray-400">
+                Runs (24h):
+                <span class="tabular-nums font-medium text-gray-900 dark:text-white">{{ runs_24h|commafy }}</span>
+            </span>
+            <span class="text-gray-600 dark:text-gray-400">
+                Last run:
+                <span class="tabular-nums font-medium text-gray-900 dark:text-white">{{ last_run_formatted }}</span>
+            </span>
+        </div>
     </div>
 
     <!-- Unified container: tabs + content + inspector -->

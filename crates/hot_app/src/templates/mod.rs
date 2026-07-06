@@ -3762,6 +3762,11 @@ pub struct WorkflowListCard {
     pub project_name: String,
     pub source_file: Option<String>,
     pub source_line: Option<i32>,
+    /// Agent cards only: "green" | "yellow" | "red" | "idle"; empty for
+    /// workflow/unnamed cards (no health badge rendered).
+    pub health_color: String,
+    pub success_rate: f64,
+    pub runs_24h: i64,
 }
 
 #[derive(Template)]
@@ -3771,6 +3776,7 @@ pub struct AgentsList<'a> {
     pub page_context: PrivatePageContext,
     pub workflow_cards: Vec<WorkflowListCard>,
     pub search_query: String,
+    pub status_filter: String,
     pub active_tab: String,
 }
 
@@ -3780,6 +3786,13 @@ pub struct AgentsDetail<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
     pub agent: AgentCard,
+    /// Header stats strip (24h window).
+    pub health_color: String,
+    pub health_label: String,
+    pub success_rate: f64,
+    pub runs_24h: i64,
+    /// Formatted start time of the most recent run, or "—" when never run.
+    pub last_run_formatted: String,
     pub full_description: String,
     pub config_fields: Vec<(String, String)>,
     pub handlers: Vec<AgentHandlerDisplay>,

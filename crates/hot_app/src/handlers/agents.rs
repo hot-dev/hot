@@ -5,9 +5,9 @@ use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse};
 use hot::db::{
-    Agent, AgentWithProject, DatabasePool, EventHandler, EventHandlerWithProject, McpTool,
-    McpToolWithProject, Schedule, ScheduleWithProject, Webhook, WebhookWithProject, Workflow,
-    WorkflowWithProject,
+    Agent, AgentStats, AgentWithProject, DatabasePool, EventHandler, EventHandlerWithProject,
+    McpTool, McpToolWithProject, Schedule, ScheduleWithProject, Webhook, WebhookWithProject,
+    Workflow, WorkflowWithProject,
 };
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -482,6 +482,13 @@ pub async fn agents_list_handler(
         .map(|s| s.to_string())
         .unwrap_or_default();
 
+    let status_filter = params
+        .get("status")
+        .map(|s| s.as_str())
+        .filter(|s| matches!(*s, "failing" | "degraded" | "healthy" | "idle"))
+        .unwrap_or("all")
+        .to_string();
+
     let active_tab = params
         .get("tab")
         .map(|s| {
@@ -525,6 +532,19 @@ pub async fn agents_list_handler(
             .await
             .unwrap_or_default();
 
+        // 24h health per agent, keyed by qualified name, for card badges.
+        let cutoff_24h = chrono::Utc::now() - chrono::Duration::hours(24);
+        let health_map: AHashMap<String, hot::db::AgentHealthSummary> =
+            AgentStats::get_per_agent_health(&db, &env_id, Some(cutoff_24h), None)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to get agent health: {e}");
+                    Vec::new()
+                })
+                .into_iter()
+                .map(|h| (h.qualified_name.clone(), h))
+                .collect();
+
         let known_agent_types: AHashSet<String> =
             agents.iter().map(|a| a.type_name.clone()).collect();
         let mut cards = Vec::new();
@@ -554,6 +574,9 @@ pub async fn agents_list_handler(
                 project_name: workflow.project_name.clone(),
                 source_file: workflow.file.clone(),
                 source_line: workflow.line,
+                health_color: String::new(),
+                success_rate: 0.0,
+                runs_24h: 0,
             });
         }
 
@@ -566,6 +589,7 @@ pub async fn agents_list_handler(
                 &mcp_tools,
                 &agent.type_name,
             );
+            let health = health_map.get(&qualified_name);
             cards.push(templates::WorkflowListCard {
                 url: format!(
                     "/workflows/agents/{}",
@@ -582,6 +606,11 @@ pub async fn agents_list_handler(
                 project_name: agent.project_name.clone(),
                 source_file: agent.file.clone(),
                 source_line: agent.line,
+                health_color: health
+                    .map(|h| h.health_color().to_string())
+                    .unwrap_or_else(|| "idle".to_string()),
+                success_rate: health.map(|h| h.success_rate()).unwrap_or(100.0),
+                runs_24h: health.map(|h| h.total_runs).unwrap_or(0),
             });
         }
 
@@ -632,6 +661,9 @@ pub async fn agents_list_handler(
                 project_name,
                 source_file: None,
                 source_line: None,
+                health_color: String::new(),
+                success_rate: 0.0,
+                runs_24h: 0,
             });
         }
 
@@ -645,9 +677,26 @@ pub async fn agents_list_handler(
                     || card.kind_label.to_lowercase().contains(&q)
             });
         }
+        if status_filter != "all" {
+            let wanted = match status_filter.as_str() {
+                "failing" => "red",
+                "degraded" => "yellow",
+                "healthy" => "green",
+                _ => "idle",
+            };
+            cards.retain(|card| card.kind == "agent" && card.health_color == wanted);
+        }
+        // Problem agents surface first: failing, then degraded, then the rest
+        // in the usual project/name order.
+        let severity = |card: &templates::WorkflowListCard| match card.health_color.as_str() {
+            "red" => 0,
+            "yellow" => 1,
+            _ => 2,
+        };
         cards.sort_by(|a, b| {
-            a.project_name
-                .cmp(&b.project_name)
+            severity(a)
+                .cmp(&severity(b))
+                .then_with(|| a.project_name.cmp(&b.project_name))
                 .then_with(|| a.display_name.cmp(&b.display_name))
                 .then_with(|| a.kind.cmp(&b.kind))
         });
@@ -665,6 +714,7 @@ pub async fn agents_list_handler(
         ),
         workflow_cards,
         search_query,
+        status_filter,
         active_tab,
     };
 
@@ -806,6 +856,43 @@ pub async fn agents_detail_handler(
         source_line: agent.line,
     };
 
+    // Header stats strip: 24h run stats plus the most recent run overall
+    // (dedicated 1-row query — the paginated list above may not be page 1).
+    let run_stats = AgentStats::get_agent_run_stats(&db, &env_id, &qualified_name, 24)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to get agent run stats for {qualified_name}: {e}");
+            hot::db::AgentRunStats {
+                total_runs: 0,
+                ok_runs: 0,
+                err_runs: 0,
+                avg_duration_ms: None,
+            }
+        });
+    let last_run_formatted =
+        hot::db::Run::get_runs_by_agent_type(&db, &env_id, &qualified_name, 1, 0)
+            .await
+            .ok()
+            .and_then(|runs| runs.into_iter().next())
+            .map(|r| {
+                templates::RunDisplay::from_with_timezone(
+                    &r,
+                    &session.display_timezone,
+                    &session.timezone_abbreviation,
+                )
+                .start_time_formatted
+            })
+            .unwrap_or_else(|| "—".to_string());
+
+    let health_color = run_stats.health_color().to_string();
+    let health_label = match health_color.as_str() {
+        "green" => "healthy",
+        "yellow" => "degraded",
+        "red" => "failing",
+        _ => "idle",
+    }
+    .to_string();
+
     let template = templates::AgentsDetail {
         title: "Agent",
         page_context: templates::PrivatePageContext::with_breadcrumbs(
@@ -814,6 +901,11 @@ pub async fn agents_detail_handler(
             breadcrumbs,
         ),
         agent: agent_card,
+        health_color,
+        health_label,
+        success_rate: run_stats.success_rate(),
+        runs_24h: run_stats.total_runs,
+        last_run_formatted,
         full_description: agent.description.clone().unwrap_or_default(),
         config_fields: extract_config_fields(&agent.config_fields),
         handlers: handler_displays,
@@ -899,6 +991,9 @@ pub async fn workflow_detail_handler(
         project_name: workflow.project_name.clone(),
         source_file: workflow.file.clone(),
         source_line: workflow.line,
+        health_color: String::new(),
+        success_rate: 0.0,
+        runs_24h: 0,
     };
 
     let active_tab = params.get("tab").map(|s| s.as_str()).unwrap_or("graph");
@@ -1012,6 +1107,9 @@ pub async fn unnamed_workflow_detail_handler(
         project_name,
         source_file: None,
         source_line: None,
+        health_color: String::new(),
+        success_rate: 0.0,
+        runs_24h: 0,
     };
 
     let active_tab = params.get("tab").map(|s| s.as_str()).unwrap_or("graph");

@@ -545,6 +545,57 @@ impl Schedule {
         Ok(schedule)
     }
 
+    /// Get an active schedule by build and function identity.
+    pub async fn get_active_schedule_by_build_fn(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        ns: &str,
+        var: &str,
+    ) -> Result<Schedule, ScheduleError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                Self::get_active_schedule_by_build_fn_postgres(pg_pool, build_id, ns, var).await
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                Self::get_active_schedule_by_build_fn_sqlite(sqlite_pool, build_id, ns, var).await
+            }
+        }
+    }
+
+    async fn get_active_schedule_by_build_fn_sqlite(
+        db: &Pool<Sqlite>,
+        build_id: &Uuid,
+        ns: &str,
+        var: &str,
+    ) -> Result<Schedule, ScheduleError> {
+        let schedule = sqlx::query_as::<_, Schedule>(
+            "SELECT schedule_id, build_id, cron, ns, var, meta, value, file, line, \"column\", position, active, created_at, deactivated_at FROM schedule WHERE build_id = ? AND ns = ? AND var = ? AND active = 1 LIMIT 1"
+        )
+        .bind(build_id)
+        .bind(ns)
+        .bind(var)
+        .fetch_one(db)
+        .await?;
+        Ok(schedule)
+    }
+
+    async fn get_active_schedule_by_build_fn_postgres(
+        db: &Pool<Postgres>,
+        build_id: &Uuid,
+        ns: &str,
+        var: &str,
+    ) -> Result<Schedule, ScheduleError> {
+        let schedule = sqlx::query_as::<_, Schedule>(
+            "SELECT schedule_id, build_id, cron, ns, var, meta, value, file, line, \"column\", position, active, created_at, deactivated_at FROM schedule WHERE build_id = $1 AND ns = $2 AND var = $3 AND active = true LIMIT 1"
+        )
+        .bind(build_id)
+        .bind(ns)
+        .bind(var)
+        .fetch_one(db)
+        .await?;
+        Ok(schedule)
+    }
+
     /// Get schedules by build ID
     pub async fn get_schedules_by_build(
         db: &crate::db::DatabasePool,

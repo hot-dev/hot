@@ -1,6 +1,7 @@
 ::demo::agents ns
 
 ::store ::hot::store
+::time  ::hot::time
 
 // ---------------------------------------------------------------------------
 // Agent definition
@@ -153,6 +154,20 @@ fn (request) {
   })
   send("lead:updated", data)
   {ok: true}
+}
+
+// ---------------------------------------------------------------------------
+// Schedule: tick (heartbeat)
+// ---------------------------------------------------------------------------
+
+tick
+meta {
+    doc: "Periodic heartbeat for agent health and observability.",
+    agent: LeadQualifier,
+    schedule: "every 1 minute",
+}
+fn (event) {
+  {ts: div(::time/epoch-millis(::time/now()), 1000)}
 }
 
 // ---------------------------------------------------------------------------

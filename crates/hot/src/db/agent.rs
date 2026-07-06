@@ -551,6 +551,21 @@ impl AgentRunStats {
             (self.ok_runs as f64 / self.total_runs as f64) * 100.0
         }
     }
+
+    /// Same thresholds as [`AgentHealthSummary::health_color`].
+    pub fn health_color(&self) -> &'static str {
+        if self.total_runs == 0 {
+            return "idle";
+        }
+        let rate = self.success_rate();
+        if rate >= 95.0 {
+            "green"
+        } else if rate >= 80.0 {
+            "yellow"
+        } else {
+            "red"
+        }
+    }
 }
 
 /// Agent/non-agent run counts for the main Dashboard breakdown.
@@ -633,9 +648,9 @@ impl AgentStats {
                 let row = sqlx::query_as::<_, AgentRunStats>(
                     r#"SELECT
                          COUNT(*) as total_runs,
-                         SUM(CASE WHEN rs.status = 'succeeded' THEN 1 ELSE 0 END) as ok_runs,
-                         SUM(CASE WHEN rs.status = 'failed' THEN 1 ELSE 0 END) as err_runs,
-                         AVG(CAST((julianday(r.stop_time) - julianday(r.start_time)) * 86400000 AS INTEGER)) as avg_duration_ms
+                         COALESCE(SUM(CASE WHEN rs.status = 'succeeded' THEN 1 ELSE 0 END), 0) as ok_runs,
+                         COALESCE(SUM(CASE WHEN rs.status = 'failed' THEN 1 ELSE 0 END), 0) as err_runs,
+                         CAST(AVG((julianday(r.stop_time) - julianday(r.start_time)) * 86400000) AS INTEGER) as avg_duration_ms
                        FROM run r
                        JOIN run_status rs ON r.status_id = rs.status_id
                        WHERE r.env_id = ?
@@ -697,10 +712,13 @@ impl AgentStats {
 
     /// Per-agent health summaries for the Dashboard widget.
     /// Joins against deployed agents to get display names, then counts runs.
+    ///
+    /// `cutoff: None` means "all time"; `project_id: None` means all projects.
     pub async fn get_per_agent_health(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
-        hours: i64,
+        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+        project_id: Option<&Uuid>,
     ) -> Result<Vec<AgentHealthSummary>, AgentError> {
         #[derive(FromRow)]
         struct Row {
@@ -732,17 +750,22 @@ impl AgentStats {
                          JOIN run_status rs ON r.status_id = rs.status_id
                          WHERE r.env_id = $1
                            AND r.agent_type = a.namespace || '/' || a.type_name
-                           AND r.start_time >= NOW() - make_interval(hours => $2)
+                           AND ($2::timestamptz IS NULL OR r.start_time >= $2)
                        ) stats ON true
                        WHERE b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true AND p.env_id = $1
+                         AND ($3::uuid IS NULL OR p.project_id = $3)
                        ORDER BY COALESCE(stats.total_runs, 0) DESC"#,
                 )
                 .bind(env_id)
-                .bind(hours as i32)
+                .bind(cutoff)
+                .bind(project_id.copied())
                 .fetch_all(pg_pool)
                 .await?
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                // Cutoff is bound as a formatted string to match SQLite's
+                // stored text timestamps (same pattern as run.rs).
+                let cutoff_str = cutoff.map(|c| c.format("%Y-%m-%d %H:%M:%S").to_string());
                 sqlx::query_as::<_, Row>(
                     r#"SELECT a.agent_id, a.namespace, a.type_name, a.name,
                          COALESCE(stats.total_runs, 0) as total_runs,
@@ -758,17 +781,18 @@ impl AgentStats {
                            SUM(CASE WHEN rs.status = 'failed' THEN 1 ELSE 0 END) as err_runs
                          FROM run r
                          JOIN run_status rs ON r.status_id = rs.status_id
-                         WHERE r.env_id = ?
+                         WHERE r.env_id = ?1
                            AND r.agent_type IS NOT NULL
-                           AND r.start_time >= datetime('now', '-' || ? || ' hours')
+                           AND (?2 IS NULL OR r.start_time >= ?2)
                          GROUP BY r.agent_type
                        ) stats ON stats.agent_type = a.namespace || '/' || a.type_name
-                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?
+                       WHERE b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1 AND p.env_id = ?1
+                         AND (?3 IS NULL OR p.project_id = ?3)
                        ORDER BY COALESCE(stats.total_runs, 0) DESC"#,
                 )
                 .bind(env_id)
-                .bind(hours)
-                .bind(env_id)
+                .bind(cutoff_str)
+                .bind(project_id.copied())
                 .fetch_all(sqlite_pool)
                 .await?
             }

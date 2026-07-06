@@ -153,6 +153,16 @@ record-error fn (where: Str, msg: Str) {
   ::agent-runtime/record-error(agent-runtime, where, msg)
 }
 
+tick
+meta {
+    doc: "Periodic heartbeat for agent health and observability.",
+    agent: TeamAgent,
+    schedule: "every 3 minutes",
+}
+fn (event) {
+  {ts: now-epoch-secs()}
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
