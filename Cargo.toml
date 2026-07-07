@@ -81,7 +81,7 @@ zstd = "0.13.3"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "sqlite", "chrono", "uuid", "json", "migrate", "macros"] }
 thiserror = "1.0.69"
 indexmap = "2.14.0"
-askama = "0.15.6"
+askama = "0.16.0"
 tower = "0.5"
 tower-http = "0.6.11"
 utoipa = { version = "5.5.0", features = ["chrono", "uuid"] }
