@@ -694,7 +694,7 @@ meta {
     **Example**
 
     ```hot
-    partition-by([1, 1, 2, 2, 3], %)
+    partition-by([1, 1, 2, 2, 3], (x) { x })
     // [[1, 1], [2, 2], [3]]
 
     partition-by(["a", "ab", "abc", "b"], length(%))
@@ -1076,7 +1076,6 @@ meta {
     doc: """
     Signal early termination from inside a `reduce`. When the reducer
     returns `reduced(x)`, `reduce` immediately stops and returns `x`.
-    Similar to Clojure's `reduced`.
 
     **Example**
 
@@ -1186,9 +1185,7 @@ meta {
 }
 fn
 (coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
-    coll
-    |> map(f)
-    |> reduce((acc, x) { concat(acc, x) }, [])
+    call-lib(::hot::coll/mapcat, [coll, f])
 },
 (coll: Str | Vec | Map, f: Fn, on-err: OnErr): Str | Vec | Map {
     call-lib(::hot::coll/mapcat, [coll, f, on-err])

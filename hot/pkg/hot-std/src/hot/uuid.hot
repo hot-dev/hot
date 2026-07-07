@@ -24,7 +24,7 @@ type fn
     cond {
         eq(version, 4) => { call-lib(::hot::uuid/uuid-v4, []) }
         eq(version, 7) => { call-lib(::hot::uuid/uuid-v7, []) }
-        eq(version, null) => { call-lib(::hot::uuid/uuid-nil, []) }
+        is-null(version) => { call-lib(::hot::uuid/uuid-nil, []) }
         => { err("Invalid UUID version") }
     }
 }

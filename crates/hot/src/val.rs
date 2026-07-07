@@ -2679,24 +2679,22 @@ impl Val {
                     result.extend(map1.iter().map(|(k, v)| (k.clone(), v.clone())));
                     result.extend(map2.iter().map(|(k, v)| (k.clone(), v.clone())));
                 } else {
-                    // There are overlapping keys - need to merge
-
-                    // Add all keys from map2, merging with map1 where necessary
-                    for (key, value2) in map2.iter() {
-                        if let Some(value1) = map1.get(key) {
+                    // There are overlapping keys - need to merge.
+                    // Preserve the first map's key order (matching the fast
+                    // path above), then append keys only in the second map.
+                    for (key, value1) in map1.iter() {
+                        if let Some(value2) = map2.get(key) {
                             // Key exists in both maps, merge the values
                             let merged_value = value1.merge(value2);
                             result.insert(key.clone(), merged_value);
                         } else {
-                            // Key only exists in the second map, add it
-                            result.insert(key.clone(), value2.clone());
+                            result.insert(key.clone(), value1.clone());
                         }
                     }
 
-                    // Add all keys from map1 that don't exist in map2
-                    for (key, value) in map1.iter() {
-                        if !map2.contains_key(key) {
-                            result.insert(key.clone(), value.clone());
+                    for (key, value2) in map2.iter() {
+                        if !map1.contains_key(key) {
+                            result.insert(key.clone(), value2.clone());
                         }
                     }
                 }

@@ -58,9 +58,9 @@ fn () {
     str-result MyStr(42)
     assert-eq("42", str-result, "Type constructor alias should work for Str")
 
-    // Int rounds (not truncates)
+    // Int truncates toward zero
     int-result MyInt(3.7)
-    assert-eq(4, int-result, "Type constructor alias should work for Int")
+    assert-eq(3, int-result, "Type constructor alias should work for Int")
 }
 
 test-enum-type-alias-construction
@@ -144,11 +144,11 @@ fn () {
     LocalDec ::hot::type/Dec
 
     str-val LocalStr(123)
-    int-val LocalInt(45.9)  // Int rounds (not truncates)
+    int-val LocalInt(45.9)  // Int truncates toward zero
     dec-val LocalDec(78)
 
     assert-eq("123", str-val, "Type constructor alias in function body should work (Str)")
-    assert-eq(46, int-val, "Type constructor alias in function body should work (Int)")
+    assert-eq(45, int-val, "Type constructor alias in function body should work (Int)")
     assert-eq(78.0, dec-val, "Type constructor alias in function body should work (Dec)")
 }
 

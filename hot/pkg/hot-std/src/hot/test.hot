@@ -37,7 +37,7 @@ empty-test-counter {passed: 0, failed: 0, total: 0}
 
 // Initialize test counters in context
 init-test-counters
-meta {doc: """Initialize test counters in context."""}
+meta {doc: """Initialize test counters in context. Returns the fresh counters."""}
 fn () {
     ::hot::ctx/set("test-counters", {
             assertions: empty-test-counter,
@@ -51,15 +51,8 @@ fn () {
 get-test-counters
 meta {doc: """Get test counters from context, initializing if missing."""}
 fn () {
-    existing-counters ::hot::ctx/get("test-counters")
-    cond {
-        existing-counters => { existing-counters }
-        => {
-            // Initialize counters if they don't exist
-            init-test-counters()
-            ::hot::ctx/get("test-counters")
-        }
-    }
+    existing ::hot::ctx/get("test-counters")
+    if(existing, existing, init-test-counters())
 }
 
 set-test-counters
@@ -68,47 +61,26 @@ fn (counters) {
     ::hot::ctx/set("test-counters", counters)
 }
 
+// Increment `outcome` (and total) in each of the given counter sections
+bump-counters fn (counters, sections: Vec<Str>, outcome: Str) {
+    reduce(sections, (acc, section) {
+        acc
+        |> update-in([section, outcome], add(%, 1))
+        |> update-in([section, "total"], add(%, 1))
+    }, counters)
+}
+
 // Helper to increment a counter in context
 assertion-passed
 meta {doc: """Increment passed assertion counters."""}
 fn () {
-    counters get-test-counters()
-    new-counters {
-        ...counters,
-        assertions: {
-            passed: add(counters.assertions.passed, 1),
-            failed: counters.assertions.failed,
-            total: add(counters.assertions.total, 1)
-        },
-        current-test: {
-            passed: add(counters.current-test.passed, 1),
-            failed: counters.current-test.failed,
-            total: add(counters.current-test.total, 1)
-        }
-    }
-
-    set-test-counters(new-counters)
+    set-test-counters(bump-counters(get-test-counters(), ["assertions", "current-test"], "passed"))
 }
 
 assertion-failed
 meta {doc: """Increment failed assertion counters."""}
 fn () {
-    counters get-test-counters()
-    new-counters {
-        ...counters,
-        assertions: {
-            passed: counters.assertions.passed,
-            failed: add(counters.assertions.failed, 1),
-            total: add(counters.assertions.total, 1)
-        },
-        current-test: {
-            passed: counters.current-test.passed,
-            failed: add(counters.current-test.failed, 1),
-            total: add(counters.current-test.total, 1)
-        }
-    }
-
-    set-test-counters(new-counters)
+    set-test-counters(bump-counters(get-test-counters(), ["assertions", "current-test"], "failed"))
 }
 
 assertion-failed-with-details
@@ -139,42 +111,21 @@ fn (test-name, assertion-description) {
 test-passed
 meta {doc: """Increment passed test counters."""}
 fn () {
-    counters get-test-counters()
-    new-counters {
-        ...counters,
-        tests: {
-            passed: add(counters.tests.passed, 1),
-            failed: counters.tests.failed,
-            total: add(counters.tests.total, 1)
-        }
-    }
-
-    set-test-counters(new-counters)
+    set-test-counters(bump-counters(get-test-counters(), ["tests"], "passed"))
 }
 
 test-failed
 meta {doc: """Record a failed test and store enhanced name."""}
 fn (test-name) {
-    counters get-test-counters()
-
-    // Get source location info for enhanced reporting
-    test-source ::hot::meta/source(test-name)
-    location-str format-source-location(test-source)
-
     // Store enhanced test name with IDE-friendly location format
+    location-str format-source-location(::hot::meta/source(test-name))
     enhanced-test-name if(location-str, `${test-name} (${location-str})`, test-name)
 
-    new-counters {
+    counters bump-counters(get-test-counters(), ["tests"], "failed")
+    set-test-counters({
         ...counters,
-        tests: {
-            passed: counters.tests.passed,
-            failed: add(counters.tests.failed, 1),
-            total: add(counters.tests.total, 1)
-        },
         failed-tests: concat(counters.failed-tests, [enhanced-test-name])
-    }
-
-    set-test-counters(new-counters)
+    })
 }
 
 current-test-reset
@@ -201,7 +152,7 @@ fn (expected, actual) {
 // Helper function to format source location in IDE-friendly format
 format-source-location fn (source-info) {
     cond {
-        and(source-info.file, and(source-info.line, source-info.column)) => {
+        and(source-info.file, source-info.line, source-info.column) => {
             `${source-info.file}:${source-info.line}:${source-info.column}`
         }
 
@@ -214,6 +165,17 @@ format-source-location fn (source-info) {
         }
         => { null }
     }
+}
+
+// Record a failed assertion (with test details when a test is running),
+// print the failure line, and return false
+record-failure fn (description: Str): Bool {
+    current-test-name ::hot::ctx/get("current-test-name")
+    if(current-test-name,
+        assertion-failed-with-details(current-test-name, description),
+        assertion-failed())
+    println(`    ${bright-red("✗")} ${description}`)
+    false
 }
 
 // Test assertion helpers (use these in your test functions)
@@ -248,29 +210,11 @@ fn
     // Check if either argument is an error Result - if so, fail with clear message
     cond {
         is-err(expected-val) => {
-            current-test-name ::hot::ctx/get("current-test-name")
-            expected-error if-err(expected-val, (error) { error })
-            error-msg `${description}: expected argument returned error: ${expected-error}`
-
-            if(current-test-name,
-                assertion-failed-with-details(current-test-name, error-msg),
-                assertion-failed())
-
-            println(`    ${bright-red("✗")} ${error-msg}`)
-            false
+            record-failure(`${description}: expected argument returned error: ${err-value(expected-val)}`)
         }
 
         is-err(actual-val) => {
-            current-test-name ::hot::ctx/get("current-test-name")
-            actual-error if-err(actual-val, (error) { error })
-            error-msg `${description}: actual argument returned error: ${actual-error}`
-
-            if(current-test-name,
-                assertion-failed-with-details(current-test-name, error-msg),
-                assertion-failed())
-
-            println(`    ${bright-red("✗")} ${error-msg}`)
-            false
+            record-failure(`${description}: actual argument returned error: ${err-value(actual-val)}`)
         }
         => {
             // Normal comparison
@@ -282,14 +226,7 @@ fn
                     println(`    ${bright-green("✓")} ${description}`)
                 }
                 => {
-                    current-test-name ::hot::ctx/get("current-test-name")
-                    full-description `${description}: ${assert-expected-got(expected-val, actual-val)}`
-
-                    if(current-test-name,
-                        assertion-failed-with-details(current-test-name, full-description),
-                        assertion-failed())
-
-                    println(`    ${bright-red("✗")} ${full-description}`)
+                    record-failure(`${description}: ${assert-expected-got(expected-val, actual-val)}`)
                 }
             }
 
@@ -330,14 +267,7 @@ fn
             println(`    ${bright-green("✓")} ${description}`)
         }
         => {
-            current-test-name ::hot::ctx/get("current-test-name")
-            full-description `${description}: expected truthy, got ${actual-val}`
-
-            if(current-test-name,
-                assertion-failed-with-details(current-test-name, full-description),
-                assertion-failed())
-
-            println(`    ${bright-red("✗")} ${full-description}`)
+            record-failure(`${description}: expected truthy, got ${actual-val}`)
         }
     }
 
@@ -405,11 +335,10 @@ fn (f, capture-output) {
     test-had-execution-error is-err(result)
     did-pass if(test-had-execution-error, {
         // For actual execution errors, print the error details
-        error-detail if-err(result, (error) { error })
-        println(`    ${::hot::term/bright-red("✗")} Test execution error: ${error-detail}`)
+        println(`    ${::hot::term/bright-red("✗")} Test execution error: ${err-value(result)}`)
         false
     }, {
-        if(current-test-assertions-passed(), true, false)
+        current-test-assertions-passed()
     })
 
     // Update test counters
@@ -450,7 +379,7 @@ fn () {
 
             // Print detailed assertion failures if we have them
             cond {
-                and(failed-assertions, gt(length(failed-assertions), 0)) => {
+                not(is-empty(failed-assertions)) => {
                     println(`\nfailed assertions:\n`)
                     map(failed-assertions, (assertion-failure) {
                             // Display in IDE-friendly format: test-name at file:line:column

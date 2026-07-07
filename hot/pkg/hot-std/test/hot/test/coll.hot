@@ -1431,3 +1431,12 @@ meta ["test"] fn () {
     assert(is-err(result[1]))
     assert-eq(30, result[2])
 }
+
+
+// merge preserves the left map's key order, appending right-only keys
+test-merge-key-order
+meta ["test"] fn () {
+    merged merge({a: 1, b: 2}, {b: 3, c: 4})
+    assert-eq(["a", "b", "c"], keys(merged), "left map key order wins")
+    assert-eq(3, merged.b, "right map value wins on conflict")
+}

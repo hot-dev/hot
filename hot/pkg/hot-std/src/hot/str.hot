@@ -100,20 +100,43 @@ replace
 meta {
     core: true,
     doc: """
-    Replace first occurrence of `from` with `to` in `s`.
+    Replace **all** occurrences of `from` with `to` in `s`.
+    Use `replace-first` to replace only the first occurrence.
 
     **Example**
 
     ```hot
     replace("hello world", "world", "Hot")  // "hello Hot"
-    replace("aaa", "a", "b")                 // "baa" (first only)
+    replace("aaa", "a", "b")                 // "bbb" (all occurrences)
+    replace("a&b&c", "&", "&amp;")           // "a&amp;b&amp;c" (escaping)
+    ```
+
+    See also: `::hot::regex/replace-all` for pattern-based replacement.
+    """
+}
+fn (s: Str, from: Str, to: Str): Str {
+    call-lib(::hot::str/replace, [s, from, to])
+}
+
+
+replace-first
+meta {
+    core: true,
+    doc: """
+    Replace only the first occurrence of `from` with `to` in `s`.
+
+    **Example**
+
+    ```hot
+    replace-first("aaa", "a", "b")   // "baa"
+    replace-first("abc", "z", "y")   // "abc" (no match, unchanged)
     ```
 
     See also: `::hot::regex/replace` for pattern-based replacement.
     """
 }
 fn (s: Str, from: Str, to: Str): Str {
-    call-lib(::hot::str/replace, [s, from, to])
+    call-lib(::hot::str/replace-first, [s, from, to])
 }
 
 

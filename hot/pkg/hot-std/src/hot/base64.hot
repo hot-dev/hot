@@ -9,7 +9,7 @@ meta {
     **Example**
 
     ```hot
-    data [72, 101, 108, 108, 111]  // "Hello" as bytes
+    data Bytes([72, 101, 108, 108, 111])  // "Hello" as bytes
     result encode(data)
     // result = "SGVsbG8="
     ```
@@ -30,7 +30,7 @@ meta {
     ```hot
     encoded "SGVsbG8="
     bytes decode(encoded)
-    // bytes = [72, 101, 108, 108, 111]
+    // bytes = Bytes([72, 101, 108, 108, 111])
     ```
     """
 }
@@ -85,7 +85,7 @@ meta {
 
     ```hot
     decode-url("SGVsbG8")
-    // [72, 101, 108, 108, 111]
+    // Bytes([72, 101, 108, 108, 111])
     ```
     """
 }

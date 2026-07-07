@@ -74,6 +74,8 @@ fd-lock = { workspace = true }
 pulldown-cmark = { workspace = true }
 # MIME type detection from file extensions
 mime_guess = { workspace = true }
+# Canonical single extension per MIME type (mime-db backed)
+mime2ext = { workspace = true }
 # Blocking HTTP client for CDN package downloads (no async runtime)
 ureq = { workspace = true }
 # Gzip decompression for package tarballs

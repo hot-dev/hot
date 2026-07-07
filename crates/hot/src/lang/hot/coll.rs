@@ -3319,9 +3319,10 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
     postwalk_recursive(vm, function_val, data)
 }
 
-/// Post-order walk and replace elements based on a predicate
+/// Post-order walk replacing values found in a replacement map
+/// using `{old-value: new-value}` substitution
 pub fn postwalk_replace(
-    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    _vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
     if args.len() != 2 {
@@ -3331,64 +3332,50 @@ pub fn postwalk_replace(
         )));
     }
 
-    let predicate_map = &args[0];
+    let replacement_map = match &args[0] {
+        Val::Map(m) => m,
+        _ => {
+            return HotResult::Err(Val::from(
+                "::hot::coll/postwalk-replace: first argument must be a map of {old: new} values"
+                    .to_string(),
+            ));
+        }
+    };
     let data = &args[1];
 
     fn postwalk_replace_recursive(
-        vm: &mut crate::lang::runtime::vm::VirtualMachine,
-        predicate_map: &Val,
+        replacement_map: &indexmap::IndexMap<Val, Val>,
         data: &Val,
-    ) -> HotResult<Val> {
-        // First recurse into children
+    ) -> Val {
+        // First recurse into children (post-order)
         let walked = match data {
-            Val::Vec(items) => {
-                let mut result = Vec::new();
-                for item in items {
-                    match postwalk_replace_recursive(vm, predicate_map, item) {
-                        HotResult::Ok(walked_item) => result.push(walked_item),
-                        HotResult::Err(err) => return HotResult::Err(err),
-                    }
-                }
-                Val::Vec(result)
-            }
+            Val::Vec(items) => Val::Vec(
+                items
+                    .iter()
+                    .map(|item| postwalk_replace_recursive(replacement_map, item))
+                    .collect(),
+            ),
             Val::Map(map) => {
                 let mut result_map = indexmap::IndexMap::new();
                 for (key, value) in map.iter() {
-                    match postwalk_replace_recursive(vm, predicate_map, value) {
-                        HotResult::Ok(walked_value) => {
-                            result_map.insert(key.clone(), walked_value);
-                        }
-                        HotResult::Err(err) => return HotResult::Err(err),
-                    }
+                    result_map.insert(
+                        postwalk_replace_recursive(replacement_map, key),
+                        postwalk_replace_recursive(replacement_map, value),
+                    );
                 }
                 Val::Map(Box::new(result_map))
             }
             _ => data.clone(),
         };
 
-        // Then check if we should replace this element
-        if let Val::Map(pred_map) = predicate_map {
-            for (predicate_fn, replacement_fn) in pred_map.iter() {
-                match call_function_with_vm(vm, predicate_fn, &walked) {
-                    Ok(predicate_result) => {
-                        if is_truthy(&predicate_result) {
-                            // Apply replacement function
-                            match call_function_with_vm(vm, replacement_fn, &walked) {
-                                Ok(replaced) => return HotResult::Ok(replaced),
-                                Err(err) => return HotResult::Err(Val::from(err)),
-                            }
-                        }
-                    }
-                    Err(err) => return HotResult::Err(Val::from(err)),
-                }
-            }
+        // Then replace this element if it matches a key in the map
+        match replacement_map.get(&walked) {
+            Some(replacement) => replacement.clone(),
+            None => walked,
         }
-
-        // No replacement, return as-is
-        HotResult::Ok(walked)
     }
 
-    postwalk_replace_recursive(vm, predicate_map, data)
+    HotResult::Ok(postwalk_replace_recursive(replacement_map, data))
 }
 
 // --- Deep path operations ---
@@ -3599,6 +3586,34 @@ pub fn update_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_merge_preserves_left_key_order() {
+        let mut a = IndexMap::new();
+        a.insert(Val::from("a"), Val::Int(1));
+        a.insert(Val::from("b"), Val::Int(2));
+        let mut b = IndexMap::new();
+        b.insert(Val::from("b"), Val::Int(3));
+        b.insert(Val::from("c"), Val::Int(4));
+
+        let result = merge(&[Val::Map(Box::new(a)), Val::Map(Box::new(b))]);
+        match result {
+            HotResult::Ok(Val::Map(m)) => {
+                let keys: Vec<Val> = m.keys().cloned().collect();
+                assert_eq!(
+                    keys,
+                    vec![Val::from("a"), Val::from("b"), Val::from("c")],
+                    "left map's key order wins"
+                );
+                assert_eq!(
+                    m.get(&Val::from("b")),
+                    Some(&Val::Int(3)),
+                    "right value wins"
+                );
+            }
+            other => panic!("Expected map, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_get_map_found() {

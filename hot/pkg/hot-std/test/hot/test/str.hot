@@ -147,3 +147,20 @@ meta ["test"] fn () {
     world "world"
     assert-eq("hello,world", join([hello, world], delim), "join with template strings works")
 }
+
+
+// replace substitutes every occurrence (the semantics escaping code relies on)
+test-replace-all-occurrences
+meta ["test"] fn () {
+    assert-eq("bbb", replace("aaa", "a", "b"), "replace substitutes all occurrences")
+    assert-eq("a&amp;b&amp;c", replace("a&b&c", "&", "&amp;"), "escaping replaces every occurrence")
+    assert-eq("abc", replace("abc", "z", "y"), "no match leaves string unchanged")
+}
+
+// replace-first substitutes only the first occurrence
+test-replace-first
+meta ["test"] fn () {
+    assert-eq("baa", replace-first("aaa", "a", "b"), "replace-first substitutes first only")
+    assert-eq("abc", replace-first("abc", "z", "y"), "no match leaves string unchanged")
+    assert-eq("X-b-b", replace-first("b-b-b", "b", "X"), "first occurrence at start")
+}

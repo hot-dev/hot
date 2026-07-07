@@ -75,10 +75,21 @@ pub fn to_ext(args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    // Get extensions for this MIME type
-    let extensions = mime_guess::get_mime_extensions_str(mime_str);
+    // mime-db's canonical extension for audio/mpeg is "mpga", which many
+    // extension-keyed players, OS file associations, and upload whitelists
+    // don't recognize. "mp3" is what the ecosystem expects for saved files.
+    if &**mime_str == "audio/mpeg" {
+        return HotResult::Ok(Val::from("mp3"));
+    }
 
-    match extensions {
+    // mime2ext returns the canonical extension per the mime-db dataset
+    // (e.g. text/plain -> "txt"), unlike mime_guess's alphabetical first.
+    if let Some(ext) = mime2ext::mime2ext(&**mime_str) {
+        return HotResult::Ok(Val::from(ext.to_string()));
+    }
+
+    // Fall back to mime_guess for types mime-db doesn't cover
+    match mime_guess::get_mime_extensions_str(mime_str) {
         Some(exts) if !exts.is_empty() => HotResult::Ok(Val::from(exts[0].to_string())),
         _ => HotResult::Ok(Val::Null),
     }
@@ -241,6 +252,31 @@ pub fn get_subtype(args: &[Val]) -> HotResult<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_to_ext_canonical() {
+        // mime2ext gives the canonical extension, not mime_guess's
+        // alphabetical first (which would be "asm" for text/plain)
+        let result = to_ext(&[Val::from("text/plain")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "txt"));
+
+        let result = to_ext(&[Val::from("image/jpeg")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "jpg"));
+
+        let result = to_ext(&[Val::from("image/png")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "png"));
+
+        let result = to_ext(&[Val::from("application/json")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "json"));
+
+        // Deliberate override: mime-db says "mpga", the ecosystem expects "mp3"
+        let result = to_ext(&[Val::from("audio/mpeg")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "mp3"));
+
+        // Unknown MIME type
+        let result = to_ext(&[Val::from("application/x-not-real")]);
+        assert!(matches!(result, HotResult::Ok(Val::Null)));
+    }
 
     #[test]
     fn test_from_ext() {

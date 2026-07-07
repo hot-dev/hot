@@ -84,13 +84,14 @@ Dec
 meta {
     core: true,
     doc: """
-    Decimal type (256-bit precision). Convert numeric values to decimal.
+    Decimal type (256-bit precision). Converts numeric values and numeric
+    strings to decimal.
 
     **Example**
 
     ```hot
-    Dec(42)         // 42.0
-    Dec(3.14159)    // 3.14159
+    Dec(42)         // 42 (as Dec)
+    Dec("3.14159")  // 3.14159
     div(Dec(1), 3)  // 0.333... (high precision)
     ```
     """
@@ -104,16 +105,23 @@ Bool
 meta {
     core: true,
     doc: """
-    Boolean type. Convert any value to boolean (truthiness).
+    Boolean type. Strictly parses boolean-like values: numbers (0 is false,
+    anything else true), the strings "true"/"yes"/"1" and "false"/"no"/"0"
+    (case-insensitive), and null (false). Other strings — including the
+    empty string — are an error, never silently false. Use `is-truthy`
+    for truthiness checks, or define a `Str -> Bool` coercion in your
+    namespace for app-specific parsing (e.g. "on"/"off").
 
     **Example**
 
     ```hot
-    Bool(1)       // true
-    Bool(0)       // false
-    Bool("")      // false
-    Bool("hi")    // true
-    Bool(null)    // false
+    Bool(1)         // true
+    Bool(0)         // false
+    Bool("true")    // true
+    Bool("no")      // false
+    Bool(null)      // false
+    Bool("hi")      // Err — not a boolean-like string
+    is-truthy("hi") // true
     ```
     """
 }
@@ -131,8 +139,8 @@ meta {
     **Example**
 
     ```hot
-    Null()       // null
-    eq(n, null)  // check for null
+    Null()      // null
+    is-null(n)  // check for null
     ```
     """
 }
@@ -143,18 +151,24 @@ Vec
 meta {
     core: true,
     doc: """
-    Vector (array) type. Convert value to a vector.
+    Vector (array) type. With one argument, coerces it to a vector:
+    strings split into characters, maps become `[key, value]` pairs,
+    bytes become ints, and vectors pass through. With multiple
+    arguments, collects them into a vector.
 
     **Example**
 
     ```hot
-    Vec("abc")     // ["a", "b", "c"]
-    Vec({"a": 1})  // [["a", 1]]
+    Vec(1, 2, 3)       // [1, 2, 3]
+    Vec("abc")         // ["a", "b", "c"]
+    Vec({a: 1, b: 2})  // [["a", 1], ["b", 2]]
+    Vec(Bytes([7, 8])) // [7, 8]
+    Vec(42)            // [42]
     ```
     """
 }
-type fn (value: Any): Vec<Any> {
-    call-lib(::hot::type/Vec, [value])
+type fn (value: Any, ...rest: Any): Vec<Any> {
+    call-lib(::hot::type/Vec, [value, ...rest])
 }
 
 
@@ -162,17 +176,22 @@ Map
 meta {
     core: true,
     doc: """
-    Map (object) type. Convert value to a map.
+    Map (object) type. With one Vec argument, builds a map from
+    `[key, value]` pairs and/or single-entry maps. With multiple
+    arguments, treats them as alternating key-value pairs.
 
     **Example**
 
     ```hot
-    Map([["a", 1], ["b", 2]])  // {"a": 1, "b": 2}
+    Map([["a", 1], ["b", 2]])     // {a: 1, b: 2} — from pairs
+    Map([{a: 1}, {b: 2}])         // {a: 1, b: 2} — from entry maps
+    Map("a", 1, "b", 2)           // {a: 1, b: 2} — flat pairs
+    zipmap(["a", "b"], [1, 2])    // {a: 1, b: 2} — separate key/value vecs
     ```
     """
 }
-type fn (value: Any): Map<Any, Any> {
-    call-lib(::hot::type/Map, [value])
+type fn (value: Any, ...rest: Any): Map<Any, Any> {
+    call-lib(::hot::type/Map, [value, ...rest])
 }
 
 
@@ -487,10 +506,14 @@ meta {
     doc: """
     Return true if `value` is a Var.
 
+    Note: Var references are dereferenced when passed as regular arguments,
+    so this returns true only for Var values reaching it through lazy or
+    metadata contexts.
+
     **Example**
 
     ```hot
-    is-var(Var("::hot::str/split"))  // true
+    is-var("::hot::str/split")  // false — a plain string
     ```
     """
 }
@@ -599,7 +622,7 @@ meta {
     ok("success")    // Result.Ok("success")
 
     result ok(get-user(id))
-    if-ok(result, (user) { user })
+    user ok-value(result)
     ```
     """
 }
@@ -620,7 +643,7 @@ meta {
     err("Not found")           // Result.Err("Not found")
     err({code: 404})            // Result.Err({code: 404})
 
-    if(eq(user, null), err("User not found"), ok(user))
+    if(is-null(user), err("User not found"), ok(user))
     ```
     """
 }
@@ -642,7 +665,7 @@ meta {
     is-ok(Result.Err("failed"))     // false
 
     result safe-divide(10, 2)
-    if-ok(result, (value) { value })
+    if(is-ok(result), ok-value(result), 0)
     ```
     """
 }
@@ -747,7 +770,54 @@ meta {
     ```
     """
 }
-fn (value: Any): Bool { is-type(value, Result) }
+fn (lazy value: Any): Bool {
+    call-lib(::hot::type/is-result, [value])
+}
+
+
+ok-value
+meta {
+    core: true,
+    doc: """
+    Extract the payload of a `Result.Ok`. Plain (non-Result) values are
+    returned unchanged, matching `is-ok` treating them as successes.
+    Returns `null` for `Result.Err`.
+
+    **Example**
+
+    ```hot
+    ok-value(ok(42))        // 42
+    ok-value(42)            // 42
+    ok-value(err("fail"))   // null
+    ```
+    """
+}
+fn (lazy result: Any): Any {
+    call-lib(::hot::type/ok-value, [result])
+}
+
+
+err-value
+meta {
+    core: true,
+    doc: """
+    Extract the payload of a `Result.Err`, without re-triggering the error.
+    Returns `null` for `Result.Ok` and plain values.
+
+    **Example**
+
+    ```hot
+    result read-file("missing.txt")
+    if(is-err(result), println(`failed: ${err-value(result)}`), null)
+
+    err-value(err("boom"))   // "boom"
+    err-value(ok(42))        // null
+    ```
+    """
+}
+fn (lazy result: Any): Any {
+    call-lib(::hot::type/err-value, [result])
+}
 
 
 // OnErr controls whether eligible higher-order functions force or preserve

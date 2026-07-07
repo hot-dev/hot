@@ -259,7 +259,17 @@ fn int_internal(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Int(i) => HotResult::Ok(Val::Int(*i)),
-        Val::Dec(d) => HotResult::Ok(Val::Int(d.to_i64().unwrap_or(0))),
+        Val::Dec(d) => {
+            // Truncate toward zero (drop the fractional part), the
+            // conventional int-cast semantics: Int(3.7) = 3, Int(-2.9) = -2.
+            // Use round(x) for nearest-integer conversion instead.
+            let truncated = if d.is_sign_negative() {
+                d.ceil()
+            } else {
+                d.floor()
+            };
+            HotResult::Ok(Val::Int(truncated.to_i64().unwrap_or(0)))
+        }
         Val::Str(s) => match s.parse::<i64>() {
             Ok(i) => HotResult::Ok(Val::Int(i)),
             Err(_) => HotResult::Err(Val::from(format!("Cannot convert '{}' to Int", s))),
@@ -643,15 +653,67 @@ pub fn null_constructor(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::Null)
 }
 
-/// Core Vec constructor
+/// Core Vec constructor.
+/// Single argument = coercion: Str splits into
+/// characters, Map becomes [key, value] pairs, Bytes become ints, Vec stays
+/// itself. Multiple arguments collect into a vector.
 pub fn vec_constructor(args: &[Val]) -> HotResult<Val> {
-    // Vec constructor can take any number of arguments
+    if args.len() == 1 {
+        let coerced = match &args[0] {
+            Val::Vec(v) => v.clone(),
+            Val::Str(s) => s.chars().map(|c| Val::from(c.to_string())).collect(),
+            Val::Map(m) => m
+                .iter()
+                .map(|(k, v)| Val::Vec(vec![k.clone(), v.clone()]))
+                .collect(),
+            Val::Bytes(b) => b.iter().map(|byte| Val::Int(*byte as i64)).collect(),
+            other => vec![other.clone()],
+        };
+        return HotResult::Ok(Val::Vec(coerced));
+    }
     HotResult::Ok(Val::Vec(args.to_vec()))
 }
 
-/// Core Map constructor
+/// Core Map constructor.
+/// Single argument = coercion: a Vec of
+/// [key, value] pairs and/or single-entry maps builds a map; a Map stays
+/// itself. Multiple arguments are flat key-value pairs.
 pub fn map_constructor(args: &[Val]) -> HotResult<Val> {
-    // Map constructor can take pairs of arguments
+    if args.len() == 1 {
+        match &args[0] {
+            Val::Map(m) => return HotResult::Ok(Val::Map(m.clone())),
+            Val::Vec(entries) => {
+                let mut map = IndexMap::new();
+                for entry in entries {
+                    match entry {
+                        Val::Vec(pair) if pair.len() == 2 => {
+                            map.insert(pair[0].clone(), pair[1].clone());
+                        }
+                        Val::Map(entry_map) => {
+                            for (k, v) in entry_map.iter() {
+                                map.insert(k.clone(), v.clone());
+                            }
+                        }
+                        other => {
+                            return HotResult::Err(Val::from(format!(
+                                "Map constructor: entries must be [key, value] pairs or maps, got {:?}",
+                                other
+                            )));
+                        }
+                    }
+                }
+                return HotResult::Ok(Val::Map(Box::new(map)));
+            }
+            _ => {
+                return HotResult::Err(Val::from(
+                    "Map constructor with one argument expects a Map or a Vec of [key, value] pairs / entry maps"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // Multiple arguments: flat key-value pairs
     if !args.len().is_multiple_of(2) {
         return HotResult::Err(Val::from(
             "Map constructor expects an even number of arguments (key-value pairs)".to_string(),
@@ -1295,6 +1357,115 @@ pub fn result_err(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::err(args[0].clone()))
 }
 
+/// Evaluate a possibly-lazy argument with Result checking suppressed, so a
+/// Result value reaches the caller unchanged instead of re-triggering a halt.
+/// Returns Err(()) when the thunk itself fails to evaluate.
+fn eval_result_arg(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    arg: &Val,
+) -> Result<Val, ()> {
+    if let Val::Box(b) = arg
+        && let Some(lambda_info) = b
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        && lambda_info.parameters.is_empty()
+    {
+        let saved_suppress = if lambda_info.is_lazy_param {
+            let current = vm.get_suppress_result_checking();
+            vm.set_suppress_result_checking(true);
+            Some(current)
+        } else {
+            None
+        };
+
+        let result = vm.execute_lambda(arg, &[]);
+
+        if let Some(saved) = saved_suppress {
+            vm.set_suppress_result_checking(saved);
+        }
+
+        return result.map_err(|_| ());
+    }
+    Ok(arg.clone())
+}
+
+/// Classify an evaluated value: Some(true) = Result.Ok, Some(false) = Result.Err,
+/// None = not a Result. Also returns the payload for Result values.
+fn classify_result(val: &Val) -> (Option<bool>, Option<Val>) {
+    // Unwrap nested Raw wrappers first
+    let mut actual = val;
+    while actual.is_type("Raw") {
+        match actual {
+            Val::Map(map) => match map.get(&Val::from("$val")) {
+                Some(inner) => actual = inner,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+
+    if let Val::Map(map) = actual
+        && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+    {
+        let payload = map.get(&Val::from("$val")).cloned();
+        if &**type_str == "::hot::type/Result.Ok" {
+            return (Some(true), payload);
+        }
+        if &**type_str == "::hot::type/Result.Err" {
+            return (Some(false), payload);
+        }
+    }
+    (None, None)
+}
+
+/// is-result: true only for Result.Ok / Result.Err values (lazy-aware)
+pub fn result_is_result(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    validate_args!("::hot::type/is-result", args, 1);
+    let val = match eval_result_arg(vm, &args[0]) {
+        Ok(v) => v,
+        Err(()) => return HotResult::Ok(Val::Bool(false)),
+    };
+    let (kind, _) = classify_result(&val);
+    HotResult::Ok(Val::Bool(kind.is_some()))
+}
+
+/// ok-value: the payload of a Result.Ok, the value itself for non-Results
+/// (mirroring is-ok's "plain values are ok" semantics), or null for Result.Err
+pub fn result_ok_value(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    validate_args!("::hot::type/ok-value", args, 1);
+    let val = match eval_result_arg(vm, &args[0]) {
+        Ok(v) => v,
+        Err(()) => return HotResult::Ok(Val::Null),
+    };
+    match classify_result(&val) {
+        (Some(true), payload) => HotResult::Ok(payload.unwrap_or(Val::Null)),
+        (Some(false), _) => HotResult::Ok(Val::Null),
+        (None, _) => HotResult::Ok(val),
+    }
+}
+
+/// err-value: the payload of a Result.Err, or null for anything else
+pub fn result_err_value(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    validate_args!("::hot::type/err-value", args, 1);
+    let val = match eval_result_arg(vm, &args[0]) {
+        Ok(v) => v,
+        Err(()) => return HotResult::Ok(Val::Null),
+    };
+    match classify_result(&val) {
+        (Some(false), payload) => HotResult::Ok(payload.unwrap_or(Val::Null)),
+        _ => HotResult::Ok(Val::Null),
+    }
+}
+
 /// if-ok: if Result is Ok, apply fn or use value; if Err, pass through
 /// if-ok(result, fn-or-value) — VM-aware for lazy eval + fn dispatch
 pub fn result_if_ok(
@@ -1546,4 +1717,134 @@ fn handle_err_branch(
 mod tests {
     // Include Result unwrapping tests
     include!("result_unwrap_test.rs");
+}
+
+#[cfg(test)]
+mod constructor_tests {
+    use super::*;
+
+    fn dec(s: &str) -> Val {
+        Val::Dec(s.parse::<D256>().unwrap())
+    }
+
+    #[test]
+    fn test_int_truncates_toward_zero() {
+        assert_eq!(int_internal(&[dec("3.7")]), HotResult::Ok(Val::Int(3)));
+        assert_eq!(int_internal(&[dec("3.2")]), HotResult::Ok(Val::Int(3)));
+        assert_eq!(int_internal(&[dec("-2.9")]), HotResult::Ok(Val::Int(-2)));
+        assert_eq!(int_internal(&[dec("-2.2")]), HotResult::Ok(Val::Int(-2)));
+        assert_eq!(int_internal(&[dec("5")]), HotResult::Ok(Val::Int(5)));
+        assert_eq!(int_internal(&[dec("-0.9")]), HotResult::Ok(Val::Int(0)));
+    }
+
+    #[test]
+    fn test_vec_single_arg_coercion() {
+        // Str splits into characters
+        assert_eq!(
+            vec_constructor(&[Val::from("abc")]),
+            HotResult::Ok(Val::Vec(vec![
+                Val::from("a"),
+                Val::from("b"),
+                Val::from("c")
+            ]))
+        );
+        // Vec stays itself (no wrapping)
+        assert_eq!(
+            vec_constructor(&[Val::Vec(vec![Val::Int(1), Val::Int(2)])]),
+            HotResult::Ok(Val::Vec(vec![Val::Int(1), Val::Int(2)]))
+        );
+        // Map becomes [key, value] pairs
+        let mut m = IndexMap::new();
+        m.insert(Val::from("a"), Val::Int(1));
+        assert_eq!(
+            vec_constructor(&[Val::Map(Box::new(m))]),
+            HotResult::Ok(Val::Vec(vec![Val::Vec(vec![Val::from("a"), Val::Int(1)])]))
+        );
+        // Bytes become ints
+        assert_eq!(
+            vec_constructor(&[Val::Bytes(vec![7, 8])]),
+            HotResult::Ok(Val::Vec(vec![Val::Int(7), Val::Int(8)]))
+        );
+        // Scalars wrap
+        assert_eq!(
+            vec_constructor(&[Val::Int(5)]),
+            HotResult::Ok(Val::Vec(vec![Val::Int(5)]))
+        );
+    }
+
+    #[test]
+    fn test_vec_multi_arg_collects() {
+        assert_eq!(
+            vec_constructor(&[Val::Int(1), Val::Int(2), Val::Int(3)]),
+            HotResult::Ok(Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+        assert_eq!(
+            vec_constructor(&[Val::from("a"), Val::from("b")]),
+            HotResult::Ok(Val::Vec(vec![Val::from("a"), Val::from("b")]))
+        );
+    }
+
+    #[test]
+    fn test_map_from_pairs_and_entry_maps() {
+        // Vec of [key, value] pairs
+        let pairs = Val::Vec(vec![
+            Val::Vec(vec![Val::from("a"), Val::Int(1)]),
+            Val::Vec(vec![Val::from("b"), Val::Int(2)]),
+        ]);
+        let result = map_constructor(&[pairs]);
+        match result {
+            HotResult::Ok(Val::Map(m)) => {
+                assert_eq!(m.get(&Val::from("a")), Some(&Val::Int(1)));
+                assert_eq!(m.get(&Val::from("b")), Some(&Val::Int(2)));
+            }
+            other => panic!("Expected map, got {:?}", other),
+        }
+
+        // Vec of single-entry maps
+        let mut e1 = IndexMap::new();
+        e1.insert(Val::from("x"), Val::Int(10));
+        let mut e2 = IndexMap::new();
+        e2.insert(Val::from("y"), Val::Int(20));
+        let entries = Val::Vec(vec![Val::Map(Box::new(e1)), Val::Map(Box::new(e2))]);
+        let result = map_constructor(&[entries]);
+        match result {
+            HotResult::Ok(Val::Map(m)) => {
+                assert_eq!(m.get(&Val::from("x")), Some(&Val::Int(10)));
+                assert_eq!(m.get(&Val::from("y")), Some(&Val::Int(20)));
+            }
+            other => panic!("Expected map, got {:?}", other),
+        }
+
+        // Invalid entry errors
+        let bad = Val::Vec(vec![Val::Int(1)]);
+        assert!(matches!(map_constructor(&[bad]), HotResult::Err(_)));
+
+        // Map identity coercion
+        let mut m = IndexMap::new();
+        m.insert(Val::from("k"), Val::Int(9));
+        let result = map_constructor(&[Val::Map(Box::new(m))]);
+        match result {
+            HotResult::Ok(Val::Map(out)) => {
+                assert_eq!(out.get(&Val::from("k")), Some(&Val::Int(9)));
+            }
+            other => panic!("Expected map, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_map_flat_pairs() {
+        let result = map_constructor(&[Val::from("a"), Val::Int(1), Val::from("b"), Val::Int(2)]);
+        match result {
+            HotResult::Ok(Val::Map(m)) => {
+                assert_eq!(m.get(&Val::from("a")), Some(&Val::Int(1)));
+                assert_eq!(m.get(&Val::from("b")), Some(&Val::Int(2)));
+            }
+            other => panic!("Expected map, got {:?}", other),
+        }
+        // Odd multi-arg count still errors
+        assert!(matches!(
+            map_constructor(&[Val::from("a"), Val::Int(1), Val::from("b")]),
+            HotResult::Err(_)
+        ));
+    }
 }
