@@ -8398,6 +8398,21 @@ impl VirtualMachine {
         let shared_failure_state = self.get_failure_state_arc();
         let host_context = self.host_context_snapshot();
 
+        // Correlation ids for worker-thread logs. Parallel branches run user
+        // code on detached threads, so without these a branch failure in a
+        // shared worker log cannot be tied back to the run that caused it.
+        let log_run_id = self
+            .execution_context
+            .as_ref()
+            .map(|ctx| ctx.run_id.to_string())
+            .unwrap_or_default();
+        let log_env_id = self
+            .execution_context
+            .as_ref()
+            .and_then(|ctx| ctx.env_id)
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+
         // Track computed variables from previous levels to pass to task VMs
         let mut computed_vars: IndexMap<String, Val> = IndexMap::new();
 
@@ -8541,6 +8556,8 @@ impl VirtualMachine {
                 let error_clone = error_mutex.clone();
                 let failure_state_worker = shared_failure_state.clone();
                 let tokio_handle_clone = tokio_handle.clone();
+                let log_run_id = log_run_id.clone();
+                let log_env_id = log_env_id.clone();
 
                 let spawn_result = thread::Builder::new()
                     .name(format!("parallel-w{}", worker_idx))
@@ -8636,8 +8653,13 @@ impl VirtualMachine {
                                         results_clone.lock().insert(var_name, result);
                                     }
                                     Err(err) => {
-                                        tracing::error!(
-                                            "VM: Worker failed executing thunk for '{}': {:?}",
+                                        // User-code failure (fail(), Result.Err, type errors,
+                                        // ...) — the worker itself is healthy, so log at warn.
+                                        // ERROR is reserved for VM-internal panics below.
+                                        tracing::warn!(
+                                            run_id = %log_run_id,
+                                            env_id = %log_env_id,
+                                            "VM: Worker failed executing thunk for '{}': {}",
                                             var_name,
                                             err
                                         );
@@ -8655,7 +8677,12 @@ impl VirtualMachine {
                             // If user code panicked, surface the structured info as
                             // the branch's error (without re-panicking the thread).
                             if let Err(panic) = panic_result {
-                                tracing::error!(
+                                // Also user code (run_user_code boundary), so warn — a
+                                // panic escaping that boundary is caught at join below
+                                // and logged at error as a genuine VM bug.
+                                tracing::warn!(
+                                    run_id = %log_run_id,
+                                    env_id = %log_env_id,
                                     "VM: Parallel branch '{}' panicked: {}",
                                     var_name_for_label,
                                     panic.summary()

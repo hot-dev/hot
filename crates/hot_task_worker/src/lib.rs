@@ -2557,7 +2557,7 @@ async fn process_container_task(
         }
     } else {
         // Kata: use atomic execute_with_extras (phased not supported)
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             total_timeout,
             executor.execute_with_extras(
                 &image,
@@ -2570,7 +2570,23 @@ async fn process_container_task(
                 pre_start_hook,
             ),
         )
-        .await
+        .await;
+        if result.is_err() {
+            // The executor's internal timeout starts counting only once the
+            // VM is booted, so this outer wall-clock timeout (which also
+            // covers slot wait, image pull, and boot) fires first — dropping
+            // the execute future before its own cleanup can run. Reap the
+            // leaked VM, snapshot, FIFOs, and netns here.
+            tracing::warn!(
+                task_id = %task_id,
+                timeout_ms,
+                "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
+            );
+            executor
+                .cleanup_after_timeout(&trace_id, limits.network)
+                .await;
+        }
+        result
     };
 
     let duration_ms = start.elapsed().as_millis() as i64;
@@ -2709,36 +2725,28 @@ async fn process_container_task(
             );
         }
         Ok(Err(e)) => {
-            // Infrastructure failure — don't charge CUS
-            let is_infra_failure = matches!(
-                &e,
-                ExecutorError::ImagePull(_)
-                    | ExecutorError::Connection(_)
-                    | ExecutorError::SlotTimeout(_)
-                    | ExecutorError::ImageNotAllowed(_)
-                    | ExecutorError::Create(_)
-            );
-            let compute_units = if is_infra_failure {
-                0
-            } else {
-                limits.size.compute_units(duration_ms)
-            };
-            let user_message = if is_infra_failure {
-                match &e {
-                    ExecutorError::ImageNotAllowed(img) => {
-                        format!(
-                            "Image '{}' is not allowed by the container image policy",
-                            img
-                        )
-                    }
-                    ExecutorError::SlotTimeout(secs) => {
-                        format!("Timed out waiting for execution slot ({}s)", secs)
-                    }
-                    ExecutorError::ImagePull(_) => "Failed to pull container image".to_string(),
-                    _ => "Container infrastructure error".to_string(),
+            // Every executor error means the workload itself never ran to
+            // completion — the failure is in container infrastructure
+            // (pull, create, start, containerd/wait plumbing) — so don't
+            // charge CUS and don't surface raw backend errors to the user.
+            // (`Start` was previously misclassified as a user failure,
+            // charging CUS and leaking containerd internals when Kata
+            // setup retries were exhausted.)
+            let is_infra_failure = true;
+            let compute_units = 0;
+            let user_message = match &e {
+                ExecutorError::ImageNotAllowed(img) => {
+                    format!(
+                        "Image '{}' is not allowed by the container image policy",
+                        img
+                    )
                 }
-            } else {
-                e.to_string()
+                ExecutorError::SlotTimeout(secs) => {
+                    format!("Timed out waiting for execution slot ({}s)", secs)
+                }
+                ExecutorError::ImagePull(_) => "Failed to pull container image".to_string(),
+                ExecutorError::Start(_) => "Failed to start container".to_string(),
+                _ => "Container infrastructure error".to_string(),
             };
             let error = task_failure_json(
                 &user_message,
