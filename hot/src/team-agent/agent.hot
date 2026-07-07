@@ -848,13 +848,13 @@ compact-team-agent-session fn (session: Session, hours: Int): Map {
     metadata: {agent: "team-agent", session-id: session.id},
     emit-stream: true,
   })
-  {capsule-id: capsule.id, source-count: length(capsule.source-ids)}
+  if-ok(capsule, (c) { {capsule-id: c.id, source-count: length(c.source-ids)} })
 }
 
 handle-compact-command fn (session: Session, arg: Str, reply-to: Str?) {
   hours if(is-empty(trim(or(arg, ""))), 168, Int(trim(arg)))
   ::agent-stream/emit-memory-start(AGENT_NAME, "compact", {session-id: session.id, hours: hours})
-  result ::hot::lang/try(() { compact-team-agent-session(session, hours) })
+  result compact-team-agent-session(session, hours)
   cond {
     is-ok(result) => {
       compact-result result
@@ -864,10 +864,10 @@ handle-compact-command fn (session: Session, arg: Str, reply-to: Str?) {
       ::transport/reply(session, `<b>Compaction complete</b>\nCapsule <code>${capsule-id}</code> captured ${source-count} source record(s).`, reply-to)
     }
     => {
-      failure if-err(result, (failure) { failure })
-      record-error("compact", `${session.id}: ${failure.msg}`)
+      failure err-value(result)
+      record-error("compact", `${session.id}: ${Str(failure)}`)
       ::agent-stream/emit-memory-error(AGENT_NAME, "compact", {session-id: session.id, error: failure})
-      ::transport/reply(session, `<b>Compaction failed</b>\n<code>${failure.msg}</code>`, reply-to)
+      ::transport/reply(session, `<b>Compaction failed</b>\n<code>${Str(failure)}</code>`, reply-to)
     }
   }
 }
@@ -1277,11 +1277,12 @@ meta {
 }
 fn (event) {
   sessions list-registered-sessions()
-  for-each(sessions, (s) {
-    // Don't let one session's failure (e.g. revoked token) take out the
-    // whole loop; `::hot::lang/try` lets us fan-out without aborting.
-    result ::hot::lang/try(() { run-digest-for-session(s) })
-    if-err(result, (failure) { record-error("daily-digest", `${s.id}: ${failure.msg}`) })
+  // Don't let one session's failure (e.g. revoked token) take out the
+  // whole loop; `OnErr.Preserve` keeps each failure as a per-session
+  // `Result.Err` slot instead of aborting the fan-out.
+  results map(sessions, run-digest-for-session, OnErr.Preserve)
+  map-indexed(results, (i, r) {
+    if-err(r, (failure) { record-error("daily-digest", `${get(sessions, i).id}: ${Str(failure)}`) })
   })
 }
 
@@ -1333,9 +1334,9 @@ meta {
 }
 fn (event) {
   sessions list-registered-sessions()
-  for-each(sessions, (s) {
-    result ::hot::lang/try(() { run-weekly-for-session(s) })
-    if-err(result, (failure) { record-error("weekly-summary", `${s.id}: ${failure.msg}`) })
+  results map(sessions, run-weekly-for-session, OnErr.Preserve)
+  map-indexed(results, (i, r) {
+    if-err(r, (failure) { record-error("weekly-summary", `${get(sessions, i).id}: ${Str(failure)}`) })
   })
 }
 
@@ -1371,8 +1372,9 @@ fn (event) {
 // `name target meta {…}` is also accepted). The library function's own
 // `doc:` flows through via meta merging, with these alias keys winning
 // on collision. If you need transport-specific behaviour beyond
-// registration (e.g. wrapping the call in `try` for fault isolation),
-// upgrade the alias to a full `fn (event) { … }` wrapper.
+// registration (e.g. recovering from an adapter's `Result.Err` with
+// `if-err` instead of letting it halt), upgrade the alias to a full
+// `fn (event) { … }` wrapper.
 
 tg-record-voice
 meta {
