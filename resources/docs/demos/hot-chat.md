@@ -70,7 +70,7 @@ confirms the published deps resolve and both agents compile end to end.
 hot dev --open
 ```
 
-`hot dev` opens the Hot App at <http://localhost:4681> and registers both
+`hot dev` opens the Hot App at <http://localhost:4680> and registers both
 agents under one project. Leave it running.
 
 While the Hot App is open, generate an API key:

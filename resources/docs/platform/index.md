@@ -8,108 +8,103 @@ The Hot Platform is a complete backend workflow automation system. It combines a
 
 ## Architecture Overview
 
-<svg viewBox="0 0 600 480" class="w-full max-w-2xl mx-auto" style="font-family: system-ui, sans-serif;">
-  <!-- Styles -->
+<svg viewBox="0 0 720 592" class="w-full max-w-2xl mx-auto" style="font-family: system-ui, sans-serif;">
+  <!--
+    Theming note: the Hot App toggles dark mode with a `dark` class on <html>
+    (not the OS prefers-color-scheme), so these styles use `.dark` selectors.
+  -->
+  <!-- Neutral grays matching the app palette (input.css) — no blue tint. -->
   <style>
-    .arch-box { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 2; }
-    .arch-box-accent { fill: #fef2f2; stroke: #ef4444; stroke-width: 2; }
-    .arch-text { fill: #1e293b; font-size: 14px; font-weight: 600; }
-    .arch-text-sm { fill: #475569; font-size: 11px; }
-    .arch-arrow { stroke: #94a3b8; stroke-width: 2; fill: none; }
-    @media (prefers-color-scheme: dark) {
-      .arch-box { fill: #334155; stroke: #475569; }
-      .arch-box-accent { fill: #451a1a; stroke: #f87171; }
-      .arch-text { fill: #f1f5f9; }
-      .arch-text-sm { fill: #cbd5e1; }
-      .arch-arrow { stroke: #94a3b8; }
-    }
+    .arch-box { fill: #f9f9f9; stroke: #cccccc; stroke-width: 1.5; }
+    .arch-accent { fill: #fef2f2; stroke: #ef4444; stroke-width: 1.5; }
+    .arch-chip { fill: #ffffff; stroke: #dddddd; stroke-width: 1; }
+    .arch-title { fill: #111111; font-size: 15px; font-weight: 650; }
+    .arch-sub { fill: #666666; font-size: 11.5px; }
+    .arch-label { fill: #888888; font-size: 10.5px; font-style: italic; }
+    .arch-arrow { stroke: #aaaaaa; stroke-width: 1.75; fill: none; }
+    .arch-arrow-dashed { stroke: #aaaaaa; stroke-width: 1.75; fill: none; stroke-dasharray: 4 4; }
+    .dark .arch-box { fill: #17171a; stroke: #2a2a30; }
+    .dark .arch-accent { fill: #7f1d1d; stroke: #f87171; }
+    .dark .arch-chip { fill: #212126; stroke: #2f2f36; }
+    .dark .arch-title { fill: #f8f8f8; }
+    .dark .arch-sub { fill: #aaaaaa; }
+    .dark .arch-sub-accent { fill: #f0dcdc; }
+    .dark .arch-label { fill: #aaaaaa; }
   </style>
 
-  <!-- Your Backend -->
-  <rect x="20" y="10" width="560" height="70" rx="8" class="arch-box"/>
-  <text x="300" y="35" text-anchor="middle" class="arch-text">Your Backend</text>
-  <g transform="translate(80, 45)">
-    <rect x="0" y="0" width="90" height="28" rx="4" class="arch-box"/>
-    <text x="45" y="18" text-anchor="middle" class="arch-text-sm">Web Server</text>
-  </g>
-  <g transform="translate(190, 45)">
-    <rect x="0" y="0" width="70" height="28" rx="4" class="arch-box"/>
-    <text x="35" y="18" text-anchor="middle" class="arch-text-sm">CLI</text>
-  </g>
-  <g transform="translate(280, 45)">
-    <rect x="0" y="0" width="70" height="28" rx="4" class="arch-box"/>
-    <text x="35" y="18" text-anchor="middle" class="arch-text-sm">Scripts</text>
-  </g>
-  <g transform="translate(370, 45)">
-    <rect x="0" y="0" width="90" height="28" rx="4" class="arch-box"/>
-    <text x="45" y="18" text-anchor="middle" class="arch-text-sm">Integrations</text>
-  </g>
-
-  <!-- Arrow from backend to API -->
-  <path d="M 300 80 L 300 110" class="arch-arrow" marker-end="url(#arrowhead)"/>
-
-  <!-- Hot API -->
-  <rect x="20" y="110" width="560" height="60" rx="8" class="arch-box-accent"/>
-  <text x="300" y="135" text-anchor="middle" class="arch-text">Hot API</text>
-  <text x="300" y="155" text-anchor="middle" class="arch-text-sm">Execute functions, send events, manage files</text>
-
-  <!-- Arrow from API to Streams -->
-  <path d="M 300 170 L 300 200" class="arch-arrow"/>
-
-  <!-- Streams (container for Runs and Events) -->
-  <rect x="20" y="200" width="560" height="100" rx="8" class="arch-box"/>
-  <text x="300" y="222" text-anchor="middle" class="arch-text">Streams</text>
-  <text x="300" y="238" text-anchor="middle" class="arch-text-sm">Real-time workflow execution</text>
-
-  <!-- Runs (inside Streams) -->
-  <g transform="translate(60, 250)">
-    <rect x="0" y="0" width="220" height="40" rx="6" class="arch-box"/>
-    <text x="110" y="26" text-anchor="middle" class="arch-text-sm">Runs — Function executions</text>
-  </g>
-
-  <!-- Events (inside Streams) -->
-  <g transform="translate(320, 250)">
-    <rect x="0" y="0" width="220" height="40" rx="6" class="arch-box"/>
-    <text x="110" y="26" text-anchor="middle" class="arch-text-sm">Events — Async triggers</text>
-  </g>
-
-  <!-- Arrows from Streams to scheduler and workers -->
-  <path d="M 150 300 L 150 320" class="arch-arrow"/>
-  <path d="M 430 300 L 430 320" class="arch-arrow"/>
-
-  <!-- Hot Scheduler -->
-  <rect x="20" y="320" width="260" height="90" rx="8" class="arch-box-accent"/>
-  <text x="150" y="355" text-anchor="middle" class="arch-text">Hot Scheduler</text>
-  <text x="150" y="375" text-anchor="middle" class="arch-text-sm">Cron &amp; scheduled jobs</text>
-
-  <!-- Hot Workers -->
-  <rect x="300" y="320" width="280" height="90" rx="8" class="arch-box-accent"/>
-  <text x="440" y="345" text-anchor="middle" class="arch-text">Hot Workers</text>
-  <g transform="translate(320, 355)">
-    <rect x="0" y="0" width="55" height="30" rx="4" class="arch-box"/>
-    <text x="27" y="20" text-anchor="middle" class="arch-text-sm">Worker</text>
-  </g>
-  <g transform="translate(385, 355)">
-    <rect x="0" y="0" width="55" height="30" rx="4" class="arch-box"/>
-    <text x="27" y="20" text-anchor="middle" class="arch-text-sm">Worker</text>
-  </g>
-  <g transform="translate(450, 355)">
-    <rect x="0" y="0" width="55" height="30" rx="4" class="arch-box"/>
-    <text x="27" y="20" text-anchor="middle" class="arch-text-sm">Worker</text>
-  </g>
-  <text x="525" y="375" class="arch-text-sm">...</text>
-
-  <!-- Hot App -->
-  <rect x="20" y="430" width="560" height="50" rx="8" class="arch-box"/>
-  <text x="300" y="455" text-anchor="middle" class="arch-text">Hot App</text>
-  <text x="300" y="472" text-anchor="middle" class="arch-text-sm">Monitor runs, inspect events, debug workflows</text>
-
-  <!-- Arrowhead marker -->
   <defs>
-    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    <marker id="arch-arrow-head" markerWidth="9" markerHeight="7" refX="7.5" refY="3.5" orient="auto-start-reverse">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#aaaaaa"/>
     </marker>
   </defs>
+
+  <!-- Your Backend (producer: calls the API) -->
+  <rect x="16" y="12" width="436" height="84" rx="10" class="arch-box"/>
+  <text x="234" y="36" text-anchor="middle" class="arch-title">Your Backend</text>
+  <rect x="46" y="50" width="96" height="30" rx="6" class="arch-chip"/>
+  <text x="94" y="69" text-anchor="middle" class="arch-sub">Web Server</text>
+  <rect x="154" y="50" width="64" height="30" rx="6" class="arch-chip"/>
+  <text x="186" y="69" text-anchor="middle" class="arch-sub">CLI</text>
+  <rect x="230" y="50" width="76" height="30" rx="6" class="arch-chip"/>
+  <text x="268" y="69" text-anchor="middle" class="arch-sub">Scripts</text>
+  <rect x="318" y="50" width="104" height="30" rx="6" class="arch-chip"/>
+  <text x="370" y="69" text-anchor="middle" class="arch-sub">Integrations</text>
+
+  <!-- Hot Scheduler (producer: cron fires emit events) -->
+  <rect x="470" y="12" width="234" height="84" rx="10" class="arch-accent"/>
+  <text x="587" y="44" text-anchor="middle" class="arch-title">Hot Scheduler</text>
+  <text x="587" y="64" text-anchor="middle" class="arch-sub arch-sub-accent">Cron &amp; scheduled jobs</text>
+
+  <!-- Backend <-> API (calls in, results and SSE back) -->
+  <path d="M 234 101 L 234 121" class="arch-arrow" marker-start="url(#arch-arrow-head)" marker-end="url(#arch-arrow-head)"/>
+  <text x="246" y="115" class="arch-label">REST calls &amp; SSE subscriptions</text>
+
+  <!-- Scheduler -> Streams (emits schedule events) -->
+  <path d="M 587 96 L 587 241" class="arch-arrow" marker-end="url(#arch-arrow-head)"/>
+  <text x="599" y="172" class="arch-label">cron fires → emits events</text>
+
+  <!-- Hot API -->
+  <rect x="16" y="126" width="436" height="64" rx="10" class="arch-accent"/>
+  <text x="234" y="152" text-anchor="middle" class="arch-title">Hot API</text>
+  <text x="234" y="172" text-anchor="middle" class="arch-sub arch-sub-accent">Execute functions, send events, manage files</text>
+
+  <!-- API -> Streams -->
+  <path d="M 234 190 L 234 241" class="arch-arrow" marker-end="url(#arch-arrow-head)"/>
+  <text x="246" y="220" class="arch-label">publishes events</text>
+
+  <!-- Streams (grouping runs and events) -->
+  <rect x="16" y="246" width="688" height="112" rx="10" class="arch-box"/>
+  <text x="360" y="272" text-anchor="middle" class="arch-title">Streams</text>
+  <text x="360" y="289" text-anchor="middle" class="arch-sub">Group related events &amp; runs for end-to-end tracing</text>
+  <rect x="48" y="300" width="304" height="44" rx="6" class="arch-chip"/>
+  <text x="200" y="326" text-anchor="middle" class="arch-sub">Events — async triggers</text>
+  <rect x="368" y="300" width="304" height="44" rx="6" class="arch-chip"/>
+  <text x="520" y="326" text-anchor="middle" class="arch-sub">Runs — function executions</text>
+
+  <!-- Streams -> Workers -->
+  <path d="M 360 358 L 360 387" class="arch-arrow" marker-end="url(#arch-arrow-head)"/>
+  <text x="372" y="378" class="arch-label">workers pick up events &amp; execute runs</text>
+
+  <!-- Hot Workers (consumer: executes Hot code) -->
+  <rect x="16" y="392" width="688" height="96" rx="10" class="arch-accent"/>
+  <text x="360" y="416" text-anchor="middle" class="arch-title">Hot Workers</text>
+  <rect x="240" y="428" width="72" height="32" rx="6" class="arch-chip"/>
+  <text x="276" y="448" text-anchor="middle" class="arch-sub">Worker</text>
+  <rect x="324" y="428" width="72" height="32" rx="6" class="arch-chip"/>
+  <text x="360" y="448" text-anchor="middle" class="arch-sub">Worker</text>
+  <rect x="408" y="428" width="72" height="32" rx="6" class="arch-chip"/>
+  <text x="444" y="448" text-anchor="middle" class="arch-sub">Worker</text>
+  <text x="496" y="448" class="arch-sub">…</text>
+  <text x="360" y="478" text-anchor="middle" class="arch-sub arch-sub-accent">Scale horizontally — each worker executes runs in isolation</text>
+
+  <!-- Everything is recorded and observable in Hot App -->
+  <path d="M 360 488 L 360 507" class="arch-arrow-dashed" marker-end="url(#arch-arrow-head)"/>
+  <text x="372" y="502" class="arch-label">every run, event &amp; stream recorded</text>
+
+  <!-- Hot App -->
+  <rect x="16" y="512" width="688" height="64" rx="10" class="arch-box"/>
+  <text x="360" y="538" text-anchor="middle" class="arch-title">Hot App</text>
+  <text x="360" y="558" text-anchor="middle" class="arch-sub">Monitor runs, inspect events, debug workflows</text>
 </svg>
 
 ## Core Concepts

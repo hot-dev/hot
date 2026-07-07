@@ -242,7 +242,7 @@ fn (name: Str, mood: Str): Str {
 }
 
 // With `hot dev` running, MCP clients can connect to:
-//   http://localhost:4681/mcp/local/salutations
+//   http://localhost:4681/mcp/local/development/salutations
 
 // WEBHOOKS
 

@@ -97,10 +97,10 @@ hot run script.hot --value.format json    # Output as JSON
 Evaluate Hot code directly from the command line:
 
 ```bash
-hot eval '1 + 2'
-hot eval '::my-app::hello()'
+hot eval 'add(1, 2)'
+hot eval '::my-app::hi/hello()'
 hot eval 'send("user:created", {id: 123})'
-hot eval '[1, 2, 3] | map(x => x * 2)'
+hot eval '[1, 2, 3] |> map(mul(%, 2))'
 ```
 
 Output format:
@@ -129,12 +129,12 @@ hot test user               # Run tests matching "user"
 hot test "user signup"      # Run tests matching pattern
 ```
 
-Tests are functions with `meta {test: true}`:
+Tests are functions with `meta ["test"]` (or the equivalent `meta {test: true}`):
 
 ```hot
-should-add-numbers meta {test: true}
+should-add-numbers meta ["test"]
 fn () {
-  assert-eq(1 + 1, 2)
+  assert-eq(add(1, 1), 2)
 }
 ```
 

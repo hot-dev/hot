@@ -29,6 +29,8 @@ Hot has no `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `&&`, `||`, etc.
 
 **Why?** Consistency. Everything is a function call, with predictable evaluation order and no operator precedence to remember.
 
+> **Watch out:** `%` is not the modulo operator in Hot — it's the [lambda placeholder](/docs/language/functions#placeholder-lambdas). Use `mod(a, b)` for remainders.
+
 ## No Assignment Operator
 
 Hot has no `=` for assignment.
@@ -166,7 +168,7 @@ total reduce(items, (sum, x) { add(sum, x) }, 0)
 The last expression in a function body is the return value:
 
 ```hot
-add fn (a: Int, b: Int): Int {
+sum fn (a: Int, b: Int): Int {
   add(a, b)  // This is returned
 }
 ```

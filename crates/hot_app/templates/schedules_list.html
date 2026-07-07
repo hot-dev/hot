@@ -1,4 +1,5 @@
 {% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
 {% block content %}
 <div>
     <!-- Filter Controls -->
@@ -15,7 +16,7 @@
                 type="text"
                 x-model="searchQuery"
                 placeholder="Search by function name, cron expression, or project..."
-                class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+                class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-hot-red-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
         </div>
     </div>
 
@@ -42,12 +43,12 @@
     </div>
 
     {% if schedules.is_empty() %}
-        <div class="text-center py-12">
+        <div class="empty-state">
             <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No scheduled runs</h3>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No scheduled functions found for deployed builds in this environment.</p>
+            <h3 class="empty-state-title">No scheduled runs</h3>
+            <p class="empty-state-message">No scheduled functions found for deployed builds in this environment.</p>
         </div>
     {% else %}
         <!-- Desktop Table View -->
@@ -56,18 +57,18 @@
                 <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-100 dark:bg-gray-800">
                         <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Project</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Function</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Type</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Schedule</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Retry</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Source</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Project</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Function</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Type</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Schedule</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Retry</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Source</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
                         {% for schedule in schedules %}
-                        <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">
                                 <a href="/projects/{{ schedule.project_name }}" class="link">
                                     {{ schedule.project_name }}
@@ -147,42 +148,8 @@
             <!-- Pagination (Desktop) -->
             {% if has_prev_page || has_next_page %}
             <div class="px-6 py-4 border-t border-gray-200 dark:border-gray-800">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm text-gray-700 dark:text-gray-300">
-                            Showing <span class="font-medium">{{ schedules.len() }}</span> of <span class="font-medium">{{ total_schedules }}</span> scheduled runs
-                        </p>
-                    </div>
-                    <div>
-                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                            {% if has_prev_page %}
-                            <a href="/schedules?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Previous</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-
-                            {% for page_num in start_page..=end_page %}
-                            {% if page_num == current_page_num %}
-                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
-                            {% else %}
-                            <a href="/schedules?p={{ page_num }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
-                            {% endif %}
-                            {% endfor %}
-
-                            {% if has_next_page %}
-                            <a href="/schedules?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Next</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-                        </nav>
-                    </div>
-                </div>
+                {% let pag_suffix = "&search={}"|format(search_query) %}
+                {% call ui::pagination("/schedules?p=", pag_suffix, current_page_num, start_page, end_page, has_prev_page, has_next_page, schedules.len(), total_schedules, "scheduled runs") %}{% endcall %}
             </div>
             {% endif %}
         </div>
@@ -259,13 +226,13 @@
             {% if has_prev_page || has_next_page %}
             <div class="flex justify-between items-center pt-4">
                 {% if has_prev_page %}
-                <a href="/schedules?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
+                <a href="/schedules?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</a>
                 {% else %}
                 <div></div>
                 {% endif %}
                 <span class="text-sm text-gray-700 dark:text-gray-300">Page {{ current_page_num }}</span>
                 {% if has_next_page %}
-                <a href="/schedules?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
+                <a href="/schedules?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</a>
                 {% else %}
                 <div></div>
                 {% endif %}

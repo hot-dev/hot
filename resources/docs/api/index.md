@@ -57,7 +57,6 @@ API keys, service keys, and sessions share a granular permission system. Permiss
 | `stream` | `read` | Stream subscription (e.g., `stream:*` or `stream:<id>`) |
 | `event` | `create`, `read` | Event publishing and reading |
 | `run` | `read` | Run inspection |
-| `call` | `create`, `read` | Function call invocation |
 | `project` | `create`, `read`, `update`, `delete` | Project management |
 | `build` | `create`, `read`, `execute` | Build management and deployment |
 | `context` | `create`, `read`, `update`, `delete` | Context variable management |
@@ -95,7 +94,7 @@ API requests are rate limited per organization. Limits are based on your subscri
 |------|-------------------|
 | Starter | 20 RPS |
 | Pro | 100 RPS |
-| Enterprise / Self-hosted | Unlimited |
+| Scale / Self-Host | Unlimited |
 
 When the limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header indicating how many seconds to wait before retrying.
 
@@ -169,7 +168,7 @@ List endpoints support pagination via query parameters:
 GET /status
 ```
 
-Returns API server health information. No authentication required.
+Returns API server health information. No authentication required. Note that `/status` is served at the server root — it is the one endpoint **not** under the `/v1` prefix.
 
 **Response:**
 
@@ -476,7 +475,8 @@ GET /v1/files
       "updated_at": "2024-01-15T10:30:00Z"
     }
   ],
-  "meta": {"total": 1, "limit": 20, "offset": 0}
+  "pagination": {"total": 1, "limit": 20, "offset": 0},
+  "meta": {...}
 }
 ```
 
@@ -866,7 +866,7 @@ For comparison:
 
 ```json
 {
-  "event_type": "user.signup",
+  "event_type": "user:signup",
   "event_data": {
     "user_id": "123",
     "email": "alice@example.com"
@@ -882,7 +882,7 @@ For comparison:
     "event_id": "550e8400-e29b-41d4-a716-446655440000",
     "env_id": "660e8400-e29b-41d4-a716-446655440000",
     "stream_id": "770e8400-e29b-41d4-a716-446655440000",
-    "event_type": "user.signup",
+    "event_type": "user:signup",
     "event_data": {...},
     "event_time": "2024-01-15T10:30:00Z",
     "created_at": "2024-01-15T10:30:00Z"
@@ -934,7 +934,7 @@ GET /v1/runs
 |-----------|------|-------------|
 | `limit` | int | Max results (default: 20) |
 | `offset` | int | Pagination offset |
-| `status` | string | Filter: `running`, `succeeded`, `failed`, `cancelled` |
+| `status` | string | Filter: `running`, `succeeded`, `failed`, `cancelled`, `pending_retry` |
 | `type` | string | Filter: `call`, `event`, `schedule`, `run`, `eval`, `repl` |
 | `time_range` | string | ISO 8601 duration: `P7D`, `P30D`, etc. |
 
@@ -1013,7 +1013,7 @@ Returns event handlers from the project's deployed build.
     {
       "event_handler_id": "550e8400-e29b-41d4-a716-446655440000",
       "build_id": "660e8400-e29b-41d4-a716-446655440000",
-      "event_type": "user.signup",
+      "event_type": "user:signup",
       "ns": "::myapp::handlers",
       "var": "on-user-signup"
     }
@@ -1111,7 +1111,7 @@ event: run:stop
 data: {"run_id":"550e8400-...","stream_id":"660e8400-..."}
 
 event: event:created
-data: {"event_id":"770e8400-...","stream_id":"880e8400-...","event_type":"user.signup"}
+data: {"event_id":"770e8400-...","stream_id":"880e8400-...","event_type":"user:signup"}
 ```
 
 **Examples:**
@@ -1129,19 +1129,30 @@ curl -N 'https://api.hot.dev/v1/env/subscribe' \
 #### **JavaScript**
 
 ```javascript
-const eventSource = new EventSource('https://api.hot.dev/v1/env/subscribe', {
-  headers: { 'Authorization': `Bearer ${HOT_API_KEY}` }
+// Note: the browser-native EventSource API can't send an Authorization
+// header, so use fetch with a stream reader instead.
+const response = await fetch('https://api.hot.dev/v1/env/subscribe', {
+  headers: {
+    'Authorization': `Bearer ${HOT_API_KEY}`,
+    'Accept': 'text/event-stream'
+  }
 });
 
-eventSource.addEventListener('run:stop', (e) => {
-  const data = JSON.parse(e.data);
-  console.log('Run stopped:', data.run_id);
-});
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
 
-eventSource.addEventListener('event:created', (e) => {
-  const data = JSON.parse(e.data);
-  console.log('Event created:', data.event_type);
-});
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  const text = decoder.decode(value);
+  for (const line of text.split('\n')) {
+    if (line.startsWith('data: ')) {
+      const data = JSON.parse(line.slice(6));
+      console.log('SSE event:', data);
+    }
+  }
+}
 ```
 
 #### **Python**
@@ -1263,7 +1274,7 @@ Subscribe to an existing stream to receive real-time updates.
 | `run:fail` | A run failed |
 | `run:cancel` | A run was cancelled |
 | `stream:data` | Real-time data from the run (e.g., AI tokens) |
-| `stream:complete` | Stream timed out (5 minute default) |
+| `stream:complete` | Stream subscription ended — the stream completed or the subscription timed out (5 minute default) |
 
 **Example Event:**
 
@@ -1767,7 +1778,7 @@ curl https://api.hot.dev/v1/projects \
 curl -X POST https://api.hot.dev/v1/events \
   -H "Authorization: Bearer $HOT_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"event_type": "user.signup", "event_data": {"user_id": "123"}}'
+  -d '{"event_type": "user:signup", "event_data": {"user_id": "123"}}'
 ```
 
 #### **JavaScript**
@@ -1790,7 +1801,7 @@ await fetch(`${BASE_URL}/events`, {
     'Content-Type': 'application/json'
   },
   body: JSON.stringify({
-    event_type: 'user.signup',
+    event_type: 'user:signup',
     event_data: { user_id: '123', email: 'alice@example.com' }
   })
 });
@@ -1818,7 +1829,7 @@ requests.post(
     f'{BASE_URL}/events',
     headers=headers,
     json={
-        'event_type': 'user.signup',
+        'event_type': 'user:signup',
         'event_data': {'user_id': '123', 'email': 'alice@example.com'}
     }
 )

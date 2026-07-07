@@ -96,7 +96,7 @@ fn (event) {
 }
 
 daily-review meta {agent: SupportAgent, schedule: "0 9 * * 1-5"}
-fn () {
+fn (event) {
   summarize-yesterday(kb)
 }
 
@@ -137,7 +137,7 @@ fn (event) {
 
 ```hot
 daily-review meta {agent: SupportAgent, schedule: "0 9 * * 1-5"}
-fn () {
+fn (event) {
   review-interactions()
 }
 ```
@@ -177,7 +177,7 @@ LeadQualification meta {
 type {}
 ```
 
-Handlers can opt into one or more named workflows:
+Handlers can opt into one or more named workflows (here `LeadQualifier` is the agent type defined in [Hybrid Agent](#hybrid-agent) below):
 
 ```hot
 qualify-lead meta {
@@ -516,7 +516,7 @@ briefing DailyBriefing({
 })
 
 morning-report meta {agent: DailyBriefing, schedule: "0 8 * * 1-5"}
-fn () {
+fn (event) {
   data aggregate-sources(briefing.sources)
   summary generate-summary(data)
   send-to-channel(briefing.channel, summary)
@@ -554,7 +554,7 @@ fn (event) {
 }
 
 weekly-pipeline meta {agent: LeadQualifier, schedule: "0 9 * * 1"}
-fn () {
+fn (event) {
   generate-pipeline-report()
 }
 ```
@@ -571,6 +571,6 @@ fn () {
 
 **Use `::hot::store` for agent memory.** Enable embeddings when you need semantic search (conversation history, knowledge bases). Use plain maps for counters, state flags, and structured data.
 
-**Use streams for multi-step workflows.** Send events with a `stream_id` to group related runs under a single stream. This gives you end-to-end visibility into agent workflows in the Streams view.
+**Use streams for multi-step workflows.** Runs triggered from inside a handler automatically share that handler's stream, so chained `send(...)` calls stay grouped. When publishing from outside Hot, pass a `stream_id` to `POST /v1/events` to append to an existing stream. Either way, the Streams view gives you end-to-end visibility into agent workflows.
 
 **Prefer event-driven over polling.** Use `on-event` handlers to react to changes rather than scheduled polling. Events are more efficient and produce clearer audit trails.

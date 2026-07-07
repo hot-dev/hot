@@ -53,7 +53,7 @@
                                 <label for="role_id" class="block text-sm font-medium mb-2">Role</label>
                                 <select id="role_id"
                                         name="role_id"
-                                        class="w-full px-3 py-2 bg-white/50 dark:bg-gray-700 border border-gray-300 dark:border-gray-800 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 backdrop-blur-sm">
+                                        class="w-full px-3 py-2 bg-white/50 dark:bg-gray-700 border border-gray-300 dark:border-gray-800 rounded-md focus:ring-2 focus:ring-hot-red-500 focus:border-hot-red-500 backdrop-blur-sm">
                                     <option value="1" {% if org_user.org_user_role_id == 1 %}selected{% endif %}>Member</option>
                                     <option value="2" {% if org_user.org_user_role_id == 2 %}selected{% endif %}>Admin</option>
                                 </select>
@@ -72,7 +72,7 @@
                                                name="active"
                                                value="true"
                                                {% if org_user.active %}checked{% endif %}
-                                               class="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300">
+                                               class="h-4 w-4 text-red-600 focus:ring-hot-red-500 border-gray-300">
                                         <label for="active" class="ml-2 text-sm text-gray-900 dark:text-white">
                                             Active - User can access the organization
                                         </label>
@@ -83,7 +83,7 @@
                                                name="active"
                                                value="false"
                                                {% if !org_user.active %}checked{% endif %}
-                                               class="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300">
+                                               class="h-4 w-4 text-red-600 focus:ring-hot-red-500 border-gray-300">
                                         <label for="inactive" class="ml-2 text-sm text-gray-900 dark:text-white">
                                             Inactive - User cannot access the organization
                                         </label>
@@ -100,7 +100,7 @@
                                 <a href="/@{{ org.slug }}/users" class="text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-white transition-colors">
                                     Cancel
                                 </a>
-                                <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                                <button type="submit" class="btn btn-primary">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>

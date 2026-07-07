@@ -25,7 +25,7 @@
         <input type="hidden" name="plan_id" value="{{ plan.plan_id.as_deref().unwrap_or("") }}">
         <input type="hidden" name="billing_period" value="{{ billing_period }}">
 
-        <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white font-semibold py-3 px-6 rounded-md transition shadow-sm">
+        <button type="submit" class="btn btn-primary btn-lg w-full">
           Continue to Payment
         </button>
       </form>
