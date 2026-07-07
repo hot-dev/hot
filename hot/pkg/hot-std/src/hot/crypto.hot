@@ -1,0 +1,45 @@
+::hot::crypto ns
+meta {
+    doc: """
+    Key-derivation functions.
+
+    These run natively because interpreting thousands of HMAC rounds per
+    call would be prohibitively slow. For plain hashes see `::hot::hash`,
+    for HMAC see `::hot::hmac`.
+    """
+}
+
+pbkdf2-hmac-sha256
+meta {
+    doc: """
+    PBKDF2 key derivation using HMAC-SHA256 (RFC 2898). This is the `Hi()`
+    function from SCRAM-SHA-256 (RFC 5802/7677), used by Postgres and other
+    SASL-based protocols to derive the salted password.
+
+    Returns the derived key as Bytes. The default length is 32 bytes
+    (the SHA-256 output size); pass `length` to derive more or fewer.
+
+    **Example**
+
+    ```hot
+    ::crypto ::hot::crypto
+    ::hex ::hot::hex
+
+    key ::crypto/pbkdf2-hmac-sha256("password", "salt", 1)
+    ::hex/encode(key)
+    // "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+
+    // SCRAM-SHA-256 SaltedPassword (RFC 7677 test vector)
+    ::b64 ::hot::base64
+    salt ::b64/decode("W22ZaJ0SNY7soEsUEjb6gQ==")
+    salted ::crypto/pbkdf2-hmac-sha256("pencil", salt, 4096)
+    ```
+    """
+}
+fn
+(password: Str | Bytes, salt: Str | Bytes, iterations: Int): Bytes {
+    call-lib(::hot::crypto/pbkdf2-hmac-sha256, [password, salt, iterations])
+},
+(password: Str | Bytes, salt: Str | Bytes, iterations: Int, length: Int): Bytes {
+    call-lib(::hot::crypto/pbkdf2-hmac-sha256, [password, salt, iterations, length])
+}

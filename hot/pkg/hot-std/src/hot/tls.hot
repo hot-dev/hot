@@ -1,0 +1,110 @@
+::hot::tls ns
+meta {
+    doc: """
+    TLS upgrades for `::hot::tcp` connections.
+
+    Many protocols (Postgres, SMTP, IMAP) negotiate TLS on an already-open
+    TCP connection: the client sends a protocol-level request in plaintext,
+    then both sides perform the TLS handshake on the same socket. `upgrade`
+    implements the client side of that handshake.
+
+    Certificate verification defaults to full chain + hostname verification
+    against the system roots (`verify-full`). Passing `mode: "insecure"`
+    disables verification entirely — only use it against servers you control.
+    """
+}
+
+TlsOptions
+meta {
+    doc: """
+    Options for upgrading a connection to TLS.
+
+    **Fields**
+    - `server-name` — Hostname for SNI and certificate verification
+      (default: the host the connection was opened with)
+    - `mode` — `"verify-full"` (default) or `"insecure"` (no verification)
+    - `ca-pem` — Additional trusted root certificate(s), PEM-encoded.
+      Use for private CAs and self-signed servers instead of `"insecure"`.
+    - `client-cert-pem` — Client certificate chain (PEM) for mutual TLS
+    - `client-key-pem` — Client private key (PEM); required with `client-cert-pem`
+    """
+}
+type {
+    server-name: Str?,
+    mode: Str?,
+    ca-pem: Str?,
+    client-cert-pem: Str?,
+    client-key-pem: Str?
+}
+
+upgrade
+meta {
+    doc: """
+    Upgrade an open `::hot::tcp` connection to TLS in place.
+
+    Returns the connection with `tls: true`. The underlying handle is
+    shared, so reads and writes made through the original connection value
+    also use TLS after the upgrade. Fails with an error Result when the
+    handshake or certificate verification fails — the connection is closed
+    and cannot be reused.
+
+    **Examples**
+
+    ```hot
+    ::tcp ::hot::tcp
+    ::tls ::hot::tls
+
+    // Postgres STARTTLS-style flow: send SSLRequest, expect 'S', upgrade
+    conn ::tcp/connect("db.example.com", 5432)
+    ::tcp/write(conn, Bytes([0, 0, 0, 8, 4, 210, 22, 47]))
+    answer ::tcp/read-exact(conn, 1)
+    secure ::tls/upgrade(conn)
+
+    // Private CA
+    secure ::tls/upgrade(conn, TlsOptions({ca-pem: read-file("ca.pem")}))
+
+    // Mutual TLS
+    secure ::tls/upgrade(conn, TlsOptions({
+        client-cert-pem: read-file("client.pem"),
+        client-key-pem: read-file("client.key"),
+    }))
+    ```
+    """
+}
+fn
+(conn: ::hot::tcp/TcpConnection): ::hot::tcp/TcpConnection {
+    call-lib(::hot::tls/upgrade, [conn])
+},
+(conn: ::hot::tcp/TcpConnection, options: TlsOptions): ::hot::tcp/TcpConnection {
+    call-lib(::hot::tls/upgrade, [conn, options])
+}
+
+peer-cert-hash
+meta {
+    doc: """
+    Hash of the server's leaf certificate (DER-encoded), as Bytes.
+
+    Used for SCRAM channel binding (`tls-server-end-point`) and certificate
+    pinning. The connection must have been upgraded to TLS first.
+
+    The default algorithm is `"sha256"`, which matches `tls-server-end-point`
+    for certificates signed with SHA-256 (the overwhelming majority). Pass
+    `"sha384"` or `"sha512"` for certificates signed with those algorithms.
+
+    **Example**
+
+    ```hot
+    ::b64 ::hot::base64
+
+    secure ::tls/upgrade(conn)
+    binding ::b64/encode(::tls/peer-cert-hash(secure))
+    ```
+    """
+}
+fn
+(conn: ::hot::tcp/TcpConnection): Bytes {
+    call-lib(::hot::tls/peer-cert-hash, [conn])
+},
+(conn: ::hot::tcp/TcpConnection, algorithm: Str): Bytes {
+    call-lib(::hot::tls/peer-cert-hash, [conn, algorithm])
+}

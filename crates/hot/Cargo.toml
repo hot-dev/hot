@@ -30,6 +30,9 @@ tracing-appender = { workspace = true }
 async-trait = { workspace = true }
 redis = { workspace = true }
 rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
 once_cell = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 async-channel = { workspace = true }

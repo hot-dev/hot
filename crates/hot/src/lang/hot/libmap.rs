@@ -918,6 +918,25 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::bytes/to-vec".to_string(),
             HotLibFn::LibFn(bytes::to_vec),
         );
+        map.insert(
+            "::hot::bytes/index-of".to_string(),
+            HotLibFn::LibFn(bytes::index_of),
+        );
+        map.insert("::hot::bytes/xor".to_string(), HotLibFn::LibFn(bytes::xor));
+        map.insert(
+            "::hot::bytes/to-float".to_string(),
+            HotLibFn::LibFn(bytes::to_float),
+        );
+        map.insert(
+            "::hot::bytes/from-float".to_string(),
+            HotLibFn::LibFn(bytes::from_float),
+        );
+
+        // Key derivation functions
+        map.insert(
+            "::hot::crypto/pbkdf2-hmac-sha256".to_string(),
+            HotLibFn::LibFn(crypto::pbkdf2_hmac_sha256),
+        );
 
         // Secure random functions
         map.insert(
@@ -1679,6 +1698,33 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         map.insert(
             "::hot::ws/is-open".to_string(),
             HotLibFn::LibFn(ws::is_open),
+        );
+
+        // TCP client functions
+        map.insert(
+            "::hot::tcp/connect".to_string(),
+            HotLibFn::LibFn(tcp::connect),
+        );
+        map.insert("::hot::tcp/read".to_string(), HotLibFn::LibFn(tcp::read));
+        map.insert(
+            "::hot::tcp/read-exact".to_string(),
+            HotLibFn::LibFn(tcp::read_exact),
+        );
+        map.insert("::hot::tcp/write".to_string(), HotLibFn::LibFn(tcp::write));
+        map.insert("::hot::tcp/close".to_string(), HotLibFn::LibFn(tcp::close));
+        map.insert(
+            "::hot::tcp/is-open".to_string(),
+            HotLibFn::LibFn(tcp::is_open),
+        );
+
+        // TLS upgrade functions
+        map.insert(
+            "::hot::tls/upgrade".to_string(),
+            HotLibFn::LibFn(tls::upgrade),
+        );
+        map.insert(
+            "::hot::tls/peer-cert-hash".to_string(),
+            HotLibFn::LibFn(tls::peer_cert_hash),
         );
 
         // Store functions

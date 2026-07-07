@@ -1,0 +1,32 @@
+::hot::test::tcp ns
+meta ["test"]
+
+::tcp ::hot::tcp
+
+is-err ::hot::type/is-err
+
+// Happy-path connect/read/write/TLS tests live in Rust (tcp.rs, tls.rs),
+// where the test can spawn a local listener. Hot tests cover the argument
+// validation and connection-failure paths, which need no server.
+
+// Connecting to a port nothing listens on returns an error Result
+test-connect-refused
+meta ["test"] fn () {
+    // Port 1 (tcpmux) is essentially never bound on modern systems
+    result ::tcp/connect("127.0.0.1", 1, ::hot::tcp/TcpOptions({timeout: 2000}))
+    assert(is-err(result), "connect to unbound port should return error")
+}
+
+// Invalid ports are rejected before any network IO
+test-connect-invalid-port
+meta ["test"] fn () {
+    assert(is-err(::tcp/connect("127.0.0.1", 0)), "port 0 is invalid")
+    assert(is-err(::tcp/connect("127.0.0.1", 99999)), "port 99999 is invalid")
+}
+
+// Unresolvable hosts return an error Result
+test-connect-bad-host
+meta ["test"] fn () {
+    result ::tcp/connect("nonexistent.invalid", 80, ::hot::tcp/TcpOptions({timeout: 2000}))
+    assert(is-err(result), "connect to unresolvable host should return error")
+}

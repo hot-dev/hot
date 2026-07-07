@@ -1,0 +1,214 @@
+::hot::tcp ns
+meta {
+    doc: """
+    Raw TCP client connections for implementing binary protocols
+    (Postgres, Redis, SMTP, ...) directly in Hot.
+
+    Connections are opaque handles owned by the runtime and live for the
+    duration of the run or task that opened them. Use `::hot::tls/upgrade`
+    to switch an open connection to TLS in place (STARTTLS style).
+
+    For HTTP use `::hot::http`; for WebSockets use `::hot::ws`.
+    """
+}
+
+TcpOptions
+meta {
+    doc: """
+    Options for opening a TCP connection.
+
+    **Fields**
+    - `timeout` — Connect timeout in milliseconds (default: `30000`, `0` = no timeout)
+    - `nodelay` — Disable Nagle's algorithm (default: `true`)
+    """
+}
+type {
+    timeout: Int?,
+    nodelay: Bool?
+}
+
+ReadOptions
+meta {
+    doc: """
+    Options for read operations.
+
+    **Fields**
+    - `timeout` — Read timeout in milliseconds (default: `30000`, `0` = block until data arrives)
+    """
+}
+type {
+    timeout: Int?
+}
+
+TcpConnection
+meta {
+    doc: """
+    An open TCP connection returned by `connect` (and by `::hot::tls/upgrade`).
+
+    **Fields**
+    - `id` - Unique connection identifier
+    - `host` - Host the connection was opened to
+    - `port` - Port the connection was opened to
+    - `tls` - Whether the connection has been upgraded to TLS
+
+    **Example**
+
+    ```hot
+    ::tcp ::hot::tcp
+    ::bytes ::hot::bytes
+
+    conn ::tcp/connect("example.com", 80)
+
+    ::tcp/write(conn, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+    response ::tcp/read(conn, 65536)
+
+    ::tcp/close(conn)
+    ```
+    """
+}
+type {
+    id: Str,
+    host: Str,
+    port: Int,
+    tls: Bool
+}
+
+connect
+meta {
+    doc: """
+    Open a TCP connection to `host`:`port`.
+
+    Returns a `TcpConnection`. Fails with an error Result when the
+    connection cannot be established within the timeout.
+
+    **Examples**
+
+    ```hot
+    // Simple connection
+    conn ::tcp/connect("db.example.com", 5432)
+
+    // With a shorter connect timeout
+    conn ::tcp/connect("db.example.com", 5432, TcpOptions({timeout: 5000}))
+    ```
+    """
+}
+fn
+(host: Str, port: Int): TcpConnection {
+    call-lib(::hot::tcp/connect, [host, port])
+},
+(host: Str, port: Int, options: TcpOptions): TcpConnection {
+    call-lib(::hot::tcp/connect, [host, port, options])
+}
+
+read
+meta {
+    doc: """
+    Read up to `max` bytes from the connection.
+
+    Blocks until at least one byte is available and returns whatever has
+    arrived (which may be fewer than `max` bytes). Returns `null` when the
+    peer has closed the connection. Fails with an error Result when the
+    timeout expires — for protocol framing prefer `read-exact`.
+
+    **Example**
+
+    ```hot
+    data ::tcp/read(conn, 4096)
+    if(is-null(data), handle-disconnect(), process(data))
+    ```
+    """
+}
+fn
+(conn: TcpConnection, max: Int): Bytes? {
+    call-lib(::hot::tcp/read, [conn, max])
+},
+(conn: TcpConnection, max: Int, options: ReadOptions): Bytes? {
+    call-lib(::hot::tcp/read, [conn, max, options])
+}
+
+read-exact
+meta {
+    doc: """
+    Read exactly `n` bytes from the connection.
+
+    Blocks until all `n` bytes have arrived. Fails with an error Result
+    when the peer closes the connection first or the timeout expires.
+    This is the building block for length-prefixed protocol framing:
+
+    **Example**
+
+    ```hot
+    ::bytes ::hot::bytes
+
+    // Read a Postgres-style message: 1-byte type + 4-byte length + body
+    msg-type ::tcp/read-exact(conn, 1)
+    len-bytes ::tcp/read-exact(conn, 4)
+    body-len sub(::bytes/to-int(len-bytes), 4)
+    body ::tcp/read-exact(conn, body-len)
+    ```
+    """
+}
+fn
+(conn: TcpConnection, n: Int): Bytes {
+    call-lib(::hot::tcp/read-exact, [conn, n])
+},
+(conn: TcpConnection, n: Int, options: ReadOptions): Bytes {
+    call-lib(::hot::tcp/read-exact, [conn, n, options])
+}
+
+write
+meta {
+    doc: """
+    Write data to the connection and flush it.
+
+    `Bytes` are written as-is; `Str` values are written as UTF-8.
+    Returns the number of bytes written.
+
+    **Example**
+
+    ```hot
+    ::bytes ::hot::bytes
+
+    n ::tcp/write(conn, concat(::bytes/from-int(length(payload), 4), payload))
+    ```
+    """
+}
+fn (conn: TcpConnection, data: Bytes | Str): Int {
+    call-lib(::hot::tcp/write, [conn, data])
+}
+
+close
+meta {
+    doc: """
+    Close the connection. Safe to call more than once.
+
+    **Example**
+
+    ```hot
+    ::tcp/close(conn)
+    ```
+    """
+}
+fn (conn: TcpConnection): Bool {
+    call-lib(::hot::tcp/close, [conn])
+}
+
+is-open
+meta {
+    doc: """
+    Check whether the connection is still open (`close` has not been
+    called and no fatal error has occurred).
+
+    Note this does not probe the peer: a connection the other side has
+    dropped reports open until a read returns `null` or a write fails.
+
+    **Example**
+
+    ```hot
+    if(::tcp/is-open(conn), send-more(conn), reconnect())
+    ```
+    """
+}
+fn (conn: TcpConnection): Bool {
+    call-lib(::hot::tcp/is-open, [conn])
+}
