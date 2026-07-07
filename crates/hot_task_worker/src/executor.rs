@@ -445,6 +445,22 @@ impl BoxExecutor {
         }
     }
 
+    /// Best-effort cleanup of any Kata VM state left behind when the
+    /// caller's outer timeout cancels `execute_with_extras` mid-flight
+    /// (dropping the future skips its internal cleanup). No-op for Docker,
+    /// whose phased create/poll path owns the container lifecycle directly.
+    pub async fn cleanup_after_timeout(
+        &self,
+        #[allow(unused_variables)] trace_id: &str,
+        #[allow(unused_variables)] needs_network: bool,
+    ) {
+        match self {
+            Self::Docker(_) => {}
+            #[cfg(all(target_os = "linux", feature = "kata"))]
+            Self::Kata(e) => e.cleanup_after_timeout(trace_id, needs_network).await,
+        }
+    }
+
     /// Force-cleanup an orphan container previously returned by
     /// `list_orphan_containers`. Best-effort; never returns an error.
     #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
@@ -976,6 +992,39 @@ pub(crate) fn normalize_image_ref(image: &str) -> String {
     format!("docker.io/library/{image}")
 }
 
+/// Derive the base container ID for a task from its trace/task ID: the
+/// last 24 hex chars of the UUID (v7, where most randomness lives). Used
+/// as both the containerd container_id and the Kata sandbox ID so shim
+/// directories, snapshots, FIFOs, and logs are all directly traceable to
+/// the task — and so a caller that cancelled `execute` mid-flight can
+/// re-derive the ID for cleanup. 24 chars keeps the vsock listener path
+/// at 99 chars, well under the 107-char Unix socket limit
+/// (sun_path[108] - null).
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn container_id_for_trace(trace_id: Option<&str>) -> String {
+    let s = trace_id
+        .and_then(|tid| uuid::Uuid::try_parse(tid).ok())
+        .unwrap_or_else(uuid::Uuid::new_v4)
+        .simple()
+        .to_string();
+    s[s.len() - 24..].to_string()
+}
+
+/// Container ID for setup-retry attempt `attempt` (2, 3, ...). Replaces
+/// the last two chars of the base ID with `r<attempt>`; `r` is outside
+/// the hex alphabet of the base ID, so a retry ID can never collide with
+/// the base (which previously happened 1-in-16 times when the base
+/// happened to end in the attempt digit, silently reusing the stale
+/// sandbox state the retry is meant to sidestep). Length is unchanged,
+/// preserving the vsock-path budget documented on
+/// [`container_id_for_trace`].
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn retry_container_id(base: &str, attempt: u32) -> String {
+    format!("{}r{:x}", &base[..base.len() - 2], attempt)
+}
+
 /// Compute the OCI chain ID from a list of diff IDs.
 /// For a single layer, chain ID = diff ID.
 /// For multiple layers: chain_id(L0..Ln) = sha256(chain_id(L0..Ln-1) + " " + diff_id(Ln))
@@ -1020,6 +1069,14 @@ mod kata {
     const SNAPSHOTTER: &str = "devmapper";
     const KATA_IO_DIR: &str = "/tmp/hot-box-io";
     const KATA_VC_DIR: &str = "/run/vc/firecracker";
+
+    /// Retry the full setup (snapshot → container → task) with a fresh
+    /// container ID on each attempt. The Kata Go shim has a known cgroup
+    /// cleanup bug where stale sandbox state from a failed attempt cannot
+    /// be removed because LoadResourceController and
+    /// NewSandboxResourceController use incompatible cgroup types. Using
+    /// a new ID sidesteps the stale state entirely.
+    const MAX_SETUP_ATTEMPTS: u32 = 3;
 
     pub struct KataExecutor {
         channel: Channel,
@@ -1156,6 +1213,31 @@ mod kata {
             .await;
         }
 
+        /// Best-effort cleanup after the caller's wall-clock timeout
+        /// cancelled `execute` mid-flight. Dropping the execute future skips
+        /// its internal cleanup, which would otherwise leak the microVM
+        /// (shim + QEMU), devmapper snapshot, IO FIFOs, and CNI netns until
+        /// worker restart — the orphan reaper can't reach a leaked shim
+        /// because its parent is kata-containerd, not PID 1.
+        ///
+        /// The container ID is re-derived from the trace/task ID (see
+        /// `container_id_for_trace`), and every setup-retry variant is
+        /// swept since we can't know which attempt was in flight.
+        pub async fn cleanup_after_timeout(&self, trace_id: &str, needs_network: bool) {
+            let base = container_id_for_trace(Some(trace_id));
+            for attempt in 1..=MAX_SETUP_ATTEMPTS {
+                let cid = if attempt == 1 {
+                    base.clone()
+                } else {
+                    retry_container_id(&base, attempt)
+                };
+                self.cleanup_orphan(&cid).await;
+            }
+            if needs_network {
+                crate::cni::teardown(&base).await;
+            }
+        }
+
         #[allow(clippy::too_many_arguments)]
         pub async fn execute(
             &self,
@@ -1230,20 +1312,7 @@ mod kata {
             pre_start_hook: Option<PreStartHook>,
         ) -> ExecutorResult<ContainerOutput> {
             let image = &normalize_image_ref(image);
-            // Derive a short ID from the task_id (last 24 hex chars of UUID
-            // v7, where most randomness lives). Used as both the containerd
-            // container_id and the Kata sandbox ID so shim directories,
-            // snapshots, FIFOs, and logs are all directly traceable to the
-            // task. 24 chars keeps the vsock listener path at 99 chars, well
-            // under the 107-char Unix socket limit (sun_path[108] - null).
-            let container_id = {
-                let s = trace_id
-                    .and_then(|tid| uuid::Uuid::try_parse(tid).ok())
-                    .unwrap_or_else(uuid::Uuid::new_v4)
-                    .simple()
-                    .to_string();
-                s[s.len() - 24..].to_string()
-            };
+            let container_id = container_id_for_trace(trace_id);
 
             let mut images = ImagesClient::new(self.channel.clone());
             let mut containers = ContainersClient::new(self.channel.clone());
@@ -1306,20 +1375,15 @@ mod kata {
                 None
             };
 
-            // Retry the full setup (snapshot → container → task) with a fresh
-            // container ID on each attempt. The Kata Go shim has a known cgroup
-            // cleanup bug where stale sandbox state from a failed attempt cannot
-            // be removed because LoadResourceController and
-            // NewSandboxResourceController use incompatible cgroup types. Using
-            // a new ID sidesteps the stale state entirely.
-            const MAX_SETUP_ATTEMPTS: u32 = 3;
+            // See MAX_SETUP_ATTEMPTS for why setup retries use a fresh
+            // container ID on each attempt.
             let setup_result: ExecutorResult<(String, String, String)> = async {
                 let mut last_err = None;
                 for attempt in 1..=MAX_SETUP_ATTEMPTS {
                     let cid = if attempt == 1 {
                         container_id.clone()
                     } else {
-                        format!("{}{:x}", &container_id[..container_id.len() - 1], attempt)
+                        retry_container_id(&container_id, attempt)
                     };
 
                     let attempt_rootfs = if attempt == 1 {
@@ -1357,6 +1421,17 @@ mod kata {
                         .await
                     {
                         Ok(()) => {
+                            if attempt > 1 {
+                                // Make recovery quantifiable: the per-attempt warn
+                                // above shows failures, this shows how many boots
+                                // ultimately needed a retry to succeed.
+                                tracing::info!(
+                                    trace_id = trace_id,
+                                    container_id = %cid,
+                                    attempts = attempt,
+                                    "kata.setup_recovered after retry with fresh container ID"
+                                );
+                            }
                             return Ok((cid, fifos.0, fifos.1));
                         }
                         Err(e) => {
@@ -2287,6 +2362,36 @@ mod kata_tests {
         assert_eq!(
             normalize_image_ref("localhost:5000/image:tag"),
             "localhost:5000/image:tag"
+        );
+    }
+
+    #[test]
+    fn test_container_id_for_trace_is_deterministic() {
+        let tid = "0198c9a2-5b7e-7c21-b0f3-9d4e8a1c6f02";
+        let a = super::container_id_for_trace(Some(tid));
+        let b = super::container_id_for_trace(Some(tid));
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 24);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_retry_container_id_never_collides_with_base() {
+        // Regression: the old scheme replaced only the last char with the
+        // attempt digit, so a base ending in that digit reused its own ID.
+        for last in "0123456789abcdef".chars() {
+            let base = format!("00000000000000000000000{}", last);
+            for attempt in 2..=3u32 {
+                let retry = super::retry_container_id(&base, attempt);
+                assert_ne!(retry, base);
+                assert_eq!(retry.len(), base.len());
+            }
+        }
+        // Distinct attempts must also get distinct IDs.
+        let base = "0198c9a25b7e7c21b0f39d4e";
+        assert_ne!(
+            super::retry_container_id(base, 2),
+            super::retry_container_id(base, 3)
         );
     }
 
