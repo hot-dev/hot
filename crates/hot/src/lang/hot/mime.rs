@@ -75,10 +75,14 @@ pub fn to_ext(args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    // Get extensions for this MIME type
-    let extensions = mime_guess::get_mime_extensions_str(mime_str);
+    // mime2ext returns the canonical extension per the mime-db dataset
+    // (e.g. text/plain -> "txt"), unlike mime_guess's alphabetical first.
+    if let Some(ext) = mime2ext::mime2ext(&**mime_str) {
+        return HotResult::Ok(Val::from(ext.to_string()));
+    }
 
-    match extensions {
+    // Fall back to mime_guess for types mime-db doesn't cover
+    match mime_guess::get_mime_extensions_str(mime_str) {
         Some(exts) if !exts.is_empty() => HotResult::Ok(Val::from(exts[0].to_string())),
         _ => HotResult::Ok(Val::Null),
     }
@@ -241,6 +245,27 @@ pub fn get_subtype(args: &[Val]) -> HotResult<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_to_ext_canonical() {
+        // mime2ext gives the canonical extension, not mime_guess's
+        // alphabetical first (which would be "asm" for text/plain)
+        let result = to_ext(&[Val::from("text/plain")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "txt"));
+
+        let result = to_ext(&[Val::from("image/jpeg")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "jpg"));
+
+        let result = to_ext(&[Val::from("image/png")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "png"));
+
+        let result = to_ext(&[Val::from("application/json")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "json"));
+
+        // Unknown MIME type
+        let result = to_ext(&[Val::from("application/x-not-real")]);
+        assert!(matches!(result, HotResult::Ok(Val::Null)));
+    }
 
     #[test]
     fn test_from_ext() {

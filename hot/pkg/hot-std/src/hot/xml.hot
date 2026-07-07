@@ -4,27 +4,27 @@ meta {doc: """XML parsing and serialization with helper functions."""}
 Xml
 meta {
     doc: """
-Represents an XML element with tag, attributes, and content.
+    Represents an XML element with tag, attributes, and content.
 
-**Fields**
-- `tag`: The element tag name (Str)
-- `attrs`: Attribute map (Map<Str, Str>)
-- `content`: Child elements and text nodes (Vec)
+    **Fields**
+    - `tag`: The element tag name (Str)
+    - `attrs`: Attribute map (Map<Str, Str>)
+    - `content`: Child elements and text nodes (Vec)
 
-**Example**
+    **Example**
 
-```hot
-// Create an XML element manually
-elem Xml({
-    "tag": "person",
-    "attrs": {"id": "123"},
-    "content": [
-        Xml({"tag": "name", "attrs": {}, "content": ["Alice"]}),
-        Xml({"tag": "age", "attrs": {}, "content": ["30"]})
-    ]
-})
-```
-"""
+    ```hot
+    // Create an XML element manually
+    elem Xml({
+        "tag": "person",
+        "attrs": {"id": "123"},
+        "content": [
+            Xml({"tag": "name", "attrs": {}, "content": ["Alice"]}),
+            Xml({"tag": "age", "attrs": {}, "content": ["30"]})
+        ]
+    })
+    ```
+    """
 }
 type {
     tag: Str,

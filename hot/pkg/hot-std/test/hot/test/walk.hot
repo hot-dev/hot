@@ -178,3 +178,23 @@ meta ["test"] fn () {
 
     assert-eq(expected-simple, simple-data)
 }
+
+
+// postwalk-replace substitutes values via an {old: new} map
+test-postwalk-replace
+meta ["test"] fn () {
+    assert-eq(
+        ["x", ["y", "c"]],
+        ::hot::coll/postwalk-replace({"a": "x", "b": "y"}, ["a", ["b", "c"]]),
+        "values replaced at every depth")
+
+    assert-eq(
+        [1, 2, 99],
+        ::hot::coll/postwalk-replace(Map(3, 99), [1, 2, 3]),
+        "non-string values are replaceable")
+
+    assert-eq(
+        [1, 2],
+        ::hot::coll/postwalk-replace({"z": "q"}, [1, 2]),
+        "no matches leaves the form unchanged")
+}

@@ -136,6 +136,7 @@ bollard = "0.20"
 crc32fast = "1.5"
 dotenvy = "0.15"
 mime_guess = "2.0"
+mime2ext = "0.1"
 urlencoding = "2.1.3"
 # Blocking HTTP client for package downloads (no async runtime)
 ureq = { version = "3.3", features = ["rustls"] }

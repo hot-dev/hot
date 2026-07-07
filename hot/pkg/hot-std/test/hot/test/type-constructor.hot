@@ -531,3 +531,46 @@ meta ["test"] fn () {
               "No matching variant should leave as raw map")
     assert-eq("test", result.data.other-field, "Field should be preserved")
 }
+
+
+// Int() truncates decimals toward zero (use round for nearest-integer)
+test-int-truncates
+meta ["test"] fn () {
+    assert-eq(3, Int(3.7), "positive decimals truncate down")
+    assert-eq(3, Int(3.2), "positive decimals truncate down")
+    assert-eq(-2, Int(-2.9), "negative decimals truncate toward zero")
+    assert-eq(0, Int(-0.9), "small negatives truncate to zero")
+    assert-eq(-3, round(-2.5), "round ties go away from zero")
+}
+
+// Vec: single-arg coercion, multi-arg collection
+test-vec-coercion
+meta ["test"] fn () {
+    assert-eq([1, 2, 3], Vec(1, 2, 3), "Vec collects multiple arguments")
+    assert-eq(["a", "b", "c"], Vec("abc"), "Vec splits a string into characters")
+    assert-eq([["a", 1], ["b", 2]], Vec({a: 1, b: 2}), "Vec turns a map into pairs")
+    assert-eq([7, 8], Vec(Bytes([7, 8])), "Vec turns bytes into ints")
+    assert-eq([1, 2], Vec([1, 2]), "Vec passes a vector through")
+    assert-eq([42], Vec(42), "Vec wraps a scalar")
+}
+
+// Map: pairs, entry maps, and flat key-value arguments
+test-map-construction
+meta ["test"] fn () {
+    assert-eq({a: 1, b: 2}, Map([["a", 1], ["b", 2]]), "Map builds from [key, value] pairs")
+    assert-eq({a: 1, b: 2}, Map([{a: 1}, {b: 2}]), "Map builds from single-entry maps")
+    assert-eq({a: 1, b: 2}, Map("a", 1, "b", 2), "Map builds from flat pairs")
+    assert-eq({a: 1}, Map({a: 1}), "Map passes a map through")
+    assert(is-err(Map([1, 2])), "non-pair entries are an error")
+    // Vec -> Map -> Vec round trip
+    assert-eq([["a", 1], ["b", 2]], Vec(Map([["a", 1], ["b", 2]])), "pairs round-trip through Map and Vec")
+}
+
+// Bool() strictly parses boolean-like values
+test-bool-strict
+meta ["test"] fn () {
+    assert-eq(true, Bool("true"), "true string parses")
+    assert-eq(false, Bool("no"), "no parses false")
+    assert-eq(false, Bool(null), "null is false")
+    assert(is-err(Bool("hi")), "arbitrary strings are an error")
+}

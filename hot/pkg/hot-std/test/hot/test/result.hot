@@ -106,3 +106,29 @@ meta ["test"] fn () {
         |> if-err("fallback")
     assert(is-ok(combo), "combo if-ok then if-err on Ok")
 }
+
+
+// is-result recognizes Result values without unwrapping them
+test-is-result
+meta ["test"] fn () {
+    assert(is-result(ok(42)), "ok value is a Result")
+    assert(is-result(err("fail")), "err value is a Result")
+    assert(not(is-result(42)), "plain Int is not a Result")
+    assert(not(is-result("ok")), "plain Str is not a Result")
+}
+
+// ok-value extracts Ok payloads; plain values pass through
+test-ok-value
+meta ["test"] fn () {
+    assert-eq(42, ok-value(ok(42)), "Ok payload extracted")
+    assert-eq(42, ok-value(42), "plain value passes through")
+    assert(is-null(ok-value(err("fail"))), "Err yields null")
+}
+
+// err-value extracts Err payloads without re-triggering the error
+test-err-value
+meta ["test"] fn () {
+    assert-eq("boom", err-value(err("boom")), "Err payload extracted")
+    assert(is-null(err-value(ok(42))), "Ok yields null")
+    assert(is-null(err-value(42)), "plain value yields null")
+}

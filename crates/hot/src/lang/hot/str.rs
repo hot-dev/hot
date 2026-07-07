@@ -226,7 +226,7 @@ pub fn trim_end(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::from(text.trim_end().to_string()))
 }
 
-/// Replace occurrences of a substring in a string
+/// Replace all occurrences of a substring in a string
 pub fn replace(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::str/replace", args, 3);
 
@@ -246,6 +246,28 @@ pub fn replace(args: &[Val]) -> HotResult<Val> {
     };
 
     HotResult::Ok(Val::from(text.replace(&**from, to)))
+}
+
+/// Replace only the first occurrence of a substring in a string
+pub fn replace_first(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::str/replace-first", args, 3);
+
+    let text = match &args[0] {
+        Val::Str(s) => s,
+        _ => return HotResult::Err(Val::from("replace-first text must be a string")),
+    };
+
+    let from = match &args[1] {
+        Val::Str(s) => s,
+        _ => return HotResult::Err(Val::from("replace-first from must be a string")),
+    };
+
+    let to = match &args[2] {
+        Val::Str(s) => s,
+        _ => return HotResult::Err(Val::from("replace-first to must be a string")),
+    };
+
+    HotResult::Ok(Val::from(text.replacen(&**from, to, 1)))
 }
 
 /// Pad a string at the start to a target length
@@ -340,4 +362,27 @@ pub fn pad_end(args: &[Val]) -> HotResult<Val> {
     }
 
     HotResult::Ok(Val::from(format!("{}{}", text, padding)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_all_occurrences() {
+        let result = replace(&[Val::from("aaa"), Val::from("a"), Val::from("b")]);
+        assert_eq!(result, HotResult::Ok(Val::from("bbb")));
+        // Escaping-style usage must replace every occurrence
+        let result = replace(&[Val::from("a&b&c"), Val::from("&"), Val::from("&amp;")]);
+        assert_eq!(result, HotResult::Ok(Val::from("a&amp;b&amp;c")));
+    }
+
+    #[test]
+    fn test_replace_first_only() {
+        let result = replace_first(&[Val::from("aaa"), Val::from("a"), Val::from("b")]);
+        assert_eq!(result, HotResult::Ok(Val::from("baa")));
+        // No match leaves the string unchanged
+        let result = replace_first(&[Val::from("abc"), Val::from("z"), Val::from("y")]);
+        assert_eq!(result, HotResult::Ok(Val::from("abc")));
+    }
 }

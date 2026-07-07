@@ -281,7 +281,7 @@ round
 meta {
     core: true,
     doc: """
-    Round `x` to the nearest integer.
+    Round `x` to the nearest integer. Halfway values round away from zero.
 
     **Example**
 
@@ -289,7 +289,8 @@ meta {
     round(2.3)   // 2
     round(2.5)   // 3
     round(2.7)   // 3
-    round(-2.5)  // -2
+    round(-2.5)  // -3 (away from zero)
+    round(-2.4)  // -2
     ```
     """
 }

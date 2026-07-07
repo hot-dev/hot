@@ -6,7 +6,7 @@ meta {
     Provides functions to convert between file extensions and MIME types,
     and to check MIME type categories.
 
-    **Usage**
+    **Example**
     ```hot
     ::mime ::hot::mime
 
@@ -45,10 +45,10 @@ meta {
 
     **Examples**
     ```hot
-    from-ext("png")   // "image/png"
-    from-ext(".jpg")  // "image/jpeg"
-    from-ext("mp4")   // "video/mp4"
-    from-ext("xyz")   // null
+    from-ext("png")      // "image/png"
+    from-ext(".jpg")     // "image/jpeg"
+    from-ext("mp4")      // "video/mp4"
+    from-ext("xyz123")   // null (unknown extension)
     ```
     """
 }
@@ -88,7 +88,10 @@ to-ext
 meta {
     core: true,
     doc: """
-    Get file extension from MIME type.
+    Get the canonical file extension for a MIME type.
+
+    Returns the single conventional extension (e.g. `text/plain` → `"txt"`).
+    For the full list of extensions a type maps to, use `to-exts`.
 
     **Arguments**
     - `mime` - MIME type string
@@ -122,8 +125,8 @@ meta {
 
     **Examples**
     ```hot
-    to-exts("image/jpeg")  // ["jpeg", "jpg", "jpe"]
-    to-exts("text/plain")  // ["txt", "text", "conf", ...]
+    to-exts("image/jpeg")  // ["jfif", "jpe", "jpeg", "jpg"] (alphabetical)
+    to-ext("image/jpeg")   // "jpg" — use to-ext for the canonical extension
     ```
     """
 }

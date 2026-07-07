@@ -507,6 +507,18 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::type/err".to_string(),
             HotLibFn::LibFn(r#type::result_err),
         );
+        map.insert(
+            "::hot::type/is-result".to_string(),
+            HotLibFn::vm_callback(r#type::result_is_result),
+        );
+        map.insert(
+            "::hot::type/ok-value".to_string(),
+            HotLibFn::vm_callback(r#type::result_ok_value),
+        );
+        map.insert(
+            "::hot::type/err-value".to_string(),
+            HotLibFn::vm_callback(r#type::result_err_value),
+        );
 
         // HTTP functions
         map.insert(
@@ -1343,6 +1355,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         map.insert(
             "::hot::str/replace".to_string(),
             HotLibFn::LibFn(str::replace),
+        );
+        map.insert(
+            "::hot::str/replace-first".to_string(),
+            HotLibFn::LibFn(str::replace_first),
         );
         map.insert(
             "::hot::str/pad-start".to_string(),

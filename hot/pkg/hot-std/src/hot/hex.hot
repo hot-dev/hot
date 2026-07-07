@@ -13,7 +13,7 @@ meta {
     encode("Hello")
     // "48656c6c6f"
 
-    encode([0x48, 0x65, 0x6c, 0x6c, 0x6f])
+    encode(Bytes([72, 101, 108, 108, 111]))
     // "48656c6c6f"
     ```
     """
@@ -33,10 +33,11 @@ meta {
 
     ```hot
     decode("48656c6c6f")
-    // [0x48, 0x65, 0x6c, 0x6c, 0x6f] (bytes for "Hello")
+    // Bytes([72, 101, 108, 108, 111]) — the bytes for "Hello"
 
-    // Convert to string
-    Str(::hot::base64/decode(::hot::base64/encode(decode("48656c6c6f"))))
+    // Convert decoded bytes to string
+    Str(decode("48656c6c6f"))
+    // "Hello"
     ```
     """
 }

@@ -202,3 +202,14 @@ meta ["test"] fn () {
     assert(not(::hot::mime/is-media("text/plain")), "is-media should return false for text")
     assert(not(::hot::mime/is-media("application/json")), "is-media should return false for application")
 }
+
+
+// to-ext prefers the canonical extension over alphabetical order
+test-to-ext-canonical
+meta ["test"] fn () {
+    assert-eq("txt", ::hot::mime/to-ext("text/plain"), "text/plain is txt, not asm")
+    assert-eq("jpg", ::hot::mime/to-ext("image/jpeg"), "image/jpeg is jpg")
+    assert-eq("png", ::hot::mime/to-ext("image/png"), "subtype match")
+    assert-eq("json", ::hot::mime/to-ext("application/json"), "subtype match")
+    assert(is-null(::hot::mime/to-ext("application/x-not-real")), "unknown type is null")
+}

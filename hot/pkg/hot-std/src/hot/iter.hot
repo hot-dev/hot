@@ -27,17 +27,11 @@ meta {
     """
 }
 type
-
-fn (v: Vec<Any>): Iter {
-    call-lib(::hot::iter/Iter, [v])
-}
-fn (m: Map<Any, Any>): Iter {
-    call-lib(::hot::iter/Iter, [m])
-}
-fn (s: Str): Iter {
-    call-lib(::hot::iter/Iter, [s])
-}
-fn (it: Iter): Iter {
+fn
+(coll: Vec<Any> | Map<Any, Any> | Str): Iter {
+    call-lib(::hot::iter/Iter, [coll])
+},
+(it: Iter): Iter {
     it
 }
 
