@@ -30,7 +30,7 @@ fn cancellation_type(vm: &crate::lang::runtime::vm::VirtualMachine) -> &'static 
 }
 
 /// Evaluate lazy thunks (handles both Val::Box lambdas and serialized Map forms)
-fn evaluate_lazy(vm: &mut crate::lang::runtime::vm::VirtualMachine, val: &Val) -> Val {
+pub(crate) fn evaluate_lazy(vm: &mut crate::lang::runtime::vm::VirtualMachine, val: &Val) -> Val {
     match val {
         Val::Box(b) => {
             if let Some(lambda_info) = b

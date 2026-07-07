@@ -528,9 +528,40 @@ enum TryShape {
     LegacyMap,
 }
 
+/// Extract a human-readable message from an error payload: the string
+/// itself, a map's `msg`/`message` field, or the display form.
+fn error_payload_message(payload: &Val) -> String {
+    match payload {
+        Val::Str(s) => (**s).to_owned(),
+        Val::Map(m) => m
+            .get(&Val::from("msg"))
+            .or_else(|| m.get(&Val::from("message")))
+            .and_then(|v| match v {
+                Val::Str(s) => Some((**s).to_owned()),
+                _ => None,
+            })
+            .unwrap_or_else(|| payload.to_string()),
+        other => other.to_string(),
+    }
+}
+
 fn try_success(value: Val, shape: TryShape) -> HotResult<Val> {
     match shape {
+        // Idempotent on Results: a callee that already returned a Result
+        // (e.g. a native that errors by value) passes through unchanged.
+        // Wrapping an Err in Ok would hide it from is-err/if-err.
+        TryShape::Result if value.is_ok() || value.is_err() => HotResult::Ok(value),
         TryShape::Result => HotResult::Ok(Val::ok(value)),
+        TryShape::LegacyMap if value.is_err() => {
+            let payload = value.unwrap_err().cloned().unwrap_or(Val::Null);
+            let mut result = indexmap::IndexMap::new();
+            result.insert(Val::from("ok"), Val::Bool(false));
+            result.insert(
+                Val::from("error"),
+                Val::from(error_payload_message(&payload)),
+            );
+            HotResult::Ok(Val::Map(Box::new(result)))
+        }
         TryShape::LegacyMap => {
             let mut result = indexmap::IndexMap::new();
             result.insert(Val::from("ok"), Val::Bool(true));
@@ -569,7 +600,10 @@ fn try_error(
         TryShape::LegacyMap => {
             let mut result = indexmap::IndexMap::new();
             result.insert(Val::from("ok"), Val::Bool(false));
-            result.insert(Val::from("error"), Val::from(payload.to_string()));
+            result.insert(
+                Val::from("error"),
+                Val::from(error_payload_message(&payload)),
+            );
             HotResult::Ok(Val::Map(Box::new(result)))
         }
     }

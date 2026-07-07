@@ -92,12 +92,12 @@ fn () {
     assert(s3-job.ok)
 }
 
-// A handler that returns a `Result.Err` value (rather than halting via
-// fail()) is treated as data: the slot is a successful LifecycleJob
-// whose `result` carries the Result.Err. To flag a per-session error,
-// the handler should `fail()` — that's the contract for triggering
-// the if-err catch path. Pinning this keeps the boundary unambiguous.
-test-run-session-job-passes-result-err-as-data
+// A handler that returns a `Result.Err` value is a failed job, exactly
+// like one that halts via fail(): under the error model both channels
+// mean "this session's work did not succeed", and the boundary must
+// not smuggle an Err through as a successful result (where the next
+// use would escalate it). Pinning this keeps the contract unambiguous.
+test-run-session-job-marks-result-err-failed
 meta ["test"]
 fn () {
     rt ::runtime/create-runtime(`test-life-err:${Uuid()}`)
@@ -111,8 +111,8 @@ fn () {
     jobs ::lifecycle/run-session-job(rt, "explicit-err", handler)
     assert-eq(1, length(jobs))
     job first(jobs)
-    assert(job.ok)
-    assert(is-err(job.result))
+    assert(not(job.ok), "an Err-returning handler is a failed job")
+    assert(not(is-null(job.error)), "the Err payload is recorded")
 }
 
 test-prune-raw-memory

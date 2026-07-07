@@ -646,7 +646,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::io/clear-captured-content".to_string(),
             HotLibFn::LibFn(io::clear_captured_content),
         );
-        map.insert("::hot::io/tap".to_string(), HotLibFn::LibFn(io::tap));
+        map.insert("::hot::io/tap".to_string(), HotLibFn::VmAwareFn(io::tap));
         // Add direct println alias for compatibility with hot-std
         map.insert("println".to_string(), HotLibFn::LibFn(io::println));
 

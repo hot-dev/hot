@@ -62,9 +62,9 @@ meta {
     Run `handler(session)` for every registered session and collect a
     `LifecycleJob` per session.
 
-    Per-session recovery is handled inside the callback with `if-err`:
-    if a handler halts via `fail()` / `cancel()`, the structured error
-    is captured and recorded on `rt.errors-store`, and the slot becomes
+    Per-session recovery: whether a handler halts via `fail()` /
+    `cancel()` or returns a `Result.Err` value, the error is captured
+    and recorded on `rt.errors-store`, and the slot becomes
     `LifecycleJob.ok = false`. The loop always processes every session
     and always returns a uniform `Vec<LifecycleJob>` — halts never
     escape `run-session-job`.
@@ -73,6 +73,11 @@ meta {
 fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
     sessions ::runtime/list-registered-sessions(rt)
     map(sessions, (session) {
+        // Supervision boundary: lifecycle handlers are arbitrary user
+        // code, so this is a sanctioned halt-containment point — one
+        // session's fail() is recorded as a failed LifecycleJob without
+        // aborting the fan-out. Application code should not copy this
+        // pattern; expected failures are Result.Err values.
         attempt ::hot::lang/try(handler, [session])
         cond {
             is-ok(attempt) => {

@@ -277,9 +277,13 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
             is-error: true
         }),
         {
-            // try catches halts from `fail()` so a misbehaving tool
-            // is reported back to the model as `is-error: true` instead
-            // of bringing down the whole run-loop.
+            // Supervision boundary: a tool is arbitrary user code invoked
+            // on the model's behalf, so this is one of the sanctioned
+            // halt-containment points — a tool that fail()s (or returns
+            // an Err) is reported back to the model as `is-error: true`
+            // instead of bringing down the agent run-loop. Application
+            // code should not copy this pattern; expected failures are
+            // Result.Err values (see `::hot::lang/try` deprecation notes).
             attempt if(
                 or(get(tool, "pass-input"), false),
                 ::hot::lang/try(tool.fn, [call.input]),
@@ -289,37 +293,17 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
                 Result.Err => {
                     ToolResult({
                         id: call.id,
-                        output: attempt.msg,
+                        output: err-value(attempt),
                         is-error: true,
                     })
                 }
 
                 Result.Ok => {
-                    match attempt {
-                        Result.Err => {
-                            ToolResult({
-                                id: call.id,
-                                output: attempt,
-                                is-error: true,
-                            })
-                        }
-
-                        Result.Ok => {
-                            ToolResult({
-                                id: call.id,
-                                output: attempt,
-                                is-error: false,
-                            })
-                        }
-
-                        _ => {
-                            ToolResult({
-                                id: call.id,
-                                output: attempt,
-                                is-error: false,
-                            })
-                        }
-                    }
+                    ToolResult({
+                        id: call.id,
+                        output: ok-value(attempt),
+                        is-error: false,
+                    })
                 }
             }
         }

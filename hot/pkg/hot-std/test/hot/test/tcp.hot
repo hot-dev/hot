@@ -30,3 +30,25 @@ meta ["test"] fn () {
     result ::tcp/connect("nonexistent.invalid", 80, ::hot::tcp/TcpOptions({timeout: 2000}))
     assert(is-err(result), "connect to unresolvable host should return error")
 }
+
+// Regression: a native connect failure is a SINGLE well-formed Err —
+// the payload must be the message, never a nested Result.Err (which
+// made is-err return false and err-value useless).
+test-connect-err-is-not-nested
+meta ["test"] fn () {
+    result ::tcp/connect("127.0.0.1", 1, ::hot::tcp/TcpOptions({timeout: 2000}))
+    assert(is-err(result), "connect failure is an Err")
+    payload err-value(result)
+    assert(not(is-err(payload)), "Err payload is not itself a Result.Err")
+    assert(is-str(payload), "Err payload is the failure message")
+}
+
+// Regression: ::hot::lang/try around a native that errors by value is
+// idempotent — the Err passes through unchanged instead of being
+// re-wrapped as Ok(Err) (invisible to is-err) or Err(Err).
+test-try-around-native-err-is-idempotent
+meta ["test"] fn () {
+    r ::hot::lang/try(() { ::tcp/connect("127.0.0.1", 1, ::hot::tcp/TcpOptions({timeout: 2000})) })
+    assert(is-err(r), "try around a failing connect is an Err")
+    assert(not(is-err(err-value(r))), "no nested Err through the try boundary")
+}

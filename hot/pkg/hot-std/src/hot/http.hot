@@ -90,6 +90,12 @@ meta {
 
     Accepts either an `HttpRequest` or positional arguments (method, url, headers, body).
 
+    Transport failures (DNS failure, connection refused, TLS errors,
+    timeouts, ...) return a `Result.Err`; branch on it with `is-err` /
+    `if-err`. An unhandled error halts at first use with the same
+    message. Non-2xx responses are normal `HttpResponse` values — check
+    `response.status`.
+
     **Examples**
 
     ```hot
@@ -98,6 +104,10 @@ meta {
 
     // Using positional arguments
     response request("POST", "https://api.example.com/data", {"Content-Type": "application/json"}, {name: "Alice"})
+
+    // Handling transport failure
+    response request(HttpRequest({method: "GET", url: url}))
+    if-err(response, (failure) { println(`network error: ${failure}`) })
     ```
     """
 }
@@ -111,35 +121,27 @@ fn (request: HttpRequest): HttpResponse {
 
 try-request
 meta {
+    deprecated: true,
     doc: """
-    Like `request`, but catches transport errors (DNS failure, connection
-    refused, TLS errors, timeouts, etc.) and returns a `Result` instead
-    of halting execution.
+    **Deprecated:** `request` already returns a `Result.Err` for
+    transport failures (DNS failure, connection refused, TLS errors,
+    timeouts, ...), so this wrapper adds nothing — call `request` and
+    branch with `is-err` / `if-err`.
 
-    Use this when you need to handle network failures gracefully — for
-    example, in agent callbacks, scheduled fan-out, or any code path
-    that must keep running even when an outbound HTTP call fails.
-
-    Returns:
-
-    - `Result.Ok(HttpResponse)` on success (including non-2xx status codes —
-      use `is-ok-response` to check status separately).
-    - `Result.Err(payload)` when the transport itself failed.
-
-    **Example**
+    **Example (preferred)**
 
     ```hot
-    result try-request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
-    if-err(result, (failure) { println(`Network error: ${failure.msg}`) })
-    if-ok(result, (response) { handle-response(response) })
+    response request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
+    if-err(response, (failure) { println(`network error: ${failure}`) })
+    if-ok(response, (r) { handle-response(r) })
     ```
     """
 }
-fn (request: HttpRequest): Result {
-    ::hot::lang/try(::hot::http/request, [request])
+fn (req: HttpRequest): Result {
+    request(req)
 },
 (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result {
-    try-request(HttpRequest({method, url, headers, body}))
+    request(HttpRequest({method, url, headers, body}))
 }
 
 

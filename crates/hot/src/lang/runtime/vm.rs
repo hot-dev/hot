@@ -4939,6 +4939,31 @@ impl VirtualMachine {
         crate::lang::runtime::function_ref::function_ref(function_name.to_string())
     }
 
+    /// Extract a human-readable message from a Result.Err payload so the
+    /// escalation halt carries the underlying failure (a connect error,
+    /// an HTTP status, ...) instead of an opaque placeholder.
+    fn result_err_message(err_val: &Val) -> String {
+        match err_val {
+            Val::Str(s) => (**s).to_owned(),
+            // Defensive: a nested Result.Err payload (should no longer be
+            // produced) still surfaces its inner message.
+            v if v.is_err() => v
+                .unwrap_err()
+                .map(Self::result_err_message)
+                .unwrap_or_else(|| "Error Result encountered".to_string()),
+            Val::Map(err_map) => err_map
+                .get(&Val::from("msg"))
+                .or_else(|| err_map.get(&Val::from("message")))
+                .and_then(|v| match v {
+                    Val::Str(s) => Some((**s).to_owned()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| err_val.to_string()),
+            Val::Null => "Error Result encountered".to_string(),
+            other => other.to_string(),
+        }
+    }
+
     /// Unwrap result if it's an "ok" result, or fail if it's an error
     /// This implements Hot's automatic Result unwrapping behavior:
     /// - If val is a Result.Ok: return the $val value
@@ -4975,18 +5000,7 @@ impl VirtualMachine {
             if &**type_str == "::hot::type/Result.Err" {
                 let err_val = m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
 
-                // Extract message from error
-                let msg = match &err_val {
-                    Val::Str(s) => (**s).to_owned(),
-                    Val::Map(err_map) => err_map
-                        .get(&Val::from("msg"))
-                        .and_then(|v| match v {
-                            Val::Str(s) => Some((**s).to_owned()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "Error Result encountered".to_string()),
-                    _ => "Error Result encountered".to_string(),
-                };
+                let msg = Self::result_err_message(&err_val);
 
                 // Set VM failure state and return error. The run/task boundary
                 // emits terminal status if this halt is not explicitly
@@ -9291,6 +9305,12 @@ impl VirtualMachine {
                 });
             return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
         }
+        // Some natives (tcp/tls/http/...) return an already-wrapped
+        // Result.Err as their error payload; wrapping again would nest
+        // Err(Err(...)) and hide the message from is-err/err-value.
+        if err.is_err() {
+            return Ok(err);
+        }
         Ok(Val::err(err))
     }
 
@@ -9799,6 +9819,44 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
 
+    // Regression (nested-Err bug): the escalation halt for an unhandled
+    // Result.Err must carry the payload's actual message, never the
+    // opaque "Error Result encountered" placeholder.
+    #[test]
+    fn test_result_err_message_extraction() {
+        // Plain string payload (the common native err_val shape)
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::from("connection refused")),
+            "connection refused"
+        );
+
+        // Map payloads: msg, then message, are preferred
+        let mut m = IndexMap::new();
+        m.insert(Val::from("msg"), Val::from("boom"));
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
+            "boom"
+        );
+        let mut m = IndexMap::new();
+        m.insert(Val::from("message"), Val::from("pg: relation missing"));
+        m.insert(Val::from("code"), Val::from("42P01"));
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
+            "pg: relation missing"
+        );
+
+        // Defensive: a nested Result.Err payload still surfaces the
+        // innermost message.
+        let nested = Val::err(Val::from("inner reason"));
+        assert_eq!(VirtualMachine::result_err_message(&nested), "inner reason");
+
+        // Null payload keeps the legacy placeholder
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::Null),
+            "Error Result encountered"
+        );
+    }
+
     #[test]
     fn test_vm_basic_execution() {
         let program = Arc::new(BytecodeProgram::new());
@@ -9813,6 +9871,35 @@ mod tests {
         );
         let result = vm.execute();
         assert!(result.is_ok());
+    }
+
+    // Regression (nested-Err bug): natives that error by returning an
+    // already-wrapped Result.Err (tcp/tls/http/... err_val helpers) must
+    // pass through dispatch unchanged — wrapping again produced
+    // Err(Err(msg)), which is-err/err-value could not handle.
+    #[test]
+    fn test_dispatch_hotlib_err_is_idempotent() {
+        let program = Arc::new(BytecodeProgram::new());
+        let mut vm = VirtualMachine::new(
+            program,
+            None,
+            Arc::new(IndexMap::new()),
+            Arc::new(IndexMap::new()),
+            Arc::new(IndexMap::new()),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        );
+
+        // Pre-wrapped Err passes through unchanged
+        let wrapped = Val::err(Val::from("connection refused"));
+        let out = vm.dispatch_hotlib_err(wrapped.clone()).unwrap();
+        assert_eq!(out, wrapped);
+        assert!(out.unwrap_err().is_some_and(|p| !p.is_err()));
+
+        // Bare payload gets wrapped exactly once
+        let out = vm.dispatch_hotlib_err(Val::from("parse error")).unwrap();
+        assert!(out.is_err());
+        assert_eq!(out.unwrap_err(), Some(&Val::from("parse error")));
     }
 
     #[test]
