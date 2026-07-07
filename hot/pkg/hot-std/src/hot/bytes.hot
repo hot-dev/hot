@@ -118,3 +118,114 @@ meta {
 fn (bytes: Bytes): Vec<Int> {
     call-lib(::hot::bytes/to-vec, [bytes])
 }
+
+
+index-of
+meta {
+    doc: """
+    Find the first occurrence of a byte or byte sequence within bytes.
+    Returns the index as Int, or `null` when not found.
+
+    The needle can be a single byte value (Int 0-255) or a Bytes sequence.
+    An optional `from` index starts the search at an offset — useful for
+    scanning consecutive null-terminated strings in binary protocols.
+
+    **Example**
+
+    ```hot
+    data Bytes([82, 0, 65, 66, 0])
+
+    index-of(data, 0)                    // 1 (first null byte)
+    index-of(data, 0, 2)                 // 4 (next null byte from index 2)
+    index-of(data, Bytes([65, 66]))      // 2
+    index-of(data, 99)                   // null (not found)
+    ```
+    """
+}
+fn
+(haystack: Bytes, needle: Bytes | Byte | Int): Int? {
+    call-lib(::hot::bytes/index-of, [haystack, needle])
+},
+(haystack: Bytes, needle: Bytes | Byte | Int, from: Int): Int? {
+    call-lib(::hot::bytes/index-of, [haystack, needle, from])
+}
+
+
+xor
+meta {
+    doc: """
+    XOR two equal-length byte sequences. Fails when lengths differ.
+
+    Used by authentication schemes like SCRAM, where the client proof is
+    `ClientKey XOR ClientSignature`.
+
+    **Example**
+
+    ```hot
+    a Bytes([10, 255, 0])
+    b Bytes([6, 15, 0])
+    xor(a, b)  // Bytes([12, 240, 0])
+    ```
+    """
+}
+fn (a: Bytes, b: Bytes): Bytes {
+    call-lib(::hot::bytes/xor, [a, b])
+}
+
+
+to-float
+meta {
+    doc: """
+    Decode IEEE 754 float bytes to a Dec value.
+    Accepts 4 bytes (single precision) or 8 bytes (double precision).
+    Default is big-endian (network byte order).
+
+    Hot has no float type — the wire encoding is IEEE 754, but the decoded
+    value is an exact Dec using the shortest decimal form that round-trips.
+
+    **Example**
+
+    ```hot
+    to-float(Bytes([63, 248, 0, 0, 0, 0, 0, 0]))        // 1.5 (f64)
+    to-float(Bytes([62, 128, 0, 0]))                     // 0.25 (f32)
+    to-float(Bytes([0, 0, 128, 62]), "le")               // 0.25 (f32, little-endian)
+    ```
+    """
+}
+fn
+(bytes: Bytes): Dec {
+    call-lib(::hot::bytes/to-float, [bytes])
+},
+(bytes: Bytes, endian: Str): Dec {
+    call-lib(::hot::bytes/to-float, [bytes, endian])
+}
+
+
+from-float
+meta {
+    doc: """
+    Encode a Dec or Int value as IEEE 754 float bytes.
+    Size must be 4 (single precision) or 8 (double precision).
+    Default is big-endian (network byte order).
+
+    Values that are not exactly representable as a binary float are rounded
+    to the nearest representable value — the usual IEEE 754 behavior. Use
+    Str encoding instead when a protocol offers a text format and you need
+    exact decimals.
+
+    **Example**
+
+    ```hot
+    from-float(1.5, 8)         // Bytes([63, 248, 0, 0, 0, 0, 0, 0])
+    from-float(0.25, 4)        // Bytes([62, 128, 0, 0])
+    from-float(2, 4, "le")     // Bytes([0, 0, 0, 64])
+    ```
+    """
+}
+fn
+(value: Dec | Int, size: Int): Bytes {
+    call-lib(::hot::bytes/from-float, [value, size])
+},
+(value: Dec | Int, size: Int, endian: Str): Bytes {
+    call-lib(::hot::bytes/from-float, [value, size, endian])
+}

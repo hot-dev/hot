@@ -1,0 +1,81 @@
+::hot::test::crypto ns
+meta ["test"]
+
+::crypto ::hot::crypto
+::hex ::hot::hex
+::hmac ::hot::hmac
+::b64 ::hot::base64
+::bytes ::hot::bytes
+
+is-err ::hot::type/is-err
+
+// Standard PBKDF2-HMAC-SHA256 test vector, 1 iteration
+test-pbkdf2-basic-vector
+meta ["test"] fn () {
+    key ::crypto/pbkdf2-hmac-sha256("password", "salt", 1)
+    assert-eq(
+        "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
+        ::hex/encode(key),
+        "PBKDF2-HMAC-SHA256 c=1 vector")
+}
+
+// Custom derived-key length
+test-pbkdf2-custom-length
+meta ["test"] fn () {
+    key ::crypto/pbkdf2-hmac-sha256("password", "salt", 2, 64)
+    assert-eq(64, length(key), "derived key should be 64 bytes")
+}
+
+// Invalid iteration counts are errors
+test-pbkdf2-invalid-iterations
+meta ["test"] fn () {
+    assert(is-err(::crypto/pbkdf2-hmac-sha256("password", "salt", 0)),
+        "0 iterations should return error")
+}
+
+// Full SCRAM-SHA-256 client-side derivation (RFC 7677 test vector),
+// built entirely from hot-std primitives. This is the auth flow a
+// Hot-only Postgres client would run.
+test-scram-sha256-rfc7677
+meta ["test"] fn () {
+    password "pencil"
+    salt ::b64/decode("W22ZaJ0SNY7soEsUEjb6gQ==")
+    iterations 4096
+
+    client-nonce "rOprNGfwEbeRWgbNEkqO"
+    full-nonce "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"
+
+    auth-message join([
+        join(["n=user,r=", client-nonce], ""),
+        join(["r=", full-nonce, ",s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"], ""),
+        join(["c=biws,r=", full-nonce], "")
+    ], ",")
+
+    // SaltedPassword = Hi(password, salt, i)
+    salted ::crypto/pbkdf2-hmac-sha256(password, salt, iterations)
+    assert-eq(
+        "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d",
+        ::hex/encode(salted),
+        "SaltedPassword matches RFC 7677")
+
+    // ClientKey = HMAC(SaltedPassword, "Client Key")
+    client-key ::hmac/hmac-sha256-bytes(salted, "Client Key")
+    // StoredKey = H(ClientKey)
+    stored-key ::hex/decode(sha256(client-key))
+    // ClientSignature = HMAC(StoredKey, AuthMessage)
+    client-sig ::hmac/hmac-sha256-bytes(stored-key, auth-message)
+    // ClientProof = ClientKey XOR ClientSignature
+    proof ::bytes/xor(client-key, client-sig)
+    assert-eq(
+        "dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=",
+        ::b64/encode(proof),
+        "ClientProof matches RFC 7677")
+
+    // ServerSignature = HMAC(HMAC(SaltedPassword, "Server Key"), AuthMessage)
+    server-key ::hmac/hmac-sha256-bytes(salted, "Server Key")
+    server-sig ::hmac/hmac-sha256-bytes(server-key, auth-message)
+    assert-eq(
+        "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=",
+        ::b64/encode(server-sig),
+        "ServerSignature matches RFC 7677")
+}

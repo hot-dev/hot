@@ -1,0 +1,88 @@
+::hot::test::bytes ns
+meta ["test"]
+
+::bytes ::hot::bytes
+
+is-err ::hot::type/is-err
+
+// Test int encode/decode round trip (big-endian default)
+test-int-round-trip
+meta ["test"] fn () {
+    assert-eq(Bytes([1, 0]), ::bytes/from-int(256, 2), "256 as 2 bytes big-endian")
+    assert-eq(256, ::bytes/to-int(Bytes([1, 0])), "2 bytes big-endian back to 256")
+    assert-eq(Bytes([0, 1]), ::bytes/from-int(256, 2, "le"), "256 as 2 bytes little-endian")
+    assert-eq(65535, ::bytes/to-uint(Bytes([255, 255])), "unsigned 2-byte max")
+}
+
+// Test index-of with single-byte needle
+test-index-of-byte
+meta ["test"] fn () {
+    data Bytes([82, 0, 65, 66, 0])
+    assert-eq(1, ::bytes/index-of(data, 0), "first null byte at index 1")
+    assert-eq(4, ::bytes/index-of(data, 0, 2), "next null byte from offset 2")
+    assert(is-null(::bytes/index-of(data, 99)), "missing byte returns null")
+}
+
+// Test index-of with byte-sequence needle
+test-index-of-sequence
+meta ["test"] fn () {
+    data Bytes([1, 2, 3, 4, 5])
+    assert-eq(2, ::bytes/index-of(data, Bytes([3, 4])), "sequence found at index 2")
+    assert(is-null(::bytes/index-of(data, Bytes([4, 3]))), "missing sequence returns null")
+    assert(is-null(::bytes/index-of(data, Bytes([1]), 10)), "offset past end returns null")
+}
+
+// Test parsing a null-terminated field, protocol style
+test-index-of-c-string-parse
+meta ["test"] fn () {
+    // "user\0curt\0" — parse the two null-terminated strings
+    data concat(Bytes("user"), Bytes([0]), Bytes("curt"), Bytes([0]))
+    first-null ::bytes/index-of(data, 0)
+    assert-eq(4, first-null, "terminator after 'user'")
+    assert-eq("user", Str(slice(data, 0, first-null)), "first field decodes")
+    second-null ::bytes/index-of(data, 0, add(first-null, 1))
+    assert-eq("curt", Str(slice(data, add(first-null, 1), second-null)), "second field decodes")
+}
+
+// Test xor
+test-xor
+meta ["test"] fn () {
+    assert-eq(Bytes([12, 240, 0]), ::bytes/xor(Bytes([10, 255, 0]), Bytes([6, 15, 0])), "byte-wise xor")
+    // xor with itself is all zeroes
+    data Bytes([1, 2, 3])
+    assert-eq(Bytes([0, 0, 0]), ::bytes/xor(data, data), "self-xor is zero")
+}
+
+// Test xor length mismatch is an error
+test-xor-length-mismatch
+meta ["test"] fn () {
+    result ::bytes/xor(Bytes([1, 2]), Bytes([1]))
+    assert(is-err(result), "xor with mismatched lengths should return error")
+}
+
+// Test IEEE 754 float decode (values are returned as Dec)
+test-to-float
+meta ["test"] fn () {
+    assert-eq(1.5, ::bytes/to-float(Bytes([63, 248, 0, 0, 0, 0, 0, 0])), "f64 1.5 decodes")
+    assert-eq(0.25, ::bytes/to-float(Bytes([62, 128, 0, 0])), "f32 0.25 decodes")
+    assert-eq(0.25, ::bytes/to-float(Bytes([0, 0, 128, 62]), "le"), "f32 0.25 little-endian decodes")
+    // 0.1 has no exact binary representation; the Dec is the shortest round-trip form
+    encoded ::bytes/from-float(0.1, 8)
+    assert-eq(0.1, ::bytes/to-float(encoded), "0.1 round-trips through f64 bytes")
+}
+
+// Test IEEE 754 float encode
+test-from-float
+meta ["test"] fn () {
+    assert-eq(Bytes([63, 248, 0, 0, 0, 0, 0, 0]), ::bytes/from-float(1.5, 8), "1.5 as f64 bytes")
+    assert-eq(Bytes([62, 128, 0, 0]), ::bytes/from-float(0.25, 4), "0.25 as f32 bytes")
+    // Int input is accepted
+    assert-eq(Bytes([64, 0, 0, 0]), ::bytes/from-float(2, 4), "Int 2 as f32 bytes")
+}
+
+// Test float error cases
+test-float-errors
+meta ["test"] fn () {
+    assert(is-err(::bytes/to-float(Bytes([1, 2, 3]))), "3 bytes is not a valid float width")
+    assert(is-err(::bytes/from-float(1.5, 3)), "size 3 is invalid")
+}
