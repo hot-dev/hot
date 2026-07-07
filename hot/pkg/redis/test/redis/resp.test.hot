@@ -1,0 +1,27 @@
+::redis::test::resp ns
+meta ["test"]
+
+::resp ::redis::resp
+
+// Commands encode as RESP arrays of bulk strings
+test-encode-command
+meta ["test"] fn () {
+    assert-eq(
+        Bytes("*1\r\n$4\r\nPING\r\n"),
+        ::resp/encode-command(["PING"]),
+        "single-argument command")
+
+    assert-eq(
+        Bytes("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$5\r\nhello\r\n"),
+        ::resp/encode-command(["SET", "k", "hello"]),
+        "three-argument command")
+}
+
+// Non-string arguments are coerced, using byte length
+test-encode-coercion
+meta ["test"] fn () {
+    assert-eq(
+        Bytes("*3\r\n$6\r\nINCRBY\r\n$1\r\nn\r\n$2\r\n42\r\n"),
+        ::resp/encode-command(["INCRBY", "n", 42]),
+        "integer argument coerces to its decimal string")
+}

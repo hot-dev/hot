@@ -1,0 +1,64 @@
+::redis::test::integration ns
+meta ["test"]
+
+::ctx ::hot::ctx
+::lang ::hot::lang
+
+redis-options fn (): Map {
+    {
+        host: ::ctx/get("redis.host", "127.0.0.1"),
+        port: Int(::ctx/get("redis.port", "6379"))
+    }
+}
+
+// End-to-end exercise against a live server. Skipped (not failed) when no
+// Redis is reachable, so the suite stays runnable without a server.
+test-roundtrip
+meta ["test"] fn () {
+    attempt ::lang/try(() { ::redis/connect(redis-options()) })
+    cond {
+        is-err(attempt) => {
+            println(`  (skipped: no Redis reachable — ${err-value(attempt)})`)
+            assert(true, "skipped without a server")
+        }
+        => {
+            conn ok-value(attempt)
+
+            assert-eq("PONG", ::redis/ping(conn), "ping")
+
+            // Use a unique key namespace and clean up first
+            key `hot:redis:test:${Uuid()}`
+            ::redis/del(conn, [key])
+
+            assert(is-null(::redis/get(conn, key)), "missing key is null")
+            assert-eq("OK", ::redis/set(conn, key, "hello"), "set returns OK")
+            assert-eq("hello", ::redis/get(conn, key), "get returns the value")
+            assert-eq(1, ::redis/exists(conn, [key]), "key exists")
+
+            // Integer replies
+            counter `${key}:n`
+            ::redis/del(conn, [counter])
+            assert-eq(1, ::redis/incr(conn, counter), "incr from missing is 1")
+            assert-eq(2, ::redis/incr(conn, counter), "incr again is 2")
+
+            // Array replies
+            list `${key}:list`
+            ::redis/del(conn, [list])
+            ::redis/command(conn, ["RPUSH", list, "a", "b", "c"])
+            assert-eq(["a", "b", "c"], ::redis/command(conn, ["LRANGE", list, "0", "-1"]), "array reply")
+
+            // MGET with a missing element yields null in the array
+            assert-eq(["hello", null], ::redis/command(conn, ["MGET", key, "hot:redis:test:absent"]), "null within array")
+
+            // Expiry and delete
+            assert-eq(1, ::redis/expire(conn, key, 100), "expire returns 1")
+            assert-eq(3, ::redis/del(conn, [key, counter, list]), "delete removes 3 keys")
+
+            // Errors surface as catchable failures
+            failed ::lang/try(() { ::redis/command(conn, ["INCR", list, "extra-arg"]) })
+            assert(is-err(failed), "wrong-arity command fails")
+
+            ::redis/close(conn)
+        }
+    }
+}
