@@ -1,4 +1,5 @@
 {% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
 {% block content %}
 <div class="flex flex-col">
     <!-- Filter Controls -->
@@ -173,52 +174,8 @@
         <!-- Pagination -->
         {% if has_prev_page || has_next_page %}
         <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-800">
-            <div class="flex items-center justify-between">
-                <div class="flex-1 flex justify-between sm:hidden">
-                    {% if has_prev_page %}
-                    <a href="/files?p={{ current_page_num - 1 }}&time_range={{ selected_time_range }}&search={{ search_query }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</a>
-                    {% endif %}
-                    {% if has_next_page %}
-                    <a href="/files?p={{ current_page_num + 1 }}&time_range={{ selected_time_range }}&search={{ search_query }}" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</a>
-                    {% endif %}
-                </div>
-                <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-                    <div>
-                        <p class="text-sm text-gray-700 dark:text-gray-300">
-                            Showing <span class="font-medium">{{ files.len() }}</span> of <span class="font-medium">{{ total_files }}</span> files
-                        </p>
-                    </div>
-                    <div>
-                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                            {% if has_prev_page %}
-                            <a href="/files?p={{ current_page_num - 1 }}&time_range={{ selected_time_range }}&search={{ search_query }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                                <span class="sr-only">Previous</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-
-                            {% for page_num in start_page..=end_page %}
-                            {% if page_num == current_page_num %}
-                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
-                            {% else %}
-                            <a href="/files?p={{ page_num }}&time_range={{ selected_time_range }}&search={{ search_query }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</a>
-                            {% endif %}
-                            {% endfor %}
-
-                            {% if has_next_page %}
-                            <a href="/files?p={{ current_page_num + 1 }}&time_range={{ selected_time_range }}&search={{ search_query }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                                <span class="sr-only">Next</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-                        </nav>
-                    </div>
-                </div>
-            </div>
+            {% let pag_suffix = "&time_range={}&search={}"|format(selected_time_range, search_query) %}
+            {% call ui::pagination("/files?p=", pag_suffix, current_page_num, start_page, end_page, has_prev_page, has_next_page, files.len(), total_files, "files") %}{% endcall %}
         </div>
         {% endif %}
         {% else %}
