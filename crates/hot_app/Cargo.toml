@@ -60,5 +60,3 @@ tempfile = { workspace = true }
 [build-dependencies]
 walkdir = { workspace = true }
 
-[package.metadata.askama]
-dir = "templates"

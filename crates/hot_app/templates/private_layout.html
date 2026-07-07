@@ -806,7 +806,7 @@
     </script>
 
     <!-- Content Modal for Full Display -->
-    <div id="content-modal" class="hidden fixed inset-0 z-50 overflow-auto bg-black/50 flex items-center justify-center p-4" onclick="closeContentModal(event)">
+    <div id="content-modal" role="dialog" aria-modal="true" aria-labelledby="content-modal-title" class="hidden fixed inset-0 z-50 overflow-auto bg-black/50 flex items-center justify-center p-4" onclick="closeContentModal(event)">
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-6xl max-h-[90vh] flex flex-col" onclick="event.stopPropagation()">
             <!-- Modal Header -->
             <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
@@ -847,7 +847,7 @@
     {% include "components/source_browser_modal.html" %}
 
     <!-- Image Lightbox Modal -->
-    <div id="image-lightbox" class="image-lightbox" onclick="closeLightbox(event)">
+    <div id="image-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" class="image-lightbox" onclick="closeLightbox(event)">
         <div class="image-lightbox-content" onclick="event.stopPropagation()">
             <button class="image-lightbox-close" onclick="closeLightbox()" aria-label="Close lightbox" title="Close">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">

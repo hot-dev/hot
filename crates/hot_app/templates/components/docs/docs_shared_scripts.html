@@ -148,7 +148,10 @@ var searchResults = [];
 var selectedIndex = 0;
 var currentQuery = '';
 
+var lastFocusedBeforeSearch = null;
+
 function openSearch() {
+  lastFocusedBeforeSearch = document.activeElement;
   document.getElementById('search-modal').classList.remove('hidden');
   document.getElementById('search-input').focus();
   document.body.style.overflow = 'hidden';
@@ -167,7 +170,31 @@ function closeSearch() {
   document.body.style.overflow = '';
   searchResults = [];
   selectedIndex = 0;
+  if (lastFocusedBeforeSearch && lastFocusedBeforeSearch.focus) {
+    lastFocusedBeforeSearch.focus();
+    lastFocusedBeforeSearch = null;
+  }
 }
+
+// Keep Tab focus inside the search dialog while it is open
+(function() {
+  var modal = document.getElementById('search-modal');
+  if (!modal) return;
+  modal.addEventListener('keydown', function(e) {
+    if (e.key !== 'Tab') return;
+    var focusables = modal.querySelectorAll('input, a[href], button:not([disabled])');
+    if (focusables.length === 0) return;
+    var first = focusables[0];
+    var last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+})();
 
 function onSearchKeydown(e) {
   if (e.key === 'Escape') {
