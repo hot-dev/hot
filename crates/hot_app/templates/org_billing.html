@@ -47,7 +47,7 @@
                         Get managed runs, team collaboration, and advanced observability — start free, upgrade anytime.
                     </p>
                 </div>
-                <a href="{{ page_context.pricing_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition whitespace-nowrap">
+                <a href="{{ page_context.pricing_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-primary">
                     View Plans
                 </a>
             </div>
@@ -160,7 +160,7 @@
                     <!-- Actions -->
                     <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
                             {% if plan.is_free_plan() %}
-                            <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition">
+                            <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary">
                                 Upgrade Plan
                             </a>
                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
@@ -168,10 +168,10 @@
                             </p>
                             {% else %}
                             <div class="flex items-center gap-3">
-                                <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-4 py-2 rounded-md transition">
+                                <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary">
                                     Change Plan
                                 </a>
-                                <button type="button" onclick="showCancelModal()" class="inline-flex items-center bg-white dark:bg-gray-800 border border-red-300 dark:border-red-600 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 font-medium px-4 py-2 rounded-md transition">
+                                <button type="button" onclick="showCancelModal()" class="btn btn-danger">
                                     Cancel Subscription
                                 </button>
                             </div>
@@ -203,7 +203,7 @@
                         </script>
                     {% else %}
                         <p class="text-gray-600 dark:text-gray-400 mb-4">No active subscription found for {{ org.name }}.</p>
-                        <a href="/@{{ org.slug }}/billing/checkout" class="inline-block bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium px-6 py-3 rounded-md transition">
+                        <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary btn-lg">
                             Choose a Plan
                         </a>
                     {% endif %}
@@ -280,7 +280,7 @@
                     Keep Subscription
                 </button>
                 <form method="post" action="/@{{ org.slug }}/billing/cancel">
-                    <button type="submit" class="inline-flex items-center px-5 py-2.5 border border-transparent text-sm font-medium rounded-md text-white bg-red-500 hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all duration-200">
+                    <button type="submit" class="btn btn-danger">
                         Yes, Cancel Subscription
                     </button>
                 </form>

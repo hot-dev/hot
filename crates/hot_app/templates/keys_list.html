@@ -1,4 +1,5 @@
 {% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
 <div class="py-2 px-2 sm:px-0">
@@ -6,7 +7,7 @@
     {% if api_keys.len() > 0 %}
     <div class="flex items-center justify-end mb-4 sm:mb-6">
         {% if is_admin %}
-        <a href="/keys/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+        <a href="/keys/new" class="btn btn-primary">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -65,7 +66,7 @@
                 </thead>
                 <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for api_key in api_keys %}
-                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-4 lg:px-6 py-4">
                             <div>
                                 <div class="text-sm font-medium text-gray-900 dark:text-white">{{ api_key.description }}</div>
@@ -184,18 +185,18 @@
     {% else %}
     <!-- Empty State -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 sm:p-8">
-        <div class="text-center">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+        <div class="empty-state">
+            <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m0 0a2 2 0 012 2v6a2 2 0 01-2 2H7a2 2 0 01-2-2V9a2 2 0 012-2m0 0V7a2 2 0 012-2h4zm-6 6h6m-6 4h6"></path>
                 </svg>
             </div>
-            <h3 class="text-base sm:text-lg font-medium text-gray-900 dark:text-white mb-2">No API keys</h3>
-            <p class="text-sm sm:text-base text-gray-500 dark:text-gray-400 mb-4">
+            <h3 class="empty-state-title">No API keys</h3>
+            <p class="empty-state-message">
                 Get started by creating your first API key.
             </p>
             {% if is_admin %}
-            <a href="/keys/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <a href="/keys/new" class="btn btn-primary">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                 </svg>
@@ -227,52 +228,7 @@
     {% if has_prev_page || has_next_page %}
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md mt-4">
         <div class="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
-            <div class="flex items-center justify-between">
-                <div class="flex-1 flex justify-between md:hidden">
-                    {% if has_prev_page %}
-                    <a href="/keys?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
-                    {% endif %}
-                    {% if has_next_page %}
-                    <a href="/keys?p={{ current_page_num + 1 }}" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
-                    {% endif %}
-                </div>
-                <div class="hidden md:flex-1 md:flex md:items-center md:justify-between">
-                    <div>
-                        <p class="text-xs sm:text-sm text-gray-700 dark:text-gray-300">
-                            Showing <span class="font-medium">{{ api_keys.len() }}</span> of <span class="font-medium">{{ total_keys }}</span> API keys
-                        </p>
-                    </div>
-                    <div>
-                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                            {% if has_prev_page %}
-                            <a href="/keys?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Previous</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-
-                            {% for page_num in start_page..=end_page %}
-                            {% if page_num == current_page_num %}
-                            <span class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-xs sm:text-sm font-medium text-white">{{ page_num }}</span>
-                            {% else %}
-                            <a href="/keys?p={{ page_num }}" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
-                            {% endif %}
-                            {% endfor %}
-
-                            {% if has_next_page %}
-                            <a href="/keys?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Next</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-                        </nav>
-                    </div>
-                </div>
-            </div>
+            {% call ui::pagination("/keys?p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, api_keys.len(), total_keys, "API keys") %}{% endcall %}
         </div>
     </div>
     {% endif %}

@@ -51,7 +51,7 @@
                 <a href="/service-keys/{{ service_key_id.unwrap() }}" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
                     View Details
                 </a>
-                <a href="/service-keys" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-colors">
+                <a href="/service-keys" class="btn btn-primary">
                     Done
                 </a>
             </div>
@@ -306,11 +306,11 @@
                         Cancel
                     </a>
                     {% if page_context.is_local_dev %}
-                    <button type="button" data-local-dev-restricted class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-colors cursor-pointer">
+                    <button type="button" data-local-dev-restricted class="btn btn-primary">
                         Create Service Key
                     </button>
                     {% else %}
-                    <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-colors">
+                    <button type="submit" class="btn btn-primary">
                         Create Service Key
                     </button>
                     {% endif %}

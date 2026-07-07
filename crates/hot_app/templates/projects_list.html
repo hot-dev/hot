@@ -1,14 +1,15 @@
 {% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
 {% block content %}
 
 <div>
     {% if projects.is_empty() %}
-        <div class="text-center py-12">
+        <div class="empty-state">
             <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
             </svg>
-            <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No projects</h3>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No projects found for the current environment.</p>
+            <h3 class="empty-state-title">No projects</h3>
+            <p class="empty-state-message">No projects found for the current environment.</p>
         </div>
     {% else %}
         <!-- Desktop Table View -->
@@ -17,18 +18,18 @@
                 <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-100 dark:bg-gray-700">
                         <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Project ID</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Name</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Status</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Created</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Builds</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Active Build</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Context Variables</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Project ID</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Name</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Builds</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Active Build</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Context Variables</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
                         {% for project in projects %}
-                        <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                        <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                             <td class="px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
                                 <div class="uuid-container inline-flex items-center gap-1">
                                     <a href="/projects/{{ project.name }}" class="uuid-display uuid-link link transition-all" data-full-uuid="{{ project.project_id }}" title="{{ project.project_id }}">{{ project.project_id|shortuuid }}</a>
@@ -97,42 +98,7 @@
             <!-- Pagination (Desktop) -->
             {% if has_prev_page || has_next_page %}
             <div class="px-6 py-4 border-t border-gray-200 dark:border-gray-800">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm text-gray-700 dark:text-gray-300">
-                            Showing <span class="font-medium">{{ projects.len() }}</span> of <span class="font-medium">{{ total_projects }}</span> projects
-                        </p>
-                    </div>
-                    <div>
-                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                            {% if has_prev_page %}
-                            <a href="/projects?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Previous</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-
-                            {% for page_num in start_page..=end_page %}
-                            {% if page_num == current_page_num %}
-                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
-                            {% else %}
-                            <a href="/projects?p={{ page_num }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
-                            {% endif %}
-                            {% endfor %}
-
-                            {% if has_next_page %}
-                            <a href="/projects?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Next</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-                        </nav>
-                    </div>
-                </div>
+                {% call ui::pagination("/projects?p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, projects.len(), total_projects, "projects") %}{% endcall %}
             </div>
             {% endif %}
         </div>
@@ -224,13 +190,13 @@
             {% if has_prev_page || has_next_page %}
             <div class="flex justify-between items-center pt-4">
                 {% if has_prev_page %}
-                <a href="/projects?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
+                <a href="/projects?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</a>
                 {% else %}
                 <div></div>
                 {% endif %}
                 <span class="text-sm text-gray-700 dark:text-gray-300">Page {{ current_page_num }}</span>
                 {% if has_next_page %}
-                <a href="/projects?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
+                <a href="/projects?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700">Next</a>
                 {% else %}
                 <div></div>
                 {% endif %}

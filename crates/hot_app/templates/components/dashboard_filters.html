@@ -7,7 +7,7 @@
             <!-- Project Filter -->
             <div class="w-full sm:w-auto">
                 <div x-data="{ open: false }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full sm:w-64 text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-3 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -19,28 +19,28 @@
                             <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
                         </svg>
                     </button>
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full sm:w-64 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="selectedProject = null; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
+                            <button type="button" @click="selectedProject = null; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>All Projects</span>
                                     <svg x-show="selectedProject === null" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
 {% endraw %}
                             {% for project in projects %}
 {% raw %}
-                            <a @click="selectedProject = '{% endraw %}{{ project.project_id }}{% raw %}'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
+                            <button type="button" @click="selectedProject = '{% endraw %}{{ project.project_id }}{% raw %}'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>{% endraw %}{{ project.name }}{% raw %}</span>
                                     <svg x-show="selectedProject === '{% endraw %}{{ project.project_id }}{% raw %}'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
 {% endraw %}
                             {% endfor %}
 {% raw %}
@@ -52,7 +52,7 @@
             <!-- Time Range Filter -->
             <div class="w-full sm:w-auto">
                 <div x-data="{ open: false, selectedText: 'Last 24 Hours' }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full sm:w-64 text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-3 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -64,14 +64,14 @@
                             <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
                         </svg>
                     </button>
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full sm:w-64 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="setTimeRange('P1D'); selectedText = 'Last 24 Hours'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 24 Hours</a>
-                            <a @click="setTimeRange('P7D'); selectedText = 'Last 7 Days'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 7 Days</a>
-                            <a @click="setTimeRange('P30D'); selectedText = 'Last 30 Days'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 30 Days</a>
-                            <a @click="setTimeRange('P90D'); selectedText = 'Last 90 Days'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 90 Days</a>
-                            <a @click="setTimeRange('all'); selectedText = 'All Time'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">All Time</a>
+                            <button type="button" @click="setTimeRange('P1D'); selectedText = 'Last 24 Hours'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 24 Hours</button>
+                            <button type="button" @click="setTimeRange('P7D'); selectedText = 'Last 7 Days'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 7 Days</button>
+                            <button type="button" @click="setTimeRange('P30D'); selectedText = 'Last 30 Days'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 30 Days</button>
+                            <button type="button" @click="setTimeRange('P90D'); selectedText = 'Last 90 Days'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">Last 90 Days</button>
+                            <button type="button" @click="setTimeRange('all'); selectedText = 'All Time'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">All Time</button>
                         </div>
                     </div>
                 </div>
@@ -80,7 +80,7 @@
             <!-- Time Unit Filter -->
             <div class="w-full sm:w-auto">
                 <div x-data="{ open: false }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full sm:w-48 text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-3 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -92,33 +92,33 @@
                             <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m1 1 4 4 4-4"/>
                         </svg>
                     </button>
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full sm:w-48 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
                         <div class="py-1">
-                            <a @click="timeUnit = 'hour'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
+                            <button type="button" @click="timeUnit = 'hour'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Hourly</span>
                                     <svg x-show="timeUnit === 'hour'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="timeUnit = 'day'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
+                            </button>
+                            <button type="button" @click="timeUnit = 'day'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Daily</span>
                                     <svg x-show="timeUnit === 'day'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
-                            <a @click="timeUnit = 'month'; open = false; updateFilters()" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
+                            </button>
+                            <button type="button" @click="timeUnit = 'month'; open = false; updateFilters()" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer">
                                 <div class="flex items-center justify-between">
                                     <span>Monthly</span>
                                     <svg x-show="timeUnit === 'month'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                                     </svg>
                                 </div>
-                            </a>
+                            </button>
                         </div>
                     </div>
                 </div>

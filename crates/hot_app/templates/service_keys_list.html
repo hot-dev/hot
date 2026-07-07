@@ -18,7 +18,7 @@
         <div class="mt-6">
             {% match page_context.current_org %}
             {% when Some with (org) %}
-            <a href="/@{{ org.slug }}/billing/checkout" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary">
                 Upgrade Plan
             </a>
             {% when None %}
@@ -48,7 +48,7 @@
     <!-- Header -->
     {% if service_keys.len() > 0 %}
     <div class="flex items-center justify-end mb-4 sm:mb-6">
-        <a href="/service-keys/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+        <a href="/service-keys/new" class="btn btn-primary">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -170,16 +170,16 @@
 
     {% else %}
     <!-- Empty State -->
-    <div class="text-center py-12 sm:py-16 bg-white dark:bg-gray-800 rounded-lg shadow-md">
+    <div class="empty-state bg-white dark:bg-gray-800 rounded-lg shadow-md">
         <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
         </svg>
-        <h3 class="mt-4 text-base sm:text-lg font-medium text-gray-900 dark:text-white">No service keys</h3>
-        <p class="mt-2 text-xs sm:text-sm text-gray-500 dark:text-gray-400 max-w-sm mx-auto px-4">
+        <h3 class="empty-state-title">No service keys</h3>
+        <p class="empty-state-message">
             Service keys are long-lived, scoped credentials you issue to your customers for access to MCP tools, webhooks, and other API resources.
         </p>
         <div class="mt-6">
-            <a href="/service-keys/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <a href="/service-keys/new" class="btn btn-primary">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                 </svg>

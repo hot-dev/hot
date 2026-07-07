@@ -46,7 +46,7 @@
                                     type="checkbox"
                                     id="newsletter"
                                     name="newsletter"
-                                    class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
                                     {% if notification_prefs.newsletter %}checked{% endif %}
                                 >
                             </div>
@@ -66,7 +66,7 @@
                                     type="checkbox"
                                     id="product_updates"
                                     name="product_updates"
-                                    class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
                                     {% if notification_prefs.product_updates %}checked{% endif %}
                                 >
                             </div>
@@ -90,7 +90,7 @@
                                     type="checkbox"
                                     id="alerts"
                                     name="alerts"
-                                    class="focus:ring-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
                                     {% if notification_prefs.alerts %}checked{% endif %}
                                 >
                             </div>
@@ -126,7 +126,7 @@
                 {% endif %}
                 <button
                     type="submit"
-                    class="px-4 py-2 bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors"
+                    class="btn btn-primary"
                 >
                     Save Changes
                 </button>

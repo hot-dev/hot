@@ -18,7 +18,7 @@
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="w-full sm:w-64">
                 <div x-data="{ open: false }" class="relative">
-                    <button @click="open = !open" type="button"
+                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
                             class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
@@ -31,7 +31,7 @@
                         </svg>
                     </button>
 
-                    <div x-cloak x-show="open" @click.away="open = false" x-transition
+                    <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
                          class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600 max-h-60 overflow-y-auto">
                         <div class="py-1">
                             {% for project in projects %}
@@ -192,16 +192,16 @@
             {% endif %}
 
         {% else %}
-            <div class="text-center py-12 bg-white dark:bg-gray-800 shadow-sm rounded-lg">
+            <div class="empty-state bg-white dark:bg-gray-800 shadow-sm rounded-lg">
                 <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                <h3 class="mt-2 text-lg font-medium text-gray-900 dark:text-gray-100">No Documentation Available</h3>
-                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                <h3 class="empty-state-title">No Documentation Available</h3>
+                <p class="empty-state-message">
                     This project does not have an active build with generated documentation.
                 </p>
                 <div class="mt-6">
-                    <a href="/projects/{{ selected_project.as_ref().unwrap().name }}/builds" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+                    <a href="/projects/{{ selected_project.as_ref().unwrap().name }}/builds" class="btn btn-primary">
                         View Builds
                     </a>
                 </div>
