@@ -2647,14 +2647,14 @@ window.ObservabilityTabs = class ObservabilityTabs {
         if (!this.filesData || !this.filesData.files || this.filesData.files.length === 0) {
             this.filesView.innerHTML = `
                 <div class="flex items-center justify-center py-12">
-                    <div class="text-center py-8">
-                        <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
                             </svg>
                         </div>
-                        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Files</h3>
-                        <p class="text-gray-500 dark:text-gray-400">
+                        <h3 class="empty-state-title">No Files</h3>
+                        <p class="empty-state-message">
                             This run did not create or update any files.
                         </p>
                     </div>
@@ -2669,10 +2669,10 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-100 dark:bg-gray-700 sticky top-0">
                         <tr>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Path</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">Size</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider hidden md:table-cell">Type</th>
-                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider hidden lg:table-cell">Updated</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Path</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Size</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden md:table-cell">Type</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider hidden lg:table-cell">Updated</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
@@ -2681,7 +2681,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         files.forEach(file => {
             const contentType = file.content_type || '-';
             html += `
-                <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                     <td class="px-4 py-3 text-xs font-medium text-gray-900 dark:text-white">
                         <div class="inline-flex items-center gap-2">
                             <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-hot-red-600 dark:text-gray-500 dark:hover:text-hot-red-400 transition-colors" title="Download">

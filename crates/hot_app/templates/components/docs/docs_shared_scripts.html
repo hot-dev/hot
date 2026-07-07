@@ -1,0 +1,237 @@
+{# Shared docs behavior: code-copy buttons, TOC scroll-spy, heading anchor
+   links, search modal plumbing, Cmd/Ctrl+K. Site-specific pieces each
+   layout must provide in its own <script> AFTER this include:
+     loadSearchIndex(), onSearchInput(q), renderSearchResults(),
+     searchResultUrl(item)  — and optionally initHotPrismGrammar(). #}
+<script>
+// Copy button functionality
+function addCopyButtons() {
+  document.querySelectorAll('.docs-content pre').forEach(function(pre) {
+    // Skip if already has copy button; signatures are one-liners
+    if (pre.querySelector('.copy-button')) return;
+    if (pre.classList.contains('fn-signature')) return;
+
+    // Create wrapper for positioning
+    pre.style.position = 'relative';
+
+    // Create copy button
+    var button = document.createElement('button');
+    button.className = 'copy-button';
+    button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    button.title = 'Copy code';
+
+    button.addEventListener('click', function() {
+      var code = pre.querySelector('code');
+      var text = code ? code.textContent : pre.textContent;
+
+      navigator.clipboard.writeText(text).then(function() {
+        button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+        button.classList.add('copied');
+
+        setTimeout(function() {
+          button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+          button.classList.remove('copied');
+        }, 2000);
+      });
+    });
+
+    pre.appendChild(button);
+  });
+}
+
+// Scroll spy for right sidebar TOC
+function initScrollSpy() {
+  var tocLinks = document.querySelectorAll('.toc-link');
+  if (tocLinks.length === 0) return;
+
+  var headings = [];
+  tocLinks.forEach(function(link) {
+    var id = link.getAttribute('href').substring(1);
+    var heading = document.getElementById(id);
+    if (heading) headings.push({ id: id, element: heading, link: link });
+  });
+
+  if (headings.length === 0) return;
+
+  // Header offset (sticky header height)
+  var headerOffset = 80;
+
+  function updateActiveLink() {
+    var scrollPos = window.scrollY + headerOffset + 20;
+    var activeHeading = null;
+
+    // Find the heading that's closest to (but above) the scroll position
+    for (var i = headings.length - 1; i >= 0; i--) {
+      var rect = headings[i].element.getBoundingClientRect();
+      var headingTop = rect.top + window.scrollY;
+      if (headingTop <= scrollPos) {
+        activeHeading = headings[i];
+        break;
+      }
+    }
+
+    // If no heading is above scroll pos, use first heading
+    if (!activeHeading && headings.length > 0) {
+      activeHeading = headings[0];
+    }
+
+    // Update active states
+    tocLinks.forEach(function(l) { l.classList.remove('toc-active'); });
+    if (activeHeading) {
+      activeHeading.link.classList.add('toc-active');
+    }
+  }
+
+  // Debounce scroll events
+  var scrollTimeout;
+  window.addEventListener('scroll', function() {
+    if (scrollTimeout) clearTimeout(scrollTimeout);
+    scrollTimeout = setTimeout(updateActiveLink, 10);
+  });
+
+  // Initial update
+  updateActiveLink();
+}
+
+// Wait for Prism to load from parent template, then add Hot language
+window.addEventListener('load', function() {
+  if (typeof Prism !== 'undefined') {
+    // Site hook: define the Hot grammar if this page hasn't loaded it
+    // (hot_app loads prism-hot.js; other consumers define initHotPrismGrammar).
+    if (!Prism.languages.hot && typeof initHotPrismGrammar === 'function') {
+      initHotPrismGrammar();
+    }
+
+    // Now highlight all code blocks
+    Prism.highlightAll();
+  }
+
+  // Add copy buttons after a short delay to ensure highlighting is complete
+  setTimeout(addCopyButtons, 100);
+  addAnchorLinks();
+  initScrollSpy();
+});
+
+function addAnchorLinks() {
+  // Add anchor links to h2 and h3 headings with IDs
+  document.querySelectorAll('.docs-content h2[id], .docs-content h3[id]').forEach(function(heading) {
+    if (heading.querySelector('.anchor-link')) return;
+
+    var link = document.createElement('span');
+    link.className = 'anchor-link';
+    link.innerHTML = '#';
+    link.title = 'Copy link';
+
+    link.addEventListener('click', function(e) {
+      e.preventDefault();
+      var url = window.location.origin + window.location.pathname + '#' + heading.id;
+      // Update the URL in the address bar (replaceState avoids polluting back history)
+      history.replaceState(null, '', '#' + heading.id);
+      // Copy to clipboard
+      navigator.clipboard.writeText(url).then(function() {
+        link.classList.add('copied');
+        link.innerHTML = '✓';
+        setTimeout(function() {
+          link.classList.remove('copied');
+          link.innerHTML = '#';
+        }, 1500);
+      });
+    });
+
+    heading.appendChild(link);
+  });
+}
+
+// --- Search functionality ---
+var searchIndex = null;
+var searchResults = [];
+var selectedIndex = 0;
+var currentQuery = '';
+
+var lastFocusedBeforeSearch = null;
+
+function openSearch() {
+  lastFocusedBeforeSearch = document.activeElement;
+  document.getElementById('search-modal').classList.remove('hidden');
+  document.getElementById('search-input').focus();
+  document.body.style.overflow = 'hidden';
+
+  // Load search index if not loaded
+  if (!searchIndex) {
+    loadSearchIndex();
+  }
+}
+
+function closeSearch() {
+  document.getElementById('search-modal').classList.add('hidden');
+  document.getElementById('search-input').value = '';
+  var resultsEl = document.getElementById('search-results');
+  resultsEl.innerHTML = '<div class="px-4 py-8 text-center text-gray-500 dark:text-gray-400">' + (resultsEl.dataset.placeholder || 'Type to search') + '</div>';
+  document.body.style.overflow = '';
+  searchResults = [];
+  selectedIndex = 0;
+  if (lastFocusedBeforeSearch && lastFocusedBeforeSearch.focus) {
+    lastFocusedBeforeSearch.focus();
+    lastFocusedBeforeSearch = null;
+  }
+}
+
+// Keep Tab focus inside the search dialog while it is open
+(function() {
+  var modal = document.getElementById('search-modal');
+  if (!modal) return;
+  modal.addEventListener('keydown', function(e) {
+    if (e.key !== 'Tab') return;
+    var focusables = modal.querySelectorAll('input, a[href], button:not([disabled])');
+    if (focusables.length === 0) return;
+    var first = focusables[0];
+    var last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+})();
+
+function onSearchKeydown(e) {
+  if (e.key === 'Escape') {
+    closeSearch();
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (selectedIndex < searchResults.length - 1) {
+      selectedIndex++;
+      renderSearchResults();
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (selectedIndex > 0) {
+      selectedIndex--;
+      renderSearchResults();
+    }
+  } else if (e.key === 'Enter' && searchResults.length > 0) {
+    e.preventDefault();
+    var result = searchResults[selectedIndex];
+    window.location.href = searchResultUrl(result);
+  }
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Global keyboard shortcut
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    openSearch();
+  }
+  if (e.key === 'Escape') {
+    closeSearch();
+  }
+});
+</script>

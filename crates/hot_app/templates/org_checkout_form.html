@@ -21,14 +21,14 @@
           <div class="flex gap-4">
             <label class="flex items-center cursor-pointer">
               <input type="radio" name="billing_period" value="monthly"
-                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
                      {% if billing_period != "annual" %}checked{% endif %}
                      onchange="updatePrices()">
               <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Monthly</span>
             </label>
             <label class="flex items-center cursor-pointer">
               <input type="radio" name="billing_period" value="annual"
-                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
                      {% if billing_period == "annual" %}checked{% endif %}
                      onchange="updatePrices()">
               <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-600">(Save ~17%)</span></span>
@@ -49,7 +49,7 @@
                    data-annual-price="{{ p.annual_price_dollars() }}"
                    data-annual-savings="{{ p.annual_savings_percent() as i32 }}">
               <input type="radio" name="plan_id" value="{{ pid }}"
-                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-red-500"
+                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
                      {% if plan.plan_id.as_deref() == Some(pid.as_str()) %}checked{% endif %}
                      onchange="updateSelection(this)">
               <div class="ml-3 flex-1">
@@ -90,7 +90,7 @@
           </div>
         </div>
 
-        <button type="submit" class="w-full bg-hot-red-500 hover:bg-hot-red-600 text-white font-semibold py-3 px-6 rounded-md transition shadow-sm">
+        <button type="submit" class="btn btn-primary btn-lg w-full">
           {% if plan.base_price_monthly_cents == 0 %}
           Verify Card & Activate
           {% else %}

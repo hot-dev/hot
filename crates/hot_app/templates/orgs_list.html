@@ -1,10 +1,11 @@
 {% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
 <div class="py-2 px-2 sm:px-0">
     <div class="flex items-center justify-end mb-4 sm:mb-6">
         {% if page_context.is_local_dev %}
-        <button type="button" data-local-dev-restricted class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200 cursor-pointer">
+        <button type="button" data-local-dev-restricted class="btn btn-primary">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -12,7 +13,7 @@
             <span class="sm:hidden">New Org</span>
         </button>
         {% else %}
-        <a href="/orgs/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+        <a href="/orgs/new" class="btn btn-primary">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -29,23 +30,23 @@
             <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-100 dark:bg-gray-900">
                     <tr>
-                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Name
                         </th>
-                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Handle
                         </th>
-                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Created
                         </th>
-                        <th scope="col" class="px-4 lg:px-6 py-3 text-right text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Actions
                         </th>
                     </tr>
                 </thead>
                 <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for org in orgs %}
-                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-4 lg:px-6 py-4 whitespace-nowrap">
                             <div class="text-sm font-medium text-gray-900 dark:text-white">
                                 <a href="/@{{ org.slug }}" class="link transition-all">
@@ -88,52 +89,7 @@
         <!-- Pagination -->
         {% if has_prev_page || has_next_page %}
         <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
-            <div class="flex items-center justify-between">
-                <div class="flex-1 flex justify-between md:hidden">
-                    {% if has_prev_page %}
-                    <a href="/orgs?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Previous</a>
-                    {% endif %}
-                    {% if has_next_page %}
-                    <a href="/orgs?p={{ current_page_num + 1 }}" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222]">Next</a>
-                    {% endif %}
-                </div>
-                <div class="hidden md:flex-1 md:flex md:items-center md:justify-between">
-                    <div>
-                        <p class="text-xs sm:text-sm text-gray-700 dark:text-gray-300">
-                            Showing <span class="font-medium">{{ orgs.len() }}</span> of <span class="font-medium">{{ total_orgs }}</span> organizations
-                        </p>
-                    </div>
-                    <div>
-                        <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                            {% if has_prev_page %}
-                            <a href="/orgs?p={{ current_page_num - 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Previous</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-
-                            {% for page_num in start_page..=end_page %}
-                            {% if page_num == current_page_num %}
-                            <span class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-xs sm:text-sm font-medium text-white">{{ page_num }}</span>
-                            {% else %}
-                            <a href="/orgs?p={{ page_num }}" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">{{ page_num }}</a>
-                            {% endif %}
-                            {% endfor %}
-
-                            {% if has_next_page %}
-                            <a href="/orgs?p={{ current_page_num + 1 }}" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#222]">
-                                <span class="sr-only">Next</span>
-                                <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-                                </svg>
-                            </a>
-                            {% endif %}
-                        </nav>
-                    </div>
-                </div>
-            </div>
+            {% call ui::pagination("/orgs?p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, orgs.len(), total_orgs, "organizations") %}{% endcall %}
         </div>
         {% endif %}
     </div>
@@ -172,25 +128,25 @@
     </div>
     {% else %}
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 sm:p-12">
-        <div class="text-center">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+        <div class="empty-state">
+            <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                 </svg>
             </div>
-            <h3 class="text-base sm:text-lg font-medium text-gray-900 dark:text-white mb-2">No Organizations</h3>
-            <p class="text-sm sm:text-base text-gray-500 dark:text-gray-400 mb-4">
+            <h3 class="empty-state-title">No Organizations</h3>
+            <p class="empty-state-message">
                 Get started by creating your first organization.
             </p>
             {% if page_context.is_local_dev %}
-            <button type="button" data-local-dev-restricted class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200 cursor-pointer">
+            <button type="button" data-local-dev-restricted class="btn btn-primary">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                 </svg>
                 New Organization
             </button>
             {% else %}
-            <a href="/orgs/new" class="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <a href="/orgs/new" class="btn btn-primary">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                 </svg>

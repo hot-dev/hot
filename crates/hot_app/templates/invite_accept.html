@@ -32,7 +32,7 @@
         <!-- Authenticated user: show accept button -->
         <form action="/invite" method="post">
             <input type="hidden" name="code" value="{{ invite_code }}" />
-            <button type="submit" class="w-full px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <button type="submit" class="btn btn-primary w-full">
                 Accept Invitation
             </button>
         </form>
@@ -49,10 +49,10 @@
         </div>
 
         <div class="flex items-center space-x-4">
-            <a href="/signin?invite_code={{ invite_code }}" class="flex-1 text-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-[#222] transition-all duration-200">
+            <a href="/signin?invite_code={{ invite_code }}" class="flex-1 text-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 transition-all duration-200">
                 Sign In
             </a>
-            <a href="/signup?invite_code={{ invite_code }}" class="flex-1 text-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 transition-all duration-200">
+            <a href="/signup?invite_code={{ invite_code }}" class="btn btn-primary flex-1">
                 Create Account
             </a>
         </div>

@@ -67,7 +67,7 @@
                                 type="text"
                                 id="name"
                                 name="name"
-                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-gray-100"
+                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 text-gray-900 dark:text-gray-100"
                                 value="{% if let Some(name) = &user.name %}{{ name }}{% endif %}"
                                 placeholder="Your name"
                             >
@@ -95,7 +95,7 @@
                             <select
                                 id="display_timezone"
                                 name="display_timezone"
-                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-gray-100"
+                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 text-gray-900 dark:text-gray-100"
                             >
                                 <option value="UTC" {% if user_timezone == "UTC" %}selected{% endif %}>UTC (Coordinated Universal Time)</option>
                                 <option value="America/New_York" {% if user_timezone == "America/New_York" %}selected{% endif %}>America/New_York (Eastern Time)</option>
@@ -135,7 +135,7 @@
                             <select
                                 id="value_format"
                                 name="value_format"
-                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-red-500 focus:border-red-500 text-gray-900 dark:text-gray-100"
+                                class="mt-1 block w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 text-gray-900 dark:text-gray-100"
                             >
                                 <option value="hot" {% if value_format == "hot" %}selected{% endif %}>Hot (unquoted keys, typed values)</option>
                                 <option value="json" {% if value_format == "json" %}selected{% endif %}>JSON (quoted keys, $type/$val fields)</option>
@@ -166,7 +166,7 @@
                 {% endif %}
                 <button
                     type="submit"
-                    class="px-4 py-2 bg-hot-red-500 hover:bg-hot-red-600 text-white font-medium rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors"
+                    class="btn btn-primary"
                 >
                     Save Changes
                 </button>

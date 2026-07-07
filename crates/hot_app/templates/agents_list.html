@@ -40,10 +40,10 @@
                     type="text"
                     x-model="searchQuery"
                     placeholder="Search by name, namespace, or project..."
-                    class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
+                    class="w-full pl-10 text-gray-900 bg-white border border-gray-300 focus:outline-none focus:ring-2 focus:ring-hot-red-500 rounded-lg text-sm px-2.5 py-1.5 dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:placeholder-gray-400">
             </div>
             <select @change="setStatusFilter($event.target.value)"
-                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-hot-red-500">
                 <option value="all" {% if status_filter == "all" %}selected{% endif %}>All statuses</option>
                 <option value="failing" {% if status_filter == "failing" %}selected{% endif %}>Failing</option>
                 <option value="degraded" {% if status_filter == "degraded" %}selected{% endif %}>Degraded</option>

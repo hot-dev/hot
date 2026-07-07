@@ -1,0 +1,10 @@
+{# Single source for the Hot Prism grammar on pages that don't load
+   prism-hot.js as a static asset. Embeds resources/app/assets/js/prism-hot.js
+   at compile time (consumers add that directory to their askama dirs).
+   The shared docs script calls initHotPrismGrammar() only when
+   Prism.languages.hot is missing. #}
+<script>
+function initHotPrismGrammar() {
+{% include "prism-hot.js" %}
+}
+</script>
