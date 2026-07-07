@@ -1,0 +1,71 @@
+::pg::test::decode ns
+meta ["test"]
+
+::decode ::pg::decode
+::wire ::pg::wire
+::bytes ::hot::bytes
+::hex ::hot::hex
+
+// Value decoding maps OIDs to Hot types (text format)
+test-decode-value
+meta ["test"] fn () {
+    assert-eq(42, ::decode/decode-value(23, Bytes("42")), "int4 -> Int")
+    assert-eq(9000000000, ::decode/decode-value(20, Bytes("9000000000")), "int8 -> Int")
+    assert-eq(3.14, ::decode/decode-value(701, Bytes("3.14")), "float8 -> Dec")
+    assert-eq(1.5, ::decode/decode-value(1700, Bytes("1.5")), "numeric -> Dec")
+    assert-eq(true, ::decode/decode-value(16, Bytes("t")), "bool t -> true")
+    assert-eq(false, ::decode/decode-value(16, Bytes("f")), "bool f -> false")
+    assert-eq("hello", ::decode/decode-value(25, Bytes("hello")), "text -> Str")
+    assert-eq({a: 1}, ::decode/decode-value(114, Bytes("{\"a\":1}")), "json -> parsed")
+    assert-eq(Bytes([222, 173]), ::decode/decode-value(17, Bytes("\\xdead")), "bytea -> Bytes")
+}
+
+// ErrorResponse fields parse into a structured map
+test-parse-error
+meta ["test"] fn () {
+    // field-type byte + cstring, terminated by a 0 byte
+    payload concat(
+        Bytes("S"), ::wire/cstring("ERROR"),
+        Bytes("C"), ::wire/cstring("42P01"),
+        Bytes("M"), ::wire/cstring("relation does not exist"),
+        Bytes([0]))
+    err ::decode/parse-error(payload)
+    assert-eq("ERROR", err.severity, "severity")
+    assert-eq("42P01", err.code, "SQLSTATE code")
+    assert-eq("relation does not exist", err.message, "message")
+    assert(is-null(err.detail), "absent field is null")
+}
+
+// RowDescription parses into {name, oid} field descriptors
+test-parse-row-description
+meta ["test"] fn () {
+    // one field: count=1, name="id\0", tableOID, colAttr, typeOID=23, size, mod, format
+    payload concat(
+        ::wire/int16(1),
+        ::wire/cstring("id"),
+        ::wire/int32(0),      // table OID
+        ::wire/int16(0),      // column attr
+        ::wire/int32(23),     // type OID (int4)
+        ::wire/int16(4),      // type size
+        ::wire/int32(-1),     // type modifier
+        ::wire/int16(0))      // format code
+    fields ::decode/parse-row-description(payload)
+    assert-eq(1, length(fields), "one field")
+    assert-eq("id", first(fields).name, "field name")
+    assert-eq(23, first(fields).oid, "field OID")
+}
+
+// DataRow decodes columns against field OIDs, handling NULL (-1)
+test-parse-data-row
+meta ["test"] fn () {
+    fields [{name: "n", oid: 23}, {name: "s", oid: 25}, {name: "z", oid: 25}]
+    payload concat(
+        ::wire/int16(3),                          // column count
+        ::wire/int32(2), Bytes("42"),             // n = 42
+        ::wire/int32(2), Bytes("hi"),             // s = "hi"
+        ::wire/int32(-1))                          // z = NULL
+    row ::decode/parse-data-row(payload, fields)
+    assert-eq(42, row.n, "int column")
+    assert-eq("hi", row.s, "text column")
+    assert(is-null(row.z), "null column")
+}

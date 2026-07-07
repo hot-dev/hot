@@ -1,0 +1,72 @@
+::pg::test::integration ns
+meta ["test"]
+
+::ctx ::hot::ctx
+::lang ::hot::lang
+
+// Connection options from the test context (see pg.pkg.test.hot),
+// falling back to the local dev Postgres.
+pg-options fn (): Map {
+    {
+        host: ::ctx/get("pg.host", "127.0.0.1"),
+        port: Int(::ctx/get("pg.port", "5432")),
+        user: ::ctx/get("pg.user", "postgres"),
+        password: ::ctx/get("pg.password", ""),
+        database: ::ctx/get("pg.database", "postgres")
+    }
+}
+
+// End-to-end exercise of the client against a live server. If no Postgres
+// is reachable the test is skipped rather than failed, so the suite stays
+// runnable without a database.
+test-roundtrip
+meta ["test"] fn () {
+    attempt ::lang/try(() { ::pg/connect(pg-options()) })
+    cond {
+        is-err(attempt) => {
+            println(`  (skipped: no Postgres reachable — ${err-value(attempt)})`)
+            assert(true, "skipped without a database")
+        }
+        => {
+            conn ok-value(attempt)
+
+            // Simple query, several types
+            rows ::pg/query(conn, "SELECT 1 AS n, 'hi' AS s, true AS b, 2.5::float8 AS f, null AS z")
+            assert-eq(1, length(rows), "one row")
+            r first(rows)
+            assert-eq(1, r.n, "int decodes")
+            assert-eq("hi", r.s, "text decodes")
+            assert-eq(true, r.b, "bool decodes")
+            assert-eq(2.5, r.f, "float8 decodes to Dec")
+            assert(is-null(r.z), "null decodes")
+
+            // Parameterized query (extended protocol)
+            prow ::pg/query-one(conn, "SELECT $1::int AS a, $2::text AS t, $3::bool AS flag", [42, "world", false])
+            assert-eq(42, prow.a, "param int")
+            assert-eq("world", prow.t, "param text")
+            assert-eq(false, prow.flag, "param bool")
+
+            // query-one returns null with no rows
+            none ::pg/query-one(conn, "SELECT 1 WHERE false")
+            assert(is-null(none), "query-one is null with no rows")
+
+            // DDL + execute with rows-affected
+            ::pg/execute(conn, "CREATE TEMP TABLE pg_test (id int, name text)")
+            ins ::pg/execute(conn, "INSERT INTO pg_test VALUES ($1, $2), ($3, $4)", [1, "a", 2, "b"])
+            assert-eq(2, ins.rows-affected, "insert affected 2 rows")
+
+            upd ::pg/execute(conn, "UPDATE pg_test SET name = $1 WHERE id = $2", ["z", 1])
+            assert-eq(1, upd.rows-affected, "update affected 1 row")
+
+            got ::pg/query(conn, "SELECT id, name FROM pg_test ORDER BY id")
+            assert-eq([1, 2], map(got, (row) { row.id }), "ids round-trip")
+            assert-eq("z", first(got).name, "update persisted")
+
+            // Errors surface as catchable failures with SQLSTATE
+            failed ::lang/try(() { ::pg/query(conn, "SELECT * FROM does_not_exist") })
+            assert(is-err(failed), "bad query fails")
+
+            ::pg/close(conn)
+        }
+    }
+}

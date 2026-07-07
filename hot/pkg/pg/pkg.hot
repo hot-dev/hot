@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.pg {
+  name: "hot.dev/pg",
+  version: "0.1.0",
+  hot-min-version: "2.5.1",
+  description: "PostgreSQL client for Hot, implementing the wire protocol in pure Hot over ::hot::tcp / ::hot::tls.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["database", "postgres", "sql"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

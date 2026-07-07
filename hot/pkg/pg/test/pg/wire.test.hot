@@ -1,0 +1,47 @@
+::pg::test::wire ns
+meta ["test"]
+
+::wire ::pg::wire
+::bytes ::hot::bytes
+
+// Field encoders produce big-endian bytes
+test-encoders
+meta ["test"] fn () {
+    assert-eq(Bytes([0, 0, 0, 42]), ::wire/int32(42), "int32 big-endian")
+    assert-eq(Bytes([1, 0]), ::wire/int16(256), "int16 big-endian")
+    assert-eq(Bytes([104, 105, 0]), ::wire/cstring("hi"), "cstring null-terminated")
+}
+
+// StartupMessage is self-framed with a correct length prefix
+test-startup-message
+meta ["test"] fn () {
+    su ::wire/startup-message("postgres", "postgres")
+    assert-eq(length(su), ::bytes/to-int(slice(su, 0, 4)), "length prefix equals total length")
+    assert-eq(196608, ::bytes/to-int(slice(su, 4, 8)), "protocol version 3.0")
+}
+
+// Typed messages carry tag + length(body+4)
+test-frame
+meta ["test"] fn () {
+    q ::wire/query-message("SELECT 1")
+    assert-eq("Q", Str(slice(q, 0, 1)), "query tag is Q")
+    // length covers the 4 length bytes + "SELECT 1\0" (9) = 13
+    assert-eq(13, ::bytes/to-int(slice(q, 1, 5)), "length covers body + length field")
+    assert-eq("SELECT 1", Str(slice(q, 5, 13)), "sql body follows")
+}
+
+// Cursor readers advance position correctly
+test-cursor-readers
+meta ["test"] fn () {
+    buf concat(::wire/int32(70000), ::wire/cstring("name"), Bytes([255, 255]))
+    i ::wire/read-int32(buf, 0)
+    assert-eq(70000, i[0], "int32 value")
+    assert-eq(4, i[1], "int32 advances 4")
+
+    s ::wire/read-cstring(buf, i[1])
+    assert-eq("name", s[0], "cstring value")
+    assert-eq(9, s[1], "cstring advances past terminator")
+
+    u ::wire/read-uint16(buf, s[1])
+    assert-eq(65535, u[0], "uint16 is unsigned")
+}

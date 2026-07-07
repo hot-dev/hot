@@ -1,0 +1,174 @@
+::pg::auth ns
+meta {
+    doc: """
+    PostgreSQL authentication handshakes: trust (AuthenticationOk),
+    cleartext password, MD5, and SASL/SCRAM-SHA-256. Internal to the `pg`
+    package. Each handshake consumes backend messages through the final
+    AuthenticationOk, leaving the socket positioned for ParameterStatus.
+
+    On success these return `true`; on failure they `fail(...)` with the
+    PostgreSQL error details, which callers recover via
+    `::hot::lang/try-call`.
+    """
+}
+
+::tcp ::hot::tcp
+::bytes ::hot::bytes
+::hash ::hot::hash
+::hmac ::hot::hmac
+::hex ::hot::hex
+::b64 ::hot::base64
+::crypto ::hot::crypto
+::wire ::pg::wire
+::decode ::pg::decode
+
+// Authentication request sub-codes (first Int32 of an 'R' message).
+AUTH-OK 0
+AUTH-CLEARTEXT 3
+AUTH-MD5 5
+AUTH-SASL 10
+AUTH-SASL-CONTINUE 11
+AUTH-SASL-FINAL 12
+
+auth-code fn (msg: Map): Int {
+    ::bytes/to-int(slice(msg.payload, 0, 4))
+}
+
+// Halt with the PostgreSQL error from an ErrorResponse payload.
+fail-pg fn (payload: Bytes): Any {
+    e ::decode/parse-error(payload)
+    fail(`pg auth: ${e.message}`, e)
+}
+
+run-auth
+meta {
+    doc: """
+    Handle the authentication exchange given the first Authentication
+    ('R') message. Returns `true` once authenticated, or halts.
+    """
+}
+fn (socket, user: Str, password: Str, msg: Map): Bool {
+    code auth-code(msg)
+    cond {
+        eq(code, AUTH-OK) => { true }
+        eq(code, AUTH-CLEARTEXT) => { do-cleartext(socket, password) }
+        eq(code, AUTH-MD5) => { do-md5(socket, user, password, slice(msg.payload, 4, 8)) }
+        eq(code, AUTH-SASL) => { do-scram(socket, password, msg) }
+        => { fail(`pg auth: unsupported authentication method (code ${code})`) }
+    }
+}
+
+// After sending credentials the server replies with a further
+// Authentication message; expect AuthenticationOk.
+expect-auth-ok fn (socket): Bool {
+    msg ::wire/read-message(socket)
+    cond {
+        eq(msg.type, "E") => { fail-pg(msg.payload) }
+        and(eq(msg.type, "R"), eq(auth-code(msg), AUTH-OK)) => { true }
+        => { fail(`pg auth: unexpected message during authentication: ${msg.type}`) }
+    }
+}
+
+do-cleartext fn (socket, password: Str): Bool {
+    sent ::tcp/write(socket, ::wire/password-message(password))
+    expect-auth-ok(socket)
+}
+
+// md5 auth: "md5" + md5( md5(password + user) + salt )
+do-md5 fn (socket, user: Str, password: Str, salt: Bytes): Bool {
+    inner ::hash/md5(concat(Bytes(password), Bytes(user)))
+    outer ::hash/md5(concat(Bytes(inner), salt))
+    sent ::tcp/write(socket, ::wire/password-message(concat("md5", outer)))
+    expect-auth-ok(socket)
+}
+
+// ---------------------------------------------------------------------------
+// SCRAM-SHA-256 (RFC 5802 / 7677), no channel binding.
+// ---------------------------------------------------------------------------
+
+MECHANISM "SCRAM-SHA-256"
+// base64 of the gs2-header "n,," (no channel binding, no authzid)
+GS2-HEADER-B64 "biws"
+
+do-scram fn (socket, password: Str, msg: Map): Bool {
+    nonce random-string(24)
+    client-first-bare `n=,r=${nonce}`
+    client-first concat("n,,", client-first-bare)
+
+    // SASLInitialResponse: mechanism name, then Int32 length + client-first
+    initial concat(
+        ::wire/cstring(MECHANISM),
+        ::wire/int32(length(Bytes(client-first))),
+        Bytes(client-first))
+    sent ::tcp/write(socket, ::wire/frame("p", initial))
+
+    server-first-msg ::wire/read-message(socket)
+    cond {
+        eq(server-first-msg.type, "E") => { fail-pg(server-first-msg.payload) }
+        not(and(eq(server-first-msg.type, "R"), eq(auth-code(server-first-msg), AUTH-SASL-CONTINUE))) => {
+            fail("pg auth: expected SASL continue from server")
+        }
+        => {
+            scram-finish(socket, password, nonce, client-first-bare,
+                Str(slice(server-first-msg.payload, 4, length(server-first-msg.payload))))
+        }
+    }
+}
+
+// Parse a comma-separated SCRAM message ("r=..,s=..,i=..") into a map
+// keyed by the single-letter attribute.
+parse-scram-attrs fn (s: Str): Map {
+    reduce(split(s, ","), (acc, part) {
+        assoc(acc, slice(part, 0, 1), slice(part, 2))
+    }, {})
+}
+
+scram-finish fn (socket, password: Str, client-nonce: Str, client-first-bare: Str, server-first: Str): Bool {
+    attrs parse-scram-attrs(server-first)
+    combined-nonce get(attrs, "r")
+    salt ::b64/decode(get(attrs, "s"))
+    iterations Int(get(attrs, "i"))
+
+    cond {
+        not(starts-with(combined-nonce, client-nonce)) => {
+            fail("pg auth: SCRAM server nonce does not extend client nonce")
+        }
+        => {
+            salted ::crypto/pbkdf2-hmac-sha256(password, salt, iterations)
+            client-key ::hmac/hmac-sha256-bytes(salted, "Client Key")
+            stored-key ::hex/decode(::hash/sha256(client-key))
+
+            client-final-bare `c=${GS2-HEADER-B64},r=${combined-nonce}`
+            auth-message join([client-first-bare, server-first, client-final-bare], ",")
+
+            client-signature ::hmac/hmac-sha256-bytes(stored-key, auth-message)
+            client-proof ::hot::bytes/xor(client-key, client-signature)
+            client-final `${client-final-bare},p=${::b64/encode(client-proof)}`
+
+            sent ::tcp/write(socket, ::wire/frame("p", Bytes(client-final)))
+
+            // SASLFinal carries the server signature; then AuthenticationOk.
+            final-msg ::wire/read-message(socket)
+            cond {
+                eq(final-msg.type, "E") => { fail-pg(final-msg.payload) }
+                not(and(eq(final-msg.type, "R"), eq(auth-code(final-msg), AUTH-SASL-FINAL))) => {
+                    fail("pg auth: expected SASL final from server")
+                }
+                => {
+                    verified verify-server-signature(salted, auth-message,
+                        Str(slice(final-msg.payload, 4, length(final-msg.payload))))
+                    expect-auth-ok(socket)
+                }
+            }
+        }
+    }
+}
+
+verify-server-signature fn (salted: Bytes, auth-message: Str, server-final: Str): Bool {
+    attrs parse-scram-attrs(server-final)
+    server-key ::hmac/hmac-sha256-bytes(salted, "Server Key")
+    expected ::b64/encode(::hmac/hmac-sha256-bytes(server-key, auth-message))
+    if(eq(get(attrs, "v"), expected),
+        true,
+        fail("pg auth: SCRAM server signature verification failed"))
+}

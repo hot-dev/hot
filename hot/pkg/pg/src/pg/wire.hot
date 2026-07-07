@@ -1,0 +1,134 @@
+::pg::wire ns
+meta {
+    doc: """
+    PostgreSQL v3 wire-protocol framing: message encoders, a message
+    reader over `::hot::tcp`, and cursor-style readers for parsing
+    message payloads. Internal to the `pg` package.
+
+    Every backend/frontend message except the startup and SSL requests is
+    framed as: 1 type byte, Int32 length (covering the length field and
+    body but not the type byte), then the body.
+    """
+}
+
+::tcp ::hot::tcp
+::bytes ::hot::bytes
+
+// Protocol version 3.0 (major 3, minor 0) encoded as 196608.
+PROTOCOL-VERSION 196608
+// Magic number for an SSLRequest message.
+SSL-REQUEST-CODE 80877103
+
+// ---------------------------------------------------------------------------
+// Field encoders
+// ---------------------------------------------------------------------------
+
+int32
+meta {doc: """Encode an Int as a 4-byte big-endian value."""}
+fn (n: Int): Bytes { ::bytes/from-int(n, 4) }
+
+int16
+meta {doc: """Encode an Int as a 2-byte big-endian value."""}
+fn (n: Int): Bytes { ::bytes/from-int(n, 2) }
+
+cstring
+meta {doc: """Encode a string as null-terminated bytes."""}
+fn (s: Str): Bytes { concat(Bytes(s), Bytes([0])) }
+
+// ---------------------------------------------------------------------------
+// Message encoders
+// ---------------------------------------------------------------------------
+
+frame
+meta {doc: """Frame a body with a 1-char type tag and Int32 length prefix."""}
+fn (type-char: Str, body: Bytes): Bytes {
+    concat(Bytes(type-char), int32(add(length(body), 4)), body)
+}
+
+ssl-request
+meta {doc: """SSLRequest message (untyped): asks the server to start TLS."""}
+fn (): Bytes {
+    concat(int32(8), int32(SSL-REQUEST-CODE))
+}
+
+startup-message
+meta {doc: """StartupMessage (untyped) with user and database parameters."""}
+fn (user: Str, database: Str): Bytes {
+    params concat(
+        cstring("user"), cstring(user),
+        cstring("database"), cstring(database),
+        Bytes([0]))
+    body concat(int32(PROTOCOL-VERSION), params)
+    concat(int32(add(length(body), 4)), body)
+}
+
+query-message
+meta {doc: """Simple Query message ('Q')."""}
+fn (sql: Str): Bytes { frame("Q", cstring(sql)) }
+
+password-message
+meta {doc: """PasswordMessage ('p') carrying a cleartext or md5 password."""}
+fn (password: Str): Bytes { frame("p", cstring(password)) }
+
+terminate-message
+meta {doc: """Terminate message ('X')."""}
+fn (): Bytes { frame("X", Bytes([])) }
+
+sync-message
+meta {doc: """Sync message ('S') for the extended-query protocol."""}
+fn (): Bytes { frame("S", Bytes([])) }
+
+// ---------------------------------------------------------------------------
+// Reading whole messages off the socket
+// ---------------------------------------------------------------------------
+
+read-message
+meta {
+    doc: """
+    Read one framed backend message from `socket`. Returns
+    `{type: Str, payload: Bytes}` where payload excludes the type and
+    length fields. Blocks until a full message arrives.
+    """
+}
+fn (socket): Map {
+    type-byte ::tcp/read-exact(socket, 1)
+    len ::bytes/to-int(::tcp/read-exact(socket, 4))
+    body-len sub(len, 4)
+    payload if(gt(body-len, 0), ::tcp/read-exact(socket, body-len), Bytes([]))
+    {type: Str(type-byte), payload: payload}
+}
+
+// ---------------------------------------------------------------------------
+// Cursor readers — parse a payload by threading a position.
+// Each returns [value, next-position].
+// ---------------------------------------------------------------------------
+
+read-int32
+meta {doc: """Read a signed 4-byte big-endian Int at `pos`. -> [value, pos+4]."""}
+fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-int(slice(buf, pos, add(pos, 4))), add(pos, 4)]
+}
+
+read-uint16
+meta {doc: """Read an unsigned 2-byte big-endian Int at `pos`. -> [value, pos+2]."""}
+fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-uint(slice(buf, pos, add(pos, 2))), add(pos, 2)]
+}
+
+read-byte
+meta {doc: """Read one byte as an Int at `pos`. -> [value, pos+1]."""}
+fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-uint(slice(buf, pos, add(pos, 1))), add(pos, 1)]
+}
+
+read-cstring
+meta {
+    doc: """
+    Read a null-terminated string starting at `pos`.
+    -> [string, position-after-terminator].
+    """
+}
+fn (buf: Bytes, pos: Int): Vec {
+    end ::bytes/index-of(buf, 0, pos)
+    [Str(slice(buf, pos, end)), add(end, 1)]
+}
