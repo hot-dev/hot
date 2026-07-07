@@ -41,6 +41,17 @@ If the HTTP call failed, execution halts at the point of use—you don't need ex
 
 > **Note:** Function return type annotations specify the expected **success type**, not `Result`. The Result wrapper is implicit for any operation that can fail.
 
+### Dot Access on Results
+
+Auto-unwrapping extends to field access. Dot access on an `Ok` Result reads fields from the **payload**, so you never need to unwrap before drilling in:
+
+```hot
+response http-get("https://api.example.com/user/1")  // returns a Result
+name response.body.name   // reads .body.name from the Ok payload
+```
+
+If the Result is an `Err`, the dot access halts execution at that point — the same propagation rule as passing an Err to a function.
+
 ## Checking Results Explicitly
 
 Use `is-ok` and `is-err` to inspect Results without triggering automatic unwrapping:
@@ -92,6 +103,37 @@ if(is-ok(result),
   `Result: ${result}`,
   "Cannot divide by zero")  // This branch runs
 ```
+
+### Writing Your Own Result-Inspecting Functions
+
+The same rule applies to your own functions. A regular parameter auto-unwraps its argument, so passing an `Err` Result to it triggers the halt **before your function body runs**. Mark the parameter `lazy` and evaluate it with `do` — inside a lazy context, `do` preserves the Result instead of unwrapping it:
+
+```hot
+// ❌ Regular parameter: an Err argument halts before the body executes
+describe fn (r: Any): Str {
+  if(is-err(r), "failed", "succeeded")   // never reached for Err values
+}
+
+describe(err("boom"))   // Runtime error: boom
+
+// ✅ lazy parameter + do: receives and inspects the Result safely
+describe fn (lazy r: Any): Str {
+  v do r
+  if(is-err(v), "failed", "succeeded")
+}
+
+describe(err("boom"))   // "failed"
+describe(ok(42))        // "succeeded"
+```
+
+This composes with `OnErr.Preserve` (see Pattern 5) to classify per-item outcomes without halting the batch:
+
+```hot
+results map(items, process-item(%), OnErr.Preserve)  // Errs stay as values
+labels map(results, describe(%))                     // ["succeeded", "failed", ...]
+```
+
+If a halt fires when you hand a preserved `Result.Err` to a helper function, the fix is almost always marking the receiving parameter `lazy`.
 
 ## Short-Circuit Evaluation
 
@@ -180,6 +222,10 @@ without stopping the rest of the batch:
 `try` returns a normal `Result`: `Result.Ok(value)` on success and
 `Result.Err(payload)` on failure. Because it catches halts that would otherwise
 stop the run or task, it should be uncommon in application logic.
+
+> **Note:** You may also encounter `::hot::lang/try-call` in compiler hints and
+> older code — it's the legacy map-shaped variant of the same halt boundary.
+> Prefer `try` in new code.
 
 ## Summary
 

@@ -111,7 +111,7 @@ Any expression that returns a boolean works:
 validate fn cond (user: Map): Result {
   is-null(user.email) => { err("Email required") }
   not(valid-email(user.email)) => { err("Invalid email") }
-  lt(len(user.password), 8) => { err("Password too short") }
+  lt(length(user.password), 8) => { err("Password too short") }
   => { ok(user) }
 }
 ```
@@ -142,7 +142,7 @@ Use `match` to pattern match on types and literal values. The first matching pat
 {{snippet:flows#match-direction-enum}}
 
 ```hot
-describe match fn (dir: Direction): Str {
+describe fn match (dir: Direction): Str {
   Direction.Up => "Going up"
   Direction.Down => "Going down"
   Direction.Left => "Going left"
@@ -315,15 +315,34 @@ result [1, 2, 3, 4, 5]
   |> reduce((a, x) { add(a, x) }, 0)  // 24 (multi-param: use explicit lambda)
 ```
 
-### Pipes with Lambdas
+### Pipes and `%` — How They Compose
 
-Insert custom transformations using explicit lambdas or `%`:
+Two rules govern how pipes and `%` interact:
+
+1. **The pipe supplies the piped value as the first argument.** Don't add `%` for that — a pipe stage is already a partial call:
 
 ```hot
 result 10
-  |> mul(%, 2)     // 20
-  |> add(%, 5)     // 25
+  |> mul(2)     // mul(10, 2) → 20
+  |> add(5)     // add(20, 5) → 25
 ```
+
+2. **`%` creates a lambda only inside an argument that expects a function** — the higher-order arguments of `map`, `filter`, `reduce`, and friends:
+
+```hot
+[1, 2, 3] |> map(mul(%, 2))    // % is each element → [2, 4, 6]
+```
+
+A bare `%` in a pipe stage that isn't a function-typed argument is a compile error:
+
+```hot
+10 |> mul(%, 2)
+// error: Placeholder `%` has no enclosing parameter slot of type `Fn`
+// to bind to. The pipe already passes 10 as the first argument — write
+// `10 |> mul(2)` instead.
+```
+
+When you need a lambda where Hot wouldn't create one automatically, mark the boundary explicitly with `%(expr)` — see [Explicit Lambda Boundary](/docs/language/functions#explicit-lambda-boundary).
 
 ### Real-World Pipeline
 

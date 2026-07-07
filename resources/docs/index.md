@@ -11,15 +11,15 @@ Welcome to the Hot documentation. Hot is a backend workflow automation platform 
 - **[Getting Started](/docs/getting-started)** - Install Hot and run your first workflow
 - **[Demos](/docs/demos)** - Run complete tutorial projects, starting with Hot Chat
 - **[Hot Language](/docs/language)** - Learn the Hot programming language
-- **[Migrations and Upgrades](/docs/migrations)** - Update Hot and move databases between release lines
-- **[Hot Packages](/pkg)** - Standard library and integrations
-- **[Hot App](/docs/app)** - Monitor and debug executions
 - **[Events & Handlers](/docs/events)** - Event handlers and background jobs
 - **[Schedules](/docs/schedules)** - Cron and scheduled runs
 - **[Agents](/docs/agents)** - Define intelligent agents with memory and tools
 - **[MCP Services](/docs/mcp)** - Expose Hot functions as MCP tools for AI agents
 - **[Webhooks](/docs/webhooks)** - Turn Hot functions into webhook endpoints
 - **[Hot API](/docs/api)** - Integrate Hot with your backend
+- **[Hot App](/docs/app)** - Monitor and debug executions
+- **[Hot Packages](/pkg)** - Standard library and integrations
+- **[Migrations and Upgrades](/docs/migrations)** - Update Hot and move databases between release lines
 - **[VS Code & LSP](/docs/editor)** - Editor support and tooling
 
 ## Getting Help

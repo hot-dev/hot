@@ -13,7 +13,7 @@ The [Hot API](/docs/api) supports three credential types for authenticating requ
 | **Session** | `s_<uuid>_<secret>` | Short-lived (1h default, 24h max) | Ephemeral, permission-scoped access for browser clients |
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/api/v1/projects
+curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/v1/projects
 ```
 
 ## API Keys
@@ -46,6 +46,8 @@ From the [Hot App](/docs/app), click **New Service Key**. You'll specify:
 - **Metadata** — Optional JSON attached to the key (e.g., `{"customer_id": "acme-123"}`). Encrypted at rest and available to your Hot functions at runtime via `req.auth.service-key.meta`. Use this to pass customer context into your functions without requiring extra parameters. See [Caller Identity](/docs/mcp#caller-identity-hotrequest) for details.
 - **Permissions** — A granular permission map using the [permissions model](#permissions-model) below.
 - **Expiration** — Optional. Leave empty for a key that never expires.
+
+> **Resource type restriction:** Because service keys are customer-facing, they can only carry permissions for the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. Administrative resource types (`project`, `build`, `context`, `key`, `session`, `env`) are rejected when creating a service key.
 
 The generated token is displayed **only once** at creation time. It has no `hot_` prefix, making it suitable for white-label integrations where your customers shouldn't see Hot branding.
 
@@ -85,7 +87,7 @@ API keys, service keys, and sessions all share the same permissions model. Permi
 | **MCP (specific)** | `{"mcp:weather": ["execute"]}` | Invoke MCP tools in a specific service only |
 | **Events** | `{"event:*": ["create", "read"]}` | Publish and read events |
 | **Builds** | `{"build:*": ["create", "read"]}` | Upload builds and deploy them |
-| **Context Variables** | `{"ctx:*": ["create", "read", "update", "delete"]}` | Manage context variables |
+| **Context Variables** | `{"context:*": ["create", "read", "update", "delete"]}` | Manage context variables |
 | **Webhooks** | `{"webhook:*": ["execute"]}` | Access webhook endpoints that require API key authentication |
 | **Webhooks (specific)** | `{"webhook:internal": ["execute"]}` | Webhook access for a specific service only |
 
@@ -103,14 +105,14 @@ When creating or editing a restricted API key or service key, the [Hot App](/doc
 | MCP Tools | `mcp:*` → execute |
 | Events | `event:*` → create, read |
 | Builds | `build:*` → create, read |
-| Context Vars | `ctx:*` → create, read, update, delete |
+| Context Vars | `context:*` → create, read, update, delete |
 | Webhooks | `webhook:*` → execute |
 
 Presets add rules to the builder — they don't replace existing rules.
 
 **Rule Builder** — Each rule has three parts:
 
-1. **Resource Type** — Select a type from the dropdown (`mcp`, `event`, `build`, `ctx`, `webhook`, `run`, `stream`, `call`), or `All (*)` for a wildcard that covers every type.
+1. **Resource Type** — Select a type from the dropdown (`mcp`, `webhook`, `stream`, `event`, `run`, `project`, `build`, `context`, `key`, `session`, `env`), or `All (*)` for a wildcard that covers every type.
 2. **Path** — The resource path, usually `*` (all resources of that type) or a specific service name (e.g., `weather`). When the resource type is `All (*)`, the path is locked to `*`.
 3. **Actions** — Check one or more actions: `create`, `read`, `update`, `delete`, `execute`, or `*` (all actions). The available actions depend on the resource type.
 

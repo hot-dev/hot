@@ -16,7 +16,7 @@ Schedule functions to run at specific times using the `schedule` metadata:
 // Run every hour
 hourly-cleanup
 meta {schedule: "0 * * * *"}
-fn () {
+fn (event) {
   cleanup-expired-sessions()
   prune-old-logs()
 }
@@ -24,7 +24,7 @@ fn () {
 // Run daily at midnight UTC
 daily-report
 meta {schedule: "0 0 * * *"}
-fn () {
+fn (event) {
   generate-daily-report()
   send-to-slack()
 }
@@ -32,7 +32,7 @@ fn () {
 // Run every 5 minutes
 health-check
 meta {schedule: "*/5 * * * *"}
-fn () {
+fn (event) {
   check-external-services()
 }
 ```
@@ -78,19 +78,19 @@ You can also use plain English to define schedules:
 // Natural language schedules
 daily-digest
 meta {schedule: "every day at 9:00 am"}
-fn () {
+fn (event) {
   send-daily-digest()
 }
 
 weekly-review
 meta {schedule: "on Sunday at 12:00"}
-fn () {
+fn (event) {
   generate-weekly-review()
 }
 
 payroll
 meta {schedule: "run at midnight on the 1st and 15th of the month"}
-fn () {
+fn (event) {
   process-payroll()
 }
 ```
@@ -260,7 +260,7 @@ import-data meta {
   schedule: "0 2 * * *",
   retry: 5
 }
-fn () {
+fn (event) {
   import-from-sftp()
 }
 ```
@@ -270,5 +270,19 @@ For full retry configuration (attempts, delay, backoff, jitter, limits, and `pen
 ## How It Works
 
 When a scheduled function's time arrives, the scheduler sends a `hot:schedule` event with the function details. A worker picks up the event and executes the function.
+
+The function is called with a single argument describing the schedule that fired:
+
+```hot
+nightly-sync meta {schedule: "0 2 * * *"}
+fn (event) {
+  // event.type         → "hot:schedule"
+  // event.schedule_id  → UUID of the schedule that fired
+  // event.scheduled_at → RFC 3339 timestamp of the trigger
+  sync-data()
+}
+```
+
+Declare the parameter even if you don't use it — the scheduler always passes it.
 
 Scheduled runs are tracked and visible in the Hot App alongside event-triggered and API-triggered runs.
