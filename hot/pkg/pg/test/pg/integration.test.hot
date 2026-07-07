@@ -1,34 +1,59 @@
 ::pg::test::integration ns
 meta ["test"]
 
-::ctx ::hot::ctx
-::lang ::hot::lang
+::env ::hot::env
+::tcp ::hot::tcp
 
-// Connection options from the test context (see pg.pkg.test.hot),
+// Connection options from the standard PG* environment variables,
 // falling back to the local dev Postgres.
 pg-options fn (): Map {
     {
-        host: ::ctx/get("pg.host", "127.0.0.1"),
-        port: Int(::ctx/get("pg.port", "5432")),
-        user: ::ctx/get("pg.user", "postgres"),
-        password: ::ctx/get("pg.password", ""),
-        database: ::ctx/get("pg.database", "postgres")
+        host: ::env/get("PGHOST", "127.0.0.1"),
+        port: Int(::env/get("PGPORT", "5432")),
+        user: ::env/get("PGUSER", "postgres"),
+        password: ::env/get("PGPASSWORD", "password"),
+        database: ::env/get("PGDATABASE", "postgres")
     }
 }
 
-// End-to-end exercise of the client against a live server. If no Postgres
-// is reachable the test is skipped rather than failed, so the suite stays
-// runnable without a database.
+// True when a TCP connection to the configured server succeeds. Only raw
+// reachability is probed here — never the protocol handshake — so that a
+// startup/auth regression fails the test instead of masquerading as an
+// unavailable server.
+server-reachable fn (opts: Map): Bool {
+    probe ::tcp/connect(opts.host, opts.port, {timeout: 2000})
+    cond {
+        is-err(probe) => { false }
+        => {
+            closed ::tcp/close(probe)
+            true
+        }
+    }
+}
+
+// connect to a port with no listener returns a well-formed single Err
+// that is-err/err-value handle directly (regression: this used to come
+// back double-wrapped, invisible to is-err).
+test-connect-refused
+meta ["test"] fn () {
+    attempt ::pg/connect({host: "127.0.0.1", port: 59999, user: "nobody", timeout: 2000})
+    assert(is-err(attempt), "refused connect returns Err")
+    assert(not(is-err(err-value(attempt))), "Err payload is not itself an Err")
+}
+
+// End-to-end exercise of the client against a live server. Skipped only
+// when no TCP listener is reachable; once reachable, connect/auth failures
+// fail the test.
 test-roundtrip
 meta ["test"] fn () {
-    attempt ::lang/try(() { ::pg/connect(pg-options()) })
+    opts pg-options()
     cond {
-        is-err(attempt) => {
-            println(`  (skipped: no Postgres reachable — ${err-value(attempt)})`)
+        not(server-reachable(opts)) => {
+            println("  (skipped: no Postgres reachable)")
             assert(true, "skipped without a database")
         }
         => {
-            conn ok-value(attempt)
+            conn ::pg/connect(opts)
 
             // Simple query, several types
             rows ::pg/query(conn, "SELECT 1 AS n, 'hi' AS s, true AS b, 2.5::float8 AS f, null AS z")
@@ -62,11 +87,20 @@ meta ["test"] fn () {
             assert-eq([1, 2], map(got, (row) { row.id }), "ids round-trip")
             assert-eq("z", first(got).name, "update persisted")
 
-            // Errors surface as catchable failures with SQLSTATE
-            failed ::lang/try(() { ::pg/query(conn, "SELECT * FROM does_not_exist") })
-            assert(is-err(failed), "bad query fails")
+            // bytea round-trips as Bytes through a parameter and back
+            blob Bytes([0, 255, 254, 104, 105])
+            brow ::pg/query-one(conn, "SELECT $1::bytea AS b", [blob])
+            assert-eq(blob, brow.b, "bytea param round-trips as Bytes")
+
+            // Errors surface as Result.Err with the SQLSTATE attached —
+            // no halt boundary needed, branch on the value directly.
+            failed ::pg/query(conn, "SELECT * FROM does_not_exist")
+            assert(is-err(failed), "bad query returns Err")
+            assert-eq("42P01", err-value(failed).code, "Err carries SQLSTATE")
 
             ::pg/close(conn)
+            closed-again ::pg/close(conn)
+            assert-eq(true, closed-again, "close is idempotent")
         }
     }
 }

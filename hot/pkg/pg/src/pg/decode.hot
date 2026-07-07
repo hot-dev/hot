@@ -85,7 +85,9 @@ meta {
     Decode a column's raw text-format bytes into a Hot value using its
     type OID. Integers become Int, float/numeric become Dec, bool becomes
     Bool, json/jsonb are parsed, bytea is hex-decoded, and everything else
-    (text, varchar, uuid, timestamps, ...) stays a Str.
+    (text, varchar, uuid, timestamps, ...) becomes a Str — or Bytes when
+    the value is not valid UTF-8 (a non-UTF8 `client_encoding`), rather
+    than silently substituting replacement characters.
     """
 }
 fn (oid: Int, raw: Bytes): Any {
@@ -96,7 +98,10 @@ fn (oid: Int, raw: Bytes): Any {
         in(oid, [OID-FLOAT4, OID-FLOAT8, OID-NUMERIC]) => { Dec(text) }
         in(oid, [OID-JSON, OID-JSONB]) => { from-json(text) }
         eq(oid, OID-BYTEA) => { decode-bytea(text) }
-        => { text }
+        // Str() substitutes U+FFFD for invalid UTF-8, so the value
+        // round-trips unchanged exactly when it is valid UTF-8.
+        eq(Bytes(text), raw) => { text }
+        => { raw }
     }
 }
 

@@ -18,6 +18,10 @@ meta ["test"] fn () {
     assert-eq("hello", ::decode/decode-value(25, Bytes("hello")), "text -> Str")
     assert-eq({a: 1}, ::decode/decode-value(114, Bytes("{\"a\":1}")), "json -> parsed")
     assert-eq(Bytes([222, 173]), ::decode/decode-value(17, Bytes("\\xdead")), "bytea -> Bytes")
+
+    // Fallback decoding is binary-safe: invalid UTF-8 stays Bytes rather
+    // than corrupting into replacement characters.
+    assert-eq(Bytes([255, 254, 0]), ::decode/decode-value(25, Bytes([255, 254, 0])), "non-UTF8 text -> Bytes")
 }
 
 // ErrorResponse fields parse into a structured map

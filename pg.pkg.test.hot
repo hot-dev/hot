@@ -1,14 +1,12 @@
 ::hot::conf ns
 
-::env ::hot::env
-
 // Test configuration for the hot.dev/pg package.
 //
 // Runs against a local Postgres. The dev docker container
 // (hot-postgres-1) exposes Postgres 18 on 127.0.0.1:5432 with
-// user=postgres, db=postgres, trust auth. Override via env vars:
-//
-//   PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
+// user=postgres, db=postgres, trust auth. The integration test reads
+// PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE from the environment,
+// with those defaults.
 //
 // Run:  cargo run -p hot_cli -- test -c pg.pkg.test.hot
 
@@ -23,12 +21,6 @@ hot.project.pg-pkg.src.paths ["./hot/pkg/pg/src"]
 hot.project.pg-pkg.test.paths ["./hot/pkg/pg/test"]
 hot.project.pg-pkg.test.capture true
 hot.project.pg-pkg.skills.codegen.enabled false
-
-hot.ctx.pg.host ::env/get("PGHOST", "127.0.0.1")
-hot.ctx.pg.port ::env/get("PGPORT", "5432")
-hot.ctx.pg.user ::env/get("PGUSER", "postgres")
-hot.ctx.pg.password ::env/get("PGPASSWORD", "password")
-hot.ctx.pg.database ::env/get("PGDATABASE", "postgres")
 
 hot.log.level "info"
 hot.log.target "stdout"

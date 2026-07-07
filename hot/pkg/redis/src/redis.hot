@@ -84,13 +84,16 @@ meta {
     Open a Redis connection, optionally authenticating, selecting a
     database, and negotiating RESP3.
 
-    Returns a `RedisConnection`. Connection and command errors halt with
-    the error details; wrap the call in `::hot::lang/try` to recover.
+    Returns a `RedisConnection`, or a `Result.Err` carrying the error
+    details when the connection, TLS negotiation, AUTH, or SELECT fails.
+    Branch on it with `is-err` / `if-err`; an unhandled error halts at
+    first use with the same message.
 
     **Example**
 
     ```hot
     conn ::redis/connect({host: "localhost", port: 6379, password: "secret", db: 1})
+    if-err(conn, (e) { ... fall back ... })
     ```
 
     See `RedisOptions` for the accepted fields.
@@ -100,19 +103,24 @@ fn (options: Map): RedisConnection {
     host ::coll/get(options, "host", "127.0.0.1")
     port ::coll/get(options, "port", 6379)
     tcp-opts if(is-null(options.timeout), {}, {timeout: options.timeout})
-    socket ::tcp/connect(host, port, tcp-opts)
 
-    secured if(is-null(options.tls), socket, negotiate-tls(socket, options.tls, host))
-    conn {socket: socket}
-
-    authed maybe-auth(conn, ::coll/get(options, "username", null), ::coll/get(options, "password", null), ::coll/get(options, "resp3", false))
-    selected maybe-select(conn, ::coll/get(options, "db", 0))
-    conn
+    // Each step returns its value or a Result.Err; if-ok short-circuits
+    // the first error out as connect's return value.
+    if-ok(::tcp/connect(host, port, tcp-opts), (socket) {
+        if-ok(if(is-null(options.tls), true, negotiate-tls(socket, options.tls, host)), (secured) {
+            conn {socket: socket}
+            if-ok(maybe-auth(conn, ::coll/get(options, "username", null), ::coll/get(options, "password", null), ::coll/get(options, "resp3", false)), (authed) {
+                if-ok(maybe-select(conn, ::coll/get(options, "db", 0)), (selected) {
+                    conn
+                })
+            })
+        })
+    })
 }
 
-negotiate-tls fn (socket, tls-opts: Map, host: Str): Bool {
-    upgraded ::tls/upgrade(socket, {...tls-opts, server-name: ::coll/get(tls-opts, "server-name", host)})
-    true
+negotiate-tls fn (socket, tls-opts: Map, host: Str): Any {
+    // upgrade secures the socket handle in place.
+    if-ok(::tls/upgrade(socket, {...tls-opts, server-name: ::coll/get(tls-opts, "server-name", host)}), (upgraded) { true })
 }
 
 // AUTH, or HELLO 3 (with optional AUTH) when RESP3 is requested.
@@ -145,9 +153,12 @@ meta {
     doc: """
     Send a command (a Vec of arguments) and return the decoded reply.
 
-    Arguments are coerced to strings. Replies decode to Str/Int/Dec/Bool/
-    Vec/Map/null per RESP. Redis error replies halt with the message;
-    recover with `::hot::lang/try`.
+    `Bytes` arguments are sent as-is (binary-safe); other arguments are
+    coerced to strings. Replies decode to Str/Int/Dec/Bool/Vec/Map/null
+    per RESP; a bulk value that is not valid UTF-8 decodes to Bytes.
+    Redis error replies decode to a `Result.Err` with the message;
+    branch on it with `is-err` / `if-err`. An unhandled error halts at
+    first use with the same message.
 
     **Example**
 
@@ -159,8 +170,9 @@ meta {
     """
 }
 fn (conn: RedisConnection, args: Vec): Any {
-    sent ::tcp/write(conn.socket, ::resp/encode-command(args))
-    ::resp/read-reply(conn.socket)
+    if-ok(::tcp/write(conn.socket, ::resp/encode-command(args)), (sent) {
+        ::resp/read-reply(conn.socket)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -172,13 +184,19 @@ meta {doc: """Ping the server. Returns "PONG"."""}
 fn (conn: RedisConnection): Str { command(conn, ["PING"]) }
 
 get
-meta {doc: """Get the string value of `key`, or null if it does not exist."""}
+meta {
+    doc: """
+    Get the value of `key`, or null if it does not exist. Values decode
+    to Str, or to Bytes when they are not valid UTF-8.
+    """
+}
 fn (conn: RedisConnection, key: Str): Any { command(conn, ["GET", key]) }
 
 set
 meta {
     doc: """
-    Set `key` to `value`. Returns "OK".
+    Set `key` to `value`. A `Bytes` value is stored as-is (binary-safe);
+    other values are coerced to strings. Returns "OK".
 
     **Example**
 
@@ -188,13 +206,13 @@ meta {
     """
 }
 fn (conn: RedisConnection, key: Str, value: Any): Str {
-    command(conn, ["SET", key, Str(value)])
+    command(conn, ["SET", key, value])
 }
 
 set-ex
-meta {doc: """Set `key` to `value` with an expiry in `seconds`. Returns "OK"."""}
+meta {doc: """Set `key` to `value` with an expiry in `seconds`, like `set`. Returns "OK"."""}
 fn (conn: RedisConnection, key: Str, value: Any, seconds: Int): Str {
-    command(conn, ["SET", key, Str(value), "EX", Str(seconds)])
+    command(conn, ["SET", key, value, "EX", Str(seconds)])
 }
 
 del
@@ -227,6 +245,8 @@ meta {
     """
 }
 fn (conn: RedisConnection): Bool {
-    quit ::tcp/write(conn.socket, ::resp/encode-command(["QUIT"]))
+    // The QUIT courtesy write fails on an already-closed socket;
+    // recover the Err so close stays idempotent as documented.
+    quit if-err(::tcp/write(conn.socket, ::resp/encode-command(["QUIT"])), false)
     ::tcp/close(conn.socket)
 }

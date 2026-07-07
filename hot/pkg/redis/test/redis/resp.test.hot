@@ -25,3 +25,21 @@ meta ["test"] fn () {
         ::resp/encode-command(["INCRBY", "n", 42]),
         "integer argument coerces to its decimal string")
 }
+
+// Bytes arguments pass through unchanged — bulk strings are binary-safe
+test-encode-binary
+meta ["test"] fn () {
+    assert-eq(
+        concat(Bytes("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$3\r\n"), Bytes([0, 255, 254]), Bytes("\r\n")),
+        ::resp/encode-command(["SET", "k", Bytes([0, 255, 254])]),
+        "binary value is not coerced through Str")
+}
+
+// Bulk payloads decode to Str when valid UTF-8, Bytes otherwise
+test-decode-bulk-value
+meta ["test"] fn () {
+    assert-eq("hello", ::resp/decode-bulk-value(Bytes("hello")), "valid UTF-8 -> Str")
+    assert-eq("", ::resp/decode-bulk-value(Bytes([])), "empty -> empty Str")
+    assert-eq(Bytes([0, 255, 254]), ::resp/decode-bulk-value(Bytes([0, 255, 254])), "invalid UTF-8 -> Bytes")
+    assert-eq("héllo", ::resp/decode-bulk-value(Bytes("héllo")), "multibyte UTF-8 -> Str")
+}
