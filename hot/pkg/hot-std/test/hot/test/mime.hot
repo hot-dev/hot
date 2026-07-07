@@ -211,5 +211,6 @@ meta ["test"] fn () {
     assert-eq("jpg", ::hot::mime/to-ext("image/jpeg"), "image/jpeg is jpg")
     assert-eq("png", ::hot::mime/to-ext("image/png"), "subtype match")
     assert-eq("json", ::hot::mime/to-ext("application/json"), "subtype match")
+    assert-eq("mp3", ::hot::mime/to-ext("audio/mpeg"), "mp3 override (mime-db canonical is mpga)")
     assert(is-null(::hot::mime/to-ext("application/x-not-real")), "unknown type is null")
 }

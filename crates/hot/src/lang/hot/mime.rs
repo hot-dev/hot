@@ -75,6 +75,13 @@ pub fn to_ext(args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    // mime-db's canonical extension for audio/mpeg is "mpga", which many
+    // extension-keyed players, OS file associations, and upload whitelists
+    // don't recognize. "mp3" is what the ecosystem expects for saved files.
+    if &**mime_str == "audio/mpeg" {
+        return HotResult::Ok(Val::from("mp3"));
+    }
+
     // mime2ext returns the canonical extension per the mime-db dataset
     // (e.g. text/plain -> "txt"), unlike mime_guess's alphabetical first.
     if let Some(ext) = mime2ext::mime2ext(&**mime_str) {
@@ -261,6 +268,10 @@ mod tests {
 
         let result = to_ext(&[Val::from("application/json")]);
         assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "json"));
+
+        // Deliberate override: mime-db says "mpga", the ecosystem expects "mp3"
+        let result = to_ext(&[Val::from("audio/mpeg")]);
+        assert!(matches!(result, HotResult::Ok(Val::Str(s)) if &*s == "mp3"));
 
         // Unknown MIME type
         let result = to_ext(&[Val::from("application/x-not-real")]);
