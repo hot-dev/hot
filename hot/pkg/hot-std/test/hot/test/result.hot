@@ -11,6 +11,7 @@ not ::hot::bool/not
 eq ::hot::cmp/eq
 div ::hot::math/div
 if ::hot::bool/if
+contains ::hot::str/contains
 
 // Helper function that can legitimately return either success or error
 safe-divide fn (a, b) {
@@ -147,6 +148,22 @@ meta ["test"] fn () {
     passed ::hot::internal::exec/contain(() { ok(7) })
     assert(is-ok(passed), "returned Ok stays Ok")
     assert-eq(7, ok-value(passed), "Ok payload intact")
+}
+
+// Regression: an Err used inside a lambda body escalates with the
+// payload's actual message in every execution context — the lambda
+// executor's Call handler prepares arguments exactly like the main
+// interpreter loop (this used to produce "add requires numbers"
+// under the test runner while eval escalated correctly).
+test-err-escalation-carries-message
+meta ["test"] fn () {
+    use-it fn (): Any {
+        e err("the real reason")
+        add(e, 1)
+    }
+    caught ::hot::internal::exec/contain(use-it)
+    assert(is-err(caught), "escalation caught at the boundary")
+    assert(contains(Str(err-value(caught)), "the real reason"), "halt carries the payload message")
 }
 
 // Fan-out isolation without a halt boundary: OnErr.Preserve keeps a

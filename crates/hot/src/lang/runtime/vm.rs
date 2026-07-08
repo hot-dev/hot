@@ -4972,6 +4972,12 @@ impl VirtualMachine {
     ///
     /// NOTE: This should ONLY be called for non-lazy function arguments and template literal parts
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
+        if std::env::var("HOT_DBG_UNWRAP").is_ok() && val.is_err() {
+            eprintln!(
+                "DBG unwrap_result_if_ok on Err (suppress={})",
+                self.suppress_result_checking
+            );
+        }
         // Don't unwrap if this is a lambda - lazy values should not be unwrapped
         if let Val::Box(b) = val
             && b.as_any()
@@ -7473,11 +7479,17 @@ impl VirtualMachine {
                     args_start,
                     args_count,
                 } => {
+                    // Mirror the main interpreter loop's Call handler:
+                    // arguments follow the normal auto-unwrap rules (Ok
+                    // unwraps, Err escalates with its payload message).
+                    // Without this, an Err bound inside a lambda body
+                    // reached natives raw and produced misleading type
+                    // errors instead of the Err's own message.
                     let mut args = Vec::new();
                     for i in 0..*args_count {
                         let arg_reg = args_start + i as RegisterId;
                         let arg_val = self.get_register(arg_reg)?.clone();
-                        args.push(arg_val);
+                        args.push(self.prepare_call_arg(arg_val)?);
                     }
                     let result = self.execute_function_call(*function, &args)?;
                     self.set_register(*dest, result)?;
@@ -9344,6 +9356,13 @@ impl VirtualMachine {
         });
 
         if let Some(lib_fn) = lib_fn {
+            // NOTE: no Result auto-unwrap here. This is a runtime dispatch
+            // layer also reached by Rust-side HOF loops (filter/map/...)
+            // that legitimately hand raw Err elements to Result-aware
+            // natives (is-err, err-value, ...). Only compiled call sites
+            // know which parameters are lazy, so arg auto-unwrap lives in
+            // the interpreter Call handlers (main + lambda loops), where
+            // lazy arguments arrive as thunks and are skipped.
             // Dispatch based on function type encoded in the enum
             let result = match lib_fn {
                 crate::lang::hot::HotLibFn::LibFn(func) => {
