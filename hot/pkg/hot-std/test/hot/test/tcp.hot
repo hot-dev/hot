@@ -43,12 +43,12 @@ meta ["test"] fn () {
     assert(is-str(payload), "Err payload is the failure message")
 }
 
-// Regression: ::hot::lang/try around a native that errors by value is
+// Regression: the contain boundary around a native that errors by value is
 // idempotent — the Err passes through unchanged instead of being
 // re-wrapped as Ok(Err) (invisible to is-err) or Err(Err).
-test-try-around-native-err-is-idempotent
+test-contain-around-native-err-is-idempotent
 meta ["test"] fn () {
-    r ::hot::lang/try(() { ::tcp/connect("127.0.0.1", 1, ::hot::tcp/TcpOptions({timeout: 2000})) })
-    assert(is-err(r), "try around a failing connect is an Err")
-    assert(not(is-err(err-value(r))), "no nested Err through the try boundary")
+    r ::hot::internal::exec/contain(() { ::tcp/connect("127.0.0.1", 1, ::hot::tcp/TcpOptions({timeout: 2000})) })
+    assert(is-err(r), "contain around a failing connect is an Err")
+    assert(not(is-err(err-value(r))), "no nested Err through the boundary")
 }

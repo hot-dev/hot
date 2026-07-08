@@ -230,7 +230,7 @@ fn () {
     })
     // `try` keeps this test from aborting if the loop halts, while the
     // nested match also handles a domain Err returned by the run loop.
-    attempt ::hot::lang/try(::chat/run-loop, [opts, "loop forever"])
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "loop forever"])
     match attempt {
         Result.Err => {
             assert(contains(attempt.msg, "max-iterations"), "error mentions max-iterations")
@@ -618,7 +618,7 @@ fn () {
         count-tokens-fn: mock-counter-large
     })
     // Budget overflow halts via `fail(...)`; try captures the halt.
-    attempt ::hot::lang/try(::chat/run-loop, [opts, "anything"])
+    attempt ::hot::internal::exec/contain(::chat/run-loop, [opts, "anything"])
     match attempt {
         Result.Err => {
             assert(contains(attempt.msg, "context limit"), "error mentions context limit")
@@ -670,7 +670,7 @@ fn () {
         max-context-tokens: 100,
         count-tokens-fn: mock-counter-large
     })
-    attempt ::hot::lang/try(::chat/run-loop-stream, [opts, "anything"])
+    attempt ::hot::internal::exec/contain(::chat/run-loop-stream, [opts, "anything"])
     match attempt {
         Result.Err => {
             assert(contains(attempt.msg, "context limit"), "error mentions context limit")

@@ -1056,13 +1056,15 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::lang/call-internal".to_string(),
             HotLibFn::VmAwareFn(lang::call),
         );
+        // Halt containment is runtime-internal: the engine's own
+        // supervision boundaries (AI tool dispatch, lifecycle fan-out,
+        // halt-semantics tests) contain fail()/cancel() as Result.Err.
+        // Application code uses the error model instead — Err values,
+        // OnErr.Preserve fan-out, task boundaries. The public
+        // ::hot::lang/try and try-call were removed in 2.6.0.
         map.insert(
-            "::hot::lang/try-call".to_string(),
-            HotLibFn::VmAwareFn(lang::try_call),
-        );
-        map.insert(
-            "::hot::lang/try".to_string(),
-            HotLibFn::VmAwareFn(lang::r#try),
+            "::hot::internal::exec/contain".to_string(),
+            HotLibFn::VmAwareFn(lang::contain),
         );
         map.insert(
             "::hot::lang/resolve".to_string(),

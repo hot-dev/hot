@@ -1226,8 +1226,8 @@ meta ["test"] fn () {
 // failure semantics consistent and avoids HOFs silently downgrading halts
 // into Result.Err slots that downstream code may not expect.
 //
-// To recover per item, the callback should use `if-err` (or the explicit
-// halt boundary `::hot::lang/try`) inside the callback itself.
+// To recover per item, pass `OnErr.Preserve` (for Err values) or use
+// `if-err` inside the callback itself.
 //
 // `pmap` follows the same contract with a batch-completion twist: parallel
 // in-flight work is allowed to finish, then the lowest-input-index halt is
@@ -1246,7 +1246,7 @@ map-with-halt-on-2 fn (): Vec<Int> {
 
 test-map-propagates-halts
 meta ["test"] fn () {
-    attempt ::hot::lang/try(map-with-halt-on-2, [])
+    attempt ::hot::internal::exec/contain(map-with-halt-on-2, [])
     assert(is-err(attempt))
     failure if-err(attempt, (failure) { failure })
     assert(contains(failure.msg, "boom on 2"))
@@ -1278,7 +1278,7 @@ map-with-domain-err-default fn () {
 
 test-map-forces-domain-err-by-default
 meta ["test"] fn () {
-    attempt ::hot::lang/try(map-with-domain-err-default, [])
+    attempt ::hot::internal::exec/contain(map-with-domain-err-default, [])
     assert(is-err(attempt))
     failure if-err(attempt, (failure) { failure })
     assert(contains(Str(failure), "domain err on 2"))
@@ -1309,7 +1309,7 @@ mapcat-with-halt fn (): Vec<Int> {
 
 test-mapcat-propagates-halts
 meta ["test"] fn () {
-    attempt ::hot::lang/try(mapcat-with-halt, [])
+    attempt ::hot::internal::exec/contain(mapcat-with-halt, [])
     assert(is-err(attempt))
     failure if-err(attempt, (failure) { failure })
     assert(contains(failure.msg, "mapcat boom"))
@@ -1342,7 +1342,7 @@ filter-with-halt fn (): Vec<Int> {
 
 test-filter-propagates-halts
 meta ["test"] fn () {
-    attempt ::hot::lang/try(filter-with-halt, [])
+    attempt ::hot::internal::exec/contain(filter-with-halt, [])
     assert(is-err(attempt))
     failure if-err(attempt, (failure) { failure })
     assert(contains(failure.msg, "filter boom"))
@@ -1359,7 +1359,7 @@ map-indexed-with-halt fn (): Vec<Int> {
 
 test-map-indexed-propagates-halts
 meta ["test"] fn () {
-    attempt ::hot::lang/try(map-indexed-with-halt, [])
+    attempt ::hot::internal::exec/contain(map-indexed-with-halt, [])
     assert(is-err(attempt))
     failure if-err(attempt, (failure) { failure })
     assert(contains(failure.msg, "map-indexed boom"))
@@ -1392,7 +1392,7 @@ pmap-with-halt-large fn (): Vec<Int> {
 
 test-pmap-propagates-halts-after-batch
 meta ["test"] fn () {
-    attempt ::hot::lang/try(pmap-with-halt-large, [])
+    attempt ::hot::internal::exec/contain(pmap-with-halt-large, [])
     assert(is-err(attempt))
     // The lowest-input-index halt wins regardless of scheduling.
     failure if-err(attempt, (failure) { failure })

@@ -119,30 +119,9 @@ fn (request: HttpRequest): HttpResponse {
 }
 
 
-try-request
-meta {
-    deprecated: true,
-    doc: """
-    **Deprecated:** `request` already returns a `Result.Err` for
-    transport failures (DNS failure, connection refused, TLS errors,
-    timeouts, ...), so this wrapper adds nothing — call `request` and
-    branch with `is-err` / `if-err`.
-
-    **Example (preferred)**
-
-    ```hot
-    response request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
-    if-err(response, (failure) { println(`network error: ${failure}`) })
-    if-ok(response, (r) { handle-response(r) })
-    ```
-    """
-}
-fn (req: HttpRequest): Result {
-    request(req)
-},
-(method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result {
-    request(HttpRequest({method, url, headers, body}))
-}
+// NOTE: `try-request` was removed in Hot 2.6.0 — `request` already
+// returns a `Result.Err` for transport failures; branch with
+// `is-err` / `if-err`.
 
 
 get

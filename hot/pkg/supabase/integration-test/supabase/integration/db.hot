@@ -7,21 +7,17 @@ meta ["test"]
 SUPABASE_TEST_TABLE ::hot::env/get("SUPABASE_TEST_TABLE", "hot-integration-test")
 
 ok-body fn (lazy response: Any, label: Str): Any {
-  attempt ::hot::lang/try(() { do response })
+  // Force the request exactly once (lazy params re-evaluate per use).
+  // A transport failure is a Result.Err value; label it and fail the test.
+  resolved do response
   cond {
-    is-err(attempt) => {
-      failure if-err(attempt, (failure) { failure })
-      fail(`${label} transport failed: ${failure.msg}`)
+    is-err(resolved) => {
+      fail(`${label} transport failed: ${err-value(resolved)}`)
     }
-    => {
-      resolved attempt
-      cond {
-        gte(resolved.status, 400) => {
-          fail(`${label} failed with status ${resolved.status}: ${to-json(resolved.body)}`)
-        }
-        => { resolved.body }
-      }
+    gte(resolved.status, 400) => {
+      fail(`${label} failed with status ${resolved.status}: ${to-json(resolved.body)}`)
     }
+    => { resolved.body }
   }
 }
 

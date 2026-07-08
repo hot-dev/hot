@@ -80,76 +80,14 @@ fn
 }
 
 
-try
-meta {
-    core: true,
-    deprecated: true,
-    doc: """
-    **Deprecated.** Call function `f` with `args`, catching exceptional
-    halts (`fail()`, `cancel()`) and hard runtime errors as a normal
-    `Result`. A callee that already returned a `Result` passes through
-    unchanged.
-
-    Hot code should not need a halt boundary:
-
-    - **Expected failures are `Result` values.** Functions that can fail
-      (`::hot::tcp`, `::hot::http`, `::pg`, `::redis`, ...) return
-      `Result.Err`; branch with `is-err` / `if-err` / `match` — no
-      wrapper needed. An unhandled `Err` halts at first use with the
-      underlying message.
-    - **`fail()` means a broken invariant** — a bug, not an error to
-      catch. Let it stop the run or task.
-    - **Fan-out isolation:** pass `OnErr.Preserve` to `map` / `pmap` /
-      `call` to keep a per-item `Result.Err` in its slot instead of
-      halting, so one bad item never kills the loop. The default
-      (`OnErr.Force`) stays fail-fast.
-    - **Supervision:** run untrusted or independent work as a task
-      (`::hot::task/start` + `await`); a halt inside the task surfaces
-      as `status: "failed"` on its `TaskResult` instead of propagating.
-
-    ```hot
-    // Instead of: attempt try(() { run-digest(s) })
-    results map(sessions, run-digest, OnErr.Preserve)  // Err slots, loop survives
-    for-each(results, (r) { if-err(r, (e) { record-error("digest", e) }) })
-    ```
-    """
-}
-fn
-(f: Fn, args: Vec<Any>): Result {
-    call-lib(::hot::lang/try, [f, args])
-},
-(f: Fn): Result {
-    try(f, [])
-}
-
-
-try-call
-meta {
-    core: true,
-    deprecated: true,
-    doc: """
-    **Deprecated.** Call function `f` with `args`, catching **all**
-    errors — including runtime panics — and returning a plain Map (not
-    a Result, so the return value won't be auto-unwrapped).
-
-    - On success: `{ok: true, value: <result>}`
-    - On failure: `{ok: false, error: "error message"}`
-
-    Use the error model instead of a halt boundary: expected failures
-    are `Result.Err` values (branch with `is-err` / `if-err`), fan-out
-    isolation comes from `OnErr.Preserve` on `map` / `pmap` / `call`,
-    and supervision of untrusted work belongs on a task boundary
-    (`::hot::task/start` + `await`). See `try` for details; this legacy
-    map shape exists only for callers that cannot yet migrate.
-    """
-}
-fn
-(f: Fn, args: Vec<Any>): Map {
-    call-lib(::hot::lang/try-call, [f, args])
-},
-(f: Fn): Map {
-    try-call(f, [])
-}
+// NOTE: `try` and `try-call` were removed in Hot 2.6.0. Hot has one
+// error idiom: expected failures are `Result.Err` values (branch with
+// `is-err` / `if-err`, chain with `if-ok`); `fail()` means a broken
+// invariant and halts to the run/task boundary; fan-out isolation is
+// `OnErr.Preserve` on `map` / `pmap` / `call`; supervision of
+// arbitrary user code is a task boundary (`::hot::task/start` +
+// `await` -> status: "failed"). The runtime's own supervision
+// boundaries use ::hot::internal::exec/contain.
 
 
 resolve

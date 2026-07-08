@@ -210,7 +210,7 @@ meta ["test"] fn () {
     // `dispatch-chat` halts via `fail(...)` on misconfiguration (correct
     // behavior: an unknown model is a programmer error, not a normal
     // control-flow path). `try` lets this test inspect that halt.
-    attempt ::hot::lang/try(::chat/dispatch-chat, [opts, [], null])
+    attempt ::hot::internal::exec/contain(::chat/dispatch-chat, [opts, [], null])
     assert(is-err(attempt), "dispatch-chat should halt for unknown model")
 }
 

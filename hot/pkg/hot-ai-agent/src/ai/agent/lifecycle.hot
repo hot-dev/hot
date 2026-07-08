@@ -78,7 +78,7 @@ fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
         // session's fail() is recorded as a failed LifecycleJob without
         // aborting the fan-out. Application code should not copy this
         // pattern; expected failures are Result.Err values.
-        attempt ::hot::lang/try(handler, [session])
+        attempt ::hot::internal::exec/contain(handler, [session])
         cond {
             is-ok(attempt) => {
                 result attempt

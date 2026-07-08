@@ -9278,8 +9278,8 @@ impl VirtualMachine {
     ///   returning `Err(VmError)`. The state is left set so the top-level
     ///   run-loop sees `has_failed()`/`has_cancelled()` and avoids emitting
     ///   a duplicate `run:fail`/`run:cancel` event (the primitive already
-    ///   emitted it). Boundary helpers like `::hot::lang/try-call` and
-    ///   tool dispatch reset the state when they catch the halt.
+    ///   emitted it). Runtime boundaries (`::hot::internal::exec/contain`,
+    ///   tool dispatch) reset the state when they catch the halt.
     /// - Otherwise wrap the error as a `Result.Err` value so user code can
     ///   inspect it via `is-err`/`match`. This preserves the existing
     ///   contract for non-halting hotlib errors (e.g. parse errors, HTTP

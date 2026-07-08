@@ -133,18 +133,18 @@ meta ["test"] fn () {
     assert(is-null(err-value(42)), "plain value yields null")
 }
 
-// Regression: ::hot::lang/try is idempotent on Results — a callee that
+// Regression: the contain boundary is idempotent on Results — a callee that
 // returns an Err value comes back as that same single Err (not
 // Ok(Err), which is-err could not see; not Err(Err), which err-value
 // could not unwrap). The escalation-message half of this bug is pinned
 // in Rust (vm.rs test_result_err_message_extraction).
 test-try-is-idempotent-on-results
 meta ["test"] fn () {
-    caught ::hot::lang/try(() { err("the real reason") })
-    assert(is-err(caught), "returned Err stays an Err through try")
+    caught ::hot::internal::exec/contain(() { err("the real reason") })
+    assert(is-err(caught), "returned Err stays an Err through the boundary")
     assert-eq("the real reason", err-value(caught), "payload is not re-wrapped")
 
-    passed ::hot::lang/try(() { ok(7) })
+    passed ::hot::internal::exec/contain(() { ok(7) })
     assert(is-ok(passed), "returned Ok stays Ok")
     assert-eq(7, ok-value(passed), "Ok payload intact")
 }

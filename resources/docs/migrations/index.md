@@ -57,7 +57,12 @@ automatically on first run.
 
 - `All<Vec>` / `All<Map>` annotations for flow result shape — see [Flows](/docs/language/flows).
 - `OnErr.Force` / `OnErr.Preserve` disposition for map-shaped higher-order functions, defaulting to today's fail-fast behavior — see [Error Handling](/docs/language/errors).
-- `::hot::lang/try` for the rare case of containing a `fail()` / `cancel()` / runtime halt as a `Result`.
+
+> **Note (Hot 2.6):** `::hot::lang/try` and `::hot::lang/try-call` were
+> removed in Hot 2.6.0. Expected failures are `Result.Err` values — branch
+> with `is-err` / `if-err`; use `OnErr.Preserve` for fan-out isolation and a
+> task boundary (`::hot::task/start` + `await`) to supervise untrusted work.
+> See [Error Handling](/docs/language/errors).
 
 ## Upgrading from Hot 1.x to Hot 2
 
