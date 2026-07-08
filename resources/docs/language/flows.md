@@ -407,6 +407,14 @@ data: All<Map> parallel {
   user ::api/get-user(id)
   orders ::api/get-orders(id)
 }
+
+// One / One<T> opts a collect-all flow OUT of collection: it returns
+// only the final produced value. On single-value flows it documents
+// the default.
+last: One<Int> parallel {
+  a 1
+  b 2
+}
 ```
 
 Bare `All` is accepted only on natural collect-all flows (`parallel`,

@@ -2,6 +2,45 @@ use super::*;
 use ahash::AHashMap;
 
 #[test]
+fn test_removed_result_modifier_syntax_errors() {
+    // |map/|vec/|one were removed in Hot 2.6.0; the parser gives a
+    // targeted migration hint instead of a generic parse error.
+    for src in [
+        "x cond|map {\n    true => m { 1 }\n}",
+        "x cond-all|vec {\n    true => m { 1 }\n}",
+        "x parallel|one {\n    a 1\n}",
+        "x 5 |> add(2) |one",
+        "x match|map v {\n    _ => { 1 }\n}",
+    ] {
+        let result = parse_hot(src);
+        let err = format!("{:?}", result.expect_err(src));
+        assert!(
+            err.contains("removed in Hot 2.6.0"),
+            "expected migration hint for {:?}, got: {}",
+            src,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_one_flow_annotation_parses() {
+    for src in [
+        "x: One cond {\n    true => m { 1 }\n}",
+        "x: One<Int> parallel {\n    a 1\n}",
+        "x: One 5 |> add(2)",
+    ] {
+        let result = parse_hot(src);
+        assert!(
+            result.is_ok(),
+            "expected {:?} to parse: {:?}",
+            src,
+            result.err()
+        );
+    }
+}
+
+#[test]
 fn test_simple_variable() {
     let source = r#"x 42"#;
     let result = parse_hot(source);

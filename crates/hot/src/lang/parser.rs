@@ -142,6 +142,8 @@ fn merge_trailing_meta(var: &mut Var, trailing: Val) {
     }
 }
 
+const REMOVED_RESULT_MODIFIER_MSG: &str = "The |map, |vec, and |one result modifiers were removed in Hot 2.6.0. Annotate the binding or return type instead: `x: All<Map> cond { ... }`, `: All<Vec>`, or `: One`";
+
 impl Parser {
     pub fn new() -> Self {
         Self {
@@ -1621,6 +1623,18 @@ impl Parser {
         value: &Value,
     ) -> ParseResult<ResultModifier> {
         match type_annotation {
+            // `One` / `One<T>`: produce the single final value instead of
+            // collecting. Valid on every flow shape — on serial, pipe,
+            // cond, and match it documents the default; on collect-all
+            // flows it opts out of collection. The inner type, when given,
+            // describes the value and is not enforced here.
+            TypeExpr::Named(name) if Self::is_one_type_name(name) => Ok(ResultModifier::One),
+            TypeExpr::Generic(name, params) if Self::is_one_type_name(name) => {
+                if params.len() != 1 {
+                    return Err(self.error("One flow annotations expect exactly one type argument"));
+                }
+                Ok(ResultModifier::One)
+            }
             TypeExpr::Named(name) if Self::is_all_type_name(name) => {
                 self.bare_all_modifier_for_value(value)
             }
@@ -1649,14 +1663,20 @@ impl Parser {
 
     fn is_all_annotation(type_annotation: &TypeExpr) -> bool {
         match type_annotation {
-            TypeExpr::Named(name) => Self::is_all_type_name(name),
-            TypeExpr::Generic(name, _) => Self::is_all_type_name(name),
+            TypeExpr::Named(name) => Self::is_all_type_name(name) || Self::is_one_type_name(name),
+            TypeExpr::Generic(name, _) => {
+                Self::is_all_type_name(name) || Self::is_one_type_name(name)
+            }
             _ => false,
         }
     }
 
     fn is_all_type_name(name: &str) -> bool {
         name == "All" || name.ends_with("/All")
+    }
+
+    fn is_one_type_name(name: &str) -> bool {
+        name == "One" || name.ends_with("/One")
     }
 
     fn bare_all_modifier_for_value(&mut self, value: &Value) -> ParseResult<ResultModifier> {
@@ -1695,7 +1715,7 @@ impl Parser {
         {
             return Err(ParseError {
                 message: format!(
-                    "All annotation conflicts with existing deprecated |{} result modifier; remove the modifier or change the All<...> container",
+                    "conflicting flow result annotations: this flow already produces `{}` results; use one annotation",
                     Self::result_modifier_name(existing)
                 ),
                 location: ErrorLocation {
@@ -3374,32 +3394,14 @@ impl Parser {
             }
         }
 
-        // After the pipe chain is complete, check for result modifier: |map, |vec, |one
-        if let Value::Flow(ref mut flow) = left
+        // The pipe-tail |map/|vec/|one result-modifier syntax was removed
+        // in Hot 2.6.0 in favor of All<...>/One annotations; keep a
+        // targeted error so old code gets a migration hint.
+        if let Value::Flow(ref flow) = left
             && flow.flow_type == FlowType::Pipe
             && self.check(&TokenType::Pipe)
         {
-            self.next(); // consume "|"
-            if let Some(token) = self.peek() {
-                if let TokenType::Identifier(modifier) = &token.token_type {
-                    let modifier = modifier.clone();
-                    self.next(); // consume modifier
-                    flow.result_modifier = match modifier.as_str() {
-                        "map" => Some(ResultModifier::Map),
-                        "vec" => Some(ResultModifier::Vec),
-                        "one" => Some(ResultModifier::One),
-                        _ => {
-                            return Err(
-                                self.error(&format!("Unknown result modifier: {}", modifier))
-                            );
-                        }
-                    };
-                } else {
-                    return Err(self.error("Expected result modifier after |"));
-                }
-            } else {
-                return Err(self.error("Expected result modifier after |"));
-            }
+            return Err(self.error(REMOVED_RESULT_MODIFIER_MSG));
         }
 
         Ok(left)
@@ -3958,33 +3960,12 @@ impl Parser {
 
         self.next(); // consume "match" or "match-all"
 
-        // Check for result modifier: |map, |vec, |one
-        let result_modifier = if self.check(&TokenType::Pipe) {
-            self.next(); // consume "|"
-            if let Some(token) = self.peek() {
-                if let TokenType::Identifier(modifier) = &token.token_type {
-                    let modifier = modifier.clone();
-                    self.next(); // consume modifier
-                    match modifier.as_str() {
-                        "map" => Some(ResultModifier::Map),
-                        "vec" => Some(ResultModifier::Vec),
-                        "one" => Some(ResultModifier::One),
-                        _ => {
-                            return Err(self.error(&format!(
-                                "Unknown result modifier: {}. Expected 'map', 'vec', or 'one'",
-                                modifier
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(self.error("Expected result modifier after '|'"));
-                }
-            } else {
-                return Err(self.error("Unexpected end of file after '|'"));
-            }
-        } else {
-            None
-        };
+        // |map/|vec/|one result modifiers were removed in Hot 2.6.0;
+        // point old code at the All<...>/One annotations.
+        if self.check(&TokenType::Pipe) {
+            return Err(self.error(REMOVED_RESULT_MODIFIER_MSG));
+        }
+        let result_modifier = None;
 
         // Parse the value to match
         let value = self.parse_value()?;
@@ -6057,32 +6038,12 @@ impl Parser {
             return self.parse_flow_based_lambda(flow_type);
         }
 
-        // Check for result modifier: |map, |vec, |one
-        let result_modifier = if self.check(&TokenType::Pipe) {
-            self.next(); // consume "|"
-            if let Some(token) = self.peek() {
-                if let TokenType::Identifier(modifier) = &token.token_type {
-                    let modifier = modifier.clone();
-                    self.next(); // consume modifier
-                    match modifier.as_str() {
-                        "map" => Some(ResultModifier::Map),
-                        "vec" => Some(ResultModifier::Vec),
-                        "one" => Some(ResultModifier::One),
-                        _ => {
-                            return Err(
-                                self.error(&format!("Unknown result modifier: {}", modifier))
-                            );
-                        }
-                    }
-                } else {
-                    return Err(self.error("Expected result modifier after |"));
-                }
-            } else {
-                return Err(self.error("Expected result modifier after |"));
-            }
-        } else {
-            None
-        };
+        // |map/|vec/|one result modifiers were removed in Hot 2.6.0;
+        // point old code at the All<...>/One annotations.
+        if self.check(&TokenType::Pipe) {
+            return Err(self.error(REMOVED_RESULT_MODIFIER_MSG));
+        }
+        let result_modifier = None;
 
         let mut expressions = Vec::new();
 

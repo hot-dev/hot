@@ -58,6 +58,10 @@ automatically on first run.
 - `All<Vec>` / `All<Map>` annotations for flow result shape — see [Flows](/docs/language/flows).
 - `OnErr.Force` / `OnErr.Preserve` disposition for map-shaped higher-order functions, defaulting to today's fail-fast behavior — see [Error Handling](/docs/language/errors).
 
+> **Note (Hot 2.6):** the `|map`, `|vec`, and `|one` flow result modifiers
+> were removed in Hot 2.6.0 — annotate the binding or return type instead:
+> `x: All<Map> cond { ... }`, `: All<Vec>`, or `: One` / `: One<T>`.
+>
 > **Note (Hot 2.6):** `::hot::lang/try` and `::hot::lang/try-call` were
 > removed in Hot 2.6.0. Expected failures are `Result.Err` values — branch
 > with `is-err` / `if-err`; use `OnErr.Preserve` for fan-out isolation and a

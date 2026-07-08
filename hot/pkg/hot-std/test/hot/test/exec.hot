@@ -77,7 +77,7 @@ meta ["test"] fn () {
     assert(contains(failure.msg, "temporary failure"))
 
     // This parallel flow must succeed — it should NOT see the failure above.
-    data parallel|map {
+    data: All<Map> parallel {
         a 10
         b 20
     }

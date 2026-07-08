@@ -385,6 +385,7 @@ Bare `All` is allowed only on natural collect-all forms (`parallel`,
 | Plain/no annotation | Return single value (default for serial, cond, match) |
 | `All<Vec>` | Return results as vector |
 | `All<Map>` | Return results as map (default for parallel, cond-all, match-all) |
+| `One` / `One<T>` | Return only the final produced value (opts a collect-all flow out of collection) |
 
 ```hot
 // Return parallel results as a vector instead of a map

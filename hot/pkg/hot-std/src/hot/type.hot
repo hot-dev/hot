@@ -945,6 +945,35 @@ type {
 }
 
 
+One
+meta {
+    core: true,
+    doc: """
+    Marker type for flow results that intentionally produce a single
+    value.
+
+    Flow result annotations such as `: One` and `: One<Str>` are
+    compile-time result-shape directives: on collect-all flows
+    (`parallel`, `cond-all`, `match-all`) they opt out of collection and
+    return only the final produced value. On `serial`, `pipe`, `cond`,
+    and `match` a single value is already the default, so the annotation
+    simply documents intent. The inner type, when given, describes the
+    value.
+
+    ```hot
+    winner: One cond-all {
+        gt(score, 90) => a { "gold" }
+        gt(score, 50) => b { "silver" }
+    }
+    // winner is the final matching branch's value, not a collection
+    ```
+    """
+}
+type {
+    value: Any
+}
+
+
 // ============================================================================
 // Type Conversion Implementations
 // ============================================================================
