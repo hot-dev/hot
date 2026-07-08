@@ -211,6 +211,23 @@ values in the result:
 `OnErr` applies only to normal `err(...)` / `Result.Err(...)` values. It does
 not catch `fail()`, `cancel()`, or hard runtime errors.
 
+### The Error Payload Convention
+
+Keep payloads in one of two shapes so error text survives every hop:
+
+- **Simple:** a plain `Str` — `err("connection refused")`.
+- **Structured:** a Map with a `message` field plus any structured
+  fields — `err({message: "pg: relation missing", code: "42P01"})`.
+
+The auto-unwrap halt reads `message` (then `msg`) from Map payloads, and
+`err-message(result)` extracts readable text from any shape — including
+a halt's `Failure` payload — so handlers never hand-roll extraction:
+
+```hot
+conn ::pg/connect(opts)
+if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+```
+
 ### Pattern 6: Chain Fallible Steps
 
 `if-ok` flat-maps: the handler receives the Ok value, its return passes

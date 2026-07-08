@@ -195,6 +195,17 @@ For fan-out where one item must not stop the batch, pass `OnErr.Preserve` to
 supervise untrusted code that may `fail()`, run it as a task and branch on
 the awaited `status`.
 
+### Error Payloads
+
+Payload convention: a plain `Str` for simple errors, or a Map with a
+`message` field (plus structured fields like `code`) for rich ones. Use
+`err-message(result)` to extract readable text from any payload shape,
+including a halt's `Failure`:
+
+```hot
+if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+```
+
 ### Pattern 5: Result Combinators
 
 Use `if-ok` and `if-err` to selectively transform Ok or Err results. Whichever variant doesn't match passes through unchanged:

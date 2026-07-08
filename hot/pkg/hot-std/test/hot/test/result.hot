@@ -166,6 +166,18 @@ meta ["test"] fn () {
     assert(contains(Str(err-value(caught)), "the real reason"), "halt carries the payload message")
 }
 
+// err-message extracts human-readable text from every payload shape
+// in the convention: plain Str, {message}, halt Failure ({msg} under a
+// typed wrapper), and bare payloads.
+test-err-message
+meta ["test"] fn () {
+    assert-eq("connection refused", err-message(err("connection refused")), "Str payload")
+    assert-eq("pg: bad", err-message(err({message: "pg: bad", code: "42P01"})), "message field")
+    caught ::hot::internal::exec/contain(() { fail("boom", {why: "test"}) })
+    assert-eq("boom", err-message(caught), "halt Failure msg")
+    assert-eq("bare", err-message("bare"), "bare payload passes through")
+}
+
 // Fan-out isolation without a halt boundary: OnErr.Preserve keeps a
 // per-item Err in its slot so one bad item never kills the loop.
 test-map-onerr-preserve-fan-out
