@@ -223,6 +223,19 @@ meta ["test"] fn () {
 
     assert-eq(parallel-one, 3, "parallel One<Int> returns the final value")
 
+    // Typed bindings (including flow-shape annotations) parse inside
+    // arm blocks — any position but the first, where `name:` is a map
+    // literal by the documented disambiguation rule.
+    nested-annot: All<Map> cond {
+        true => m {
+            seed 1
+            inner: All<Map> serial { a seed b 2 }
+            inner
+        }
+    }
+
+    assert-eq(nested-annot, {m: {a: 1, b: 2}}, "annotated binding inside cond arm")
+
     condall-default: All cond-all {
         true => a { 1 }
         false => b { 2 }

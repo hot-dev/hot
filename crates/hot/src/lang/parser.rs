@@ -2324,6 +2324,35 @@ impl Parser {
                     self.token_index = saved_index;
                 }
 
+                // Typed binding statement: `name: Type value` (same form
+                // as function bodies; see parse_block_expression_after_brace).
+                if let Some(tok) = self.peek()
+                    && matches!(tok.token_type, TokenType::Identifier(_))
+                    && self
+                        .peek_n(1)
+                        .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+                {
+                    let name = self.expect_identifier()?;
+                    self.next(); // consume ':'
+                    let type_expr = self.parse_type_ref()?;
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    let value = self.parse_value()?;
+                    let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                    let var = Var {
+                        sym: Sym::String(name),
+                        deep_set: None,
+                        deep_path: None,
+                        meta: None,
+                        type_annotation: Some(type_expr.to_string()),
+                        src: None,
+                    };
+                    expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                    expressions.push(value);
+                    continue;
+                }
+
                 // Try to parse as: var_name value_expr
                 // or just: value_expr (with auto-generated variable name)
 
@@ -4512,6 +4541,50 @@ impl Parser {
                 break;
             }
 
+            // Typed binding statement: `name: Type value`. Unambiguous
+            // here — a block whose FIRST token pair is `name:` is routed
+            // to the map-literal parser by parse_map, so any
+            // identifier-colon reaching this loop is a binding with a
+            // type annotation, the same statement form function bodies
+            // support. Flow-shape annotations (All<...>/One) apply their
+            // result modifier to the bound flow value.
+            if let Some(tok) = self.peek()
+                && matches!(tok.token_type, TokenType::Identifier(_))
+                && self
+                    .peek_n(1)
+                    .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+            {
+                let name = self.expect_identifier()?;
+                self.next(); // consume ':'
+                let type_expr = self.parse_type_ref()?;
+                while self.check(&TokenType::Newline) {
+                    self.next();
+                }
+                let value = self.parse_value()?;
+                let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                let var = Var {
+                    sym: Sym::String(name),
+                    deep_set: None,
+                    deep_path: None,
+                    meta: None,
+                    type_annotation: Some(type_expr.to_string()),
+                    src: None,
+                };
+                expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                expressions.push(value);
+
+                while self.check(&TokenType::Newline) {
+                    self.next();
+                }
+                if self.check(&TokenType::Comma) {
+                    self.next();
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                }
+                continue;
+            }
+
             let expr = self.parse_value()?;
             expressions.push(expr);
 
@@ -6077,6 +6150,42 @@ impl Parser {
                 // Check for closing brace after skipping newlines
                 if self.check(&TokenType::RightBrace) {
                     break;
+                }
+
+                // Typed binding statement: `name: Type value` (same form as
+                // function bodies). Unambiguous: identifier-colon is not a
+                // valid expression or condition start.
+                if let Some(tok) = self.peek()
+                    && matches!(tok.token_type, TokenType::Identifier(_))
+                    && self
+                        .peek_n(1)
+                        .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+                {
+                    let name = self.expect_identifier()?;
+                    self.next(); // consume ':'
+                    let type_expr = self.parse_type_ref()?;
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    let value = self.parse_value()?;
+                    let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                    let var = Var {
+                        sym: Sym::String(name),
+                        deep_set: None,
+                        deep_path: None,
+                        meta: None,
+                        type_annotation: Some(type_expr.to_string()),
+                        src: None,
+                    };
+                    expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                    expressions.push(value);
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    if self.check(&TokenType::Comma) {
+                        self.next();
+                    }
+                    continue;
                 }
 
                 // Parse conditional branch: condition => result OR => result (default) OR _ => result (default)

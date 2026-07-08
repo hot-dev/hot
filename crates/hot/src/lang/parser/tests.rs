@@ -24,6 +24,38 @@ fn test_removed_result_modifier_syntax_errors() {
 }
 
 #[test]
+fn test_typed_bindings_in_value_position_blocks() {
+    // `name: Type value` must parse anywhere a block statement can
+    // appear, not just in function bodies. The one exception is a
+    // block's FIRST statement, where `name:` is a map literal by the
+    // documented disambiguation rule.
+    for src in [
+        // cond arm block
+        "r cond {\n    true => m {\n        y 1\n        x: Int 5\n        add(x, y)\n    }\n}",
+        // value-position serial flow
+        "v serial {\n    x: Int 5\n    x\n}",
+        // nested flow-shape annotation inside an arm block
+        "r: All<Map> cond {\n    true => m {\n        y 1\n        inner: All<Map> serial { a 1 b 2 }\n        inner\n    }\n}",
+    ] {
+        let result = parse_hot(src);
+        assert!(
+            result.is_ok(),
+            "expected {:?} to parse: {:?}",
+            src,
+            result.err()
+        );
+    }
+
+    // First statement `name:` stays a map literal (documented ambiguity)
+    let result = parse_hot("m {x: 1}");
+    assert!(
+        result.is_ok(),
+        "leading name: is a map literal: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_one_flow_annotation_parses() {
     for src in [
         "x: One cond {\n    true => m { 1 }\n}",
