@@ -1836,3 +1836,87 @@ sum-to fn (i: Int, acc: Int): Int {
         "expected TailCall for tail recursion through inline if()"
     );
 }
+
+/// Negative case: a user-defined `if` in the calling namespace shadows the
+/// core one, so the call must NOT be inlined — it should compile as a normal
+/// call to the shadow. The shadowing gate is three separate lookups
+/// (function_mapping x2 + symbol_table); this pins it.
+#[test]
+fn test_shadowed_if_is_not_inlined() {
+    let source = r#"
+::my::bool ns
+
+if
+meta { core: true }
+fn
+cond (pred: Any, lazy then: Any): Any {
+    pred => { do then }
+},
+cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+    pred => { do then }
+    => { do else }
+}
+
+::main ns
+
+if fn (pred: Any, a: Any, b: Any): Any {
+    b
+}
+
+pick fn (x: Int): Any {
+    if(gt(x, 0), "pos", "neg")
+}
+
+::other ns
+
+pick2 fn (x: Int): Any {
+    if(gt(x, 0), "pos", "neg")
+}
+"#;
+
+    let mut program = parse_hot(source).expect("Failed to parse");
+    let mut compiler = Compiler::new();
+    compiler
+        .compile_program_unchecked(&mut program)
+        .expect("Failed to compile");
+
+    let bytecode = compiler.get_program();
+    let pick = bytecode
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("/pick"))
+        .expect("pick not compiled");
+
+    // No origin-named BeginFlow: the shadow won, no inline transform.
+    assert!(
+        !pick.instructions.iter().any(|i| matches!(
+            i,
+            crate::lang::bytecode::Instruction::BeginFlow {
+                origin_name: Some(_),
+                ..
+            }
+        )),
+        "shadowed if() must not be inlined; instructions: {:#?}",
+        pick.instructions
+    );
+
+    // Positive control in a namespace without the shadow: the same call IS
+    // inlined, proving the assertion above holds because of the shadowing
+    // gate and not because inlining silently failed to apply.
+    let pick2 = bytecode
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("/pick2"))
+        .expect("pick2 not compiled");
+    assert!(
+        pick2.instructions.iter().any(|i| matches!(
+            i,
+            crate::lang::bytecode::Instruction::BeginFlow {
+                origin_name: Some(_),
+                ..
+            }
+        )),
+        "unshadowed if() should be inlined; instructions: {:#?}",
+        pick2.instructions
+    );
+}

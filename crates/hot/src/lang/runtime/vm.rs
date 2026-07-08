@@ -10375,4 +10375,117 @@ mod tests {
             vec!["parallel:a".to_string(), "parallel:b".to_string()]
         );
     }
+
+    /// Shared harness: compile a two-namespace program where `::my::bool/if`
+    /// mirrors hot-std's core lazy `if` (the inline-if transform keys on a
+    /// core function whose qualified name ends in "::bool/if"), then run a
+    /// function under the given JIT mode and return its result.
+    fn run_recursion_source(source: &str, entry: &str, args: &[Val], jit: &str) -> Val {
+        let mut program = parse_hot(source).expect("test source should parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+
+        let mut vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            Some(crate::val!({"jit": jit})),
+        );
+        vm.execute().expect("module init should run");
+        vm.call_function_bypassing_unified_lookup(entry, args)
+            .expect("entry function should run")
+    }
+
+    const CORE_IF_PRELUDE: &str = r#"
+::my::bool ns
+
+if
+meta { core: true }
+fn
+cond (pred: Any, lazy then: Any): Any {
+    pred => { do then }
+},
+cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+    pred => { do then }
+    => { do else }
+}
+"#;
+
+    // Regression: tail recursion through if() must TCO. Before the
+    // vm-jit-perf work this either overflowed the native stack (killing the
+    // process, JIT off) or churned through JIT guard failures for minutes.
+    // Depth 10000 is far beyond HOT_MAX_RECURSION_DEPTH (4096), so this only
+    // passes when TailCall is emitted and the TCO loop (or the JIT's native
+    // loop) actually runs.
+    #[test]
+    fn deep_tail_recursion_through_if_returns_correct_result() {
+        let source = format!(
+            "{CORE_IF_PRELUDE}
+::test ns
+
+sum-to fn (i: Int, acc: Int): Int {{
+    if(lte(i, 0), acc, sum-to(sub(i, 1), add(acc, i)))
+}}
+"
+        );
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(
+                &source,
+                "::test/sum-to",
+                &[Val::Int(10000), Val::Int(0)],
+                jit,
+            );
+            assert_eq!(
+                result,
+                Val::Int(50_005_000),
+                "sum-to(10000) wrong with jit={jit}"
+            );
+        }
+    }
+
+    // Regression: non-tail self-recursion through cond must not clobber the
+    // outer frame's pending intermediates (register indices are per-function
+    // and shared across re-entrant calls). Before the vm-jit-perf work this
+    // returned wrong results at full speed - fib(20) came back as a small
+    // integer instead of 6765.
+    #[test]
+    fn non_tail_cond_recursion_returns_correct_result() {
+        let source = r#"
+::test ns
+
+fib-cond fn (n: Int): Int {
+    cond {
+        lte(n, 1) => n
+        => add(fib-cond(sub(n, 1)), fib-cond(sub(n, 2)))
+    }
+}
+"#;
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(source, "::test/fib-cond", &[Val::Int(20)], jit);
+            assert_eq!(result, Val::Int(6765), "fib-cond(20) wrong with jit={jit}");
+        }
+    }
+
+    // Same clobbering shape, but through inlined if() rather than cond.
+    #[test]
+    fn non_tail_if_recursion_returns_correct_result() {
+        let source = format!(
+            "{CORE_IF_PRELUDE}
+::test ns
+
+fib fn (n: Int): Int {{
+    if(lte(n, 1), n, add(fib(sub(n, 1)), fib(sub(n, 2))))
+}}
+"
+        );
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(&source, "::test/fib", &[Val::Int(20)], jit);
+            assert_eq!(result, Val::Int(6765), "fib(20) wrong with jit={jit}");
+        }
+    }
 }
