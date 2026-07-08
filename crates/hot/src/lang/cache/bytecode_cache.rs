@@ -1022,13 +1022,14 @@ mod tests {
                 Instruction::BeginFlow {
                     flow_type: FlowType::Serial,
                     result_modifier: FlowResultModifier::One,
-                    source: Some(SourceLocation {
+                    source: Some(Box::new(SourceLocation {
                         file: Some("test.hot".to_string()),
                         line: 1,
                         column: 1,
                         position: 0,
                         length: 50,
-                    }),
+                    })),
+                    origin_name: None,
                 },
                 Instruction::EndFlow { dest: 2 },
                 Instruction::Return { value: 2 },

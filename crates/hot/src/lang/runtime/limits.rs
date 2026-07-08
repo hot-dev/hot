@@ -281,6 +281,44 @@ pub fn range_element_count(start: i64, end: i64, step: i64) -> Option<usize> {
     usize::try_from(count).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Interpreter stack guard
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static VM_STACK_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Native-stack budget the interpreter may consume below the first-seen stack
+/// pointer on a VM thread before user-function calls are refused with a
+/// structured error. Kept below `jit::JIT_STACK_GUARD_BUDGET` relative to
+/// `jit::VM_THREAD_STACK_SIZE` (64 MiB) so ~8 MiB of headroom remains for
+/// whatever native code (hotlib builtins, serde, formatting) runs on top of
+/// the deepest interpreter frame.
+const VM_STACK_GUARD_BUDGET: u64 = 56_000_000;
+
+/// Returns true when the current thread is too deep in native stack for
+/// another interpreter frame. The first call on a thread anchors the limit at
+/// `current_sp - VM_STACK_GUARD_BUDGET` (same scheme as the JIT stack guard).
+///
+/// This is the backstop that turns runaway recursion the depth counter cannot
+/// see (e.g. recursion woven through lazy-parameter thunks or JIT fallback
+/// re-entry) into a recoverable error instead of a process-killing native
+/// stack overflow, which would bypass `catch_unwind`.
+pub fn vm_stack_exhausted() -> bool {
+    let anchor: u64 = 0;
+    let sp = std::ptr::addr_of!(anchor) as u64;
+    VM_STACK_LIMIT.with(|cell| {
+        let limit = cell.get();
+        if limit == 0 {
+            cell.set(sp.saturating_sub(VM_STACK_GUARD_BUDGET));
+            false
+        } else {
+            sp < limit
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

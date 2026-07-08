@@ -1757,3 +1757,166 @@ fn test_extract_send_non_function_vars_scanned() {
     let targets = compiler.send_targets.values().next().unwrap();
     assert_eq!(targets[0].event_name, "startup:init");
 }
+
+// ========================================================================
+// Inline `if()` compilation
+// ========================================================================
+
+/// `if(pred, then, else)` calls that statically resolve to a core lazy `if`
+/// must compile as an inline cond flow whose BeginFlow carries the origin
+/// name (used by the emitter so call-trace search for "if" still works),
+/// and the tail-position self-call in a branch must compile to TailCall.
+#[test]
+fn test_inline_if_emits_origin_named_cond_flow_and_tco() {
+    // ::my::bool/if mirrors hot-std's core `if` (`fn cond` with lazy branches);
+    // the inline transform keys on a core function whose qualified name ends
+    // with "::bool/if".
+    let source = r#"
+::my::bool ns
+
+if
+meta { core: true }
+fn
+cond (pred: Any, lazy then: Any): Any {
+    pred => { do then }
+},
+cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+    pred => { do then }
+    => { do else }
+}
+
+::main ns
+
+sum-to fn (i: Int, acc: Int): Int {
+    if(lte(i, 0), acc, sum-to(sub(i, 1), add(acc, i)))
+}
+"#;
+
+    let mut program = parse_hot(source).expect("Failed to parse");
+    let mut compiler = Compiler::new();
+    compiler
+        .compile_program_unchecked(&mut program)
+        .expect("Failed to compile");
+
+    let bytecode = compiler.get_program();
+    let sum_to = bytecode
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("/sum-to"))
+        .expect("sum-to not compiled");
+
+    // The if() must have become an inline cond flow with an origin name...
+    let origin_id = sum_to
+        .instructions
+        .iter()
+        .find_map(|i| match i {
+            crate::lang::bytecode::Instruction::BeginFlow {
+                origin_name: Some(id),
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+        .expect("expected an origin-named BeginFlow from inline if()");
+    match bytecode.constants.get(origin_id as usize) {
+        Some(crate::lang::bytecode::Constant::StringRef(s)) => {
+            assert!(
+                s.ends_with("::bool/if"),
+                "origin name should be the core if, got {s}"
+            );
+        }
+        other => panic!("origin_name should be a StringRef, got {other:?}"),
+    }
+
+    // ...and the tail-position self-call must be a TailCall (TCO through if).
+    assert!(
+        sum_to
+            .instructions
+            .iter()
+            .any(|i| matches!(i, crate::lang::bytecode::Instruction::TailCall { .. })),
+        "expected TailCall for tail recursion through inline if()"
+    );
+}
+
+/// Negative case: a user-defined `if` in the calling namespace shadows the
+/// core one, so the call must NOT be inlined — it should compile as a normal
+/// call to the shadow. The shadowing gate is three separate lookups
+/// (function_mapping x2 + symbol_table); this pins it.
+#[test]
+fn test_shadowed_if_is_not_inlined() {
+    let source = r#"
+::my::bool ns
+
+if
+meta { core: true }
+fn
+cond (pred: Any, lazy then: Any): Any {
+    pred => { do then }
+},
+cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+    pred => { do then }
+    => { do else }
+}
+
+::main ns
+
+if fn (pred: Any, a: Any, b: Any): Any {
+    b
+}
+
+pick fn (x: Int): Any {
+    if(gt(x, 0), "pos", "neg")
+}
+
+::other ns
+
+pick2 fn (x: Int): Any {
+    if(gt(x, 0), "pos", "neg")
+}
+"#;
+
+    let mut program = parse_hot(source).expect("Failed to parse");
+    let mut compiler = Compiler::new();
+    compiler
+        .compile_program_unchecked(&mut program)
+        .expect("Failed to compile");
+
+    let bytecode = compiler.get_program();
+    let pick = bytecode
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("/pick"))
+        .expect("pick not compiled");
+
+    // No origin-named BeginFlow: the shadow won, no inline transform.
+    assert!(
+        !pick.instructions.iter().any(|i| matches!(
+            i,
+            crate::lang::bytecode::Instruction::BeginFlow {
+                origin_name: Some(_),
+                ..
+            }
+        )),
+        "shadowed if() must not be inlined; instructions: {:#?}",
+        pick.instructions
+    );
+
+    // Positive control in a namespace without the shadow: the same call IS
+    // inlined, proving the assertion above holds because of the shadowing
+    // gate and not because inlining silently failed to apply.
+    let pick2 = bytecode
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("/pick2"))
+        .expect("pick2 not compiled");
+    assert!(
+        pick2.instructions.iter().any(|i| matches!(
+            i,
+            crate::lang::bytecode::Instruction::BeginFlow {
+                origin_name: Some(_),
+                ..
+            }
+        )),
+        "unshadowed if() should be inlined; instructions: {:#?}",
+        pick2.instructions
+    );
+}

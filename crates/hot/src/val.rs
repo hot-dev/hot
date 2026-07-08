@@ -4854,6 +4854,7 @@ mod tests {
             defining_namespace: "::hot::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![],
+            structural_hash_cache: Default::default(),
         };
 
         let boxed = Val::Box(Box::new(lambda));
@@ -4893,6 +4894,7 @@ mod tests {
             defining_namespace: "::hot::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![],
+            structural_hash_cache: Default::default(),
         };
 
         let boxed = Val::Box(Box::new(lambda));

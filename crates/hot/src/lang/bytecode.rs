@@ -94,7 +94,16 @@ pub enum Instruction {
     BeginFlow {
         flow_type: FlowType,
         result_modifier: FlowResultModifier,
-        source: Option<SourceLocation>,
+        /// Boxed: SourceLocation is ~56 bytes and would otherwise set the
+        /// size of every Instruction in every program.
+        source: Option<Box<SourceLocation>>,
+        /// StringRef constant with the user-facing callable this flow was
+        /// inlined from (e.g. "::hot::bool/if" for compiler-inlined `if()`).
+        /// The emitter uses it as the traced call name so searching for the
+        /// original function still finds these calls; `None` for ordinary
+        /// flows, which trace under a synthetic name like `<cond>`.
+        #[serde(default)]
+        origin_name: Option<ConstantId>,
     },
 
     /// End a flow execution context and collect results
@@ -546,6 +555,37 @@ pub struct FunctionInfo {
     pub source: Option<SourceLocation>,
 }
 
+/// Lazily-computed cache of a lambda's structural hash (parameters,
+/// instructions, captures, ...). The JIT keys compiled lambdas by this hash;
+/// computing it hashed the entire instruction list on every lambda call.
+/// 0 means "not computed yet" (the hasher result is remapped away from 0).
+#[derive(Debug, Default)]
+pub struct LambdaHashCache(std::sync::atomic::AtomicU64);
+
+impl Clone for LambdaHashCache {
+    fn clone(&self) -> Self {
+        // Structural fields are immutable after construction, so the cached
+        // hash stays valid across clones (closure capture clones only mutate
+        // `closure_env`, which is not part of the hash).
+        Self(std::sync::atomic::AtomicU64::new(
+            self.0.load(std::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+}
+
+impl LambdaHashCache {
+    pub fn get_or_compute(&self, compute: impl FnOnce() -> u64) -> u64 {
+        let cached = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        // Reserve 0 as the "unset" sentinel.
+        let hash = compute().max(1);
+        self.0.store(hash, std::sync::atomic::Ordering::Relaxed);
+        hash
+    }
+}
+
 /// Lambda function information
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LambdaInfo {
@@ -568,6 +608,10 @@ pub struct LambdaInfo {
     /// Computed at compile time to avoid O(N) scan on every lambda call
     #[serde(default)]
     pub used_registers: Vec<u32>,
+    /// Lazily-computed structural hash (see `LambdaHashCache`). Not part of
+    /// equality/ordering/hashing; skipped in serialization.
+    #[serde(skip)]
+    pub structural_hash_cache: LambdaHashCache,
 }
 
 impl PartialEq for LambdaInfo {
@@ -675,8 +719,24 @@ impl LambdaInfo {
                 | Instruction::LoadScoped { dest, .. }
                 | Instruction::CaptureVar { dest, .. }
                 // Error handling
-                | Instruction::WrapOk { dest, .. } => {
+                | Instruction::WrapOk { dest, .. }
+                // Type operations
+                | Instruction::GetTypePath { dest, .. }
+                | Instruction::IsType { dest, .. }
+                | Instruction::EnsureResult { dest, .. } => {
                     used.insert(*dest);
+                }
+                // In-place mutations: the register's value is written through,
+                // so it must be part of the save/restore set as well.
+                Instruction::VecPush { vec, .. } | Instruction::VecAppend { vec, .. } => {
+                    used.insert(*vec);
+                }
+                Instruction::SetElement { collection, .. } => {
+                    used.insert(*collection);
+                }
+                Instruction::DotSet { object, .. }
+                | Instruction::DynamicDotSet { object, .. } => {
+                    used.insert(*object);
                 }
                 // Instructions without dest registers
                 _ => {}
@@ -943,6 +1003,14 @@ pub struct BytecodeProgram {
     pub source_map: SourceMap,
     /// Variable metadata registry for emitter events
     pub variable_metadata: AHashMap<String, VariableMetadata>,
+    /// Content-hash index over `constants` so `add_constant` dedup is O(1)
+    /// instead of a linear scan (which made pool construction quadratic on
+    /// large programs). Values are candidate ids sharing a hash; equality is
+    /// verified before reuse. Skipped in serde and rebuilt lazily, so
+    /// deserialized programs stay correct (worst case: a few duplicate
+    /// constants, never a wrong id).
+    #[serde(skip)]
+    constant_index: AHashMap<u64, Vec<ConstantId>>,
 }
 
 impl fmt::Display for FlowType {
@@ -998,6 +1066,7 @@ impl fmt::Display for Instruction {
                 flow_type,
                 result_modifier,
                 source,
+                ..
             } => {
                 if source.is_some() {
                     write!(f, "BEGIN_FLOW {}|{} @source", flow_type, result_modifier)
@@ -1357,6 +1426,7 @@ impl BytecodeProgram {
             namespaces: NamespaceRegistry::new(),
             source_map: SourceMap::new(),
             variable_metadata: AHashMap::new(),
+            constant_index: AHashMap::new(),
         }
     }
 
@@ -1380,17 +1450,74 @@ impl BytecodeProgram {
         self.variable_metadata.get(key)
     }
 
+    /// Hash a constant for the dedup index. Distinct-but-equal constants can
+    /// hash apart (Val's cross-type equality), which only costs a duplicate
+    /// pool entry; equal hashes are always verified with `==` before reuse.
+    fn constant_hash(constant: &Constant) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = ahash::AHasher::default();
+        match constant {
+            Constant::Val(v) => {
+                0u8.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+            Constant::FunctionRef(s) => {
+                1u8.hash(&mut hasher);
+                s.hash(&mut hasher);
+            }
+            Constant::TypeRef(s) => {
+                2u8.hash(&mut hasher);
+                s.hash(&mut hasher);
+            }
+            Constant::VariantTypeRef(tr) => {
+                3u8.hash(&mut hasher);
+                tr.name.hash(&mut hasher);
+            }
+            Constant::StringRef(s) => {
+                4u8.hash(&mut hasher);
+                s.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// Rebuild the constant index from the pool (after deserialization or
+    /// direct pushes to `constants`).
+    fn rebuild_constant_index(&mut self) {
+        self.constant_index.clear();
+        for (i, c) in self.constants.iter().enumerate() {
+            self.constant_index
+                .entry(Self::constant_hash(c))
+                .or_default()
+                .push(i as ConstantId);
+        }
+    }
+
+    /// Find an existing constant equal to `constant`, if any.
+    fn find_constant(&mut self, constant: &Constant) -> Option<ConstantId> {
+        if self.constant_index.is_empty() && !self.constants.is_empty() {
+            self.rebuild_constant_index();
+        }
+        let hash = Self::constant_hash(constant);
+        self.constant_index.get(&hash).and_then(|candidates| {
+            candidates
+                .iter()
+                .copied()
+                .find(|&id| self.constants.get(id as usize) == Some(constant))
+        })
+    }
+
     /// Add a constant to the pool, return its index
     pub fn add_constant(&mut self, constant: Constant) -> ConstantId {
         // Check if constant already exists to avoid duplicates
-        for (i, existing) in self.constants.iter().enumerate() {
-            if existing == &constant {
-                return i as ConstantId;
-            }
+        if let Some(existing) = self.find_constant(&constant) {
+            return existing;
         }
 
+        let hash = Self::constant_hash(&constant);
         let id = self.constants.len() as ConstantId;
         self.constants.push(constant);
+        self.constant_index.entry(hash).or_default().push(id);
         id
     }
 
@@ -1447,14 +1574,8 @@ impl BytecodeProgram {
     pub fn merge_constants(&mut self, new_constants: Vec<Constant>) -> Vec<ConstantId> {
         let mut id_mapping = Vec::new();
         for constant in new_constants {
-            // Check if constant already exists to deduplicate
-            let new_id =
-                if let Some(existing_id) = self.constants.iter().position(|c| c == &constant) {
-                    existing_id as ConstantId
-                } else {
-                    self.add_constant(constant)
-                };
-            id_mapping.push(new_id);
+            // add_constant deduplicates via the constant index
+            id_mapping.push(self.add_constant(constant));
         }
         id_mapping
     }

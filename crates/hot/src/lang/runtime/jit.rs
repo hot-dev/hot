@@ -277,6 +277,28 @@ impl TypeSig {
 }
 
 impl JitTypeTag {
+    /// Allocation-free equivalent of `*self == Self::from_val(val)`.
+    /// `from_val` allocates a `String` for typed maps and boxed values, which
+    /// is too expensive for a guard that runs on every JIT call.
+    pub fn matches_val(&self, val: &Val) -> bool {
+        match (self, val) {
+            (Self::Null, Val::Null)
+            | (Self::Bool, Val::Bool(_))
+            | (Self::Int, Val::Int(_))
+            | (Self::Dec, Val::Dec(_))
+            | (Self::Str, Val::Str(_))
+            | (Self::Vec, Val::Vec(_))
+            | (Self::Byte, Val::Byte(_))
+            | (Self::Bytes, Val::Bytes(_)) => true,
+            (Self::Map, Val::Map(map)) => !matches!(map.get(type_key_val()), Some(Val::Str(_))),
+            (Self::TypedMap(name), Val::Map(map)) => {
+                matches!(map.get(type_key_val()), Some(Val::Str(s)) if &**s == name.as_str())
+            }
+            (Self::Boxed(name), Val::Box(b)) => b.type_name() == name.as_str(),
+            _ => false,
+        }
+    }
+
     pub fn from_val(val: &Val) -> Self {
         match val {
             Val::Null => Self::Null,
@@ -322,16 +344,21 @@ pub struct LambdaJitKey {
 
 impl LambdaJitKey {
     fn new(lambda: &LambdaInfo, args: &[Val], captures: &[Val]) -> Self {
-        let mut hasher = DefaultHasher::new();
-        lambda.parameters.hash(&mut hasher);
-        lambda.instructions.hash(&mut hasher);
-        lambda.register_count.hash(&mut hasher);
-        lambda.capture_vars.hash(&mut hasher);
-        lambda.defining_namespace.hash(&mut hasher);
-        lambda.is_lazy_param.hash(&mut hasher);
+        // Hashing the full instruction list on every lambda call is O(body);
+        // the structural fields are immutable, so compute once and cache.
+        let structural_hash = lambda.structural_hash_cache.get_or_compute(|| {
+            let mut hasher = DefaultHasher::new();
+            lambda.parameters.hash(&mut hasher);
+            lambda.instructions.hash(&mut hasher);
+            lambda.register_count.hash(&mut hasher);
+            lambda.capture_vars.hash(&mut hasher);
+            lambda.defining_namespace.hash(&mut hasher);
+            lambda.is_lazy_param.hash(&mut hasher);
+            hasher.finish()
+        });
 
         Self {
-            structural_hash: hasher.finish(),
+            structural_hash,
             register_count: lambda.register_count,
             is_lazy_param: lambda.is_lazy_param,
             args_signature: TypeSig::from_args(args),
@@ -489,17 +516,31 @@ pub struct JitCompiledFunction {
     result_kind: JitValueKind,
     module: JITModule,
     func_id: FuncId,
+    /// Argument ABI layout, computed once at compile time. Rebuilding it per
+    /// call allocated two Vecs on every VM->JIT boundary crossing.
+    arg_layout: AbiLayout,
+    /// Result buffer word length, computed once at compile time.
+    result_word_len: usize,
 }
 
 impl JitCompiledFunction {
+    /// Allocation-free type guard: checks each runtime arg against the
+    /// compiled signature tag in place instead of building a fresh `TypeSig`
+    /// (Vec + `String`s for typed maps / boxed values) on every call.
     pub fn matches_args(&self, args: &[Val]) -> bool {
-        self.signature == TypeSig::from_args(args)
+        self.signature.arity as usize == args.len()
+            && self
+                .signature
+                .args
+                .iter()
+                .zip(args.iter())
+                .all(|(tag, val)| tag.matches_val(val))
     }
 
     pub fn call(&self, args: &[Val]) -> Result<Val, String> {
         ensure_jit_stack_limit();
-        let raw_args = self.signature.encode_args(args)?;
-        let mut raw_result = self.result_kind.make_buffer();
+        let raw_args = self.signature.encode_args(args, &self.arg_layout)?;
+        let mut raw_result = vec![0u64; self.result_word_len];
         let fn_ptr = self.module.get_finalized_function(self.func_id);
         let jit_fn: unsafe extern "C" fn(*const u8, *mut u8) -> i64 =
             unsafe { mem::transmute(fn_ptr) };
@@ -620,10 +661,21 @@ pub struct JitRuntimeState {
     // would dangle if the map rehashed / the slot moved. Callers must clone
     // the `Rc` out and drop the container borrow before invoking `call`.
     // (`Rc`, not `Arc`: the JIT state is owned by a single-threaded VM.)
-    compiled_functions: Vec<Option<Rc<JitCompiledFunction>>>,
+    //
+    // Each function holds a small vec of per-signature entries so a second
+    // hot signature can compile instead of interpreting forever (lookup is a
+    // linear allocation-free `matches_args` scan; the vec is capped at
+    // `MAX_COMPILED_SIGS_PER_FUNCTION`).
+    compiled_functions: Vec<Vec<Rc<JitCompiledFunction>>>,
     lambda_profiles: AHashMap<LambdaJitKey, JitFunctionProfile>,
     compiled_lambdas: AHashMap<LambdaJitKey, Rc<JitCompiledFunction>>,
 }
+
+/// Cap on compiled signature specializations per function.
+const MAX_COMPILED_SIGS_PER_FUNCTION: usize = 4;
+/// Cap on distinct signatures profiled per function; signature-churning
+/// functions stop being profiled (and therefore compiled) past this.
+const MAX_OBSERVED_SIGNATURES: usize = 8;
 
 impl JitRuntimeState {
     pub fn new(function_count: usize, conf: &Val) -> Self {
@@ -631,17 +683,27 @@ impl JitRuntimeState {
             config: JitConfig::from_conf(conf),
             code_memory_status: CodeMemoryStatus::detect(),
             function_profiles: vec![JitFunctionProfile::default(); function_count],
-            compiled_functions: std::iter::repeat_with(|| None)
-                .take(function_count)
-                .collect(),
+            compiled_functions: vec![Vec::new(); function_count],
             lambda_profiles: AHashMap::new(),
             compiled_lambdas: AHashMap::new(),
         }
     }
 
     pub fn record_call(&mut self, function_id: u32, args: &[Val]) {
+        // Calls already covered by a compiled specialization don't need
+        // profiling (allocation-free check).
+        if self
+            .compiled_functions
+            .get(function_id as usize)
+            .is_some_and(|entries| entries.iter().any(|e| e.matches_args(args)))
+        {
+            return;
+        }
         if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
-            if profile.do_not_jit || profile.call_count > self.config.threshold {
+            if profile.do_not_jit
+                || profile.observed_signatures.len() >= MAX_OBSERVED_SIGNATURES
+                || profile.call_count > self.config.threshold.saturating_mul(8)
+            {
                 return;
             }
             profile.record_call(args);
@@ -655,8 +717,7 @@ impl JitRuntimeState {
     pub fn has_compiled_function(&self, function_id: FunctionId) -> bool {
         self.compiled_functions
             .get(function_id as usize)
-            .and_then(|entry| entry.as_ref())
-            .is_some()
+            .is_some_and(|entries| !entries.is_empty())
     }
 
     pub fn try_call_compiled(
@@ -667,16 +728,18 @@ impl JitRuntimeState {
         // Clone the Rc out so no borrow into `compiled_functions` is held
         // while the compiled code runs: the JIT'd code can re-enter this VM
         // and mutate the JIT state (e.g. compile another function).
-        let Some(entry) = self
-            .compiled_functions
-            .get(function_id as usize)
-            .and_then(|entry| entry.as_ref())
-            .map(Rc::clone)
-        else {
+        let Some(entries) = self.compiled_functions.get(function_id as usize) else {
             return Ok(None);
         };
+        if entries.is_empty() {
+            return Ok(None);
+        }
 
-        if entry.matches_args(args) {
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.matches_args(args))
+            .map(Rc::clone)
+        {
             return match entry.call(args) {
                 Ok(val) => Ok(Some(val)),
                 Err(e) if e == "JIT_STACK_EXHAUSTED" => Ok(None),
@@ -708,11 +771,14 @@ impl JitRuntimeState {
         if profile.do_not_jit {
             return false;
         }
-        if self
+        let entries = self
             .compiled_functions
             .get(function_id as usize)
-            .and_then(|entry| entry.as_ref())
-            .is_some()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        // Already covered by an existing specialization, or at the cap.
+        if entries.len() >= MAX_COMPILED_SIGS_PER_FUNCTION
+            || entries.iter().any(|e| e.matches_args(args))
         {
             return false;
         }
@@ -746,8 +812,8 @@ impl JitRuntimeState {
         );
         let compiled = compile_supported_function(program, function_id, function_info, &signature)?;
 
-        if let Some(slot) = self.compiled_functions.get_mut(function_id as usize) {
-            *slot = Some(Rc::new(compiled));
+        if let Some(entries) = self.compiled_functions.get_mut(function_id as usize) {
+            entries.push(Rc::new(compiled));
         }
         GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -948,13 +1014,28 @@ pub fn log_jit_stats_summary() {
     }
 }
 
-impl TypeSig {
-    fn encode_args(&self, args: &[Val]) -> Result<Vec<u64>, String> {
-        if self != &TypeSig::from_args(args) {
-            return Err("JIT type guard mismatch".to_string());
-        }
+/// Shared `$type` key for allocation-free typed-map guards. Building
+/// `Val::from("$type")` per check would allocate a fresh `Arc<str>` each time.
+fn type_key_val() -> &'static Val {
+    static KEY: std::sync::OnceLock<Val> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| Val::from("$type"))
+}
 
-        let layout = AbiLayout::for_args(&self.args)?;
+impl TypeSig {
+    /// Encode `args` into the raw JIT ABI buffer. `layout` is the compile-time
+    /// `AbiLayout` cached on the compiled entry; callers must have verified the
+    /// signature with `matches_args` first (checked again in debug builds).
+    fn encode_args(&self, args: &[Val], layout: &AbiLayout) -> Result<Vec<u64>, String> {
+        debug_assert!(
+            self.arity as usize == args.len()
+                && self
+                    .args
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(tag, val)| tag.matches_val(val)),
+            "JIT type guard mismatch"
+        );
+
         let mut words = vec![0u64; layout.word_len()];
 
         for (idx, (tag, arg)) in self.args.iter().zip(args.iter()).enumerate() {
@@ -1058,10 +1139,6 @@ impl JitValueKind {
             JitValueKind::Null => RawKind::Null,
             JitValueKind::OwnedVal => RawKind::OwnedVal,
         }
-    }
-
-    fn make_buffer(self) -> Vec<u64> {
-        vec![0u64; AbiLayout::for_result(self).word_len()]
     }
 
     fn decode_result(self, words: &[u64]) -> Result<Val, String> {
@@ -1357,11 +1434,15 @@ fn compile_supported_function(
     module.clear_context(&mut ctx);
     module.finalize_definitions().map_err(|e| e.to_string())?;
 
+    let arg_layout = AbiLayout::for_args(&signature.args)?;
+    let result_word_len = AbiLayout::for_result(result_kind).word_len();
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
         module,
         func_id,
+        arg_layout,
+        result_word_len,
     })
 }
 
@@ -8592,6 +8673,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: false,
             used_registers: vec![0, 1, 2],
+            structural_hash_cache: Default::default(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -8638,6 +8720,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: false,
             used_registers: vec![0, 1, 2],
+            structural_hash_cache: Default::default(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -8693,6 +8776,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: false,
             used_registers: vec![0, 1, 2, 3],
+            structural_hash_cache: Default::default(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -8716,6 +8800,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -8910,6 +8995,7 @@ mod tests {
                     flow_type: FlowType::Cond,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9063,6 +9149,7 @@ mod tests {
                     flow_type: FlowType::Cond,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9196,6 +9283,7 @@ mod tests {
                     flow_type: FlowType::Cond,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9304,6 +9392,7 @@ mod tests {
                     flow_type: FlowType::Match,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9449,6 +9538,7 @@ mod tests {
                     flow_type: FlowType::Match,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9560,6 +9650,7 @@ mod tests {
                     flow_type: FlowType::CondAll,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9685,6 +9776,7 @@ mod tests {
                     flow_type: FlowType::MatchAll,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -10113,6 +10205,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: false,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         }));
 
         let make_vm = |conf| {
@@ -11379,6 +11472,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
 
         // Thunk for "else" branch: { b }
@@ -11397,6 +11491,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
 
         let then_const = program.constants.len() as u32;
@@ -11522,6 +11617,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
 
         // "else" thunk: { add(fib(sub(n, 1)), fib(sub(n, 2))) }
@@ -11579,6 +11675,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
+            structural_hash_cache: Default::default(),
         };
 
         let then_const = program.constants.len() as u32;
@@ -11711,6 +11808,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
         let else_thunk = LambdaInfo {
             parameters: vec![],
@@ -11727,6 +11825,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
         let then_const = program.constants.len() as u32;
         program
@@ -11829,6 +11928,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
         let lazy_const = program.constants.len() as u32;
         program
@@ -11918,6 +12018,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
         let thunk_const = program.constants.len() as u32;
         program
@@ -11977,6 +12078,7 @@ mod tests {
             defining_namespace: "::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![0],
+            structural_hash_cache: Default::default(),
         };
         let thunk_const = program.constants.len() as u32;
         program

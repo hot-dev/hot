@@ -405,6 +405,12 @@ pub struct VirtualMachine {
     skip_remaining_cond_flow: Option<usize>,
     /// Function call recursion depth to prevent infinite loops
     function_call_depth: usize,
+    /// Recursion depth of `execute_user_function` frames. Unlike
+    /// `function_call_depth` (which counts name-dispatched calls), this counts
+    /// every user-function bytecode execution regardless of dispatch path
+    /// (`CallUserFunction`, thunks, JIT re-entry), so runaway recursion always
+    /// hits the limit instead of overflowing the native stack.
+    user_function_depth: usize,
     /// Specific recursion depth tracking for the call function to prevent infinite recursion
     call_function_depth: usize,
     /// If true, convert runtime errors into Result-style maps instead of aborting
@@ -439,6 +445,23 @@ pub struct VirtualMachine {
     coercion_param_cache: AHashMap<FunctionId, Option<Vec<String>>>,
     /// JIT configuration, code-memory status, and per-function profiling state.
     jit: JitRuntimeState,
+    /// Per-function cache of detected HOF fusion pipelines. The plans depend
+    /// only on the function's (immutable) instruction list and the program, so
+    /// they are computed once on first invocation instead of rescanning the
+    /// body on every call. Keyed by `FunctionId`; `self.program` is never
+    /// replaced after construction, so entries stay valid for the VM lifetime.
+    hof_plan_cache:
+        AHashMap<FunctionId, std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]>>,
+    /// Number of currently-active `execute_user_function` frames per
+    /// FunctionId. Register indices are unique per function but shared across
+    /// invocations of the *same* function, so a re-entrant (recursive) call
+    /// must save/restore the function's own registers or it clobbers the
+    /// pending intermediates of the outer frame (e.g. the first operand of
+    /// `add(fib(n-1), fib(n-2))`). Non-recursive calls skip the save entirely.
+    function_active_depth: Vec<u32>,
+    /// Lazily computed written-register sets per FunctionId (for the
+    /// re-entrant save/restore above).
+    function_used_registers_cache: AHashMap<FunctionId, std::rc::Rc<[u32]>>,
     /// Failure state (thread-safe for parallel execution)
     failure_state: Arc<VmFailureState>,
     /// Cancellation state (thread-safe for parallel execution)
@@ -489,6 +512,7 @@ impl VirtualMachine {
         tracing::debug!("VM: Isolation mode enabled = {}", isolation_enabled);
 
         let jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let function_count = program.functions.len();
 
         let mut vm = Self {
             program,
@@ -523,6 +547,7 @@ impl VirtualMachine {
             skip_until_branch_end: None,
             skip_remaining_cond_flow: None,
             function_call_depth: 0,
+            user_function_depth: 0,
             call_function_depth: 0,
             error_capture_active: false,
             suppress_result_checking: false,
@@ -535,6 +560,9 @@ impl VirtualMachine {
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
             jit,
+            hof_plan_cache: AHashMap::new(),
+            function_active_depth: vec![0; function_count],
+            function_used_registers_cache: AHashMap::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
                 failure: RwLock::new(None),
@@ -1996,10 +2024,18 @@ impl VirtualMachine {
                 flow_type,
                 result_modifier,
                 source,
+                origin_name,
             } => {
                 let flow_type = *flow_type;
                 let result_modifier = *result_modifier;
-                let source = source.clone();
+                let origin_name = *origin_name;
+                // Only the emitter event needs the source; skip the Box clone
+                // on the hot no-emitter path.
+                let source = if self.emitter.is_some() {
+                    source.clone()
+                } else {
+                    None
+                };
                 // Begin a flow execution context
                 tracing::trace!(
                     "VM: Beginning flow execution (type: {:?}, result_modifier: {:?})",
@@ -2044,20 +2080,27 @@ impl VirtualMachine {
                         let call_depth = self.call_stack.len();
                         let runtime_path = self.build_runtime_path();
 
-                        // Synthetic function name for inline flow. The outer
+                        // Traced call name for the inline flow. Flows the
+                        // compiler inlined from a named callable (e.g. `if()`)
+                        // carry that name so call-trace search still finds
+                        // them; ordinary flows get a synthetic name. The outer
                         // `if flow_type != FlowType::Serial` makes Serial logically
                         // impossible here, but we use a string fallback rather than
                         // `unreachable!()` so a future refactor that changes the
                         // outer guard can't take the worker down.
-                        let function_name = match flow_type {
-                            FlowType::Serial => "<serial>".to_string(),
-                            FlowType::Parallel => "<parallel>".to_string(),
-                            FlowType::Cond => "<cond>".to_string(),
-                            FlowType::CondAll => "<cond-all>".to_string(),
-                            FlowType::Pipe => "<pipe>".to_string(),
-                            FlowType::Match => "<match>".to_string(),
-                            FlowType::MatchAll => "<match-all>".to_string(),
-                        };
+                        let function_name =
+                            match origin_name.and_then(|id| self.get_string_constant(id).ok()) {
+                                Some(name) => (*name).to_owned(),
+                                None => match flow_type {
+                                    FlowType::Serial => "<serial>".to_string(),
+                                    FlowType::Parallel => "<parallel>".to_string(),
+                                    FlowType::Cond => "<cond>".to_string(),
+                                    FlowType::CondAll => "<cond-all>".to_string(),
+                                    FlowType::Pipe => "<pipe>".to_string(),
+                                    FlowType::Match => "<match>".to_string(),
+                                    FlowType::MatchAll => "<match-all>".to_string(),
+                                },
+                            };
 
                         // Build flow info with inline marker
                         let flow_type_str = match flow_type {
@@ -2071,8 +2114,16 @@ impl VirtualMachine {
                         };
                         let mut flow_map = IndexMap::new();
                         flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
-                        flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
-                        flow_map.insert(Val::from("inline"), Val::Bool(true));
+                        if origin_name.is_some() {
+                            // Compiler-inlined named callable (e.g. `if()`):
+                            // mirror the flow shape these calls emitted before
+                            // inlining, when they executed as `fn cond`
+                            // functions ({type: "cond", fn: true}).
+                            flow_map.insert(Val::from("fn"), Val::Bool(true));
+                        } else {
+                            flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
+                            flow_map.insert(Val::from("inline"), Val::Bool(true));
+                        }
 
                         let start_event = crate::lang::emitter::EngineEvent::call_start(
                             execution_context,
@@ -2084,7 +2135,7 @@ impl VirtualMachine {
                                 .unwrap_or_else(|| format!("run_{}", execution_context.run_id)),
                             call_depth,
                             vec![], // No args for inline flows
-                            source.as_ref(),
+                            source.as_deref(),
                             start_time,
                             Some(Val::Map(Box::new(flow_map))),
                         );
@@ -3754,8 +3805,43 @@ impl VirtualMachine {
         }
     }
 
+    /// Returns true when a value nested inside a collection would be rewritten
+    /// by `resolve_variable_references_in_val`: boxed `FnCall`/`AstNode` values
+    /// are executed in place, everything else is copied verbatim. Lambdas
+    /// (`LambdaInfo`) are preserved as-is, so they don't count.
+    fn val_element_needs_resolution(val: &Val) -> bool {
+        match val {
+            Val::Box(b) => {
+                let any = b.as_any();
+                any.downcast_ref::<crate::lang::ast::FnCall>().is_some()
+                    || any.downcast_ref::<crate::lang::ast::AstNode>().is_some()
+            }
+            Val::Map(map) => map.values().any(Self::val_element_needs_resolution),
+            Val::Vec(vec) => vec.iter().any(Self::val_element_needs_resolution),
+            _ => false,
+        }
+    }
+
+    /// Returns true when `resolve_variable_references_in_val` would produce
+    /// anything other than a verbatim copy of `val`. Only Map/Vec containers
+    /// holding boxed AST nodes are rewritten; top-level boxes are cloned as-is.
+    fn val_needs_resolution(val: &Val) -> bool {
+        match val {
+            Val::Map(map) => map.values().any(Self::val_element_needs_resolution),
+            Val::Vec(vec) => vec.iter().any(Self::val_element_needs_resolution),
+            _ => false,
+        }
+    }
+
     /// Resolve variable references in a Val (for legacy compatibility)
     fn resolve_variable_references_in_val(&mut self, val: &Val) -> VmResult<Val> {
+        // Fast path: nothing inside needs evaluation, so the rebuild below
+        // would be an element-by-element copy. A plain clone is semantically
+        // identical and avoids re-allocating every nested Map/Vec on every
+        // call-argument and constant load.
+        if !Self::val_needs_resolution(val) {
+            return Ok(val.clone());
+        }
         match val {
             Val::Map(map) => {
                 // Recursively resolve variable references in maps
@@ -4991,7 +5077,11 @@ impl VirtualMachine {
     ///
     /// NOTE: This should ONLY be called for non-lazy function arguments and template literal parts
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
-        if std::env::var("HOT_DBG_UNWRAP").is_ok() && val.is_err() {
+        // Cache the debug-env check: this runs per argument per call, and
+        // std::env::var is far too expensive for that hot path.
+        static DBG_UNWRAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let dbg_unwrap = *DBG_UNWRAP.get_or_init(|| std::env::var("HOT_DBG_UNWRAP").is_ok());
+        if dbg_unwrap && val.is_err() {
             eprintln!(
                 "DBG unwrap_result_if_ok on Err (suppress={})",
                 self.suppress_result_checking
@@ -5749,21 +5839,24 @@ impl VirtualMachine {
             return exec;
         }
 
-        // Resolve to a function name for normal dispatch paths
-        let function_name: String = match function_val {
-            Val::Str(name) => (*name).to_owned(),
+        // Resolve to a function name for normal dispatch paths.
+        // Arc<str> so the common Val::Str case is a refcount bump, not a
+        // fresh String allocation on every dispatched call.
+        let function_name: Arc<str> = match function_val {
+            Val::Str(name) => name,
             Val::Box(boxed_val) => {
                 if let Some(function_ref) = boxed_val
                     .as_any()
                     .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>(
                 ) {
-                    function_ref.name.clone()
+                    Arc::from(function_ref.name.as_str())
                 } else {
                     return Ok(Val::Null);
                 }
             }
             _ => return Ok(Val::Null),
         };
+        let function_name: &str = &function_name;
 
         tracing::trace!(
             "VM: Calling function '{}' with {} args",
@@ -5775,7 +5868,7 @@ impl VirtualMachine {
         if function_name == "call-lib" {
             let result = self.execute_call_lib_builtin(args);
             if !is_dispatch_function {
-                self.decrement_function_call_depth(&function_name);
+                self.decrement_function_call_depth(function_name);
             }
             return result;
         }
@@ -5792,7 +5885,7 @@ impl VirtualMachine {
             macro_rules! fast_return {
                 ($val:expr) => {{
                     if !is_dispatch_function {
-                        self.decrement_function_call_depth(&function_name);
+                        self.decrement_function_call_depth(function_name);
                     }
                     return Ok($val);
                 }};
@@ -5803,7 +5896,7 @@ impl VirtualMachine {
                         HR::Ok(val) => fast_return!(val),
                         HR::Err(err_val) => {
                             if !is_dispatch_function {
-                                self.decrement_function_call_depth(&function_name);
+                                self.decrement_function_call_depth(function_name);
                             }
                             return Err(VmError::runtime(err_val.to_string()));
                         }
@@ -5813,7 +5906,7 @@ impl VirtualMachine {
 
             match args.len() {
                 // ── 1-arg fast paths ──────────────────────────────────────
-                1 => match function_name.as_str() {
+                1 => match function_name {
                     "not" => match &args[0] {
                         Val::Bool(b) => fast_return!(bool::fast_not_bool(*b)),
                         _ => fast_return_hr!(bool::not(args)),
@@ -5869,7 +5962,7 @@ impl VirtualMachine {
                 2 => {
                     // Tier 1: Int+Int arithmetic and comparison
                     if let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1]) {
-                        let result = match function_name.as_str() {
+                        let result = match function_name {
                             "add" => Some(math::fast_add_int(*a, *b)),
                             "sub" => Some(math::fast_sub_int(*a, *b)),
                             "mul" => Some(math::fast_mul_int(*a, *b)),
@@ -5890,7 +5983,7 @@ impl VirtualMachine {
                     }
 
                     // Tier 1: collection operations with common type combos
-                    match function_name.as_str() {
+                    match function_name {
                         "get" => match (&args[0], &args[1]) {
                             (Val::Vec(v), Val::Int(i)) => {
                                 fast_return!(coll::fast_get_vec_int(v, *i))
@@ -5923,7 +6016,7 @@ impl VirtualMachine {
                     }
 
                     // Tier 2: math/cmp for non-Int type combos (Dec, mixed, etc.)
-                    let tier2 = match function_name.as_str() {
+                    let tier2 = match function_name {
                         "add" => Some(math::add(args)),
                         "sub" => Some(math::sub(args)),
                         "mul" => Some(math::mul(args)),
@@ -5944,7 +6037,7 @@ impl VirtualMachine {
                 }
 
                 // ── 3-arg fast paths ──────────────────────────────────────
-                3 => match function_name.as_str() {
+                3 => match function_name {
                     "range" => match (&args[0], &args[1], &args[2]) {
                         (Val::Int(start), Val::Int(end), Val::Int(step)) => {
                             if let Some(n) = crate::lang::runtime::limits::range_element_count(
@@ -5970,9 +6063,9 @@ impl VirtualMachine {
         }
 
         // Use unified function lookup for all other functions
-        let result = self.unified_function_lookup(&function_name, args);
+        let result = self.unified_function_lookup(function_name, args);
         if !is_dispatch_function {
-            self.decrement_function_call_depth(&function_name);
+            self.decrement_function_call_depth(function_name);
         }
         result
     }
@@ -7143,6 +7236,16 @@ impl VirtualMachine {
 
     /// Execute a lambda
     pub fn execute_lambda(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Val> {
+        // Lambda self-recursion (CallLambda -> execute_lambda -> ...) never
+        // passes through execute_user_function's depth guard, so the stack
+        // backstop must be checked here as well.
+        if crate::lang::runtime::limits::vm_stack_exhausted() {
+            return Err(VmError::runtime(
+                "Native stack budget exhausted by deep recursion. \
+                 Use tail recursion (TCO-eligible position) or an iterative form."
+                    .to_string(),
+            ));
+        }
         super::jit::increment_lambda_interpreter_call_count();
 
         // Extract lambda information from the value - use Cow pattern to avoid clone when possible
@@ -7334,14 +7437,20 @@ impl VirtualMachine {
 
         // Save registers that will be used by this lambda to prevent nested calls from overwriting them
         // This is critical for recursive lambdas that use the same register IDs
-        // Use pre-computed used_registers to avoid O(N) instruction scan on every call
+        // Use pre-computed used_registers to avoid O(N) instruction scan on every call.
+        // Take the values out (leaving Null) instead of cloning: the lambda only
+        // reads registers it wrote itself, and a deep clone of large caller
+        // collections on every lambda call is pure waste.
         let registers_to_save: Vec<(usize, Val)> = lambda_info
             .used_registers
             .iter()
             .filter_map(|&reg| {
                 let reg_idx = reg as usize;
                 if reg_idx < self.registers.len() {
-                    Some((reg_idx, self.registers[reg_idx].clone()))
+                    Some((
+                        reg_idx,
+                        std::mem::replace(&mut self.registers[reg_idx], Val::Null),
+                    ))
                 } else {
                     None
                 }
@@ -7683,7 +7792,95 @@ impl VirtualMachine {
         result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))
     }
 
+    /// Depth- and stack-guarded entry point for user-function execution.
+    ///
+    /// Every path that runs a user function's bytecode funnels through here
+    /// (register `Call` dispatch, `CallUserFunction`, JIT re-entry via
+    /// `hot_jit_call_vm`, lazy-thunk evaluation), so this is where recursion
+    /// is bounded. The name-dispatch path has its own `function_call_depth`
+    /// counter, but calls routed through `CallUserFunction` or thunks bypass
+    /// it — without this guard, 100k-deep recursion kills the process with a
+    /// native stack overflow (which bypasses catch_unwind) instead of
+    /// returning a structured error.
     fn execute_user_function(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+        let max_depth = max_recursion_depth();
+        if self.user_function_depth >= max_depth {
+            return Err(VmError::runtime(format!(
+                "Function call recursion limit reached (depth {}, max {}). \
+                 This usually indicates unbounded recursion. \
+                 Use tail recursion (TCO-eligible position), an iterative form, \
+                 or raise HOT_MAX_RECURSION_DEPTH if your workload genuinely needs deeper calls.",
+                self.user_function_depth, max_depth,
+            )));
+        }
+        if crate::lang::runtime::limits::vm_stack_exhausted() {
+            return Err(VmError::runtime(
+                "Native stack budget exhausted by deep recursion. \
+                 Use tail recursion (TCO-eligible position) or an iterative form."
+                    .to_string(),
+            ));
+        }
+        // Re-entrant (recursive) calls share the outer frame's register
+        // indices, so save the function's own registers before re-entering
+        // and restore them after — otherwise the inner call clobbers pending
+        // intermediates of the outer expression (e.g. the first operand of
+        // `add(fib(n-1), fib(n-2))`). First-entry calls skip this entirely.
+        let fid = function_id as usize;
+        let reentrant = self.function_active_depth.get(fid).copied().unwrap_or(0) > 0;
+        let saved_own_registers: Vec<(usize, Val)> = if reentrant {
+            let used = self.function_used_registers(function_id);
+            used.iter()
+                .filter_map(|&reg| {
+                    let idx = reg as usize;
+                    if idx < self.registers.len() {
+                        Some((idx, std::mem::replace(&mut self.registers[idx], Val::Null)))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(slot) = self.function_active_depth.get_mut(fid) {
+            *slot += 1;
+        }
+
+        self.user_function_depth += 1;
+        let result = self.execute_user_function_impl(function_id, args);
+        self.user_function_depth -= 1;
+
+        if let Some(slot) = self.function_active_depth.get_mut(fid) {
+            *slot = slot.saturating_sub(1);
+        }
+        // Restore even on error so a failed call can't leak clobbered
+        // registers into an outer frame (VMs are reused across REPL runs).
+        for (idx, val) in saved_own_registers {
+            self.registers[idx] = val;
+        }
+        result
+    }
+
+    /// Written-register set for a function body (lazily computed and cached).
+    fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
+        if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
+            return std::rc::Rc::clone(cached);
+        }
+        let used: std::rc::Rc<[u32]> = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|info| {
+                crate::lang::bytecode::LambdaInfo::compute_used_registers(&info.instructions)
+            })
+            .unwrap_or_default()
+            .into();
+        self.function_used_registers_cache
+            .insert(function_id, std::rc::Rc::clone(&used));
+        used
+    }
+
+    fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
         if self.jit.config.is_enabled() {
             self.jit.record_call(function_id, args);
 
@@ -7968,6 +8165,25 @@ impl VirtualMachine {
                         ns_param_shadows.push((k.clone(), prev));
                     }
                 }
+            } else if !function_param_names.is_empty()
+                && let Some(scope) = self.scope_stack.last()
+            {
+                // Unqualified function name: historically the first TCO-loop
+                // iteration mirrored params into the *caller's* namespace
+                // without shadow capture. Preserve that behavior now that the
+                // loop only rebinds on actual tail calls.
+                let params: Vec<(String, Val)> = scope
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let ns_entry = self
+                    .namespace_variables
+                    .entry(self.current_namespace.clone())
+                    .or_default();
+                for (k, v) in params {
+                    ns_entry.insert(k, v);
+                }
             }
 
             // Execute function instructions
@@ -8004,44 +8220,50 @@ impl VirtualMachine {
                 );
 
                 // TCO Loop: Execute instructions, and if we get a TailCall result,
-                // update parameters and re-execute instead of recursing
-                let mut current_args = args.to_vec();
+                // update parameters and re-execute instead of recursing.
+                // Parameters were already bound into the function scope (and
+                // mirrored into the namespace registry) above, so only actual
+                // tail-call iterations rebind — the previous version re-bound
+                // and re-mirrored every parameter a second time on every call.
+                let mut tail_args: Option<Vec<Val>> = None;
                 loop {
-                    // Update parameter bindings with current args (for tail call iterations)
-                    // On first iteration, this duplicates the initial binding, but that's okay
-                    let mut namespace_param_updates: Vec<(String, Val)> = Vec::new();
-                    if let Some(scope) = self.scope_stack.last_mut() {
-                        for (i, param_name) in function_param_names.iter().enumerate() {
-                            let value = if function_is_variadic && i == variadic_param_index {
-                                // Variadic parameter - collect remaining args
-                                let variadic_args: Vec<Val> = if i < current_args.len() {
-                                    current_args[i..].to_vec()
+                    if let Some(current_args) = tail_args.take() {
+                        // Update parameter bindings with the tail call's args
+                        let mut namespace_param_updates: Vec<(String, Val)> =
+                            Vec::with_capacity(function_param_names.len());
+                        if let Some(scope) = self.scope_stack.last_mut() {
+                            for (i, param_name) in function_param_names.iter().enumerate() {
+                                let value = if function_is_variadic && i == variadic_param_index {
+                                    // Variadic parameter - collect remaining args
+                                    let variadic_args: Vec<Val> = if i < current_args.len() {
+                                        current_args[i..].to_vec()
+                                    } else {
+                                        vec![]
+                                    };
+                                    Val::Vec(variadic_args)
+                                } else if i < current_args.len() {
+                                    current_args[i].clone()
                                 } else {
-                                    vec![]
+                                    Val::Null
                                 };
-                                Val::Vec(variadic_args)
-                            } else if i < current_args.len() {
-                                current_args[i].clone()
-                            } else {
-                                Val::Null
-                            };
-                            scope.variables.insert(param_name.clone(), value.clone());
-                            namespace_param_updates.push((param_name.clone(), value));
+                                scope.variables.insert(param_name.clone(), value.clone());
+                                namespace_param_updates.push((param_name.clone(), value));
+                            }
                         }
-                    }
-                    if !namespace_param_updates.is_empty() {
-                        let ns_entry = self
-                            .namespace_variables
-                            .entry(self.current_namespace.clone())
-                            .or_default();
-                        for (param_name, value) in namespace_param_updates {
-                            ns_entry.insert(param_name, value);
+                        if !namespace_param_updates.is_empty() {
+                            let ns_entry = self
+                                .namespace_variables
+                                .entry(self.current_namespace.clone())
+                                .or_default();
+                            for (param_name, value) in namespace_param_updates {
+                                ns_entry.insert(param_name, value);
+                            }
                         }
                     }
 
                     // Execute the function instructions - borrow from outer Arc clone
                     let instructions = &function_info.instructions;
-                    match self.execute_function_instructions(instructions)? {
+                    match self.execute_function_instructions(instructions, Some(function_id))? {
                         FunctionExecutionResult::Value(val) => {
                             // Normal return - exit the loop with the result
                             break val;
@@ -8062,15 +8284,52 @@ impl VirtualMachine {
                                 break self.execute_user_function(tail_fn_id, &new_args)?;
                             }
 
-                            // Same function - update args and loop (TCO!)
-                            current_args = new_args;
-
                             // TCO cleanup: Reset flow contexts and skip flags from previous iteration
                             // The previous iteration may have left stale flow contexts if it exited
                             // via TailCall before EndFlow was executed (e.g., in cond flows)
                             self.flow_contexts.truncate(saved_flow_context_depth);
                             self.skip_until_branch_end = None;
                             self.skip_remaining_cond_flow = None;
+
+                            // Each tail iteration is semantically a call: record
+                            // it so hot TCO loops reach the JIT threshold, and
+                            // switch to compiled code mid-loop once available.
+                            // Without this, a million-iteration tail loop counts
+                            // as ONE call and never compiles.
+                            if self.jit.config.is_enabled() {
+                                self.jit.record_call(function_id, &new_args);
+                                if self.jit.should_compile_now(function_id, &new_args) {
+                                    match self.jit.compile_function(
+                                        &program,
+                                        function_id,
+                                        function_info,
+                                        &new_args,
+                                    ) {
+                                        Ok(()) => {}
+                                        Err(err) => {
+                                            super::jit::increment_jit_bailout_count();
+                                            if !super::jit::is_retryable_jit_bailout(&err) {
+                                                self.jit.mark_do_not_jit(function_id);
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(result) = self
+                                    .jit
+                                    .try_call_compiled(function_id, &new_args)
+                                    .map_err(|msg| {
+                                        VmError::RuntimeError(
+                                            RuntimeError::new(msg)
+                                                .with_instruction_pointer(self.instruction_pointer),
+                                        )
+                                    })?
+                                {
+                                    break result;
+                                }
+                            }
+
+                            // Same function - update args and loop (TCO!)
+                            tail_args = Some(new_args);
 
                             // Continue the loop with updated arguments
                         }
@@ -9448,6 +9707,7 @@ impl VirtualMachine {
     fn execute_function_instructions(
         &mut self,
         instructions: &[Instruction],
+        function_id: Option<FunctionId>,
     ) -> Result<FunctionExecutionResult, VmError> {
         if instructions.is_empty() {
             return Ok(FunctionExecutionResult::Value(Val::Null));
@@ -9484,12 +9744,25 @@ impl VirtualMachine {
 
         // Detect fusible HOF pipelines once for this function body. Gated behind
         // the `jit.hof.fusion` kill switch; empty when disabled or none found.
-        let fused_plans: Vec<crate::lang::runtime::jit_hof::PipelinePlan> =
+        // Plans are memoized per FunctionId so repeated calls (including TCO
+        // loop iterations) don't rescan the body.
+        let fused_plans: std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]> =
             if self.jit.config.hof_fusion_enabled() {
-                let program = self.program.clone();
-                crate::lang::runtime::jit_hof::detect_pipelines(instructions, &program)
+                match function_id.and_then(|fid| self.hof_plan_cache.get(&fid)) {
+                    Some(plans) => std::rc::Rc::clone(plans),
+                    None => {
+                        let program = self.program.clone();
+                        let plans: std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]> =
+                            crate::lang::runtime::jit_hof::detect_pipelines(instructions, &program)
+                                .into();
+                        if let Some(fid) = function_id {
+                            self.hof_plan_cache.insert(fid, std::rc::Rc::clone(&plans));
+                        }
+                        plans
+                    }
+                }
             } else {
-                Vec::new()
+                std::rc::Rc::from([])
             };
 
         // Use a local instruction pointer for function execution
@@ -10101,5 +10374,118 @@ mod tests {
             event_types,
             vec!["parallel:a".to_string(), "parallel:b".to_string()]
         );
+    }
+
+    /// Shared harness: compile a two-namespace program where `::my::bool/if`
+    /// mirrors hot-std's core lazy `if` (the inline-if transform keys on a
+    /// core function whose qualified name ends in "::bool/if"), then run a
+    /// function under the given JIT mode and return its result.
+    fn run_recursion_source(source: &str, entry: &str, args: &[Val], jit: &str) -> Val {
+        let mut program = parse_hot(source).expect("test source should parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+
+        let mut vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            Some(crate::val!({"jit": jit})),
+        );
+        vm.execute().expect("module init should run");
+        vm.call_function_bypassing_unified_lookup(entry, args)
+            .expect("entry function should run")
+    }
+
+    const CORE_IF_PRELUDE: &str = r#"
+::my::bool ns
+
+if
+meta { core: true }
+fn
+cond (pred: Any, lazy then: Any): Any {
+    pred => { do then }
+},
+cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+    pred => { do then }
+    => { do else }
+}
+"#;
+
+    // Regression: tail recursion through if() must TCO. Before the
+    // vm-jit-perf work this either overflowed the native stack (killing the
+    // process, JIT off) or churned through JIT guard failures for minutes.
+    // Depth 10000 is far beyond HOT_MAX_RECURSION_DEPTH (4096), so this only
+    // passes when TailCall is emitted and the TCO loop (or the JIT's native
+    // loop) actually runs.
+    #[test]
+    fn deep_tail_recursion_through_if_returns_correct_result() {
+        let source = format!(
+            "{CORE_IF_PRELUDE}
+::test ns
+
+sum-to fn (i: Int, acc: Int): Int {{
+    if(lte(i, 0), acc, sum-to(sub(i, 1), add(acc, i)))
+}}
+"
+        );
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(
+                &source,
+                "::test/sum-to",
+                &[Val::Int(10000), Val::Int(0)],
+                jit,
+            );
+            assert_eq!(
+                result,
+                Val::Int(50_005_000),
+                "sum-to(10000) wrong with jit={jit}"
+            );
+        }
+    }
+
+    // Regression: non-tail self-recursion through cond must not clobber the
+    // outer frame's pending intermediates (register indices are per-function
+    // and shared across re-entrant calls). Before the vm-jit-perf work this
+    // returned wrong results at full speed - fib(20) came back as a small
+    // integer instead of 6765.
+    #[test]
+    fn non_tail_cond_recursion_returns_correct_result() {
+        let source = r#"
+::test ns
+
+fib-cond fn (n: Int): Int {
+    cond {
+        lte(n, 1) => n
+        => add(fib-cond(sub(n, 1)), fib-cond(sub(n, 2)))
+    }
+}
+"#;
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(source, "::test/fib-cond", &[Val::Int(20)], jit);
+            assert_eq!(result, Val::Int(6765), "fib-cond(20) wrong with jit={jit}");
+        }
+    }
+
+    // Same clobbering shape, but through inlined if() rather than cond.
+    #[test]
+    fn non_tail_if_recursion_returns_correct_result() {
+        let source = format!(
+            "{CORE_IF_PRELUDE}
+::test ns
+
+fib fn (n: Int): Int {{
+    if(lte(n, 1), n, add(fib(sub(n, 1)), fib(sub(n, 2))))
+}}
+"
+        );
+        for jit in ["off", "on"] {
+            let result = run_recursion_source(&source, "::test/fib", &[Val::Int(20)], jit);
+            assert_eq!(result, Val::Int(6765), "fib(20) wrong with jit={jit}");
+        }
     }
 }
