@@ -2527,13 +2527,18 @@ impl VirtualMachine {
                     let actual: Vec<String> =
                         args.iter().map(|a| self.get_val_type_name(a)).collect();
                     if actual != expected {
-                        let mut plan: Vec<Option<String>> = Vec::with_capacity(args_count as usize);
+                        let actual_full: Vec<String> =
+                            args.iter().map(|a| self.get_value_type_path(a)).collect();
+                        let mut plan: Vec<Option<(String, String)>> =
+                            Vec::with_capacity(args_count as usize);
                         let mut all_ok = true;
-                        for (a, e) in actual.iter().zip(expected.iter()) {
+                        for ((a, a_full), e) in
+                            actual.iter().zip(actual_full.iter()).zip(expected.iter())
+                        {
                             if a == e {
                                 plan.push(None);
-                            } else if let Some(target) = self.find_coercion_target(a, e) {
-                                plan.push(Some(target));
+                            } else if let Some(arrow) = self.find_coercion_target(a_full, a, e) {
+                                plan.push(Some(arrow));
                             } else {
                                 all_ok = false;
                                 break;
@@ -4119,23 +4124,37 @@ impl VirtualMachine {
                 // inference we look up the arrow and call it.
                 let src_short = existing.rsplit('/').next().unwrap_or(existing);
                 let tgt_short = type_name.rsplit('/').next().unwrap_or(&type_name);
-                let candidates: Vec<String> = self
-                    .type_implementations
-                    .keys()
-                    .filter_map(|(s, t)| {
-                        if s != src_short {
-                            return None;
-                        }
-                        if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
-                            Some(t.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                // Prefer keys whose source is the value's qualified $type;
+                // fall back to short-form comparison for legacy registry
+                // entries. The single-candidate guard keeps ambiguous
+                // matches from silently picking an arrow.
+                let collect_candidates = |exact: bool| -> Vec<(String, String)> {
+                    self.type_implementations
+                        .keys()
+                        .filter_map(|(s, t)| {
+                            let source_matches = if exact {
+                                s == existing
+                            } else {
+                                s.rsplit('/').next().unwrap_or(s) == src_short
+                            };
+                            if !source_matches {
+                                return None;
+                            }
+                            if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
+                                Some((s.clone(), t.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+                let mut candidates = collect_candidates(true);
+                if candidates.is_empty() {
+                    candidates = collect_candidates(false);
+                }
                 if candidates.len() == 1
                     && let Some(impl_name) =
-                        self.resolve_type_implementation(src_short, &candidates[0])
+                        self.resolve_type_implementation(&candidates[0].0, &candidates[0].1)
                 {
                     return self.execute_function_call_by_qualified_name(
                         &impl_name,
@@ -6489,22 +6508,41 @@ impl VirtualMachine {
     /// `resolve_type_implementation`) when exactly one such arrow exists.
     /// Multiple matches return `None` so the dispatcher can fall through
     /// rather than silently picking one.
-    fn find_coercion_target(&self, src: &str, tgt: &str) -> Option<String> {
+    /// `src_full` is the value's qualified type path; the registry is keyed
+    /// by scope-resolved qualified source names, so that match is
+    /// authoritative. The short-name comparison runs only when no qualified
+    /// key matches (legacy caches, values carrying short $type strings).
+    fn find_coercion_target(
+        &self,
+        src_full: &str,
+        src_short: &str,
+        tgt: &str,
+    ) -> Option<(String, String)> {
         let dotted_prefix = format!("{}.", tgt);
-        let candidates: Vec<String> = self
-            .type_implementations
-            .keys()
-            .filter_map(|(s, t)| {
-                if s != src {
-                    return None;
-                }
-                if t == tgt || t.starts_with(&dotted_prefix) {
-                    Some(t.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let collect = |exact: bool| -> Vec<(String, String)> {
+            self.type_implementations
+                .keys()
+                .filter_map(|(s, t)| {
+                    let source_matches = if exact {
+                        s == src_full
+                    } else {
+                        s.rsplit('/').next().unwrap_or(s) == src_short
+                    };
+                    if !source_matches {
+                        return None;
+                    }
+                    if t == tgt || t.starts_with(&dotted_prefix) {
+                        Some((s.clone(), t.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut candidates = collect(true);
+        if candidates.is_empty() {
+            candidates = collect(false);
+        }
         if candidates.len() == 1 {
             candidates.into_iter().next()
         } else {
@@ -6517,16 +6555,19 @@ impl VirtualMachine {
     /// coerced value; pass `None` entries through unchanged. Errors from an arrow
     /// propagate to the caller — silent arrow-failure would surprise users who
     /// explicitly registered the conversion.
-    fn apply_coercion_plan(&mut self, args: &[Val], plan: &[Option<String>]) -> VmResult<Vec<Val>> {
+    fn apply_coercion_plan(
+        &mut self,
+        args: &[Val],
+        plan: &[Option<(String, String)>],
+    ) -> VmResult<Vec<Val>> {
         let mut coerced: Vec<Val> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
-            if let Some(target) = plan.get(i).and_then(|p| p.as_ref()) {
-                let actual = self.get_val_type_name(arg);
-                let Some(impl_name) = self.resolve_type_implementation(&actual, target) else {
+            if let Some((source_key, target)) = plan.get(i).and_then(|p| p.as_ref()) {
+                let Some(impl_name) = self.resolve_type_implementation(source_key, target) else {
                     return Err(VmError::runtime_with_ip(
                         format!(
                             "Implicit coercion plan referenced missing arrow {} -> {}",
-                            actual, target
+                            source_key, target
                         ),
                         self.instruction_pointer,
                     ));
