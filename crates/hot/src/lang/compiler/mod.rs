@@ -2435,6 +2435,7 @@ impl Compiler {
                         defining_namespace: func_info.namespace.clone(),
                         is_lazy_param: false,
                         used_registers,
+                        structural_hash_cache: Default::default(),
                     };
 
                     // Add boxed LambdaInfo as a constant and load it
@@ -2750,14 +2751,181 @@ impl Compiler {
         (vec![], false) // No lazy parameter info found
     }
 
+    /// Compile `if(pred, then[, else])` calls that statically resolve to the
+    /// core `::hot::bool/if` as an inline cond flow instead of a lazy-thunk
+    /// call. `if` is defined in hot-std as exactly this cond, so semantics are
+    /// preserved, but the inline form:
+    /// - avoids allocating two thunk lambdas and a full call frame per `if`,
+    /// - keeps branch bodies in the enclosing function, so `in_tail_position`
+    ///   propagates and self-recursive tail calls through `if` emit `TailCall`
+    ///   (interpreter TCO loop; native loop in the JIT). Without this, deep
+    ///   `if`-based tail recursion overflows the native stack.
+    /// - matches the JIT's existing lazy-branch inlining, which also evaluates
+    ///   the condition by truthiness in the caller's frame.
+    ///
+    /// Returns Ok(None) when the call doesn't match (shadowed `if`, spread or
+    /// explicitly-lazy args, result path, wrong arity) so the caller falls
+    /// back to the normal call path.
+    fn try_compile_inline_if(&mut self, fn_call: &FnCall) -> Result<Option<RegisterId>, String> {
+        if !(fn_call.args.len() == 2 || fn_call.args.len() == 3)
+            || fn_call.result_path.is_some()
+            || fn_call.args.iter().any(|a| a.spread || a.lazy)
+        {
+            return Ok(None);
+        }
+
+        // The callee must statically resolve to the core lazy `if`.
+        let is_core_if = match fn_call.function.as_ref() {
+            Value::Ref(Ref::Var(var_ref)) => {
+                let name = var_ref.var.sym.name();
+                name == "if"
+                    && var_ref.var.deep_path.is_none()
+                    // The core registry must map the bare name to a bool/if...
+                    && self
+                        .core_lazy_function_names
+                        .get(name)
+                        .is_some_and(|q| q.ends_with("::bool/if"))
+                    // ...and nothing user-defined may shadow it in this namespace.
+                    && !self
+                        .function_mapping
+                        .contains_key(&format!("{}/if", self.current_namespace))
+                    && !self.function_mapping.contains_key(&format!(
+                        "{}/if/{}",
+                        self.current_namespace,
+                        fn_call.args.len()
+                    ))
+                    && !self
+                        .symbol_table
+                        .contains_key(&format!("{}/if", self.current_namespace))
+            }
+            Value::Ref(Ref::Ns(ns_ref)) => {
+                let resolved = self.resolve_ns_ref_alias(ns_ref);
+                resolved.function_name.as_deref() == Some("if")
+                    && self
+                        .core_lazy_function_names
+                        .get("if")
+                        .is_some_and(|q| *q == format!("{}/if", resolved.ns))
+            }
+            _ => false,
+        };
+        if !is_core_if {
+            return Ok(None);
+        }
+
+        let result_reg = self.allocate_register();
+        // See `next_cond_id` doc on `Compiler`: unique suffix keeps branch
+        // names from colliding across sibling/nested conds.
+        let cond_id = self.next_cond_id;
+        self.next_cond_id += 1;
+
+        self.emit_instruction(Instruction::BeginFlow {
+            flow_type: crate::lang::bytecode::FlowType::Cond,
+            result_modifier: crate::lang::bytecode::FlowResultModifier::One,
+            source: None,
+        });
+
+        // Initialize result register with null only for the 2-arg form (a
+        // falsy 2-arg `if` yields null). With an else branch some branch
+        // always produces the result, and pre-tainting the result register
+        // with a Null kind makes the JIT bail out of arithmetic on the
+        // flow's (otherwise uniformly typed) result.
+        if fn_call.args.len() == 2 {
+            let null_constant = self.program.add_constant(Constant::Val(Val::Null));
+            self.emit_instruction(Instruction::LoadConst {
+                dest: result_reg,
+                constant: null_constant,
+            });
+        }
+
+        let saved_tail_position = self.in_tail_position;
+
+        // then-branch: `pred => then`
+        self.in_tail_position = false;
+        let condition_reg = self.compile_value(&fn_call.args[0].value)?;
+        let then_name = format!("if_then\0c{}", cond_id);
+        let then_name_id = self.program.add_string_ref(then_name);
+        self.emit_instruction(Instruction::CondBranchStart {
+            branch_name: then_name_id,
+            condition: condition_reg,
+            skip_target: 0,
+        });
+        self.emit_instruction(Instruction::EnterScope {
+            scope_type: crate::lang::bytecode::ScopeType::Flow,
+        });
+        self.in_tail_position = saved_tail_position;
+        let then_reg = self.compile_if_branch(&fn_call.args[1].value)?;
+        self.emit_instruction(Instruction::ExitScope);
+        self.emit_instruction(Instruction::CondBranchEnd {
+            branch_name: then_name_id,
+            result: then_reg,
+        });
+
+        // else-branch: `=> else` (default arm with always-true condition)
+        if let Some(else_arg) = fn_call.args.get(2) {
+            let else_name = format!("if_else\0c{}", cond_id);
+            let else_name_id = self.program.add_string_ref(else_name);
+            let true_const = self.program.add_constant(Constant::Val(Val::Bool(true)));
+            let true_reg = self.allocate_register();
+            self.emit_instruction(Instruction::LoadConst {
+                dest: true_reg,
+                constant: true_const,
+            });
+            self.emit_instruction(Instruction::CondBranchStart {
+                branch_name: else_name_id,
+                condition: true_reg,
+                skip_target: 0,
+            });
+            self.emit_instruction(Instruction::EnterScope {
+                scope_type: crate::lang::bytecode::ScopeType::Flow,
+            });
+            self.in_tail_position = saved_tail_position;
+            let else_reg = self.compile_if_branch(&else_arg.value)?;
+            self.emit_instruction(Instruction::ExitScope);
+            self.emit_instruction(Instruction::CondBranchEnd {
+                branch_name: else_name_id,
+                result: else_reg,
+            });
+        }
+
+        self.in_tail_position = saved_tail_position;
+        self.emit_instruction(Instruction::EndFlow { dest: result_reg });
+
+        Ok(Some(result_reg))
+    }
+
+    /// Compile one `if` branch inline. Zero-arg block literals (`{ ... }`)
+    /// would have become the lazy thunk itself in the call form and been
+    /// forced by `do`; inline, their body executes directly (mirroring how
+    /// cond arms compile their result flow).
+    fn compile_if_branch(&mut self, value: &Value) -> Result<RegisterId, String> {
+        if let Value::Lambda(lambda) = value
+            && lambda.args.args.is_empty()
+        {
+            return self.compile_value(&lambda.body);
+        }
+        self.compile_value(value)
+    }
+
     /// Compile a function call
     fn compile_function_call(&mut self, fn_call: &FnCall) -> Result<RegisterId, String> {
+        if let Some(result_reg) = self.try_compile_inline_if(fn_call)? {
+            return Ok(result_reg);
+        }
         let dest_reg = self.allocate_register();
 
         // Track which arguments are spread (bitmask)
         let mut spread_mask: u64 = 0;
 
-        // Compile arguments into consecutive registers
+        // Compile arguments into consecutive registers.
+        // TCO: arguments are never in tail position — only the call itself is.
+        // Without this reset, a self-recursive call appearing as an argument
+        // (e.g. `add(fib(sub(n, 1)), fib(sub(n, 2)))` in tail position) would
+        // wrongly emit TailCall and abandon the enclosing expression.
+        // Historically this was masked because such shapes only occurred
+        // inside lazy thunks, which reset the flag; inline `if` compilation
+        // exposes them directly.
+        let saved_tail_position_for_args = self.in_tail_position;
+        self.in_tail_position = false;
         let args_start = if fn_call.args.is_empty() {
             0 // No arguments
         } else {
@@ -2886,6 +3054,8 @@ impl Compiler {
             }
             first_arg_reg
         };
+        // TCO: restore tail-position state for the call emission itself.
+        self.in_tail_position = saved_tail_position_for_args;
 
         // Helper: check if we need spread call
         let has_spread = spread_mask != 0;
@@ -3412,6 +3582,7 @@ impl Compiler {
                 defining_namespace: self.current_namespace.clone(),
                 is_lazy_param: true,
                 used_registers,
+                structural_hash_cache: Default::default(),
             };
 
             // Store lambda as constant and load it
@@ -3706,6 +3877,7 @@ impl Compiler {
             defining_namespace: self.current_namespace.clone(),
             is_lazy_param,
             used_registers,
+            structural_hash_cache: Default::default(),
         };
 
         // Create a boxed LambdaInfo value
@@ -3825,6 +3997,7 @@ impl Compiler {
             defining_namespace: self.current_namespace.clone(),
             is_lazy_param: false,
             used_registers,
+            structural_hash_cache: Default::default(),
         };
 
         // Create a boxed LambdaInfo value
@@ -4065,6 +4238,7 @@ impl Compiler {
                 defining_namespace: func_info.namespace.clone(),
                 is_lazy_param: false,
                 used_registers,
+                structural_hash_cache: Default::default(),
             };
 
             // Add boxed LambdaInfo as a constant and load it
@@ -6303,7 +6477,7 @@ impl Compiler {
         self.emit_instruction(Instruction::BeginFlow {
             flow_type: crate::lang::bytecode::FlowType::Pipe,
             result_modifier,
-            source: self.source_to_location(&flow.src),
+            source: self.source_to_location(&flow.src).map(Box::new),
         });
 
         // Start with the first expression (the initial value)
@@ -6390,7 +6564,7 @@ impl Compiler {
         self.emit_instruction(Instruction::BeginFlow {
             flow_type: crate::lang::bytecode::FlowType::Serial,
             result_modifier,
-            source: self.source_to_location(&flow.src),
+            source: self.source_to_location(&flow.src).map(Box::new),
         });
 
         // Activate flow-scoped aliases, saving previous state for restore
@@ -6517,7 +6691,7 @@ impl Compiler {
         self.emit_instruction(Instruction::BeginFlow {
             flow_type: crate::lang::bytecode::FlowType::Parallel,
             result_modifier,
-            source: self.source_to_location(&flow.src),
+            source: self.source_to_location(&flow.src).map(Box::new),
         });
 
         // Store the dependency metadata in a special register that the VM can access
@@ -7192,7 +7366,7 @@ impl Compiler {
         self.emit_instruction(Instruction::BeginFlow {
             flow_type,
             result_modifier,
-            source: self.source_to_location(&match_expr.src),
+            source: self.source_to_location(&match_expr.src).map(Box::new),
         });
 
         // Get the type path of the matched value (works for primitives and custom types)
@@ -7463,7 +7637,7 @@ impl Compiler {
         self.emit_instruction(Instruction::BeginFlow {
             flow_type,
             result_modifier,
-            source: self.source_to_location(&flow.src),
+            source: self.source_to_location(&flow.src).map(Box::new),
         });
 
         // Initialize result register with null (in case no conditions match)

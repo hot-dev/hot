@@ -1011,6 +1011,7 @@ mod tests {
             defining_namespace: "::hot::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![],
+            structural_hash_cache: Default::default(),
         };
 
         let args = Val::Vec(vec![
@@ -1065,6 +1066,7 @@ mod tests {
             defining_namespace: "::hot::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![],
+            structural_hash_cache: Default::default(),
         };
 
         emitter.emit(EngineEvent::call_start(

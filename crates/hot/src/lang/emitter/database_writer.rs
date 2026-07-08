@@ -2364,6 +2364,7 @@ mod tests {
             defining_namespace: "::hot::test".to_string(),
             is_lazy_param: true,
             used_registers: vec![],
+            structural_hash_cache: Default::default(),
         };
 
         let json = val_to_jsonb_string(&Val::Box(Box::new(lazy_thunk)));
