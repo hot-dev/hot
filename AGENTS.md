@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:fb55d94e852d
+<!-- HOT_LANGUAGE_SECTION_START --> hash:e987b364dbd0
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -542,13 +542,20 @@ if(is-ok(result), render-profile(result), render-error-page())
 // Pattern 3: Default values
 name or(get(config, "name"), "Anonymous")
 
-// Pattern 4: Fail with context
-if(is-empty(data.email), fail("Email required", {field: "email"}), data)
+// Pattern 4: Expected failures are err(...) values; fail() is for
+// broken invariants only — it halts the run/task (there is no catch)
+if(is-empty(data.email), err({field: "email", message: "Email required"}), data)
+if(lt(version, current-version(db)), fail("migration went backwards"), data)
 
 // Pattern 5: Result combinators — transform Ok or Err selectively
 fetch-user(id)
     |> if-ok(%.name)
     |> if-err("Anonymous")
+
+// Pattern 6: Fan-out isolation — OnErr.Preserve keeps per-item Errs
+// in their slots instead of halting the loop
+results map(items, process-item, OnErr.Preserve)
+failures filter(results, is-err)
 ```
 
 ## Common Patterns
