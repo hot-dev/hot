@@ -23,7 +23,7 @@ process fn (x: Int): Int {
 // @end: serial-basic
 
 // @doc: parallel-function
-fetch-all fn parallel (user-id: Str): Map {
+fetch-all fn parallel (user-id: Str): All<Map> {
   user api-get(`/users/${user-id}`)
   orders api-get(`/orders/${user-id}`)
   preferences api-get(`/prefs/${user-id}`)
@@ -49,7 +49,7 @@ grade fn cond (score: Int): Str {
 // @end: cond-grade
 
 // @doc: cond-all-discounts
-apply-discounts fn cond-all (order: Map): Map {
+apply-discounts fn cond-all (order: Map): All<Map> {
   order.is-member => member { "10% member discount" }
   gt(order.total, 100) => shipping { "Free shipping" }
   order.has-coupon => coupon { "Coupon applied" }
@@ -77,7 +77,7 @@ process-explicit fn serial (x: Int): Int {
 // @end: serial-explicit
 
 // @doc: flow-as-modifier
-fetch-all-modifier fn parallel (id: Str): Map {
+fetch-all-modifier fn parallel (id: Str): All<Map> {
   user api-get(`/users/${id}`)
   orders api-get(`/orders/${id}`)
 }
@@ -118,7 +118,7 @@ categorize fn cond (x: Int): Str {
 // @end: cond-named-branches
 
 // @doc: cond-all-validate
-validate-all fn cond-all (user: Map): Map {
+validate-all fn cond-all (user: Map): All<Map> {
   is-null(user.name) => name { "Name required" }
   is-null(user.email) => email { "Email required" }
   lt(length(user.password), 8) => password { "Password too short" }
@@ -188,7 +188,7 @@ Trait enum {
 // @end: match-all-trait-enum
 
 // @doc: match-all-describe-traits
-describe-traits fn match-all (trait): Str {
+describe-traits fn match-all (trait): All<Map> {
   Trait.Flying => "Can fly"
   Trait.Swimming => "Can swim"
   Trait.Walking => "Can walk"

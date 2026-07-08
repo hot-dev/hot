@@ -102,7 +102,7 @@ classify fn cond (x: Int): Str {
 }
 
 // Parallel execution function
-fetch-all fn parallel (id: Str): Map {
+fetch-all fn parallel (id: Str): All<Map> {
     user ::http/get(`/users/${id}`)
     posts ::http/get(`/users/${id}/posts`)
 }

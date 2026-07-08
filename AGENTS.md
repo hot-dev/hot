@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:8926423ea39d
+<!-- HOT_LANGUAGE_SECTION_START --> hash:2f8ecc6bf205
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -147,7 +147,7 @@ classify fn cond (x: Int): Str {
 - plain/no annotation — return the winning/last value (default for `serial`, `cond`, `match`)
 - `All<Vec>` — collect all results into a Vec
 - `All<Map>` — collect results into a Map keyed by branch name (default for `parallel`, `cond-all`, `match-all`)
-- `One` / `One<T>` — return only the final produced value (opts a collect-all flow out of collection)
+- Any other type on a collect-all flow — return only the single final value (`x: Int parallel { ... }`)
 
 Bare `All` is only for natural collect-all forms (`parallel`, `cond-all`, and
 `match-all`); use explicit `All<Vec>` or `All<Map>` elsewhere.

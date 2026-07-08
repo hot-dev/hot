@@ -64,7 +64,7 @@ Hot automatically analyzes dependencies and executes in "levels" - variables at 
 
 ```hot
 // Parallel with automatic dependency resolution
-enrich-user fn parallel (id: Str): Map {
+enrich-user fn parallel (id: Str): All<Map> {
   user ::api/get-user(id)           // Level 0
   orders ::api/get-orders(user.id)  // Level 1 (depends on user)
   prefs ::api/get-prefs(user.id)    // Level 1 (depends on user)
@@ -408,10 +408,10 @@ data: All<Map> parallel {
   orders ::api/get-orders(id)
 }
 
-// One / One<T> opts a collect-all flow OUT of collection: it returns
-// only the final produced value. On single-value flows it documents
-// the default.
-last: One<Int> parallel {
+// Any other type opts a collect-all flow OUT of collection: the
+// annotation states the type of the single final value. On
+// single-value flows a plain annotation is an ordinary type check.
+last: Int parallel {
   a 1
   b 2
 }

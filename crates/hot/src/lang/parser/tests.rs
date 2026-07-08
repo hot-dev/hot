@@ -56,19 +56,57 @@ fn test_typed_bindings_in_value_position_blocks() {
 }
 
 #[test]
-fn test_one_flow_annotation_parses() {
+fn test_plain_annotation_takes_single_value_on_collect_all_flows() {
+    // A flow annotation states the type of the flow's result: All<...>
+    // collects, any other type opts a collect-all flow out of collection
+    // and takes the single final value.
     for src in [
-        "x: One cond {\n    true => m { 1 }\n}",
-        "x: One<Int> parallel {\n    a 1\n}",
-        "x: One 5 |> add(2)",
+        "x: Int parallel {\n    a 1\n}",
+        "x: Str cond-all {\n    true => m { \"a\" }\n}",
+        "x: Map parallel {\n    a {k: 1}\n}",
     ] {
-        let result = parse_hot(src);
-        assert!(
-            result.is_ok(),
-            "expected {:?} to parse: {:?}",
-            src,
-            result.err()
-        );
+        let program = parse_hot(src).expect(src);
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let (_, value) = default_ns
+            .scope
+            .vars
+            .iter()
+            .find(|(var, _)| var.sym.name() == "x")
+            .expect("x should exist");
+        match value {
+            Value::Flow(flow) => assert_eq!(
+                flow.result_modifier,
+                Some(ResultModifier::One),
+                "plain annotation should set One on collect-all flow: {}",
+                src
+            ),
+            other => panic!("expected flow, got {:?}", other),
+        }
+    }
+
+    // On naturally-single flows a plain annotation is an ordinary type
+    // check and sets no result modifier.
+    for src in [
+        "x: Int cond {\n    true => m { 1 }\n}",
+        "x: Int serial {\n    a 1\n}",
+        "x: Int 5 |> add(2)",
+    ] {
+        let program = parse_hot(src).expect(src);
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let (_, value) = default_ns
+            .scope
+            .vars
+            .iter()
+            .find(|(var, _)| var.sym.name() == "x")
+            .expect("x should exist");
+        match value {
+            Value::Flow(flow) => assert_eq!(
+                flow.result_modifier, None,
+                "plain annotation should not set a modifier on single-value flow: {}",
+                src
+            ),
+            other => panic!("expected flow, got {:?}", other),
+        }
     }
 }
 

@@ -266,7 +266,7 @@ check-coords fn (coords: Vec): Str {
 // @doc: match-all-trait
 Trait enum { Flying, Swimming, Walking }
 
-describe-trait fn match-all (creature: Trait): Str {
+describe-trait fn match-all (creature: Trait): All<Map> {
     Trait.Flying => { "can fly" }
     Trait.Swimming => { "can swim" }
     Trait.Walking => { "can walk" }
@@ -289,7 +289,7 @@ check-int fn (x: Int): Map {
 // =============================================================================
 
 // @doc: parallel-function
-fetch-user-data fn parallel (id: Str): Map {
+fetch-user-data fn parallel (id: Str): All<Map> {
     profile fetch-user(id)
     perms fetch-permissions(id)
     prefs fetch-preferences(id)
@@ -309,7 +309,7 @@ process-with-parallel fn (userId: Str): Map {
 // @end: parallel-standalone
 
 // @doc: parallel-error
-fetch-all fn parallel (ids: Vec<Str>): Str {
+fetch-all fn parallel (ids: Vec<Str>): All<Map> {
     a fetch(ids[0])
     b fetch(ids[1])
     c fetch(ids[2])

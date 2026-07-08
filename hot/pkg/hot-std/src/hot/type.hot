@@ -919,6 +919,18 @@ meta {
     `cond-all`, and `match-all`). Use explicit `All<Vec>` or `All<Map>` on
     `serial`, `pipe`, `cond`, and `match`.
 
+    Any non-`All` annotation on a collect-all flow states the type of a
+    single result: the flow opts out of collection and returns only the
+    final produced value.
+
+    ```hot
+    winner: Str cond-all {
+        gt(score, 90) => a { "gold" }
+        gt(score, 50) => b { "silver" }
+    }
+    // winner is the final matching branch's Str, not a collection
+    ```
+
     Use the `All` constructor only when you explicitly want to tag a
     collection value as "all results" for metadata, debugging, or API
     boundaries:
@@ -942,35 +954,6 @@ meta {
 }
 type {
     value: Vec | Map
-}
-
-
-One
-meta {
-    core: true,
-    doc: """
-    Marker type for flow results that intentionally produce a single
-    value.
-
-    Flow result annotations such as `: One` and `: One<Str>` are
-    compile-time result-shape directives: on collect-all flows
-    (`parallel`, `cond-all`, `match-all`) they opt out of collection and
-    return only the final produced value. On `serial`, `pipe`, `cond`,
-    and `match` a single value is already the default, so the annotation
-    simply documents intent. The inner type, when given, describes the
-    value.
-
-    ```hot
-    winner: One cond-all {
-        gt(score, 90) => a { "gold" }
-        gt(score, 50) => b { "silver" }
-    }
-    // winner is the final matching branch's value, not a collection
-    ```
-    """
-}
-type {
-    value: Any
 }
 
 

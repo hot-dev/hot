@@ -299,7 +299,7 @@ For type arms, the key is the type string (e.g., `"Int"`, `"Shape.Circle"`). For
 ```hot
 Trait enum { Flying, Swimming, Walking }
 
-describe fn match-all (creature: Trait): Str {
+describe fn match-all (creature: Trait): All<Map> {
     Trait.Flying => { "can fly" }
     Trait.Swimming => { "can swim" }
     Trait.Walking => { "can walk" }
@@ -325,7 +325,7 @@ Executes all branches concurrently. Returns Map keyed by variable names.
 ### As Function Definition
 
 ```hot
-fetch-user-data fn parallel (id: Str): Map {
+fetch-user-data fn parallel (id: Str): All<Map> {
     profile ::http/get(`/users/${id}`)
     posts ::http/get(`/users/${id}/posts`)
     friends ::http/get(`/users/${id}/friends`)
@@ -337,7 +337,7 @@ Parallel flow respects dependencies. Independent bindings run concurrently, but
 a binding that references an earlier value waits for that value:
 
 ```hot
-enrich-user fn parallel (id: Str): Map {
+enrich-user fn parallel (id: Str): All<Map> {
     user fetch-user(id)
     orders fetch-orders(user.id)
     prefs fetch-preferences(user.id)
@@ -366,7 +366,7 @@ process fn (userId: Str): Map {
 If any branch returns an error, the parallel flow short-circuits:
 
 ```hot
-fetch-all fn parallel (ids: Vec<Str>): Map {
+fetch-all fn parallel (ids: Vec<Str>): All<Map> {
     a fetch(ids[0])  // If this returns err(...), flow stops
     b fetch(ids[1])
     c fetch(ids[2])
@@ -385,7 +385,7 @@ Bare `All` is allowed only on natural collect-all forms (`parallel`,
 | Plain/no annotation | Return single value (default for serial, cond, match) |
 | `All<Vec>` | Return results as vector |
 | `All<Map>` | Return results as map (default for parallel, cond-all, match-all) |
-| `One` / `One<T>` | Return only the final produced value (opts a collect-all flow out of collection) |
+| Any other type | On a collect-all flow: return only the single final value (`x: Int parallel { ... }`) |
 
 ```hot
 // Return parallel results as a vector instead of a map

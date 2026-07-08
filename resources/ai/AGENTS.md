@@ -146,7 +146,7 @@ classify fn cond (x: Int): Str {
 - plain/no annotation — return the winning/last value (default for `serial`, `cond`, `match`)
 - `All<Vec>` — collect all results into a Vec
 - `All<Map>` — collect results into a Map keyed by branch name (default for `parallel`, `cond-all`, `match-all`)
-- `One` / `One<T>` — return only the final produced value (opts a collect-all flow out of collection)
+- Any other type on a collect-all flow — return only the single final value (`x: Int parallel { ... }`)
 
 Bare `All` is only for natural collect-all forms (`parallel`, `cond-all`, and
 `match-all`); use explicit `All<Vec>` or `All<Map>` elsewhere.

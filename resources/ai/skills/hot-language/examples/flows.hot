@@ -28,7 +28,7 @@ fetch-settings fn (id: Str): Map { {theme: "dark"} }
 
 // Parallel execution - all branches run concurrently
 // Returns Map keyed by variable names
-fetch-user-data fn parallel (userId: Str): Map {
+fetch-user-data fn parallel (userId: Str): All<Map> {
     user fetch-user(userId)
     posts fetch-posts(userId)
     settings fetch-settings(userId)
@@ -156,7 +156,7 @@ check-coords fn (coords: Vec): Str {
 // Returns Map keyed by variant pattern name
 Capability enum { Read, Write, Admin }
 
-describe-access fn match-all (cap: Capability): Str {
+describe-access fn match-all (cap: Capability): All<Map> {
     Capability.Read => { "can read" }
     Capability.Write => { "can write" }
     Capability.Admin => { "full access" }

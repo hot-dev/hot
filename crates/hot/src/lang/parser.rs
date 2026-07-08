@@ -142,7 +142,7 @@ fn merge_trailing_meta(var: &mut Var, trailing: Val) {
     }
 }
 
-const REMOVED_RESULT_MODIFIER_MSG: &str = "The |map, |vec, and |one result modifiers were removed in Hot 2.6.0. Annotate the binding or return type instead: `x: All<Map> cond { ... }`, `: All<Vec>`, or `: One`";
+const REMOVED_RESULT_MODIFIER_MSG: &str = "The |map, |vec, and |one result modifiers were removed in Hot 2.6.0. Annotate the binding or return type instead: `All<Map>`/`All<Vec>` collect all results; any other type (e.g. `x: Int parallel { ... }`) takes the single final value";
 
 impl Parser {
     pub fn new() -> Self {
@@ -1593,15 +1593,30 @@ impl Parser {
         let Some(type_annotation) = type_annotation else {
             return Ok(value);
         };
-        if !Self::is_all_annotation(type_annotation) {
-            return Ok(value);
-        }
 
+        // Non-flow values keep their annotation as an ordinary type
+        // annotation. For example, `tagged: All All({value: [1]})`
+        // constructs the real marker value.
         if !matches!(value, Value::Flow(_) | Value::Match(_)) {
             return Ok(value);
         }
 
-        let modifier = self.all_annotation_modifier(type_annotation, &value)?;
+        let modifier = if Self::is_all_annotation(type_annotation) {
+            self.all_annotation_modifier(type_annotation, &value)?
+        } else if Self::value_is_collect_all(&value) {
+            // A flow annotation states the type of the flow's result:
+            // `All<Map>`/`All<Vec>` are the collected forms (and the
+            // default for collect-all flows when unannotated); any other
+            // type opts out of collection and takes only the final
+            // produced value.
+            ResultModifier::One
+        } else {
+            // On serial, pipe, cond, and match the single final value is
+            // already the default; a plain annotation is an ordinary type
+            // check and sets no result modifier.
+            return Ok(value);
+        };
+
         match &mut value {
             Value::Flow(flow) => {
                 Self::set_all_result_modifier(&mut flow.result_modifier, modifier)?;
@@ -1609,8 +1624,6 @@ impl Parser {
             Value::Match(match_expr) => {
                 Self::set_all_result_modifier(&mut match_expr.result_modifier, modifier)?;
             }
-            // Non-flow uses of `All` are ordinary type annotations. For example,
-            // `tagged: All All({value: [1]})` constructs the real marker value.
             _ => {}
         }
 
@@ -1623,18 +1636,6 @@ impl Parser {
         value: &Value,
     ) -> ParseResult<ResultModifier> {
         match type_annotation {
-            // `One` / `One<T>`: produce the single final value instead of
-            // collecting. Valid on every flow shape — on serial, pipe,
-            // cond, and match it documents the default; on collect-all
-            // flows it opts out of collection. The inner type, when given,
-            // describes the value and is not enforced here.
-            TypeExpr::Named(name) if Self::is_one_type_name(name) => Ok(ResultModifier::One),
-            TypeExpr::Generic(name, params) if Self::is_one_type_name(name) => {
-                if params.len() != 1 {
-                    return Err(self.error("One flow annotations expect exactly one type argument"));
-                }
-                Ok(ResultModifier::One)
-            }
             TypeExpr::Named(name) if Self::is_all_type_name(name) => {
                 self.bare_all_modifier_for_value(value)
             }
@@ -1663,10 +1664,8 @@ impl Parser {
 
     fn is_all_annotation(type_annotation: &TypeExpr) -> bool {
         match type_annotation {
-            TypeExpr::Named(name) => Self::is_all_type_name(name) || Self::is_one_type_name(name),
-            TypeExpr::Generic(name, _) => {
-                Self::is_all_type_name(name) || Self::is_one_type_name(name)
-            }
+            TypeExpr::Named(name) => Self::is_all_type_name(name),
+            TypeExpr::Generic(name, _) => Self::is_all_type_name(name),
             _ => false,
         }
     }
@@ -1675,8 +1674,20 @@ impl Parser {
         name == "All" || name.ends_with("/All")
     }
 
-    fn is_one_type_name(name: &str) -> bool {
-        name == "One" || name.ends_with("/One")
+    fn value_is_collect_all(value: &Value) -> bool {
+        match value {
+            Value::Flow(flow) => matches!(
+                flow.flow_type,
+                FlowType::Parallel
+                    | FlowType::ParallelShort
+                    | FlowType::CondAll
+                    | FlowType::CondAllShort
+                    | FlowType::MatchAll
+                    | FlowType::MatchAllShort
+            ),
+            Value::Match(match_expr) => match_expr.match_all,
+            _ => false,
+        }
     }
 
     fn bare_all_modifier_for_value(&mut self, value: &Value) -> ParseResult<ResultModifier> {
