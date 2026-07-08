@@ -857,8 +857,8 @@ fn (lazy result: Any): Str {
     cond {
         is-str(payload) => { payload }
         => {
-            // Field access is null-safe on maps and typed values (a halt's
-            // ::hot::run/Failure reads msg through $val transparently).
+            // Field access is null-safe on maps and typed values (a
+            // halt's ::hot::run/Failure exposes msg directly).
             Str(or(payload.message, payload.msg, payload.reason, payload))
         }
     }
