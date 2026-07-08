@@ -5013,6 +5013,14 @@ impl Compiler {
             type_impl.source_type,
             type_impl.target_type.replace("/", "_").replace("::", "_")
         );
+        // Register the implementation under its namespace-qualified name.
+        // The impl function is compiled into the declaring namespace, so a
+        // bare name only resolves for callers in that namespace (or via the
+        // bare function_mapping entries, which do not survive bytecode-cache
+        // restoration across compilation units). Dispatch calls
+        // execute_function_call_by_qualified_name, which handles qualified
+        // names in every unit.
+        let qualified_impl_name = format!("{}/{}", self.current_namespace, impl_name);
 
         // Handle type implementations based on scope
         // Use current_function_name instead of params - a zero-arg function is still a function scope!
@@ -5029,7 +5037,7 @@ impl Compiler {
             // that will register the implementation in the VM's current scope when executed
             let source_type_id = self.program.add_string_ref(type_impl.source_type.clone());
             let target_type_id = self.program.add_string_ref(target_type_short.clone());
-            let impl_name_id = self.program.add_string_ref(impl_name.clone());
+            let impl_name_id = self.program.add_string_ref(qualified_impl_name.clone());
             self.emit_instruction(
                 crate::lang::bytecode::Instruction::RegisterLocalImplementation {
                     source_type: source_type_id,
@@ -5046,19 +5054,19 @@ impl Compiler {
 
             // For namespace-scoped implementations, register globally as before
             self.type_implementations
-                .insert(key_short.clone(), impl_name.clone());
+                .insert(key_short.clone(), qualified_impl_name.clone());
 
             // Also register using fully-qualified source type name for disambiguation
             // Also register with fully qualified source type name
             let full_source = format!("{}/{}", self.current_namespace, type_impl.source_type);
             let key_full = (full_source, target_type_short.clone());
             self.type_implementations
-                .insert(key_full, impl_name.clone());
+                .insert(key_full, qualified_impl_name.clone());
         }
 
         // Also register as a function mapping in the current namespace so VM can call it by name
         // Compile the implementation under a qualified name
-        let qualified_name = format!("{}/{}", self.current_namespace, impl_name);
+        let qualified_name = qualified_impl_name;
         if let crate::lang::ast::Value::Fn(fn_defs_vec) = &type_impl.implementation {
             // Value::Fn can contain multiple arities; compile each
             for fn_def in fn_defs_vec {

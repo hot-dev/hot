@@ -161,8 +161,8 @@ pub fn str_constructor(
 
             // Use scope-aware type implementation resolution
             if let Some(impl_fn_name) = vm
-                .resolve_type_implementation(&source_short, "Str")
-                .or_else(|| vm.resolve_type_implementation(type_name_full, "Str"))
+                .resolve_type_implementation(type_name_full, "Str")
+                .or_else(|| vm.resolve_type_implementation(&source_short, "Str"))
             {
                 // Check type-dispatch recursion depth before calling the
                 // implementation. This catches buggy T -> Str implementations
@@ -204,7 +204,14 @@ pub fn str_constructor(
                     args[0].clone()
                 };
                 // Try calling by qualified name first (current namespace), then type's namespace, then unqualified
-                let qualified = format!("{}/{}", vm.get_current_namespace(), impl_fn_name);
+                let qualified = if impl_fn_name.starts_with("::") {
+                    // The registry stores namespace-qualified impl names; use
+                    // them directly. Bare names (older caches, function-local
+                    // arrows) fall back to the historical prefix chain.
+                    impl_fn_name.clone()
+                } else {
+                    format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
+                };
 
                 // Extract the type's namespace from the full type name
                 let type_namespace = if let Some(slash_pos) = type_name_full.rfind('/') {
@@ -212,7 +219,11 @@ pub fn str_constructor(
                 } else {
                     type_name_full
                 };
-                let type_qualified = format!("{}/{}", type_namespace, impl_fn_name);
+                let type_qualified = if impl_fn_name.starts_with("::") {
+                    impl_fn_name.clone()
+                } else {
+                    format!("{}/{}", type_namespace, impl_fn_name)
+                };
 
                 STR_DISPATCH_DEPTH.set(depth + 1);
                 let call_res = vm
@@ -313,10 +324,17 @@ pub fn int_constructor(
 
         // Use scope-aware type implementation resolution
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(&source_short, "Int")
-            .or_else(|| vm.resolve_type_implementation(type_name_full, "Int"))
+            .resolve_type_implementation(type_name_full, "Int")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "Int"))
         {
-            let qualified = format!("{}/{}", vm.get_current_namespace(), impl_fn_name);
+            let qualified = if impl_fn_name.starts_with("::") {
+                // The registry stores namespace-qualified impl names; use
+                // them directly. Bare names (older caches, function-local
+                // arrows) fall back to the historical prefix chain.
+                impl_fn_name.clone()
+            } else {
+                format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
+            };
             let call_res = vm
                 .execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]))
                 .or_else(|_| {
@@ -381,10 +399,17 @@ pub fn dec_constructor(
 
         // Use scope-aware type implementation resolution (same as str_constructor)
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(&source_short, "Dec")
-            .or_else(|| vm.resolve_type_implementation(type_name_full, "Dec"))
+            .resolve_type_implementation(type_name_full, "Dec")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "Dec"))
         {
-            let qualified = format!("{}/{}", vm.get_current_namespace(), impl_fn_name);
+            let qualified = if impl_fn_name.starts_with("::") {
+                // The registry stores namespace-qualified impl names; use
+                // them directly. Bare names (older caches, function-local
+                // arrows) fall back to the historical prefix chain.
+                impl_fn_name.clone()
+            } else {
+                format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
+            };
             let call_res = vm
                 .execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]))
                 .or_else(|_| {
@@ -439,10 +464,17 @@ pub fn bool_constructor(
 
         // Use scope-aware type implementation resolution
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(&source_short, "Bool")
-            .or_else(|| vm.resolve_type_implementation(type_name_full, "Bool"))
+            .resolve_type_implementation(type_name_full, "Bool")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "Bool"))
         {
-            let qualified = format!("{}/{}", vm.get_current_namespace(), impl_fn_name);
+            let qualified = if impl_fn_name.starts_with("::") {
+                // The registry stores namespace-qualified impl names; use
+                // them directly. Bare names (older caches, function-local
+                // arrows) fall back to the historical prefix chain.
+                impl_fn_name.clone()
+            } else {
+                format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
+            };
             let call_res = vm
                 .execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]))
                 .or_else(|_| {
