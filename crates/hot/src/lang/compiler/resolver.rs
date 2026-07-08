@@ -224,9 +224,24 @@ impl ResolutionContext {
 }
 
 /// Variable resolver for Hot programs
+/// One function/lambda body's bindings for unused-binding detection.
+#[derive(Default)]
+struct BindingFrame {
+    /// binding name -> (source location, was referenced)
+    bindings: AHashMap<String, (Option<ErrorLocation>, bool)>,
+    /// names referenced before their binding was recorded (forward refs to
+    /// locals hoisted by the collect pre-pass, e.g. mutually recursive
+    /// local fns)
+    forward_used: AHashSet<String>,
+}
+
 pub struct Resolver {
     context: ResolutionContext,
     errors: CompilerErrors,
+    /// Stack of function/lambda body scopes for unused-binding warnings.
+    /// Empty at namespace level: top-level bindings are exports and are
+    /// never warned about.
+    binding_scopes: Vec<BindingFrame>,
     /// Namespace aliases for the currently-being-validated namespace.
     /// Updated when entering each namespace so that aliased references
     /// (e.g. `::http/get` where `::http` is an alias for `::hot::http`)
@@ -239,6 +254,7 @@ impl Resolver {
         Self {
             context: ResolutionContext::new(),
             errors: CompilerErrors::new(),
+            binding_scopes: Vec::new(),
             current_aliases: NamespaceAliases::new(),
         }
     }
@@ -251,6 +267,7 @@ impl Resolver {
         Self {
             context: ResolutionContext::with_namespace_registry(namespace_registry),
             errors: CompilerErrors::new(),
+            binding_scopes: Vec::new(),
             current_aliases: NamespaceAliases::new(),
         }
     }
@@ -264,6 +281,7 @@ impl Resolver {
         Self {
             context: ResolutionContext::with_registries(namespace_registry, core_variables),
             errors: CompilerErrors::new(),
+            binding_scopes: Vec::new(),
             current_aliases: NamespaceAliases::new(),
         }
     }
@@ -313,6 +331,144 @@ impl Resolver {
                     self.context.add_function(&ns_str, var_name);
                 }
             }
+        }
+    }
+
+    /// Take collected non-fatal warnings (e.g. unused bindings), leaving
+    /// the error list intact. Mirrors TypeChecker::take_warnings.
+    pub fn take_warnings(&mut self) -> CompilerErrors {
+        let mut warnings = CompilerErrors::new();
+        let mut seen: AHashSet<String> = AHashSet::new();
+        for w in std::mem::take(&mut self.errors.warnings) {
+            let key = format!("{}|{:?}", w, w.location());
+            if seen.insert(key) {
+                warnings.warnings.push(w);
+            }
+        }
+        warnings
+    }
+
+    fn push_binding_scope(&mut self) {
+        self.binding_scopes.push(BindingFrame::default());
+    }
+
+    /// Record a local binding in the innermost function/lambda scope.
+    /// `_`-prefixed names are intentional discards and are never tracked.
+    fn record_binding(&mut self, name: &str, location: Option<ErrorLocation>) {
+        if name.starts_with('_') {
+            return;
+        }
+        if let Some(frame) = self.binding_scopes.last_mut() {
+            let used = frame.forward_used.remove(name);
+            frame.bindings.insert(name.to_string(), (location, used));
+        }
+    }
+
+    /// Mark a name as referenced. Walks scopes innermost-first so closures
+    /// mark captured outer bindings; unknown names are remembered as forward
+    /// references in the innermost scope.
+    fn mark_binding_used(&mut self, name: &str) {
+        for frame in self.binding_scopes.iter_mut().rev() {
+            if let Some(entry) = frame.bindings.get_mut(name) {
+                entry.1 = true;
+                return;
+            }
+        }
+        if let Some(frame) = self.binding_scopes.last_mut() {
+            frame.forward_used.insert(name.to_string());
+        }
+    }
+
+    /// Unused-binding warnings are opt-in until the usage walk covers every
+    /// expression position (map-literal values are not yet traversed, so a
+    /// binding used only inside a map literal would false-positive).
+    /// Enable with HOT_UNUSED_BINDINGS=1.
+    fn unused_binding_warnings_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("HOT_UNUSED_BINDINGS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Close the innermost scope, warning for each binding never referenced.
+    fn pop_binding_scope(&mut self) {
+        if !Self::unused_binding_warnings_enabled() {
+            self.binding_scopes.pop();
+            return;
+        }
+        if let Some(frame) = self.binding_scopes.pop() {
+            // Forward references may belong to an enclosing scope; propagate
+            // the ones this scope never bound.
+            let unresolved_forward: Vec<String> = frame.forward_used.into_iter().collect();
+            if let Some(outer) = self.binding_scopes.last_mut() {
+                for name in &unresolved_forward {
+                    if let Some(entry) = outer.bindings.get_mut(name) {
+                        entry.1 = true;
+                    } else {
+                        outer.forward_used.insert(name.clone());
+                    }
+                }
+            }
+            for (name, (location, used)) in frame.bindings {
+                if !used {
+                    self.errors
+                        .add_warning(CompilerError::UnusedBinding { name, location });
+                }
+            }
+        }
+    }
+
+    fn binding_location(var_ref: &crate::lang::ast::VarRef) -> Option<ErrorLocation> {
+        var_ref
+            .src
+            .as_ref()
+            .or(var_ref.var.src.as_ref())
+            .map(|src| ErrorLocation {
+                line: src.line,
+                column: src.column,
+                position: src.position,
+                length: src.length,
+                file: src.file.as_ref().map(PathBuf::from),
+            })
+    }
+
+    /// Mark variable references inside a value as used for unused-binding
+    /// tracking, without emitting resolution errors. Currently only needed
+    /// for template literals, which the validation walk does not descend
+    /// into (making it validate is a separate change: it could surface
+    /// latent unresolved-variable errors in existing template strings).
+    fn mark_usages_only(&mut self, value: &Value) {
+        match value {
+            Value::Ref(Ref::Var(var_ref)) => {
+                self.mark_binding_used(var_ref.var.sym.name());
+            }
+            Value::FnCall(fn_call) => {
+                self.mark_usages_only(&fn_call.function);
+                for arg in &fn_call.args {
+                    self.mark_usages_only(&arg.value);
+                }
+            }
+            Value::TemplateLiteral(t) => {
+                for part in &t.parts {
+                    if let crate::lang::ast::TemplatePart::Expression(expr) = part {
+                        self.mark_usages_only(expr);
+                    }
+                }
+            }
+            Value::MultipleValues(values) => {
+                for v in values {
+                    self.mark_usages_only(v);
+                }
+            }
+            Value::Flow(flow) => {
+                for e in &flow.expressions {
+                    self.mark_usages_only(e);
+                }
+            }
+            Value::Lambda(lambda) => self.mark_usages_only(&lambda.body),
+            _ => {}
         }
     }
 
@@ -389,6 +545,7 @@ impl Resolver {
                     }
                     // Then bind the new local
                     let var_name = var_ref.var.sym.name().to_string();
+                    self.record_binding(&var_name, Self::binding_location(var_ref));
                     self.context.current_local_variables.insert(var_name);
                     // Validate any remaining values (if present)
                     for rest in &values[2..] {
@@ -415,8 +572,10 @@ impl Resolver {
                             .push(param.var.sym.name().to_string());
                     }
                     // Collect and validate function body
+                    self.push_binding_scope();
                     self.collect_local_variables(&fn_def.body)?;
                     self.validate_value_references(&fn_def.body)?;
+                    self.pop_binding_scope();
                 }
 
                 // Restore previous scope
@@ -441,7 +600,9 @@ impl Resolver {
                 }
 
                 // Validate lambda body with both outer scope variables AND lambda parameters in scope
+                self.push_binding_scope();
                 self.validate_value_references(&lambda.body)?;
+                self.pop_binding_scope();
 
                 // Restore previous scope
                 self.context.current_function_params = saved_params;
@@ -450,6 +611,12 @@ impl Resolver {
             Value::TypeDef(_) => {
                 // Type definitions don't contain variable references that need validation
                 // Type field names are not variables
+            }
+            Value::TemplateLiteral(_) => {
+                // Interpolated expressions are not validated (pre-existing
+                // gap), but their variable references count as uses for
+                // unused-binding tracking.
+                self.mark_usages_only(value);
             }
             _ => {
                 // Other value types don't contain references
@@ -463,6 +630,7 @@ impl Resolver {
         match ref_val {
             Ref::Var(var_ref) => {
                 let var_name = var_ref.var.sym.name();
+                self.mark_binding_used(var_name);
                 if !self.context.can_resolve_variable(var_name) {
                     // Try to build a precise error location from AST metadata if available
                     let location = if let Some(src) = &var_ref.src {
@@ -671,7 +839,16 @@ impl Resolver {
                 } else {
                     self.validate_value_references(rhs)?;
                 }
-                // Bind variable into local scope for subsequent expressions
+                // Bind variable into local scope for subsequent expressions.
+                // Only serial flows are trusted binding sites for the
+                // unused-binding warning: pipe/cond/match flows share this
+                // expression shape without being assignments.
+                if matches!(
+                    flow.flow_type,
+                    crate::lang::ast::FlowType::Serial | crate::lang::ast::FlowType::SerialShort
+                ) {
+                    self.record_binding(&var_name, Self::binding_location(var_ref));
+                }
                 self.context.current_local_variables.insert(var_name);
                 i += 2;
                 continue;
@@ -714,7 +891,11 @@ impl Resolver {
                         }
                         self.context.current_function_params = saved_params;
 
-                        // Bind local name for subsequent expressions
+                        // Bind local name for subsequent expressions.
+                        // NOTE: not recorded for unused-binding warnings —
+                        // this sugar detection also matches plain
+                        // statement-position calls, so it cannot be trusted
+                        // as a real binding site.
                         self.context.current_local_variables.insert(local_name);
                         i += 2;
                         continue;
@@ -741,7 +922,9 @@ impl Resolver {
                         }
                         self.validate_value_references(&lambda.body)?;
                         self.context.current_function_params = saved_params;
-                        // Bind local name and continue
+                        // Bind local name and continue.
+                        // NOTE: not recorded for unused-binding warnings —
+                        // see the sugar-detection caveat above.
                         self.context.current_local_variables.insert(local_name);
                         i += 1;
                         continue;
@@ -1028,6 +1211,39 @@ fn resolve_variable_to_namespace_function(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unused_binding_warning() {
+        // SAFETY: test-only env mutation; the lint is opt-in via env flag.
+        unsafe { std::env::set_var("HOT_UNUSED_BINDINGS", "1") };
+        let source = "::lint::probe ns\n\nf fn (): Int {\n    unused-thing 42\n    _intentional 7\n    kept 1\n    kept\n}\n";
+        let program = crate::lang::parser::parse_hot(source).expect("parse");
+        let mut resolver = Resolver::new();
+        let result = resolver.resolve_program(&program);
+        assert!(result.is_ok(), "no hard errors expected: {:?}", result);
+        let warnings = resolver.take_warnings();
+        let names: Vec<String> = warnings
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CompilerError::UnusedBinding { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"unused-thing".to_string()),
+            "expected unused-thing warning, got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"_intentional".to_string()),
+            "underscore-prefixed bindings must not warn"
+        );
+        assert!(
+            !names.contains(&"kept".to_string()),
+            "referenced bindings must not warn"
+        );
+    }
 
     #[test]
     fn test_variable_resolution() {

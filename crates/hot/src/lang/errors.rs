@@ -273,6 +273,16 @@ pub enum CompilerError {
         note: Option<String>,
         location: Option<ErrorLocation>,
     },
+    /// A local binding inside a function or lambda body is never referenced.
+    /// This is a *warning*: silently dropping a value is how swallowed
+    /// `Result.Err`s hide (Hot signatures declare success types, so the
+    /// checker cannot see which calls can fail — every unused binding is a
+    /// potential dropped error). Prefix the name with `_` to declare the
+    /// discard intentional (e.g. `_quit if-err(write(...), false)`).
+    UnusedBinding {
+        name: String,
+        location: Option<ErrorLocation>,
+    },
     /// A statically known record/struct type does not contain the requested
     /// field. This rolls out as a warning first because runtime map access is
     /// still permissive and returns null for missing fields.
@@ -918,6 +928,27 @@ impl fmt::Display for CompilerError {
                     )
                 }
             }
+            CompilerError::UnusedBinding { name, location } => {
+                let body = format!(
+                    "unused binding `{}` (prefix with `_` if the discard is intentional)",
+                    name
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<unknown>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
             CompilerError::DeprecatedUsage {
                 name,
                 note,
@@ -1097,6 +1128,7 @@ impl CompilerErrors {
             CompilerError::OpenLiteralUnionMismatch { location, .. } => location.as_ref(),
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
+            CompilerError::UnusedBinding { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
         }?;
 
@@ -1524,6 +1556,19 @@ impl CompilerErrors {
                          (and any types it depends on) to the top level of a namespace.",
                     );
             }
+            CompilerError::UnusedBinding { name, .. } => {
+                report = report
+                    .with_code("unused-binding")
+                    .with_message(format!("binding `{}` is never used", name))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message("bound here but never referenced")
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "An unused binding silently drops its value — including any                          Result.Err a fallible call returned. Handle the value, or                          prefix the name with `_` to declare the discard intentional.",
+                    );
+            }
             CompilerError::DeprecatedUsage { name, note, .. } => {
                 let label_msg = match note {
                     Some(n) => format!("deprecated: {}", n),
@@ -1618,6 +1663,7 @@ impl CompilerError {
             CompilerError::OpenLiteralUnionMismatch { location, .. } => location.as_ref(),
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
+            CompilerError::UnusedBinding { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
         }
     }
@@ -1671,6 +1717,7 @@ impl CompilerError {
             CompilerError::OpenLiteralUnionMismatch { .. } => "open-literal-union-mismatch",
             CompilerError::NestedTypeImplementation { .. } => "nested-type-implementation",
             CompilerError::DeprecatedUsage { .. } => "deprecated-usage",
+            CompilerError::UnusedBinding { .. } => "unused-binding",
             CompilerError::UnknownField { .. } => "unknown-field",
         }
     }

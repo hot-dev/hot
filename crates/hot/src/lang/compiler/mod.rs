@@ -723,7 +723,15 @@ impl Compiler {
         for (file_path, content) in &self.file_contents {
             resolver.add_source_file(file_path.clone(), content.clone());
         }
-        resolver.resolve_program(program)?;
+        let resolve_result = resolver.resolve_program(program);
+        // Capture resolver warnings (e.g. unused bindings) on the success
+        // path; on the failure path drop them so they never count toward
+        // compilation failure (mirrors the type-checker handling below).
+        let resolver_warnings = resolver.take_warnings();
+        if let Err(mut errors) = resolve_result {
+            errors.warnings.clear();
+            return Err(errors);
+        }
 
         // Phase 2: Type checking pass
         tracing::debug!("Compiler: Phase 2 - Type checking");
@@ -737,7 +745,10 @@ impl Compiler {
         // Capture non-fatal warnings (e.g. deprecated-API usage) on both the
         // success and failure paths. Warnings live on the compiler, not in the
         // returned error, so they never count toward compilation failure.
-        self.diagnostics = type_checker.take_warnings();
+        self.diagnostics = resolver_warnings;
+        self.diagnostics
+            .warnings
+            .extend(type_checker.take_warnings().warnings);
         if let Err(mut errors) = check_result {
             errors.warnings.clear();
             return Err(errors);
