@@ -2,8 +2,8 @@
 
 hot.pkg.hot-ai-agent {
   name: "hot.dev/hot-ai-agent",
-  version: "1.3.0",
-  hot-min-version: "2.3.0",
+  version: "1.4.0",
+  hot-min-version: "2.6.0",
   description: "Reusable harness primitives for AI agents: transports, commands, runtime stores, rendering, streaming, and MCP helpers.",
   author: "Hot Dev",
   email: "hi@hot.dev",
