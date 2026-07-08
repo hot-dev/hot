@@ -2361,7 +2361,29 @@ impl TypeChecker {
                     self.check_match_exhaustiveness_for(&subject_type, &arm_refs, location);
                 }
                 if match_expr.match_all {
-                    TypeExpr::Map(Box::new(TypeExpr::Str), Box::new(TypeExpr::Any))
+                    let arm_types: Vec<TypeExpr> = match_expr
+                        .arms
+                        .iter()
+                        .map(|arm| self.infer_value_type(&arm.body))
+                        .collect();
+                    self.flow_result_type(
+                        match_expr.result_modifier.as_ref(),
+                        arm_types,
+                        true,
+                        false,
+                    )
+                } else if match_expr.result_modifier.is_some() {
+                    let arm_types: Vec<TypeExpr> = match_expr
+                        .arms
+                        .iter()
+                        .map(|arm| self.infer_value_type(&arm.body))
+                        .collect();
+                    self.flow_result_type(
+                        match_expr.result_modifier.as_ref(),
+                        arm_types,
+                        false,
+                        false,
+                    )
                 } else {
                     last_type
                 }
@@ -4086,6 +4108,7 @@ impl TypeChecker {
         modifier: Option<&crate::lang::ast::ResultModifier>,
         result_types: Vec<TypeExpr>,
         default_map: bool,
+        deterministic_order: bool,
     ) -> TypeExpr {
         use crate::lang::ast::ResultModifier;
 
@@ -4105,10 +4128,18 @@ impl TypeChecker {
                 Box::new(union_or_single(result_types)),
             ),
             Some(ResultModifier::Vec) => TypeExpr::Vec(Box::new(union_or_single(result_types))),
-            // One takes the single final value. Both callers are parallel
-            // flows, where the final binding is deterministic, so its type
-            // is the result type.
-            Some(ResultModifier::One) => result_types.last().cloned().unwrap_or(TypeExpr::Null),
+            // One takes the single final value. When arm order is
+            // deterministic (serial, parallel, pipe) that is the last
+            // result; when the winner is dynamic (cond-all/match-all take
+            // the last *truthy/matching* arm) the honest static type is
+            // the union of the possibilities.
+            Some(ResultModifier::One) => {
+                if deterministic_order {
+                    result_types.last().cloned().unwrap_or(TypeExpr::Null)
+                } else {
+                    union_or_single(result_types)
+                }
+            }
             None => {
                 if default_map {
                     TypeExpr::Map(
@@ -4158,6 +4189,16 @@ impl TypeChecker {
 
         match flow.flow_type {
             FlowType::Serial => {
+                // An explicit All<...> shape collects the body's bindings.
+                if flow.result_modifier.is_some() {
+                    let result_types = self.walk_paired_bindings(&flow.expressions);
+                    return self.flow_result_type(
+                        flow.result_modifier.as_ref(),
+                        result_types,
+                        false,
+                        true,
+                    );
+                }
                 // Walk every expression so calls earlier in the body are type-checked,
                 // not just whichever happens to be the return value.
                 let mut last_type = TypeExpr::Null;
@@ -4172,7 +4213,7 @@ impl TypeChecker {
                 // Walking them with `pair_bind` keeps later expressions in
                 // the body able to type-check against earlier bindings.
                 let result_types = self.walk_paired_bindings(&flow.expressions);
-                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true)
+                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, true)
             }
             FlowType::Cond => {
                 // Conditional flow returns a union of possible result types
@@ -4183,6 +4224,14 @@ impl TypeChecker {
                     .map(|expr| self.infer_value_type(expr))
                     .collect();
 
+                if flow.result_modifier.is_some() {
+                    return self.flow_result_type(
+                        flow.result_modifier.as_ref(),
+                        result_types,
+                        false,
+                        false,
+                    );
+                }
                 if result_types.is_empty() {
                     TypeExpr::Null
                 } else if result_types.len() == 1 {
@@ -4192,14 +4241,16 @@ impl TypeChecker {
                 }
             }
             FlowType::CondAll => {
-                // CondAll flow is similar to Cond but all conditions must be checked
+                // CondAll runs every truthy branch and collects to a Map by
+                // default; All<Vec> collects into a Vec and a plain
+                // annotation (One) takes the last truthy branch's value.
                 let result_types: Vec<TypeExpr> = flow
                     .expressions
                     .iter()
                     .map(|expr| self.infer_value_type(expr))
                     .collect();
 
-                TypeExpr::Union(result_types)
+                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, false)
             }
             FlowType::Pipe => {
                 // Pipe flow returns the type of the last expression in the chain
@@ -4214,17 +4265,37 @@ impl TypeChecker {
                 };
 
                 // Process remaining expressions with pipe context
+                let mut stage_types = vec![last_type.clone()];
                 self.in_pipe_flow = true;
                 for expr in flow.expressions.iter().skip(1) {
                     last_type = self.infer_value_type(expr);
+                    stage_types.push(last_type.clone());
                 }
                 self.in_pipe_flow = false;
 
-                // Return the type of the last expression (already computed above)
+                // An explicit All<...> shape collects every stage's result;
+                // the default is the final piped value.
+                if flow.result_modifier.is_some() {
+                    return self.flow_result_type(
+                        flow.result_modifier.as_ref(),
+                        stage_types,
+                        false,
+                        true,
+                    );
+                }
                 last_type
             }
             // Handle short form flows
             FlowType::SerialShort => {
+                if flow.result_modifier.is_some() {
+                    let result_types = self.walk_paired_bindings(&flow.expressions);
+                    return self.flow_result_type(
+                        flow.result_modifier.as_ref(),
+                        result_types,
+                        false,
+                        true,
+                    );
+                }
                 let mut last_type = TypeExpr::Null;
                 for expr in &flow.expressions {
                     last_type = self.infer_value_type(expr);
@@ -4233,7 +4304,7 @@ impl TypeChecker {
             }
             FlowType::ParallelShort => {
                 let result_types = self.walk_paired_bindings(&flow.expressions);
-                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true)
+                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, true)
             }
             FlowType::CondShort => {
                 let result_types: Vec<TypeExpr> = flow
@@ -4242,6 +4313,14 @@ impl TypeChecker {
                     .skip(1)
                     .map(|expr| self.infer_value_type(expr))
                     .collect();
+                if flow.result_modifier.is_some() {
+                    return self.flow_result_type(
+                        flow.result_modifier.as_ref(),
+                        result_types,
+                        false,
+                        false,
+                    );
+                }
                 TypeExpr::Optional(Box::new(TypeExpr::Union(result_types)))
             }
             FlowType::CondAllShort => {
@@ -4250,7 +4329,7 @@ impl TypeChecker {
                     .iter()
                     .map(|expr| self.infer_value_type(expr))
                     .collect();
-                TypeExpr::Union(result_types)
+                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, false)
             }
             // Match flows are similar to Cond flows for typing
             FlowType::Match | FlowType::MatchShort => {
@@ -4260,6 +4339,14 @@ impl TypeChecker {
                     .map(|expr| self.infer_value_type(expr))
                     .collect();
                 self.check_match_exhaustiveness(flow);
+                if flow.result_modifier.is_some() {
+                    return self.flow_result_type(
+                        flow.result_modifier.as_ref(),
+                        result_types,
+                        false,
+                        false,
+                    );
+                }
                 if result_types.is_empty() {
                     TypeExpr::Null
                 } else if result_types.len() == 1 {
@@ -4269,10 +4356,12 @@ impl TypeChecker {
                 }
             }
             FlowType::MatchAll | FlowType::MatchAllShort => {
-                for expr in &flow.expressions {
-                    let _ = self.infer_value_type(expr);
-                }
-                TypeExpr::Map(Box::new(TypeExpr::Str), Box::new(TypeExpr::Any))
+                let result_types: Vec<TypeExpr> = flow
+                    .expressions
+                    .iter()
+                    .map(|expr| self.infer_value_type(expr))
+                    .collect();
+                self.flow_result_type(flow.result_modifier.as_ref(), result_types, true, false)
             }
         }
     }
@@ -4488,6 +4577,63 @@ mod tests {
             "expected AmbiguousTypeImplementation for Triangle -> Shape.Tri, got: {:?}",
             errors.errors
         );
+    }
+
+    #[test]
+    fn test_flow_shape_inference_honors_result_modifiers() {
+        use crate::lang::parser::parse_hot;
+
+        // Inferred flow types must match the 2.6 runtime shapes: collect-all
+        // flows default to Map, All<Vec> collects into a Vec, and a plain
+        // annotation takes the single value (last binding on parallel; a
+        // union of branch values when the winning arm is dynamic).
+        type ShapeCheck = Box<dyn Fn(&TypeExpr) -> bool>;
+        let cases: Vec<(&str, ShapeCheck)> = vec![
+            (
+                "x cond-all {\n    true => a { 1 }\n    true => b { 2 }\n}",
+                Box::new(|t| matches!(t, TypeExpr::Map(_, _))),
+            ),
+            (
+                "x: All<Vec> cond-all {\n    true => a { 1 }\n    true => b { 2 }\n}",
+                Box::new(|t| matches!(t, TypeExpr::Vec(_))),
+            ),
+            (
+                "x: Int cond-all {\n    true => a { 1 }\n    true => b { 2 }\n}",
+                Box::new(|t| !matches!(t, TypeExpr::Map(_, _) | TypeExpr::Vec(_))),
+            ),
+            (
+                "x: All<Map> serial {\n    a 1\n    b 2\n}",
+                Box::new(|t| matches!(t, TypeExpr::Map(_, _))),
+            ),
+            (
+                "x: All<Vec> 5 |> add(2)",
+                Box::new(|t| matches!(t, TypeExpr::Vec(_))),
+            ),
+            (
+                "x: Str parallel {\n    a 1\n    b \"s\"\n}",
+                Box::new(|t| matches!(t, TypeExpr::Str)),
+            ),
+        ];
+
+        for (src, expect) in cases {
+            let program = parse_hot(src).expect(src);
+            let mut checker = TypeChecker::new();
+            let _ = checker.check_program(&program);
+            let ns = &program.namespaces[&crate::lang::ast::NsPath::new()];
+            let (_, value) = ns
+                .scope
+                .vars
+                .iter()
+                .find(|(var, _)| var.sym.name() == "x")
+                .expect("x should exist");
+            let inferred = checker.infer_value_type_for_lsp(value);
+            assert!(
+                expect(&inferred),
+                "unexpected inferred shape for {:?}: {}",
+                src,
+                inferred
+            );
+        }
     }
 
     #[test]

@@ -120,9 +120,12 @@ User -> Str fn (user: User): Str {
 
 ## No Exceptions
 
-Hot has no `throw`, `catch`, `finally`, or `try { ... } catch { ... }` blocks.
-The `try(...)` function is a rare fault-isolation boundary for containing
-exceptional halts; it is not the normal error-handling pattern.
+Hot has no `throw`, `catch`, `finally`, or `try { ... } catch { ... }` blocks —
+and no `try(...)` function either. Expected failures are `Result.Err` values
+you branch on; `fail()` signals a broken invariant and halts the run or task
+(there is no catch). To supervise work that may halt, run it behind a task
+boundary (`::hot::task/start` + `await`) — see
+[Error Handling](/docs/language/errors).
 
 | Instead of | Use |
 |------------|-----|

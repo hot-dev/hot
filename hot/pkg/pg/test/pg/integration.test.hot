@@ -104,3 +104,47 @@ meta ["test"] fn () {
         }
     }
 }
+
+// SCRAM-SHA-256 authentication. The default dev pg_hba rules are all
+// `trust`, so the tests above never exercise the auth exchange; this one
+// connects as a role that pg_hba forces through scram-sha-256.
+//
+// Dev fixture (once, on the dev Postgres):
+//   CREATE USER scramtest PASSWORD 'scrampw';
+//   -- pg_hba.conf, BEFORE the trust rules:
+//   -- host all scramtest all scram-sha-256
+//   SELECT pg_reload_conf();
+//
+// Skipped when the fixture role is absent; once it exists, a handshake
+// failure fails the test. Note the client sends an empty SCRAM username
+// (`n=,r=...`) exactly like libpq: PostgreSQL ignores the username inside
+// the SCRAM exchange and authenticates the startup-message user.
+test-scram-auth
+meta ["test"] fn () {
+    opts pg-options()
+    scram-opts {...opts,
+        user: ::env/get("PGSCRAMUSER", "scramtest"),
+        password: ::env/get("PGSCRAMPASSWORD", "scrampw")}
+    conn ::pg/connect(scram-opts)
+    cond {
+        not(server-reachable(scram-opts)) => {
+            println("  (skipped: no Postgres reachable)")
+            assert(true, "skipped without a database")
+        }
+        and(is-err(conn), contains(err-message(conn), "does not exist")) => {
+            println("  (skipped: scramtest fixture role not provisioned)")
+            assert(true, "skipped without the scram fixture role")
+        }
+        => {
+            row ::pg/query-one(conn, "SELECT current_user AS u")
+            assert-eq(scram-opts.user, row.u, "SCRAM handshake authenticates the startup user")
+            ::pg/close(conn)
+
+            // A wrong password must be rejected by SCRAM verification and
+            // surface as a clean Err, not a halt.
+            bad ::pg/connect({...scram-opts, password: "definitely-wrong"})
+            assert(is-err(bad), "wrong password fails SCRAM")
+            assert(contains(err-message(bad), "password"), "Err names the auth failure")
+        }
+    }
+}
