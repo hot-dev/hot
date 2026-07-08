@@ -11,6 +11,13 @@ meta {
     A connection is a runtime-owned socket handle plus backend state; it
     lives for the duration of the run or task that opened it.
 
+    **Error contract:** expected failures — connection refused, TLS
+    negotiation, authentication, SQL errors — return a `Result.Err`;
+    branch with `is-err` / `if-err`. A socket failure mid-protocol (the
+    connection drops between request and reply) halts the run instead:
+    the connection state is unusable and the recovery unit is the run or
+    task, not the query.
+
     **Quick start**
 
     ```hot

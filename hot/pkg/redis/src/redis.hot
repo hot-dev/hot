@@ -11,6 +11,13 @@ meta {
     A connection is a runtime-owned socket handle; it lives for the
     duration of the run or task that opened it.
 
+    **Error contract:** expected failures — connection refused, TLS
+    negotiation, AUTH/SELECT, Redis error replies — return a
+    `Result.Err`; branch with `is-err` / `if-err`. A socket failure
+    mid-protocol (the connection drops between command and reply) halts
+    the run instead: the connection state is unusable and the recovery
+    unit is the run or task, not the command.
+
     **Quick start**
 
     ```hot
