@@ -48,24 +48,27 @@ scores map([1, 0, 3], load-score, OnErr.Preserve)  // keep Err slots as values
 failed filter(scores, is-err)                       // [Err("missing score")]
 // @end: preserve-domain-errors
 
-// Stubs for the try containment example (not shown in docs)
-session "bad"
-
-run-one-session fn (s: Str): Str {
+// Stubs for the if-ok chain example (not shown in docs)
+open-conn fn (host: Str): Any {
   cond {
-    eq(s, "bad") => { fail(`session ${s} crashed`) }
-    => { `ok: ${s}` }
+    eq(host, "down.example") => { err(`${host}: connection refused`) }
+    => { {host: host} }
   }
 }
 
-record-error fn (label: Str, detail: Any): Str {
-  `${label} recorded`
-}
+send-greeting fn (conn: Map): Any { `greeted ${conn.host}` }
 
-// @doc: try-contain-halt
-attempt ::hot::lang/try(() { run-one-session(session) })
-outcome if-err(attempt, (failure) { record-error("session", failure) })
-// @end: try-contain-halt
+// @doc: chain-if-ok
+greeting if-ok(open-conn("db.example"), (conn) {
+  send-greeting(conn)
+})
+// greeting = "greeted db.example"
+
+chain-err if-ok(open-conn("down.example"), (conn) {
+  send-greeting(conn)  // never runs; the Err short-circuits out
+})
+// is-err(chain-err) = true
+// @end: chain-if-ok
 
 
 // =============================================================================
@@ -144,8 +147,9 @@ meta ["test"] fn () {
   assert-eq(1, length(failed), "one domain error collected")
 }
 
-test-try-contain-halt
+test-chain-if-ok
 meta ["test"] fn () {
-  assert(is-err(attempt), "try contains the fail() as an Err Result")
-  assert-eq("session recorded", outcome, "the halt is handled at the boundary")
+  assert-eq("greeted db.example", greeting, "if-ok runs the handler on success")
+  assert(is-err(chain-err), "the Err short-circuits the chain")
+  assert(not(is-err(err-value(chain-err))), "single well-formed Err, not nested")
 }

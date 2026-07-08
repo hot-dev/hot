@@ -11,6 +11,7 @@ not ::hot::bool/not
 eq ::hot::cmp/eq
 div ::hot::math/div
 if ::hot::bool/if
+contains ::hot::str/contains
 
 // Helper function that can legitimately return either success or error
 safe-divide fn (a, b) {
@@ -131,4 +132,61 @@ meta ["test"] fn () {
     assert-eq("boom", err-value(err("boom")), "Err payload extracted")
     assert(is-null(err-value(ok(42))), "Ok yields null")
     assert(is-null(err-value(42)), "plain value yields null")
+}
+
+// Regression: the contain boundary is idempotent on Results — a callee that
+// returns an Err value comes back as that same single Err (not
+// Ok(Err), which is-err could not see; not Err(Err), which err-value
+// could not unwrap). The escalation-message half of this bug is pinned
+// in Rust (vm.rs test_result_err_message_extraction).
+test-try-is-idempotent-on-results
+meta ["test"] fn () {
+    caught ::hot::internal::exec/contain(() { err("the real reason") })
+    assert(is-err(caught), "returned Err stays an Err through the boundary")
+    assert-eq("the real reason", err-value(caught), "payload is not re-wrapped")
+
+    passed ::hot::internal::exec/contain(() { ok(7) })
+    assert(is-ok(passed), "returned Ok stays Ok")
+    assert-eq(7, ok-value(passed), "Ok payload intact")
+}
+
+// Regression: an Err used inside a lambda body escalates with the
+// payload's actual message in every execution context — the lambda
+// executor's Call handler prepares arguments exactly like the main
+// interpreter loop (this used to produce "add requires numbers"
+// under the test runner while eval escalated correctly).
+test-err-escalation-carries-message
+meta ["test"] fn () {
+    use-it fn (): Any {
+        e err("the real reason")
+        add(e, 1)
+    }
+    caught ::hot::internal::exec/contain(use-it)
+    assert(is-err(caught), "escalation caught at the boundary")
+    assert(contains(Str(err-value(caught)), "the real reason"), "halt carries the payload message")
+}
+
+// err-message extracts human-readable text from every payload shape
+// in the convention: plain Str, {message}, halt Failure ({msg} under a
+// typed wrapper), and bare payloads.
+test-err-message
+meta ["test"] fn () {
+    assert-eq("connection refused", err-message(err("connection refused")), "Str payload")
+    assert-eq("pg: bad", err-message(err({message: "pg: bad", code: "42P01"})), "message field")
+    caught ::hot::internal::exec/contain(() { fail("boom", {why: "test"}) })
+    assert-eq("boom", err-message(caught), "halt Failure msg")
+    assert-eq("bare", err-message("bare"), "bare payload passes through")
+}
+
+// Fan-out isolation without a halt boundary: OnErr.Preserve keeps a
+// per-item Err in its slot so one bad item never kills the loop.
+test-map-onerr-preserve-fan-out
+meta ["test"] fn () {
+    step fn (x: Int): Any { if(eq(x, 2), err("bad item"), x) }
+    results map([1, 2, 3], step, OnErr.Preserve)
+    assert-eq(3, length(results), "every slot survives")
+    assert(not(is-err(results[0])), "good slot is plain")
+    assert(is-err(results[1]), "bad slot is an Err")
+    assert-eq("bad item", err-value(results[1]), "Err payload intact")
+    assert-eq(3, results[2], "later slots still ran")
 }

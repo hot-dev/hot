@@ -167,8 +167,10 @@ fn (literal: Str?, env-name: Str?): Str? {
     cond {
         not(is-null(literal)) => { literal }
         not(is-null(env-name)) => {
-            v ::env/get(env-name, null)
-            if(is-empty(or(v, "")), null, v)
+            // env/get requires a Str default; "" doubles as the
+            // missing-value sentinel here.
+            v ::env/get(env-name, "")
+            if(is-empty(v), null, v)
         }
         => { null }
     }
@@ -243,19 +245,16 @@ fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
                             ts-str header-lookup(headers, ts-header)
                             cond {
                                 is-null(ts-str) => { fail-result("timestamp-missing") }
+                                not(::hot::regex/is-match(ts-str, "^[0-9]+$")) => {
+                                    fail-result("timestamp-invalid")
+                                }
                                 => {
-                                    ts-attempt ::hot::lang/try(Int, [ts-str])
-                                    cond {
-                                        is-err(ts-attempt) => { fail-result("timestamp-invalid") }
-                                        => {
-                                            ts ts-attempt
-                                            now div(::time/epoch-millis(::time/now()), 1000)
-                                            delta ::math/abs(sub(now, ts))
-                                            if(gt(delta, skew),
-                                                fail-result("timestamp-stale"),
-                                                ok-result())
-                                        }
-                                    }
+                                    ts Int(ts-str)
+                                    now div(::time/epoch-millis(::time/now()), 1000)
+                                    delta ::math/abs(sub(now, ts))
+                                    if(gt(delta, skew),
+                                        fail-result("timestamp-stale"),
+                                        ok-result())
                                 }
                             }
                         }

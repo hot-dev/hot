@@ -34,7 +34,7 @@ process fn (x: Int): Int {
 // @end: serial-basic
 
 // @doc: parallel-function
-fetch-all fn parallel (user-id: Str): Map {
+fetch-all fn parallel (user-id: Str): All<Map> {
   user api-get(`/users/${user-id}`)
   orders api-get(`/orders/${user-id}`)
   preferences api-get(`/prefs/${user-id}`)
@@ -60,7 +60,7 @@ grade fn cond (score: Int): Str {
 // @end: cond-grade
 
 // @doc: cond-all-discounts
-apply-discounts fn cond-all (order: Map): Map {
+apply-discounts fn cond-all (order: Map): All<Map> {
   order.is-member => member { "10% member discount" }
   gt(order.total, 100) => shipping { "Free shipping" }
   order.has-coupon => coupon { "Coupon applied" }

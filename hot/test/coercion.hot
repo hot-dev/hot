@@ -1,0 +1,16 @@
+::hot::test::coercion ns
+meta ["test"]
+
+// Regression: coercion arrows declared in hot-std (a separate
+// compilation unit) must resolve from user namespaces. The impl
+// function is compiled into its declaring namespace, so the
+// type-implementation registry must carry the namespace-qualified
+// name — the bare name only resolved within ::hot::time itself
+// (and via bare function-mapping entries that do not survive
+// bytecode-cache restoration).
+test-cross-namespace-coercion-arrows
+meta ["test"] fn () {
+    assert-eq(5000, Int(::hot::time/Nanosecond(5000)), "Nanosecond -> Int from user namespace")
+    assert-eq(7, Int(::hot::time/Day(7)), "Day -> Int from user namespace")
+    assert-eq(24, Int(::hot::time/Hour(24)), "Hour -> Int from user namespace")
+}

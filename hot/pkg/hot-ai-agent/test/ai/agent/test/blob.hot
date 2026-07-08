@@ -64,7 +64,7 @@ fn () {
     raw {
         name: "notes.md",
         type: "text/markdown",
-        content_base64: ::base64/encode("# Hello"),
+        content_base64: ::base64/encode(Bytes("# Hello")),
         size: 7,
     }
 

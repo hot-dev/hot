@@ -411,14 +411,16 @@ pub fn eprintln(args: &[Val]) -> HotResult<Val> {
 /// code from flooding production logs with debug prints, while keeping
 /// `tap` ergonomic during local development. If a user really needs a
 /// production log line, they should use the logging API explicitly.
-pub fn tap(args: &[Val]) -> HotResult<Val> {
+pub fn tap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
     if args.is_empty() || args.len() > 2 {
         return HotResult::Err(Val::from(
             "tap expects 1 or 2 arguments (value, [label])".to_string(),
         ));
     }
 
-    let value = &args[0];
+    // The value parameter is lazy so Results reach tap intact instead of
+    // halting at the call boundary; force the thunk here.
+    let value = &super::exec::evaluate_lazy(vm, &args[0]);
 
     if !crate::env::is_local_dev() {
         return HotResult::Ok(value.clone());

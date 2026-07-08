@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:fb55d94e852d
+<!-- HOT_LANGUAGE_SECTION_START --> hash:2f8ecc6bf205
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -147,6 +147,7 @@ classify fn cond (x: Int): Str {
 - plain/no annotation — return the winning/last value (default for `serial`, `cond`, `match`)
 - `All<Vec>` — collect all results into a Vec
 - `All<Map>` — collect results into a Map keyed by branch name (default for `parallel`, `cond-all`, `match-all`)
+- Any other type on a collect-all flow — return only the single final value (`x: Int parallel { ... }`)
 
 Bare `All` is only for natural collect-all forms (`parallel`, `cond-all`, and
 `match-all`); use explicit `All<Vec>` or `All<Map>` elsewhere.
@@ -542,13 +543,20 @@ if(is-ok(result), render-profile(result), render-error-page())
 // Pattern 3: Default values
 name or(get(config, "name"), "Anonymous")
 
-// Pattern 4: Fail with context
-if(is-empty(data.email), fail("Email required", {field: "email"}), data)
+// Pattern 4: Expected failures are err(...) values; fail() is for
+// broken invariants only — it halts the run/task (there is no catch)
+if(is-empty(data.email), err({field: "email", message: "Email required"}), data)
+if(lt(version, current-version(db)), fail("migration went backwards"), data)
 
 // Pattern 5: Result combinators — transform Ok or Err selectively
 fetch-user(id)
     |> if-ok(%.name)
     |> if-err("Anonymous")
+
+// Pattern 6: Fan-out isolation — OnErr.Preserve keeps per-item Errs
+// in their slots instead of halting the loop
+results map(items, process-item, OnErr.Preserve)
+failures filter(results, is-err)
 ```
 
 ## Common Patterns

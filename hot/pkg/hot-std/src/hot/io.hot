@@ -214,9 +214,9 @@ meta {
     """
 }
 fn
-(value: Any): Any {
+(lazy value: Any): Any {
     call-lib(::hot::io/tap, [value])
 },
-(value: Any, label: Str): Any {
+(lazy value: Any, label: Str): Any {
     call-lib(::hot::io/tap, [value, label])
 }

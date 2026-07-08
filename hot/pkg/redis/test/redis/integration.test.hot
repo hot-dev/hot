@@ -1,0 +1,101 @@
+::redis::test::integration ns
+meta ["test"]
+
+::env ::hot::env
+::tcp ::hot::tcp
+
+// Connection options from REDISHOST/REDISPORT environment variables,
+// falling back to the local dev Redis.
+redis-options fn (): Map {
+    {
+        host: ::env/get("REDISHOST", "127.0.0.1"),
+        port: Int(::env/get("REDISPORT", "6379"))
+    }
+}
+
+// True when a TCP connection to the configured server succeeds. Only raw
+// reachability is probed here — never the protocol handshake — so that a
+// connect/auth regression fails the test instead of masquerading as an
+// unavailable server.
+server-reachable fn (opts: Map): Bool {
+    probe ::tcp/connect(opts.host, opts.port, {timeout: 2000})
+    cond {
+        is-err(probe) => { false }
+        => {
+            closed ::tcp/close(probe)
+            true
+        }
+    }
+}
+
+// connect to a port with no listener returns a well-formed single Err
+// that is-err/err-value handle directly.
+test-connect-refused
+meta ["test"] fn () {
+    attempt ::redis/connect({host: "127.0.0.1", port: 59999, timeout: 2000})
+    assert(is-err(attempt), "refused connect returns Err")
+    assert(not(is-err(err-value(attempt))), "Err payload is not itself an Err")
+}
+
+// End-to-end exercise against a live server. Skipped only when no TCP
+// listener is reachable; once reachable, connect failures fail the test.
+test-roundtrip
+meta ["test"] fn () {
+    opts redis-options()
+    cond {
+        not(server-reachable(opts)) => {
+            println("  (skipped: no Redis reachable)")
+            assert(true, "skipped without a server")
+        }
+        => {
+            conn ::redis/connect(opts)
+
+            assert-eq("PONG", ::redis/ping(conn), "ping")
+
+            // Use a unique key namespace and clean up first
+            key `hot:redis:test:${Uuid()}`
+            ::redis/del(conn, [key])
+
+            assert(is-null(::redis/get(conn, key)), "missing key is null")
+            assert-eq("OK", ::redis/set(conn, key, "hello"), "set returns OK")
+            assert-eq("hello", ::redis/get(conn, key), "get returns the value")
+            assert-eq(1, ::redis/exists(conn, [key]), "key exists")
+
+            // Integer replies
+            counter `${key}:n`
+            ::redis/del(conn, [counter])
+            assert-eq(1, ::redis/incr(conn, counter), "incr from missing is 1")
+            assert-eq(2, ::redis/incr(conn, counter), "incr again is 2")
+
+            // Array replies
+            list `${key}:list`
+            ::redis/del(conn, [list])
+            ::redis/command(conn, ["RPUSH", list, "a", "b", "c"])
+            assert-eq(["a", "b", "c"], ::redis/command(conn, ["LRANGE", list, "0", "-1"]), "array reply")
+
+            // MGET with a missing element yields null in the array
+            assert-eq(["hello", null], ::redis/command(conn, ["MGET", key, "hot:redis:test:absent"]), "null within array")
+
+            // Expiry and delete
+            assert-eq(1, ::redis/expire(conn, key, 100), "expire returns 1")
+            assert-eq(3, ::redis/del(conn, [key, counter, list]), "delete removes 3 keys")
+
+            // Binary values round-trip as Bytes (no lossy Str coercion)
+            bin-key `${key}:bin`
+            blob Bytes([0, 255, 254, 104, 105])
+            assert-eq("OK", ::redis/set(conn, bin-key, blob), "set binary value")
+            assert-eq(blob, ::redis/get(conn, bin-key), "binary value round-trips as Bytes")
+            ::redis/del(conn, [bin-key])
+
+            // Errors surface as Result.Err — no halt boundary needed,
+            // branch on the value directly.
+            failed ::redis/command(conn, ["INCR", list, "extra-arg"])
+            assert(is-err(failed), "wrong-arity command returns Err")
+            assert(not(is-err(err-value(failed))), "Err payload is not itself an Err")
+
+            ::redis/close(conn)
+            closed-again ::redis/close(conn)
+            assert-eq(true, closed-again, "close is idempotent")
+        }
+    }
+}

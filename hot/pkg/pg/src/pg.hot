@@ -1,0 +1,393 @@
+::pg ns
+meta {
+    doc: """
+    PostgreSQL client for Hot.
+
+    Speaks the PostgreSQL v3 wire protocol directly over `::hot::tcp`
+    (with optional `::hot::tls`), so no native driver is required.
+    Supports trust, cleartext, MD5, and SCRAM-SHA-256 authentication,
+    simple and parameterized queries, and text-format result decoding.
+
+    A connection is a runtime-owned socket handle plus backend state; it
+    lives for the duration of the run or task that opened it.
+
+    **Error contract:** expected failures — connection refused, TLS
+    negotiation, authentication, SQL errors — return a `Result.Err`;
+    branch with `is-err` / `if-err`. A socket failure mid-protocol (the
+    connection drops between request and reply) halts the run instead:
+    the connection state is unusable and the recovery unit is the run or
+    task, not the query.
+
+    **Quick start**
+
+    ```hot
+    conn ::pg/connect({host: "localhost", port: 5432, user: "postgres",
+                       password: "secret", database: "app"})
+
+    users ::pg/query(conn, "SELECT id, email FROM users WHERE active = $1", [true])
+
+    ::pg/execute(conn, "INSERT INTO events (name) VALUES ($1)", ["signup"])
+
+    ::pg/close(conn)
+    ```
+    """
+}
+
+::tcp ::hot::tcp
+::tls ::hot::tls
+::bytes ::hot::bytes
+::hex ::hot::hex
+::wire ::pg::wire
+::auth ::pg::auth
+::decode ::pg::decode
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+PgOptions
+meta {
+    doc: """
+    Connection options.
+
+    **Fields**
+    - `host` — Server host (default `"127.0.0.1"`)
+    - `port` — Server port (default `5432`)
+    - `user` — Role name (required)
+    - `password` — Password for cleartext/MD5/SCRAM auth (default `""`)
+    - `database` — Database name (default: the `user` value)
+    - `ssl` — `"prefer"` (default; TLS if offered, else plaintext),
+      `"require"` (fail if the server refuses TLS), or `"disable"`
+    - `tls` — Options passed to `::hot::tls/upgrade` (e.g. `ca-pem`, `mode`)
+    - `timeout` — Connect/read timeout in milliseconds
+    """
+}
+type {
+    host: Str?,
+    port: Int?,
+    user: Str,
+    password: Str?,
+    database: Str?,
+    ssl: Str?,
+    tls: Map?,
+    timeout: Int?
+}
+
+PgConnection
+meta {
+    doc: """
+    An open PostgreSQL connection.
+
+    **Fields**
+    - `socket` — The underlying `::hot::tcp` connection
+    - `parameters` — Server ParameterStatus values (e.g. `server_version`)
+    - `backend-pid` / `backend-key` — BackendKeyData for query cancellation
+    """
+}
+type {
+    socket: Any,
+    parameters: Map,
+    backend-pid: Int?,
+    backend-key: Int?
+}
+
+// ---------------------------------------------------------------------------
+// Connect
+// ---------------------------------------------------------------------------
+
+connect
+meta {
+    doc: """
+    Open and authenticate a PostgreSQL connection.
+
+    Performs optional TLS negotiation, sends the startup message, runs the
+    authentication handshake, and consumes backend setup messages through
+    the first ReadyForQuery. Returns a `PgConnection`, or a `Result.Err`
+    carrying the error details when the connection, TLS negotiation, or
+    authentication fails. Branch on it with `is-err` / `if-err`; an
+    unhandled error halts at first use with the same message.
+
+    **Example**
+
+    ```hot
+    conn ::pg/connect({user: "postgres", database: "postgres"})
+    if-err(conn, (e) { ... fall back ... })
+    ```
+
+    See `PgOptions` for the accepted fields.
+    """
+}
+fn (options: Map): PgConnection {
+    host get(options, "host", "127.0.0.1")
+    port get(options, "port", 5432)
+    user options.user
+    password get(options, "password", "")
+    database get(options, "database", user)
+    ssl-mode get(options, "ssl", "prefer")
+    tls-opts get(options, "tls", {})
+
+    tcp-opts if(is-null(options.timeout), {}, {timeout: options.timeout})
+
+    // Each step returns its value or a Result.Err; if-ok short-circuits
+    // the first error out as connect's return value.
+    if-ok(::tcp/connect(host, port, tcp-opts), (socket) {
+        if-ok(negotiate-ssl(socket, ssl-mode, host, tls-opts), (secured) {
+            if-ok(::tcp/write(socket, ::wire/startup-message(user, database)), (sent) {
+                startup-loop(socket, user, password, {
+                    socket: socket,
+                    parameters: {},
+                    backend-pid: null,
+                    backend-key: null
+                })
+            })
+        })
+    })
+}
+
+// Try (or require) a TLS upgrade before the startup message. Returns `true`
+// when the socket is ready (secured or plaintext as allowed), else an Err.
+negotiate-ssl fn (socket, ssl-mode: Str, host: Str, tls-opts: Map): Any {
+    cond {
+        eq(ssl-mode, "disable") => { true }
+        => {
+            if-ok(::tcp/write(socket, ::wire/ssl-request()), (sent) {
+                if-ok(::tcp/read-exact(socket, 1), (response-byte) {
+                    response Str(response-byte)
+                    cond {
+                        eq(response, "S") => {
+                            // upgrade secures the socket handle in place.
+                            if-ok(::tls/upgrade(socket, {...tls-opts, server-name: get(tls-opts, "server-name", host)}), (upgraded) { true })
+                        }
+                        eq(ssl-mode, "require") => {
+                            err("pg: server does not support TLS but ssl=require")
+                        }
+                        => { true }
+                    }
+                })
+            })
+        }
+    }
+}
+
+// Read backend messages until ReadyForQuery, building the connection.
+// Returns the PgConnection map, or an Err from an ErrorResponse.
+startup-loop fn (socket, user: Str, password: Str, conn: Map): Map {
+    msg ::wire/read-message(socket)
+    cond {
+        eq(msg.type, "R") => {
+            if-ok(::auth/run-auth(socket, user, password, msg), (authed) {
+                startup-loop(socket, user, password, conn)
+            })
+        }
+        eq(msg.type, "S") => {
+            k ::wire/read-cstring(msg.payload, 0)
+            v ::wire/read-cstring(msg.payload, k[1])
+            startup-loop(socket, user, password, assoc-in(conn, ["parameters", k[0]], v[0]))
+        }
+        eq(msg.type, "K") => {
+            pid ::wire/read-int32(msg.payload, 0)
+            key ::wire/read-int32(msg.payload, pid[1])
+            startup-loop(socket, user, password, {...conn, backend-pid: pid[0], backend-key: key[0]})
+        }
+        eq(msg.type, "Z") => { conn }
+        eq(msg.type, "E") => {
+            e ::decode/parse-error(msg.payload)
+            err({...e, message: `pg: connection failed: ${e.message}`})
+        }
+        // NoticeResponse and anything else during startup: ignore.
+        => { startup-loop(socket, user, password, conn) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query result collection (shared by simple and extended protocols)
+// ---------------------------------------------------------------------------
+
+// Read messages until ReadyForQuery, accumulating rows and the command
+// tag. ParseComplete/BindComplete/NoData/NoticeResponse and similar are
+// skipped. Returns `{rows, command}` on success. On an ErrorResponse the
+// stream is drained to ReadyForQuery, then an Err with the PostgreSQL
+// error fields is returned.
+collect-results fn (socket, fields: Vec, rows: Vec, command: Str, error): Map {
+    msg ::wire/read-message(socket)
+    cond {
+        eq(msg.type, "T") => {
+            collect-results(socket, ::decode/parse-row-description(msg.payload), rows, command, error)
+        }
+        eq(msg.type, "D") => {
+            collect-results(socket, fields, concat(rows, [::decode/parse-data-row(msg.payload, fields)]), command, error)
+        }
+        eq(msg.type, "C") => {
+            tag ::wire/read-cstring(msg.payload, 0)
+            collect-results(socket, fields, rows, tag[0], error)
+        }
+        eq(msg.type, "E") => {
+            collect-results(socket, fields, rows, command, ::decode/parse-error(msg.payload))
+        }
+        eq(msg.type, "Z") => {
+            cond {
+                is-null(error) => { {rows: rows, command: command} }
+                => { err({...error, message: `pg: ${error.message}`}) }
+            }
+        }
+        => { collect-results(socket, fields, rows, command, error) }
+    }
+}
+
+run-collect fn (socket): Map {
+    collect-results(socket, [], [], "", null)
+}
+
+// ---------------------------------------------------------------------------
+// Extended-protocol parameter binding (text format)
+// ---------------------------------------------------------------------------
+
+encode-param fn (value: Any): Bytes {
+    cond {
+        is-null(value) => { ::wire/int32(-1) }
+        is-bytes(value) => {
+            text Bytes(concat("\\x", ::hex/encode(value)))
+            concat(::wire/int32(length(text)), text)
+        }
+        is-bool(value) => {
+            text Bytes(if(value, "t", "f"))
+            concat(::wire/int32(length(text)), text)
+        }
+        => {
+            text Bytes(Str(value))
+            concat(::wire/int32(length(text)), text)
+        }
+    }
+}
+
+// Build Parse + Bind + Describe + Execute + Sync for a parameterized query.
+build-extended fn (sql: Str, params: Vec): Bytes {
+    parse ::wire/frame("P", concat(::wire/cstring(""), ::wire/cstring(sql), ::wire/int16(0)))
+    param-bytes reduce(params, (acc, p) { concat(acc, encode-param(p)) }, Bytes([]))
+    bind ::wire/frame("B", concat(
+        ::wire/cstring(""),        // portal
+        ::wire/cstring(""),        // prepared statement
+        ::wire/int16(0),           // 0 param format codes -> all text
+        ::wire/int16(length(params)),
+        param-bytes,
+        ::wire/int16(0)))          // 0 result format codes -> all text
+    describe ::wire/frame("D", concat(Bytes("P"), ::wire/cstring("")))
+    execute ::wire/frame("E", concat(::wire/cstring(""), ::wire/int32(0)))
+    concat(parse, bind, describe, execute, ::wire/sync-message())
+}
+
+// ---------------------------------------------------------------------------
+// Public query API
+// ---------------------------------------------------------------------------
+
+query
+meta {
+    doc: """
+    Run a query and return its rows as a `Vec<Map>` (column name -> value).
+
+    With `params`, the query runs through the extended protocol with
+    `$1`, `$2`, ... placeholders bound as parameters — always prefer this
+    over interpolating values into the SQL string. A query error returns
+    a `Result.Err` with the PostgreSQL error fields (`code`, `message`,
+    ...) attached; branch on it with `is-err` / `if-err`. An unhandled
+    error halts at first use with the same message.
+
+    **Example**
+
+    ```hot
+    ::pg/query(conn, "SELECT id, email FROM users")
+    ::pg/query(conn, "SELECT * FROM users WHERE id = $1", [42])
+    ```
+    """
+}
+fn
+(conn: PgConnection, sql: Str): Vec {
+    if-ok(::tcp/write(conn.socket, ::wire/query-message(sql)), (sent) {
+        if-ok(run-collect(conn.socket), (result) { result.rows })
+    })
+},
+(conn: PgConnection, sql: Str, params: Vec): Vec {
+    if-ok(::tcp/write(conn.socket, build-extended(sql, params)), (sent) {
+        if-ok(run-collect(conn.socket), (result) { result.rows })
+    })
+}
+
+query-one
+meta {
+    doc: """
+    Run a query and return its first row as a Map, or `null` if there are
+    no rows. Accepts optional `params` like `query`.
+
+    **Example**
+
+    ```hot
+    user ::pg/query-one(conn, "SELECT * FROM users WHERE id = $1", [42])
+    ```
+    """
+}
+fn
+(conn: PgConnection, sql: Str): Any {
+    if-ok(query(conn, sql), (rows) { if(is-empty(rows), null, first(rows)) })
+},
+(conn: PgConnection, sql: Str, params: Vec): Any {
+    if-ok(query(conn, sql, params), (rows) { if(is-empty(rows), null, first(rows)) })
+}
+
+execute
+meta {
+    doc: """
+    Run a statement for its effect and return
+    `{command: Str, rows-affected: Int}`. Use for INSERT/UPDATE/DELETE and
+    DDL. Accepts optional `params` like `query`.
+
+    **Example**
+
+    ```hot
+    ::pg/execute(conn, "UPDATE users SET active = $1 WHERE id = $2", [false, 42])
+    // {command: "UPDATE 1", rows-affected: 1}
+    ```
+    """
+}
+fn
+(conn: PgConnection, sql: Str): Map {
+    if-ok(::tcp/write(conn.socket, ::wire/query-message(sql)), (sent) {
+        if-ok(run-collect(conn.socket), (result) {
+            {command: result.command, rows-affected: parse-affected(result.command)}
+        })
+    })
+},
+(conn: PgConnection, sql: Str, params: Vec): Map {
+    if-ok(::tcp/write(conn.socket, build-extended(sql, params)), (sent) {
+        if-ok(run-collect(conn.socket), (result) {
+            {command: result.command, rows-affected: parse-affected(result.command)}
+        })
+    })
+}
+
+// CommandComplete tags look like "INSERT 0 5", "UPDATE 3", "DELETE 2",
+// "SELECT 7". The row count is the final whitespace-delimited token.
+parse-affected fn (command: Str): Int {
+    parts split(command, " ")
+    last-part last(parts)
+    if(::hot::regex/is-match(last-part, "^[0-9]+$"), Int(last-part), 0)
+}
+
+close
+meta {
+    doc: """
+    Close a connection: send Terminate and shut down the socket.
+    Safe to call more than once.
+
+    **Example**
+
+    ```hot
+    ::pg/close(conn)
+    ```
+    """
+}
+fn (conn: PgConnection): Bool {
+    // The Terminate courtesy write fails on an already-closed socket;
+    // recover the Err so close stays idempotent as documented.
+    sent if-err(::tcp/write(conn.socket, ::wire/terminate-message()), false)
+    ::tcp/close(conn.socket)
+}

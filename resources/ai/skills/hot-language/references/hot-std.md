@@ -364,10 +364,8 @@ post fn (url: Str, body: Any): HttpResponse
 put fn (url: Str, body: Any): HttpResponse
 patch fn (url: Str, body: Any): HttpResponse
 delete fn (url: Str): HttpResponse
-request fn (request: HttpRequest): HttpResponse
+request fn (request: HttpRequest): HttpResponse         // Transport errors (DNS, TLS, timeouts) return Result.Err
 request fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): HttpResponse
-try-request fn (request: HttpRequest): Result            // Catches transport errors (DNS, TLS, timeouts)
-try-request fn (method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result
 request-stream fn (method: Str, url: Str, headers: Map, body: Any): StreamingResponse
 request-stream fn (method: Str, url: Str, headers: Map, body: Any, format: Str): StreamingResponse
 get-stream fn (url: Str): StreamingResponse
@@ -565,30 +563,22 @@ if(gt(i.run.retry-attempt, 0),
 
 ### ::hot::lang
 
-Language-level helpers. Most code should rely on normal `Result` propagation.
-Use `try` only at explicit fault-isolation boundaries.
+Language-level helpers. Rely on normal `Result` propagation — there is no
+halt-catching helper (`try` / `try-call` were removed in Hot 2.6.0).
 
 ```hot
 call fn (f: Fn, args: Vec<Any>): Any                     // Force domain Err by default
 call fn (f: Fn, args: Vec<Any>, on-err: OnErr): Any      // Use OnErr.Preserve to return domain Err as value
 call fn (f: Fn): Any                                     // Same as call(f, [])
-try fn (f: Fn, args: Vec<Any>): Result                   // Returns Result.Ok(value) | Result.Err(payload)
-try fn (f: Fn): Result                                   // Same as try(f, [])
 ```
 
 > Prefer Result propagation for normal domain errors. Use `OnErr.Preserve` on
 > eligible APIs (`map`, `pmap`, `map-indexed`, `mapcat`, `call`) when you want
-> to keep a domain `Err` as a value. Use `try` rarely, when an intentional
-> boundary needs to contain `fail()`, `cancel()`, or hard runtime errors as a
-> normal Result so nearby code can record the failure and continue.
-
-`try` returns a normal Result:
+> to keep a domain `Err` as a value:
 
 ```hot
-// Fan-out where one exceptional failure must not abort the run.
-results map(items, (item) {
-    ::hot::lang/try(process-item, [item])
-})
+// Fan-out where one failing item must not abort the run.
+results map(items, process-item, OnErr.Preserve)
 
 failures filter(results, is-err)
 ```

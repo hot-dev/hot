@@ -187,7 +187,9 @@ fn (payload: Any, opts: CallbackOptions): CallbackResult {
             body-text ::json/to-json(payload)
             headers build-headers(body-text, opts)
             started ::time/epoch-millis(::time/now())
-            attempt ::http/try-request(::http/HttpRequest({
+            // request returns a Result.Err for transport failures;
+            // branch on it directly (no halt boundary needed).
+            attempt ::http/request(::http/HttpRequest({
                 method: "POST",
                 url: opts.url,
                 headers: headers,
@@ -196,11 +198,11 @@ fn (payload: Any, opts: CallbackOptions): CallbackResult {
             elapsed sub(::time/epoch-millis(::time/now()), started)
             cond {
                 is-err(attempt) => {
-                    failure if-err(attempt, (failure) { failure })
+                    failure err-value(attempt)
                     CallbackResult({
                         ok: false,
                         status: 0,
-                        error: failure.msg,
+                        error: Str(failure),
                         attempt-ms: elapsed,
                     })
                 }

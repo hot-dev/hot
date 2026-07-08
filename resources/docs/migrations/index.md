@@ -36,6 +36,22 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading to Hot 2.6
+
+Hot 2.6 completes the move to one error idiom and removes the legacy
+flow-result-modifier syntax:
+
+- **`::hot::lang/try` and `::hot::lang/try-call` are removed.** Expected
+  failures are `Result.Err` values — branch with `is-err` / `if-err`; use
+  `OnErr.Preserve` for fan-out isolation and a task boundary
+  (`::hot::task/start` + `await`) to supervise untrusted work. See
+  [Error Handling](/docs/language/errors).
+- **The `|map`, `|vec`, and `|one` flow result modifiers are removed** —
+  annotate the binding or return type instead. `All<Map>` / `All<Vec>`
+  collect all results (`x: All<Map> cond { ... }`); any other type on a
+  collect-all flow takes the single final value (`x: Int parallel { ... }`).
+  See [Flows](/docs/language/flows).
+
 ## Upgrading to Hot 2.3
 
 Hot 2.3 includes a breaking cleanup to the public `Failure` and `Cancellation`
@@ -48,16 +64,17 @@ payload fields. Replace direct field access as follows:
 
 ## Upgrading to Hot 2.2
 
-No code changes are required. Hot 2.2 is backward compatible — existing flow
-modifiers, `try-call`, and default error behavior keep working. The version bump
-does invalidate bytecode and AST cache entries from older versions; they rebuild
-automatically on first run.
+No code changes were required for 2.2 itself. The idioms it introduced are
+now the standard forms — and, as of Hot 2.6, the only forms: the legacy
+syntax that 2.2 still tolerated (`|map`/`|vec`/`|one` modifiers, `try-call`)
+is removed, see [Upgrading to Hot 2.6](#upgrading-to-hot-26). The version
+bump invalidates bytecode and AST cache entries from older versions; they
+rebuild automatically on first run.
 
-2.2 also adds newer, opt-in idioms you can adopt over time:
+2.2 added:
 
 - `All<Vec>` / `All<Map>` annotations for flow result shape — see [Flows](/docs/language/flows).
-- `OnErr.Force` / `OnErr.Preserve` disposition for map-shaped higher-order functions, defaulting to today's fail-fast behavior — see [Error Handling](/docs/language/errors).
-- `::hot::lang/try` for the rare case of containing a `fail()` / `cancel()` / runtime halt as a `Result`.
+- `OnErr.Force` / `OnErr.Preserve` disposition for map-shaped higher-order functions — see [Error Handling](/docs/language/errors).
 
 ## Upgrading from Hot 1.x to Hot 2
 

@@ -32,25 +32,25 @@ meta {doc: """Month time unit. Wraps an Int value."""}
 Year type
 meta {doc: """Year time unit. Wraps an Int value."""}
 
-Nanosecond -> Int fn(nanosecond) { Int(nanosecond.$val) }
+Nanosecond -> Int fn(nanosecond) { Int(untype(nanosecond)) }
 
-Microsecond -> Int fn(microsecond) { Int(microsecond.$val) }
+Microsecond -> Int fn(microsecond) { Int(untype(microsecond)) }
 
-Millisecond -> Int fn(millisecond) { Int(millisecond.$val) }
+Millisecond -> Int fn(millisecond) { Int(untype(millisecond)) }
 
-Second -> Int fn(second) { Int(second.$val) }
+Second -> Int fn(second) { Int(untype(second)) }
 
-Minute -> Int fn(minute) { Int(minute.$val) }
+Minute -> Int fn(minute) { Int(untype(minute)) }
 
-Hour -> Int fn(hour) { Int(hour.$val) }
+Hour -> Int fn(hour) { Int(untype(hour)) }
 
-Day -> Int fn(day) { Int(day.$val) }
+Day -> Int fn(day) { Int(untype(day)) }
 
-Week -> Int fn(week) { Int(week.$val) }
+Week -> Int fn(week) { Int(untype(week)) }
 
-Month -> Int fn(month) { Int(month.$val) }
+Month -> Int fn(month) { Int(untype(month)) }
 
-Year -> Int fn(year) { Int(year.$val) }
+Year -> Int fn(year) { Int(untype(year)) }
 
 
 Instant

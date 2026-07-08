@@ -1,0 +1,26 @@
+::hot::conf ns
+
+// Test configuration for the hot.dev/pg package.
+//
+// Runs against a local Postgres. The dev docker container
+// (hot-postgres-1) exposes Postgres 18 on 127.0.0.1:5432 with
+// user=postgres, db=postgres, trust auth. The integration test reads
+// PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE from the environment,
+// with those defaults.
+//
+// Run:  cargo run -p hot_cli -- test -c pg.pkg.test.hot
+
+hot.set.profile "pg-pkg"
+hot.set.project "pg-pkg"
+
+hot.profile.pg-pkg.user.email "pg-pkg-test@hot.dev"
+hot.profile.pg-pkg.org.slug "pg-pkg"
+hot.profile.pg-pkg.env.name "development"
+
+hot.project.pg-pkg.src.paths ["./hot/pkg/pg/src"]
+hot.project.pg-pkg.test.paths ["./hot/pkg/pg/test"]
+hot.project.pg-pkg.test.capture true
+hot.project.pg-pkg.skills.codegen.enabled false
+
+hot.log.level "info"
+hot.log.target "stdout"

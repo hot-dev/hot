@@ -56,7 +56,7 @@ process fn
 (x: Str): Str { `Str: ${x}` }
 
 // Parallel execution
-fetch-all fn parallel (urls: Vec<Str>): Vec {
+fetch-all fn parallel (urls: Vec<Str>): All<Vec> {
     ::hot::http/get(urls[0])
     ::hot::http/get(urls[1])
 }

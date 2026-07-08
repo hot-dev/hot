@@ -60,106 +60,111 @@ meta ["test"] fn () {
     // Test regular conditional flows with simple branches
 
     // map-result => {m: "b"}
-    map-result cond|map {
+    map-result: All<Map> cond {
         true => m { x0 a x1 b }
         true => n { y0 c y1 d }
     }
 
-    assert-eq(map-result, {m: "b"}, "cond|map")
+    assert-eq(map-result, {m: "b"}, "cond All<Map>")
 
     // vec-result => ["b"]
-    vec-result cond|vec {
+    vec-result: All<Vec> cond {
         true => m { x0 a x1 b }
         true => n { y0 c y1 d }
     }
 
-    assert-eq(vec-result, ["b"], "cond|vec")
+    assert-eq(vec-result, ["b"], "cond All<Vec>")
 
     // one-result => "b"
-    one-result cond|one {
+    one-result: Str cond {
         true => m { x0 a x1 b }
         true => n { y0 c y1 d }
     }
 
-    assert-eq(one-result, "b", "cond|one")
+    assert-eq(one-result, "b", "cond plain annotation")
 
     // Test conditional all flows with simple branches
 
     // all-map-result => {m: "b", n: "d"}
-    all-map-result cond-all|map {
+    all-map-result: All<Map> cond-all {
         true => m { x0 a x1 b }
         true => n { y0 c y1 d }
     }
 
-    assert-eq(all-map-result, {m: "b", n: "d"}, "cond-all|map")
+    assert-eq(all-map-result, {m: "b", n: "d"}, "cond-all All<Map>")
 
     // all-vec-result => ["b", "d"]
-    all-vec-result cond-all|vec {
+    all-vec-result: All<Vec> cond-all {
         true => m { x0 a x1 b }
         true => n { y0 c y1 d }
     }
 
-    assert-eq(all-vec-result, ["b", "d"], "cond-all|vec")
+    assert-eq(all-vec-result, ["b", "d"], "cond-all All<Vec>")
 
-    // all-one-result => "d" (returns last truthy branch result, consistent with parallel|one)
-    all-one-result cond-all|one {
+    // all-one-result => "d" (plain annotation takes the last truthy branch result)
+    all-one-result: Str cond-all {
         true => m { x0 a x1 b }
         true => n { y0 c y1 d }
     }
 
-    assert-eq(all-one-result, "d", "cond-all|one")
+    assert-eq(all-one-result, "d", "cond-all plain annotation")
 
-    // Test regular conditional flows with explicit flow branches
+    // Test regular conditional flows with explicit flow branches.
+    // The nested result-shape flows are hoisted here to exercise
+    // annotated top-level bindings; annotated bindings inside arm
+    // blocks are covered in test-all-flow-annotations.
+    m-inner: All<Map> serial { x0 a x1 b }
+    n-inner: All<Map> serial { y0 c y1 d }
 
     // map-flow-map-result => {m: {x0: "a", x1: "b"}}
-    map-flow-map-result cond|map {
-        true => m serial|map { x0 a x1 b }
-        false => n serial|map { y0 c y1 d }
+    map-flow-map-result: All<Map> cond {
+        true => m { m-inner }
+        false => n { n-inner }
     }
 
-    assert-eq(map-flow-map-result, {m: {x0: "a", x1: "b"}}, "cond|map w/ serial|map")
+    assert-eq(map-flow-map-result, {m: {x0: "a", x1: "b"}}, "cond All<Map> w/ nested All<Map>")
 
     // vec-flow-map-result => [{x0: "a", x1: "b"}]
-    vec-flow-map-result cond|vec {
-        true => m serial|map { x0 a x1 b }
-        false => n serial|map { y0 c y1 d }
+    vec-flow-map-result: All<Vec> cond {
+        true => m { m-inner }
+        false => n { n-inner }
     }
 
-    assert-eq(vec-flow-map-result, [{x0: "a", x1: "b"}], "cond|vec w/ serial|map")
+    assert-eq(vec-flow-map-result, [{x0: "a", x1: "b"}], "cond All<Vec> w/ nested All<Map>")
 
     // one-flow-map-result => {x0: "a", x1: "b"}
-    one-flow-map-result cond|one {
-        true => m serial|map { x0 a x1 b }
-        true => n serial|map { y0 c y1 d }
+    one-flow-map-result: Map cond {
+        true => m { m-inner }
+        true => n { n-inner }
     }
 
-    assert-eq(one-flow-map-result, {x0: "a", x1: "b"}, "cond|one w/ serial|map")
+    assert-eq(one-flow-map-result, {x0: "a", x1: "b"}, "cond plain annotation w/ nested All<Map>")
 
     // Test conditional all flows with explicit flow branches
 
     // all-map-flow-map-result => {m: {x0: "a", x1: "b"}, n: {y0: "c", y1: "d"}}
-    all-map-flow-map-result cond-all|map {
-        true => m serial|map { x0 a x1 b }
-        true => n serial|map { y0 c y1 d }
+    all-map-flow-map-result: All<Map> cond-all {
+        true => m { m-inner }
+        true => n { n-inner }
     }
 
-    assert-eq(all-map-flow-map-result, {m: {x0: "a", x1: "b"}, n: {y0: "c", y1: "d"}}, "cond-all|map w/ serial|map")
+    assert-eq(all-map-flow-map-result, {m: {x0: "a", x1: "b"}, n: {y0: "c", y1: "d"}}, "cond-all All<Map> w/ nested All<Map>")
 
     // all-vec-flow-map-result => [{x0: "a", x1: "b"}, {y0: "c", y1: "d"}]
-    all-vec-flow-map-result cond-all|vec {
-        true => m serial|map { x0 a x1 b }
-        true => n serial|map { y0 c y1 d }
+    all-vec-flow-map-result: All<Vec> cond-all {
+        true => m { m-inner }
+        true => n { n-inner }
     }
 
-    assert-eq(all-vec-flow-map-result, [{x0: "a", x1: "b"}, {y0: "c", y1: "d"}], "cond-all|vec w/ serial|map")
+    assert-eq(all-vec-flow-map-result, [{x0: "a", x1: "b"}, {y0: "c", y1: "d"}], "cond-all All<Vec> w/ nested All<Map>")
 
     // all-one-flow-map-result => {y0: "c", y1: "d"} (returns last truthy branch result)
-    all-one-flow-map-result cond-all|one {
-        true => m serial|map { x0 a x1 b }
-        true => n serial|map { y0 c y1 d }
+    all-one-flow-map-result: Map cond-all {
+        true => m { m-inner }
+        true => n { n-inner }
     }
 
-    assert-eq(all-one-flow-map-result, {y0: "c", y1: "d"}, "cond-all|one w/ serial|map")
+    assert-eq(all-one-flow-map-result, {y0: "c", y1: "d"}, "cond-all plain annotation w/ nested All<Map>")
 }
 
 test-pipe-flows
@@ -171,19 +176,19 @@ meta ["test"] fn () {
     basic-pipe 5 |> add(2) |> mul(3)
     assert-eq(21, basic-pipe, "Basic pipe: 5 |> add(2) |> mul(3) = 21")
 
-    // Test pipe flow with |one modifier (should be same as basic)
-    pipe-one 5 |> add(2) |> mul(3) |one
-    assert-eq(21, pipe-one, "Pipe |one: should return final result")
+    // A plain annotation on a pipe is a type check; the final result is the default
+    pipe-one: Int 5 |> add(2) |> mul(3)
+    assert-eq(21, pipe-one, "Pipe plain annotation: should return final result")
 
-    // Test pipe flow with |vec modifier (should return all step results)
-    pipe-vec 5 |> add(2) |> mul(3) |vec
-    assert-eq([5, 7, 21], pipe-vec, "Pipe |vec: should return [5, 7, 21]")
+    // All<Vec> on a pipe returns all step results
+    pipe-vec: All<Vec> 5 |> add(2) |> mul(3)
+    assert-eq([5, 7, 21], pipe-vec, "Pipe All<Vec>: should return [5, 7, 21]")
 
-    // Test pipe flow with |map modifier (should return step results as map)
-    pipe-map 5 |> add(2) |> mul(3) |map
-    assert-eq({"$pipe_0": 5, "$pipe_1": 7, "$pipe_2": 21}, pipe-map, "Pipe |map: should return step map")
+    // All<Map> on a pipe returns step results as a map
+    pipe-map: All<Map> 5 |> add(2) |> mul(3)
+    assert-eq({"$pipe_0": 5, "$pipe_1": 7, "$pipe_2": 21}, pipe-map, "Pipe All<Map>: should return step map")
 
-    // New All<Vec> annotation is equivalent to |vec, but erases to a plain Vec.
+    // All<Vec> erases to a plain Vec at runtime.
     pipe-all-vec: All<Vec> 5 |> add(2) |> mul(3)
     assert-eq([5, 7, 21], pipe-all-vec, "Pipe All<Vec>: should return [5, 7, 21]")
 }
@@ -209,6 +214,29 @@ meta ["test"] fn () {
     }
 
     assert-eq(serial-vec, [1, 2, 3], "serial All<Vec>")
+
+    // A plain (non-All) annotation opts a collect-all flow out of
+    // collection: it states the type of the single final value
+    parallel-one: Int parallel {
+        a 1
+        b 2
+        c 3
+    }
+
+    assert-eq(parallel-one, 3, "parallel Int annotation returns the final value")
+
+    // Typed bindings (including flow-shape annotations) parse inside
+    // arm blocks — any position but the first, where `name:` is a map
+    // literal by the documented disambiguation rule.
+    nested-annot: All<Map> cond {
+        true => m {
+            seed 1
+            inner: All<Map> serial { a seed b 2 }
+            inner
+        }
+    }
+
+    assert-eq(nested-annot, {m: {a: 1, b: 2}}, "annotated binding inside cond arm")
 
     condall-default: All cond-all {
         true => a { 1 }
@@ -294,41 +322,41 @@ meta ["test"] fn () {
     sub ::hot::math/sub
     div ::hot::math/div
 
-    // Test basic parallel flow with |map modifier
+    // Test basic parallel flow with All<Map>
     // Variables a and b should execute in parallel (Level 0)
     // Variables c and d should execute in parallel (Level 1) after Level 0
-    parallel-map-basic parallel|map {
+    parallel-map-basic: All<Map> parallel {
         a 10
         b 20
         c add(a, 5)
         d add(b, 10)
     }
 
-    assert-eq(parallel-map-basic, {a: 10, b: 20, c: 15, d: 30}, "parallel|map basic")
+    assert-eq(parallel-map-basic, {a: 10, b: 20, c: 15, d: 30}, "parallel All<Map> basic")
 
-    // Test parallel flow with |vec modifier
-    parallel-vec-basic parallel|vec {
+    // Test parallel flow with All<Vec>
+    parallel-vec-basic: All<Vec> parallel {
         a 10
         b 20
         c add(a, 5)
         d add(b, 10)
     }
 
-    assert-eq(parallel-vec-basic, [10, 20, 15, 30], "parallel|vec basic")
+    assert-eq(parallel-vec-basic, [10, 20, 15, 30], "parallel All<Vec> basic")
 
-    // Test parallel flow with |one modifier (returns last value)
-    parallel-one-basic parallel|one {
+    // Test parallel flow with a plain annotation (returns last value)
+    parallel-one-basic: Int parallel {
         a 10
         b 20
         c add(a, 5)
         d add(b, 10)
     }
 
-    assert-eq(parallel-one-basic, 30, "parallel|one basic")
+    assert-eq(parallel-one-basic, 30, "parallel plain annotation basic")
 
     // Test parallel flow with chain dependencies
     // Should execute in levels: [a] -> [b] -> [c] -> [d]
-    parallel-chain parallel|map {
+    parallel-chain: All<Map> parallel {
         a 5
         b mul(a, 2)
         c mul(b, 2)
@@ -341,7 +369,7 @@ meta ["test"] fn () {
     // Level 0: [a, b]
     // Level 1: [c, d, e] (c depends on a, d depends on b, e is independent)
     // Level 2: [f] (depends on c and d)
-    parallel-complex parallel|map {
+    parallel-complex: All<Map> parallel {
         a 10
         b 20
         c add(a, 5)
@@ -354,7 +382,7 @@ meta ["test"] fn () {
 
     // Test parallel flow with only independent variables
     // All should execute in parallel (Level 0)
-    parallel-all-independent parallel|vec {
+    parallel-all-independent: All<Vec> parallel {
         a 1
         b 2
         c 3
@@ -365,7 +393,7 @@ meta ["test"] fn () {
     assert-eq(parallel-all-independent, [1, 2, 3, 4, 5], "parallel all independent")
 
     // Test parallel flow with mathematical operations
-    parallel-math parallel|map {
+    parallel-math: All<Map> parallel {
         x 10
         y 20
         sum add(x, y)
@@ -377,7 +405,7 @@ meta ["test"] fn () {
     assert-eq(parallel-math, {x: 10, y: 20, sum: 30, product: 200, diff: 10, result: 230}, "parallel math operations")
 
     // Test nested operations in parallel flow
-    parallel-nested parallel|vec {
+    parallel-nested: All<Vec> parallel {
         a 5
         b 3
         c add(mul(a, 2), b)
@@ -391,58 +419,58 @@ test-condall-flows
 meta ["test"] fn () {
     // Test CondAll with multiple truthy branches
     // Note: Execution is sequential, but all truthy branches run
-    condall-basic cond-all|vec {
+    condall-basic: All<Vec> cond-all {
         true => a { 10 }
         true => b { 20 }
         false => c { 30 }
         true => d { 40 }
     }
 
-    assert-eq(condall-basic, [10, 20, 40], "cond-all|vec with multiple truthy branches")
+    assert-eq(condall-basic, [10, 20, 40], "cond-all All<Vec> with multiple truthy branches")
 
-    // Test CondAll with map result modifier
-    condall-map cond-all|map {
+    // Test CondAll with All<Map>
+    condall-map: All<Map> cond-all {
         true => x { 1 }
         false => y { 2 }
         true => z { 3 }
     }
 
-    assert-eq(condall-map, {x: 1, z: 3}, "cond-all|map collects all truthy results")
+    assert-eq(condall-map, {x: 1, z: 3}, "cond-all All<Map> collects all truthy results")
 
-    // Test CondAll with one result modifier (takes last truthy)
-    condall-one cond-all|one {
+    // Test CondAll with a plain annotation (takes last truthy)
+    condall-one: Int cond-all {
         true => first { 100 }
         true => second { 200 }
         true => third { 300 }
     }
 
-    assert-eq(condall-one, 300, "cond-all|one returns last truthy result")
+    assert-eq(condall-one, 300, "cond-all plain annotation returns last truthy result")
 
     // Test CondAll with all false conditions
-    condall-all-false cond-all|vec {
+    condall-all-false: All<Vec> cond-all {
         false => a { 1 }
         false => b { 2 }
         false => c { 3 }
     }
 
-    assert-eq(condall-all-false, [], "cond-all|vec with all false returns empty")
+    assert-eq(condall-all-false, [], "cond-all All<Vec> with all false returns empty")
 
     // Test CondAll with truthy/falsy values
     val1 true
     val2 false
     val3 true
     val4 false
-    condall-conditions cond-all|vec {
+    condall-conditions: All<Vec> cond-all {
         val1 => a { "first" }
         val2 => b { "second" }
         val3 => c { "third" }
         val4 => d { "fourth" }
     }
 
-    assert-eq(condall-conditions, ["first", "third"], "cond-all|vec evaluates all conditions")
+    assert-eq(condall-conditions, ["first", "third"], "cond-all All<Vec> evaluates all conditions")
 
     // Test CondAll with nested flows in branches
-    condall-nested cond-all|vec {
+    condall-nested: All<Vec> cond-all {
         true => result1 {
             a 1
             b 2
@@ -456,7 +484,7 @@ meta ["test"] fn () {
         }
     }
 
-    assert-eq(condall-nested, [3, 30], "cond-all|vec with nested flows")
+    assert-eq(condall-nested, [3, 30], "cond-all All<Vec> with nested flows")
 }
 
 // ============================================================================
@@ -738,7 +766,7 @@ test-cond-all-no-short-circuit
 meta ["test"] fn () {
     x 10
 
-    result cond-all|map {
+    result: All<Map> cond-all {
         gt(x, 5) => a { "big" }
         gt(x, 3) => b { "medium" }
         gt(x, 1) => c { "small" }

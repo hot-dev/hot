@@ -149,13 +149,23 @@ with-default fn (): Map {
 }
 // @end: default-values
 
-// @doc: fail-with-context
+// @doc: expected-failure-err
+// Expected failures are err(...) values the caller can branch on;
+// fail() is reserved for broken invariants and halts the run or task.
 validate-email fn (data: Map): Map {
     if(is-empty(data.email),
-        fail("Email is required", {field: "email"}),
+        err({message: "Email is required", field: "email"}),
         data)
 }
-// @end: fail-with-context
+// @end: expected-failure-err
+
+test-validate-email-err
+meta ["test"] fn () {
+    bad validate-email({email: ""})
+    assert(is-err(bad), "missing email is an Err value")
+    good validate-email({email: "a@example.com"})
+    assert(is-ok(good), "present email passes through")
+}
 
 // =============================================================================
 // Tests

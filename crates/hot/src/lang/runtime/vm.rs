@@ -2527,13 +2527,18 @@ impl VirtualMachine {
                     let actual: Vec<String> =
                         args.iter().map(|a| self.get_val_type_name(a)).collect();
                     if actual != expected {
-                        let mut plan: Vec<Option<String>> = Vec::with_capacity(args_count as usize);
+                        let actual_full: Vec<String> =
+                            args.iter().map(|a| self.get_value_type_path(a)).collect();
+                        let mut plan: Vec<Option<(String, String)>> =
+                            Vec::with_capacity(args_count as usize);
                         let mut all_ok = true;
-                        for (a, e) in actual.iter().zip(expected.iter()) {
+                        for ((a, a_full), e) in
+                            actual.iter().zip(actual_full.iter()).zip(expected.iter())
+                        {
                             if a == e {
                                 plan.push(None);
-                            } else if let Some(target) = self.find_coercion_target(a, e) {
-                                plan.push(Some(target));
+                            } else if let Some(arrow) = self.find_coercion_target(a_full, a, e) {
+                                plan.push(Some(arrow));
                             } else {
                                 all_ok = false;
                                 break;
@@ -4119,23 +4124,37 @@ impl VirtualMachine {
                 // inference we look up the arrow and call it.
                 let src_short = existing.rsplit('/').next().unwrap_or(existing);
                 let tgt_short = type_name.rsplit('/').next().unwrap_or(&type_name);
-                let candidates: Vec<String> = self
-                    .type_implementations
-                    .keys()
-                    .filter_map(|(s, t)| {
-                        if s != src_short {
-                            return None;
-                        }
-                        if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
-                            Some(t.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                // Prefer keys whose source is the value's qualified $type;
+                // fall back to short-form comparison for legacy registry
+                // entries. The single-candidate guard keeps ambiguous
+                // matches from silently picking an arrow.
+                let collect_candidates = |exact: bool| -> Vec<(String, String)> {
+                    self.type_implementations
+                        .keys()
+                        .filter_map(|(s, t)| {
+                            let source_matches = if exact {
+                                s == existing
+                            } else {
+                                s.rsplit('/').next().unwrap_or(s) == src_short
+                            };
+                            if !source_matches {
+                                return None;
+                            }
+                            if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
+                                Some((s.clone(), t.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+                let mut candidates = collect_candidates(true);
+                if candidates.is_empty() {
+                    candidates = collect_candidates(false);
+                }
                 if candidates.len() == 1
                     && let Some(impl_name) =
-                        self.resolve_type_implementation(src_short, &candidates[0])
+                        self.resolve_type_implementation(&candidates[0].0, &candidates[0].1)
                 {
                     return self.execute_function_call_by_qualified_name(
                         &impl_name,
@@ -4939,6 +4958,31 @@ impl VirtualMachine {
         crate::lang::runtime::function_ref::function_ref(function_name.to_string())
     }
 
+    /// Extract a human-readable message from a Result.Err payload so the
+    /// escalation halt carries the underlying failure (a connect error,
+    /// an HTTP status, ...) instead of an opaque placeholder.
+    fn result_err_message(err_val: &Val) -> String {
+        match err_val {
+            Val::Str(s) => (**s).to_owned(),
+            // Defensive: a nested Result.Err payload (should no longer be
+            // produced) still surfaces its inner message.
+            v if v.is_err() => v
+                .unwrap_err()
+                .map(Self::result_err_message)
+                .unwrap_or_else(|| "Error Result encountered".to_string()),
+            Val::Map(err_map) => err_map
+                .get(&Val::from("msg"))
+                .or_else(|| err_map.get(&Val::from("message")))
+                .and_then(|v| match v {
+                    Val::Str(s) => Some((**s).to_owned()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| err_val.to_string()),
+            Val::Null => "Error Result encountered".to_string(),
+            other => other.to_string(),
+        }
+    }
+
     /// Unwrap result if it's an "ok" result, or fail if it's an error
     /// This implements Hot's automatic Result unwrapping behavior:
     /// - If val is a Result.Ok: return the $val value
@@ -4947,6 +4991,12 @@ impl VirtualMachine {
     ///
     /// NOTE: This should ONLY be called for non-lazy function arguments and template literal parts
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
+        if std::env::var("HOT_DBG_UNWRAP").is_ok() && val.is_err() {
+            eprintln!(
+                "DBG unwrap_result_if_ok on Err (suppress={})",
+                self.suppress_result_checking
+            );
+        }
         // Don't unwrap if this is a lambda - lazy values should not be unwrapped
         if let Val::Box(b) = val
             && b.as_any()
@@ -4975,18 +5025,7 @@ impl VirtualMachine {
             if &**type_str == "::hot::type/Result.Err" {
                 let err_val = m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
 
-                // Extract message from error
-                let msg = match &err_val {
-                    Val::Str(s) => (**s).to_owned(),
-                    Val::Map(err_map) => err_map
-                        .get(&Val::from("msg"))
-                        .and_then(|v| match v {
-                            Val::Str(s) => Some((**s).to_owned()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "Error Result encountered".to_string()),
-                    _ => "Error Result encountered".to_string(),
-                };
+                let msg = Self::result_err_message(&err_val);
 
                 // Set VM failure state and return error. The run/task boundary
                 // emits terminal status if this halt is not explicitly
@@ -6469,22 +6508,41 @@ impl VirtualMachine {
     /// `resolve_type_implementation`) when exactly one such arrow exists.
     /// Multiple matches return `None` so the dispatcher can fall through
     /// rather than silently picking one.
-    fn find_coercion_target(&self, src: &str, tgt: &str) -> Option<String> {
+    /// `src_full` is the value's qualified type path; the registry is keyed
+    /// by scope-resolved qualified source names, so that match is
+    /// authoritative. The short-name comparison runs only when no qualified
+    /// key matches (legacy caches, values carrying short $type strings).
+    fn find_coercion_target(
+        &self,
+        src_full: &str,
+        src_short: &str,
+        tgt: &str,
+    ) -> Option<(String, String)> {
         let dotted_prefix = format!("{}.", tgt);
-        let candidates: Vec<String> = self
-            .type_implementations
-            .keys()
-            .filter_map(|(s, t)| {
-                if s != src {
-                    return None;
-                }
-                if t == tgt || t.starts_with(&dotted_prefix) {
-                    Some(t.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let collect = |exact: bool| -> Vec<(String, String)> {
+            self.type_implementations
+                .keys()
+                .filter_map(|(s, t)| {
+                    let source_matches = if exact {
+                        s == src_full
+                    } else {
+                        s.rsplit('/').next().unwrap_or(s) == src_short
+                    };
+                    if !source_matches {
+                        return None;
+                    }
+                    if t == tgt || t.starts_with(&dotted_prefix) {
+                        Some((s.clone(), t.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut candidates = collect(true);
+        if candidates.is_empty() {
+            candidates = collect(false);
+        }
         if candidates.len() == 1 {
             candidates.into_iter().next()
         } else {
@@ -6497,16 +6555,19 @@ impl VirtualMachine {
     /// coerced value; pass `None` entries through unchanged. Errors from an arrow
     /// propagate to the caller — silent arrow-failure would surprise users who
     /// explicitly registered the conversion.
-    fn apply_coercion_plan(&mut self, args: &[Val], plan: &[Option<String>]) -> VmResult<Vec<Val>> {
+    fn apply_coercion_plan(
+        &mut self,
+        args: &[Val],
+        plan: &[Option<(String, String)>],
+    ) -> VmResult<Vec<Val>> {
         let mut coerced: Vec<Val> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
-            if let Some(target) = plan.get(i).and_then(|p| p.as_ref()) {
-                let actual = self.get_val_type_name(arg);
-                let Some(impl_name) = self.resolve_type_implementation(&actual, target) else {
+            if let Some((source_key, target)) = plan.get(i).and_then(|p| p.as_ref()) {
+                let Some(impl_name) = self.resolve_type_implementation(source_key, target) else {
                     return Err(VmError::runtime_with_ip(
                         format!(
                             "Implicit coercion plan referenced missing arrow {} -> {}",
-                            actual, target
+                            source_key, target
                         ),
                         self.instruction_pointer,
                     ));
@@ -7459,11 +7520,17 @@ impl VirtualMachine {
                     args_start,
                     args_count,
                 } => {
+                    // Mirror the main interpreter loop's Call handler:
+                    // arguments follow the normal auto-unwrap rules (Ok
+                    // unwraps, Err escalates with its payload message).
+                    // Without this, an Err bound inside a lambda body
+                    // reached natives raw and produced misleading type
+                    // errors instead of the Err's own message.
                     let mut args = Vec::new();
                     for i in 0..*args_count {
                         let arg_reg = args_start + i as RegisterId;
                         let arg_val = self.get_register(arg_reg)?.clone();
-                        args.push(arg_val);
+                        args.push(self.prepare_call_arg(arg_val)?);
                     }
                     let result = self.execute_function_call(*function, &args)?;
                     self.set_register(*dest, result)?;
@@ -9264,8 +9331,8 @@ impl VirtualMachine {
     ///   returning `Err(VmError)`. The state is left set so the top-level
     ///   run-loop sees `has_failed()`/`has_cancelled()` and avoids emitting
     ///   a duplicate `run:fail`/`run:cancel` event (the primitive already
-    ///   emitted it). Boundary helpers like `::hot::lang/try-call` and
-    ///   tool dispatch reset the state when they catch the halt.
+    ///   emitted it). Runtime boundaries (`::hot::internal::exec/contain`,
+    ///   tool dispatch) reset the state when they catch the halt.
     /// - Otherwise wrap the error as a `Result.Err` value so user code can
     ///   inspect it via `is-err`/`match`. This preserves the existing
     ///   contract for non-halting hotlib errors (e.g. parse errors, HTTP
@@ -9290,6 +9357,12 @@ impl VirtualMachine {
                     other => format!("{:?}", other),
                 });
             return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
+        }
+        // Some natives (tcp/tls/http/...) return an already-wrapped
+        // Result.Err as their error payload; wrapping again would nest
+        // Err(Err(...)) and hide the message from is-err/err-value.
+        if err.is_err() {
+            return Ok(err);
         }
         Ok(Val::err(err))
     }
@@ -9324,6 +9397,13 @@ impl VirtualMachine {
         });
 
         if let Some(lib_fn) = lib_fn {
+            // NOTE: no Result auto-unwrap here. This is a runtime dispatch
+            // layer also reached by Rust-side HOF loops (filter/map/...)
+            // that legitimately hand raw Err elements to Result-aware
+            // natives (is-err, err-value, ...). Only compiled call sites
+            // know which parameters are lazy, so arg auto-unwrap lives in
+            // the interpreter Call handlers (main + lambda loops), where
+            // lazy arguments arrive as thunks and are skipped.
             // Dispatch based on function type encoded in the enum
             let result = match lib_fn {
                 crate::lang::hot::HotLibFn::LibFn(func) => {
@@ -9799,6 +9879,44 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
 
+    // Regression (nested-Err bug): the escalation halt for an unhandled
+    // Result.Err must carry the payload's actual message, never the
+    // opaque "Error Result encountered" placeholder.
+    #[test]
+    fn test_result_err_message_extraction() {
+        // Plain string payload (the common native err_val shape)
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::from("connection refused")),
+            "connection refused"
+        );
+
+        // Map payloads: msg, then message, are preferred
+        let mut m = IndexMap::new();
+        m.insert(Val::from("msg"), Val::from("boom"));
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
+            "boom"
+        );
+        let mut m = IndexMap::new();
+        m.insert(Val::from("message"), Val::from("pg: relation missing"));
+        m.insert(Val::from("code"), Val::from("42P01"));
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
+            "pg: relation missing"
+        );
+
+        // Defensive: a nested Result.Err payload still surfaces the
+        // innermost message.
+        let nested = Val::err(Val::from("inner reason"));
+        assert_eq!(VirtualMachine::result_err_message(&nested), "inner reason");
+
+        // Null payload keeps the legacy placeholder
+        assert_eq!(
+            VirtualMachine::result_err_message(&Val::Null),
+            "Error Result encountered"
+        );
+    }
+
     #[test]
     fn test_vm_basic_execution() {
         let program = Arc::new(BytecodeProgram::new());
@@ -9813,6 +9931,35 @@ mod tests {
         );
         let result = vm.execute();
         assert!(result.is_ok());
+    }
+
+    // Regression (nested-Err bug): natives that error by returning an
+    // already-wrapped Result.Err (tcp/tls/http/... err_val helpers) must
+    // pass through dispatch unchanged — wrapping again produced
+    // Err(Err(msg)), which is-err/err-value could not handle.
+    #[test]
+    fn test_dispatch_hotlib_err_is_idempotent() {
+        let program = Arc::new(BytecodeProgram::new());
+        let mut vm = VirtualMachine::new(
+            program,
+            None,
+            Arc::new(IndexMap::new()),
+            Arc::new(IndexMap::new()),
+            Arc::new(IndexMap::new()),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        );
+
+        // Pre-wrapped Err passes through unchanged
+        let wrapped = Val::err(Val::from("connection refused"));
+        let out = vm.dispatch_hotlib_err(wrapped.clone()).unwrap();
+        assert_eq!(out, wrapped);
+        assert!(out.unwrap_err().is_some_and(|p| !p.is_err()));
+
+        // Bare payload gets wrapped exactly once
+        let out = vm.dispatch_hotlib_err(Val::from("parse error")).unwrap();
+        assert!(out.is_err());
+        assert_eq!(out.unwrap_err(), Some(&Val::from("parse error")));
     }
 
     #[test]

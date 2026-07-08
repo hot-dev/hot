@@ -182,17 +182,21 @@ Provide fallbacks for failures:
 
 {{snippet:errors#default-value}}
 
-### Pattern 4: Fail with Context
+### Pattern 4: Fail on Broken Invariants
 
-Use `fail` to declare that the current run or task failed. This is different
-from returning a normal domain `err(...)` value: `fail()` and `cancel()` stop
-execution by default and are only caught at an explicit boundary such as `try`.
+Use `fail` to declare that the current run or task hit a bug or broken
+invariant and must stop. This is different from returning a normal domain
+`err(...)` value: expected failures — bad input, a refused connection, a
+query error — should be `err(...)` values the caller can branch on, while
+`fail()` and `cancel()` halt execution and surface at the run or task
+boundary (the `run:fail` event, or `status: "failed"` on the `TaskResult`
+returned by `::hot::task/await`).
 
 ```hot
-validate fn (data) {
-  if(is-empty(data.email),
-    fail("Email is required", {field: "email"}),
-    data)
+apply-migration fn (db, version: Int) {
+  if(lt(version, current-version(db)),
+    fail("migration version went backwards", {version: version}),
+    run-migration(db, version))
 }
 ```
 
@@ -207,35 +211,64 @@ values in the result:
 `OnErr` applies only to normal `err(...)` / `Result.Err(...)` values. It does
 not catch `fail()`, `cancel()`, or hard runtime errors.
 
-### Pattern 6: Rare Halt Containment
+### The Error Payload Convention
 
-Most Hot code should not use `try`. Normal error handling uses `Result` values
-and Hot's auto-unwrapping rules, while `fail()` and `cancel()` usually mean the
-current run or task should stop.
+Keep payloads in one of two shapes so error text survives every hop:
 
-Use `::hot::lang/try` only at an intentional boundary where one failure must be
-caught, such as a scheduled fan-out loop where one failed item must be recorded
-without stopping the rest of the batch:
+- **Simple:** a plain `Str` — `err("connection refused")`.
+- **Structured:** a Map with a `message` field plus any structured
+  fields — `err({message: "pg: relation missing", code: "42P01"})`.
 
-{{snippet:errors#try-contain-halt}}
+The auto-unwrap halt reads `message` (then `msg`) from Map payloads, and
+`err-message(result)` extracts readable text from any shape — including
+a halt's `Failure` payload — so handlers never hand-roll extraction:
 
-`try` returns a normal `Result`: `Result.Ok(value)` on success and
-`Result.Err(payload)` on failure. Because it catches halts that would otherwise
-stop the run or task, it should be uncommon in application logic.
+```hot
+conn ::pg/connect(opts)
+if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+```
 
-> **Note:** You may also encounter `::hot::lang/try-call` in compiler hints and
-> older code — it's the legacy map-shaped variant of the same halt boundary.
-> Prefer `try` in new code.
+### Pattern 6: Chain Fallible Steps
+
+`if-ok` flat-maps: the handler receives the Ok value, its return passes
+through unchanged, and an `Err` short-circuits out. Use it to chain steps
+where each depends on the previous one succeeding:
+
+{{snippet:errors#chain-if-ok}}
+
+The first failing step becomes the whole chain's return value, as a single
+well-formed `Err`.
+
+### Pattern 7: Supervise Untrusted Work with Tasks
+
+There is no `catch` in Hot. Code that must survive a `fail()` in work it
+does not control — arbitrary user callbacks, independent jobs — runs that
+work as a task. A halt inside the task never propagates to the caller; it
+surfaces as data on the awaited result:
+
+```hot
+info ::hot::task/start(::myapp/risky-job, args)
+result ::hot::task/await(info.id)
+if(eq(result.status, "failed"),
+  record-error("job", result.result),
+  use-value(result.result))
+```
+
+> **Note:** `::hot::lang/try` and `::hot::lang/try-call` were removed in Hot
+> 2.6.0. Old code that wrapped calls in `try` to detect failures should
+> branch on the returned `Result` directly (Pattern 2); fan-out loops that
+> used `try` for isolation should pass `OnErr.Preserve` (Pattern 5).
 
 ## Summary
 
 - Use `Result.Ok(value)` or `ok(value)` and `Result.Err(message)` or `err(message)` to create Results
 - Results **auto-unwrap** when passed to functions or used in templates
-- Err Results **automatically fail** at point of use—no explicit handling needed
+- Err Results **automatically fail** at point of use, carrying the payload's message—no explicit handling needed
 - Use `is-ok(result)` and `is-err(result)` to check without triggering auto-unwrap
+- Use `if-ok` to chain fallible steps; an `Err` short-circuits the chain
 - Use `OnErr.Preserve` with eligible map-shaped APIs when you intentionally want to keep domain errors as values
-- Use `fail()` / `cancel()` for explicit run/task termination, not ordinary recoverable domain errors
-- Reach for `try` only in rare cases where a `fail()`, `cancel()`, or runtime halt must be caught at a boundary
+- Use `fail()` / `cancel()` for bugs and broken invariants, not ordinary recoverable domain errors
+- Supervise untrusted or independent work with a task boundary (`::hot::task/start` + `await`)
 - Use `match` for pattern matching on `Result.Ok` and `Result.Err` variants
 - Dot access on Results automatically accesses fields within the payload: `result.name`
 - **Lazy arguments** suppress Result checking, enabling safe inspection and short-circuit evaluation

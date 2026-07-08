@@ -2,6 +2,115 @@ use super::*;
 use ahash::AHashMap;
 
 #[test]
+fn test_removed_result_modifier_syntax_errors() {
+    // |map/|vec/|one were removed in Hot 2.6.0; the parser gives a
+    // targeted migration hint instead of a generic parse error.
+    for src in [
+        "x cond|map {\n    true => m { 1 }\n}",
+        "x cond-all|vec {\n    true => m { 1 }\n}",
+        "x parallel|one {\n    a 1\n}",
+        "x 5 |> add(2) |one",
+        "x match|map v {\n    _ => { 1 }\n}",
+    ] {
+        let result = parse_hot(src);
+        let err = format!("{:?}", result.expect_err(src));
+        assert!(
+            err.contains("removed in Hot 2.6.0"),
+            "expected migration hint for {:?}, got: {}",
+            src,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_typed_bindings_in_value_position_blocks() {
+    // `name: Type value` must parse anywhere a block statement can
+    // appear, not just in function bodies. The one exception is a
+    // block's FIRST statement, where `name:` is a map literal by the
+    // documented disambiguation rule.
+    for src in [
+        // cond arm block
+        "r cond {\n    true => m {\n        y 1\n        x: Int 5\n        add(x, y)\n    }\n}",
+        // value-position serial flow
+        "v serial {\n    x: Int 5\n    x\n}",
+        // nested flow-shape annotation inside an arm block
+        "r: All<Map> cond {\n    true => m {\n        y 1\n        inner: All<Map> serial { a 1 b 2 }\n        inner\n    }\n}",
+    ] {
+        let result = parse_hot(src);
+        assert!(
+            result.is_ok(),
+            "expected {:?} to parse: {:?}",
+            src,
+            result.err()
+        );
+    }
+
+    // First statement `name:` stays a map literal (documented ambiguity)
+    let result = parse_hot("m {x: 1}");
+    assert!(
+        result.is_ok(),
+        "leading name: is a map literal: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_plain_annotation_takes_single_value_on_collect_all_flows() {
+    // A flow annotation states the type of the flow's result: All<...>
+    // collects, any other type opts a collect-all flow out of collection
+    // and takes the single final value.
+    for src in [
+        "x: Int parallel {\n    a 1\n}",
+        "x: Str cond-all {\n    true => m { \"a\" }\n}",
+        "x: Map parallel {\n    a {k: 1}\n}",
+    ] {
+        let program = parse_hot(src).expect(src);
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let (_, value) = default_ns
+            .scope
+            .vars
+            .iter()
+            .find(|(var, _)| var.sym.name() == "x")
+            .expect("x should exist");
+        match value {
+            Value::Flow(flow) => assert_eq!(
+                flow.result_modifier,
+                Some(ResultModifier::One),
+                "plain annotation should set One on collect-all flow: {}",
+                src
+            ),
+            other => panic!("expected flow, got {:?}", other),
+        }
+    }
+
+    // On naturally-single flows a plain annotation is an ordinary type
+    // check and sets no result modifier.
+    for src in [
+        "x: Int cond {\n    true => m { 1 }\n}",
+        "x: Int serial {\n    a 1\n}",
+        "x: Int 5 |> add(2)",
+    ] {
+        let program = parse_hot(src).expect(src);
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let (_, value) = default_ns
+            .scope
+            .vars
+            .iter()
+            .find(|(var, _)| var.sym.name() == "x")
+            .expect("x should exist");
+        match value {
+            Value::Flow(flow) => assert_eq!(
+                flow.result_modifier, None,
+                "plain annotation should not set a modifier on single-value flow: {}",
+                src
+            ),
+            other => panic!("expected flow, got {:?}", other),
+        }
+    }
+}
+
+#[test]
 fn test_simple_variable() {
     let source = r#"x 42"#;
     let result = parse_hot(source);

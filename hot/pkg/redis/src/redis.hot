@@ -1,0 +1,259 @@
+::redis ns
+meta {
+    doc: """
+    Redis client for Hot.
+
+    Speaks the RESP protocol directly over `::hot::tcp` (with optional
+    `::hot::tls`), so no native driver is required. Supports authentication,
+    database selection, RESP2/RESP3, and arbitrary commands with typed
+    replies.
+
+    A connection is a runtime-owned socket handle; it lives for the
+    duration of the run or task that opened it.
+
+    **Error contract:** expected failures — connection refused, TLS
+    negotiation, AUTH/SELECT, Redis error replies — return a
+    `Result.Err`; branch with `is-err` / `if-err`. A socket failure
+    mid-protocol (the connection drops between command and reply) halts
+    the run instead: the connection state is unusable and the recovery
+    unit is the run or task, not the command.
+
+    **Quick start**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+
+    ::redis/set(conn, "greeting", "hello")
+    ::redis/get(conn, "greeting")        // "hello"
+    ::redis/incr(conn, "counter")        // 1
+
+    // Arbitrary commands
+    ::redis/command(conn, ["LPUSH", "queue", "a", "b"])
+    ::redis/command(conn, ["LRANGE", "queue", "0", "-1"])  // ["b", "a"]
+
+    ::redis/close(conn)
+    ```
+    """
+}
+
+::tcp ::hot::tcp
+::tls ::hot::tls
+::coll ::hot::coll
+::resp ::redis::resp
+
+RedisOptions
+meta {
+    doc: """
+    Connection options.
+
+    **Fields**
+    - `host` — Server host (default `"127.0.0.1"`)
+    - `port` — Server port (default `6379`)
+    - `username` — ACL username (RESP3/Redis 6+, optional)
+    - `password` — Password for AUTH (optional)
+    - `db` — Database index to SELECT (default `0`)
+    - `resp3` — Negotiate RESP3 with HELLO 3 (default `false`)
+    - `tls` — When set, upgrade the connection with `::hot::tls/upgrade`
+    - `timeout` — Connect/read timeout in milliseconds
+    """
+}
+type {
+    host: Str?,
+    port: Int?,
+    username: Str?,
+    password: Str?,
+    db: Int?,
+    resp3: Bool?,
+    tls: Map?,
+    timeout: Int?
+}
+
+RedisConnection
+meta {
+    doc: """
+    An open Redis connection.
+
+    **Fields**
+    - `socket` — The underlying `::hot::tcp` connection
+    """
+}
+type {
+    socket: Any
+}
+
+// ---------------------------------------------------------------------------
+// Connect
+// ---------------------------------------------------------------------------
+
+connect
+meta {
+    doc: """
+    Open a Redis connection, optionally authenticating, selecting a
+    database, and negotiating RESP3.
+
+    Returns a `RedisConnection`, or a `Result.Err` carrying the error
+    details when the connection, TLS negotiation, AUTH, or SELECT fails.
+    Branch on it with `is-err` / `if-err`; an unhandled error halts at
+    first use with the same message.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379, password: "secret", db: 1})
+    if-err(conn, (e) { ... fall back ... })
+    ```
+
+    See `RedisOptions` for the accepted fields.
+    """
+}
+fn (options: Map): RedisConnection {
+    host ::coll/get(options, "host", "127.0.0.1")
+    port ::coll/get(options, "port", 6379)
+    tcp-opts if(is-null(options.timeout), {}, {timeout: options.timeout})
+
+    // Each step returns its value or a Result.Err; if-ok short-circuits
+    // the first error out as connect's return value.
+    if-ok(::tcp/connect(host, port, tcp-opts), (socket) {
+        if-ok(if(is-null(options.tls), true, negotiate-tls(socket, options.tls, host)), (secured) {
+            conn {socket: socket}
+            if-ok(maybe-auth(conn, ::coll/get(options, "username", null), ::coll/get(options, "password", null), ::coll/get(options, "resp3", false)), (authed) {
+                if-ok(maybe-select(conn, ::coll/get(options, "db", 0)), (selected) {
+                    conn
+                })
+            })
+        })
+    })
+}
+
+negotiate-tls fn (socket, tls-opts: Map, host: Str): Any {
+    // upgrade secures the socket handle in place.
+    if-ok(::tls/upgrade(socket, {...tls-opts, server-name: ::coll/get(tls-opts, "server-name", host)}), (upgraded) { true })
+}
+
+// AUTH, or HELLO 3 (with optional AUTH) when RESP3 is requested.
+maybe-auth fn (conn: RedisConnection, username, password, resp3: Bool): Any {
+    cond {
+        resp3 => {
+            hello-args cond {
+                is-null(password) => { ["HELLO", "3"] }
+                is-null(username) => { ["HELLO", "3", "AUTH", "default", password] }
+                => { ["HELLO", "3", "AUTH", username, password] }
+            }
+            command(conn, hello-args)
+        }
+        is-null(password) => { null }
+        is-null(username) => { command(conn, ["AUTH", password]) }
+        => { command(conn, ["AUTH", username, password]) }
+    }
+}
+
+maybe-select fn (conn: RedisConnection, db: Int): Any {
+    if(eq(db, 0), null, command(conn, ["SELECT", Str(db)]))
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+command
+meta {
+    doc: """
+    Send a command (a Vec of arguments) and return the decoded reply.
+
+    `Bytes` arguments are sent as-is (binary-safe); other arguments are
+    coerced to strings. Replies decode to Str/Int/Dec/Bool/Vec/Map/null
+    per RESP; a bulk value that is not valid UTF-8 decodes to Bytes.
+    Redis error replies decode to a `Result.Err` with the message;
+    branch on it with `is-err` / `if-err`. An unhandled error halts at
+    first use with the same message.
+
+    **Example**
+
+    ```hot
+    ::redis/command(conn, ["SET", "k", "v"])          // "OK"
+    ::redis/command(conn, ["INCRBY", "n", "5"])       // 5
+    ::redis/command(conn, ["MGET", "a", "b"])         // ["1", null]
+    ```
+    """
+}
+fn (conn: RedisConnection, args: Vec): Any {
+    if-ok(::tcp/write(conn.socket, ::resp/encode-command(args)), (sent) {
+        ::resp/read-reply(conn.socket)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers
+// ---------------------------------------------------------------------------
+
+ping
+meta {doc: """Ping the server. Returns "PONG"."""}
+fn (conn: RedisConnection): Str { command(conn, ["PING"]) }
+
+get
+meta {
+    doc: """
+    Get the value of `key`, or null if it does not exist. Values decode
+    to Str, or to Bytes when they are not valid UTF-8.
+    """
+}
+fn (conn: RedisConnection, key: Str): Any { command(conn, ["GET", key]) }
+
+set
+meta {
+    doc: """
+    Set `key` to `value`. A `Bytes` value is stored as-is (binary-safe);
+    other values are coerced to strings. Returns "OK".
+
+    **Example**
+
+    ```hot
+    ::redis/set(conn, "session:42", token)
+    ```
+    """
+}
+fn (conn: RedisConnection, key: Str, value: Any): Str {
+    command(conn, ["SET", key, value])
+}
+
+set-ex
+meta {doc: """Set `key` to `value` with an expiry in `seconds`, like `set`. Returns "OK"."""}
+fn (conn: RedisConnection, key: Str, value: Any, seconds: Int): Str {
+    command(conn, ["SET", key, value, "EX", Str(seconds)])
+}
+
+del
+meta {doc: """Delete one or more `keys`. Returns the number removed."""}
+fn (conn: RedisConnection, keys: Vec): Int {
+    command(conn, concat(["DEL"], keys))
+}
+
+exists
+meta {doc: """Return the number of the given `keys` that exist."""}
+fn (conn: RedisConnection, keys: Vec): Int {
+    command(conn, concat(["EXISTS"], keys))
+}
+
+incr
+meta {doc: """Increment the integer at `key` by one and return the new value."""}
+fn (conn: RedisConnection, key: Str): Int { command(conn, ["INCR", key]) }
+
+expire
+meta {doc: """Set a `seconds` TTL on `key`. Returns 1 if set, 0 if the key does not exist."""}
+fn (conn: RedisConnection, key: Str, seconds: Int): Int {
+    command(conn, ["EXPIRE", key, Str(seconds)])
+}
+
+close
+meta {
+    doc: """
+    Close the connection (send QUIT and shut down the socket). Safe to call
+    more than once.
+    """
+}
+fn (conn: RedisConnection): Bool {
+    // The QUIT courtesy write fails on an already-closed socket;
+    // recover the Err so close stays idempotent as documented.
+    quit if-err(::tcp/write(conn.socket, ::resp/encode-command(["QUIT"])), false)
+    ::tcp/close(conn.socket)
+}

@@ -90,6 +90,12 @@ meta {
 
     Accepts either an `HttpRequest` or positional arguments (method, url, headers, body).
 
+    Transport failures (DNS failure, connection refused, TLS errors,
+    timeouts, ...) return a `Result.Err`; branch on it with `is-err` /
+    `if-err`. An unhandled error halts at first use with the same
+    message. Non-2xx responses are normal `HttpResponse` values — check
+    `response.status`.
+
     **Examples**
 
     ```hot
@@ -98,6 +104,10 @@ meta {
 
     // Using positional arguments
     response request("POST", "https://api.example.com/data", {"Content-Type": "application/json"}, {name: "Alice"})
+
+    // Handling transport failure
+    response request(HttpRequest({method: "GET", url: url}))
+    if-err(response, (failure) { println(`network error: ${failure}`) })
     ```
     """
 }
@@ -109,38 +119,9 @@ fn (request: HttpRequest): HttpResponse {
 }
 
 
-try-request
-meta {
-    doc: """
-    Like `request`, but catches transport errors (DNS failure, connection
-    refused, TLS errors, timeouts, etc.) and returns a `Result` instead
-    of halting execution.
-
-    Use this when you need to handle network failures gracefully — for
-    example, in agent callbacks, scheduled fan-out, or any code path
-    that must keep running even when an outbound HTTP call fails.
-
-    Returns:
-
-    - `Result.Ok(HttpResponse)` on success (including non-2xx status codes —
-      use `is-ok-response` to check status separately).
-    - `Result.Err(payload)` when the transport itself failed.
-
-    **Example**
-
-    ```hot
-    result try-request(HttpRequest({method: "GET", url: "https://api.example.com/data"}))
-    if-err(result, (failure) { println(`Network error: ${failure.msg}`) })
-    if-ok(result, (response) { handle-response(response) })
-    ```
-    """
-}
-fn (request: HttpRequest): Result {
-    ::hot::lang/try(::hot::http/request, [request])
-},
-(method: HttpMethod, url: Str, headers: Map<Str, Str>, body: Any): Result {
-    try-request(HttpRequest({method, url, headers, body}))
-}
+// NOTE: `try-request` was removed in Hot 2.6.0 — `request` already
+// returns a `Result.Err` for transport failures; branch with
+// `is-err` / `if-err`.
 
 
 get

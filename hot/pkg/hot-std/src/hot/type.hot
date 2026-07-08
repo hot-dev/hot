@@ -637,11 +637,17 @@ meta {
     doc: """
     Wrap `value` in an error Result.Err variant.
 
+    **Payload convention:** use a plain `Str` for simple errors, or a Map
+    with a `message` field (plus any structured fields like `code`) for
+    rich errors. The auto-unwrap halt and `err-message` both read
+    `message` (falling back to `msg`, then the payload itself), so
+    following the convention keeps error text intact end to end.
+
     **Example**
 
     ```hot
-    err("Not found")           // Result.Err("Not found")
-    err({code: 404})            // Result.Err({code: 404})
+    err("Not found")                          // simple
+    err({message: "Not found", code: 404})    // structured
 
     if(is-null(user), err("User not found"), ok(user))
     ```
@@ -820,6 +826,45 @@ fn (lazy result: Any): Any {
 }
 
 
+err-message
+meta {
+    core: true,
+    doc: """
+    Extract a human-readable message from an error, without re-triggering
+    it. Accepts a `Result.Err` or a bare payload; understands the payload
+    convention (`message` field, `msg` on halt `Failure` payloads,
+    `reason`), and falls back to the payload's string form.
+
+    **Example**
+
+    ```hot
+    err-message(err("connection refused"))              // "connection refused"
+    err-message(err({message: "pg: bad", code: "42"}))  // "pg: bad"
+
+    r ::pg/connect(opts)
+    if-err(r, (e) { log(`db down: ${err-message(e)}`) })
+    ```
+    """
+}
+fn (lazy result: Any): Str {
+    // Force the lazy argument exactly once; lazy params re-evaluate on
+    // each use and leak as thunks into non-lazy positions.
+    forced do result
+    payload cond {
+        is-err(forced) => { err-value(forced) }
+        => { forced }
+    }
+    cond {
+        is-str(payload) => { payload }
+        => {
+            // Field access is null-safe on maps and typed values (a
+            // halt's ::hot::run/Failure exposes msg directly).
+            Str(or(payload.message, payload.msg, payload.reason, payload))
+        }
+    }
+}
+
+
 // OnErr controls whether eligible higher-order functions force or preserve
 // normal domain Result.Err values. It does not govern fail(), cancel(), or
 // hard runtime halts.
@@ -873,6 +918,18 @@ meta {
     Bare `All` is only accepted on natural collect-all flows (`parallel`,
     `cond-all`, and `match-all`). Use explicit `All<Vec>` or `All<Map>` on
     `serial`, `pipe`, `cond`, and `match`.
+
+    Any non-`All` annotation on a collect-all flow states the type of a
+    single result: the flow opts out of collection and returns only the
+    final produced value.
+
+    ```hot
+    winner: Str cond-all {
+        gt(score, 90) => a { "gold" }
+        gt(score, 50) => b { "silver" }
+    }
+    // winner is the final matching branch's Str, not a collection
+    ```
 
     Use the `All` constructor only when you explicitly want to tag a
     collection value as "all results" for metadata, debugging, or API

@@ -142,6 +142,8 @@ fn merge_trailing_meta(var: &mut Var, trailing: Val) {
     }
 }
 
+const REMOVED_RESULT_MODIFIER_MSG: &str = "The |map, |vec, and |one result modifiers were removed in Hot 2.6.0. Annotate the binding or return type instead: `All<Map>`/`All<Vec>` collect all results; any other type (e.g. `x: Int parallel { ... }`) takes the single final value";
+
 impl Parser {
     pub fn new() -> Self {
         Self {
@@ -1591,15 +1593,30 @@ impl Parser {
         let Some(type_annotation) = type_annotation else {
             return Ok(value);
         };
-        if !Self::is_all_annotation(type_annotation) {
-            return Ok(value);
-        }
 
+        // Non-flow values keep their annotation as an ordinary type
+        // annotation. For example, `tagged: All All({value: [1]})`
+        // constructs the real marker value.
         if !matches!(value, Value::Flow(_) | Value::Match(_)) {
             return Ok(value);
         }
 
-        let modifier = self.all_annotation_modifier(type_annotation, &value)?;
+        let modifier = if Self::is_all_annotation(type_annotation) {
+            self.all_annotation_modifier(type_annotation, &value)?
+        } else if Self::value_is_collect_all(&value) {
+            // A flow annotation states the type of the flow's result:
+            // `All<Map>`/`All<Vec>` are the collected forms (and the
+            // default for collect-all flows when unannotated); any other
+            // type opts out of collection and takes only the final
+            // produced value.
+            ResultModifier::One
+        } else {
+            // On serial, pipe, cond, and match the single final value is
+            // already the default; a plain annotation is an ordinary type
+            // check and sets no result modifier.
+            return Ok(value);
+        };
+
         match &mut value {
             Value::Flow(flow) => {
                 Self::set_all_result_modifier(&mut flow.result_modifier, modifier)?;
@@ -1607,8 +1624,6 @@ impl Parser {
             Value::Match(match_expr) => {
                 Self::set_all_result_modifier(&mut match_expr.result_modifier, modifier)?;
             }
-            // Non-flow uses of `All` are ordinary type annotations. For example,
-            // `tagged: All All({value: [1]})` constructs the real marker value.
             _ => {}
         }
 
@@ -1659,6 +1674,22 @@ impl Parser {
         name == "All" || name.ends_with("/All")
     }
 
+    fn value_is_collect_all(value: &Value) -> bool {
+        match value {
+            Value::Flow(flow) => matches!(
+                flow.flow_type,
+                FlowType::Parallel
+                    | FlowType::ParallelShort
+                    | FlowType::CondAll
+                    | FlowType::CondAllShort
+                    | FlowType::MatchAll
+                    | FlowType::MatchAllShort
+            ),
+            Value::Match(match_expr) => match_expr.match_all,
+            _ => false,
+        }
+    }
+
     fn bare_all_modifier_for_value(&mut self, value: &Value) -> ParseResult<ResultModifier> {
         match value {
             Value::Flow(flow) => match flow.flow_type {
@@ -1695,7 +1726,7 @@ impl Parser {
         {
             return Err(ParseError {
                 message: format!(
-                    "All annotation conflicts with existing deprecated |{} result modifier; remove the modifier or change the All<...> container",
+                    "conflicting flow result annotations: this flow already produces `{}` results; use one annotation",
                     Self::result_modifier_name(existing)
                 ),
                 location: ErrorLocation {
@@ -2302,6 +2333,35 @@ impl Parser {
                         continue;
                     }
                     self.token_index = saved_index;
+                }
+
+                // Typed binding statement: `name: Type value` (same form
+                // as function bodies; see parse_block_expression_after_brace).
+                if let Some(tok) = self.peek()
+                    && matches!(tok.token_type, TokenType::Identifier(_))
+                    && self
+                        .peek_n(1)
+                        .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+                {
+                    let name = self.expect_identifier()?;
+                    self.next(); // consume ':'
+                    let type_expr = self.parse_type_ref()?;
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    let value = self.parse_value()?;
+                    let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                    let var = Var {
+                        sym: Sym::String(name),
+                        deep_set: None,
+                        deep_path: None,
+                        meta: None,
+                        type_annotation: Some(type_expr.to_string()),
+                        src: None,
+                    };
+                    expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                    expressions.push(value);
+                    continue;
                 }
 
                 // Try to parse as: var_name value_expr
@@ -3374,32 +3434,14 @@ impl Parser {
             }
         }
 
-        // After the pipe chain is complete, check for result modifier: |map, |vec, |one
-        if let Value::Flow(ref mut flow) = left
+        // The pipe-tail |map/|vec/|one result-modifier syntax was removed
+        // in Hot 2.6.0 in favor of All<...>/One annotations; keep a
+        // targeted error so old code gets a migration hint.
+        if let Value::Flow(ref flow) = left
             && flow.flow_type == FlowType::Pipe
             && self.check(&TokenType::Pipe)
         {
-            self.next(); // consume "|"
-            if let Some(token) = self.peek() {
-                if let TokenType::Identifier(modifier) = &token.token_type {
-                    let modifier = modifier.clone();
-                    self.next(); // consume modifier
-                    flow.result_modifier = match modifier.as_str() {
-                        "map" => Some(ResultModifier::Map),
-                        "vec" => Some(ResultModifier::Vec),
-                        "one" => Some(ResultModifier::One),
-                        _ => {
-                            return Err(
-                                self.error(&format!("Unknown result modifier: {}", modifier))
-                            );
-                        }
-                    };
-                } else {
-                    return Err(self.error("Expected result modifier after |"));
-                }
-            } else {
-                return Err(self.error("Expected result modifier after |"));
-            }
+            return Err(self.error(REMOVED_RESULT_MODIFIER_MSG));
         }
 
         Ok(left)
@@ -3958,33 +4000,12 @@ impl Parser {
 
         self.next(); // consume "match" or "match-all"
 
-        // Check for result modifier: |map, |vec, |one
-        let result_modifier = if self.check(&TokenType::Pipe) {
-            self.next(); // consume "|"
-            if let Some(token) = self.peek() {
-                if let TokenType::Identifier(modifier) = &token.token_type {
-                    let modifier = modifier.clone();
-                    self.next(); // consume modifier
-                    match modifier.as_str() {
-                        "map" => Some(ResultModifier::Map),
-                        "vec" => Some(ResultModifier::Vec),
-                        "one" => Some(ResultModifier::One),
-                        _ => {
-                            return Err(self.error(&format!(
-                                "Unknown result modifier: {}. Expected 'map', 'vec', or 'one'",
-                                modifier
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(self.error("Expected result modifier after '|'"));
-                }
-            } else {
-                return Err(self.error("Unexpected end of file after '|'"));
-            }
-        } else {
-            None
-        };
+        // |map/|vec/|one result modifiers were removed in Hot 2.6.0;
+        // point old code at the All<...>/One annotations.
+        if self.check(&TokenType::Pipe) {
+            return Err(self.error(REMOVED_RESULT_MODIFIER_MSG));
+        }
+        let result_modifier = None;
 
         // Parse the value to match
         let value = self.parse_value()?;
@@ -4529,6 +4550,50 @@ impl Parser {
             // Check for closing brace after skipping newlines
             if self.check(&TokenType::RightBrace) {
                 break;
+            }
+
+            // Typed binding statement: `name: Type value`. Unambiguous
+            // here — a block whose FIRST token pair is `name:` is routed
+            // to the map-literal parser by parse_map, so any
+            // identifier-colon reaching this loop is a binding with a
+            // type annotation, the same statement form function bodies
+            // support. Flow-shape annotations (All<...>/One) apply their
+            // result modifier to the bound flow value.
+            if let Some(tok) = self.peek()
+                && matches!(tok.token_type, TokenType::Identifier(_))
+                && self
+                    .peek_n(1)
+                    .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+            {
+                let name = self.expect_identifier()?;
+                self.next(); // consume ':'
+                let type_expr = self.parse_type_ref()?;
+                while self.check(&TokenType::Newline) {
+                    self.next();
+                }
+                let value = self.parse_value()?;
+                let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                let var = Var {
+                    sym: Sym::String(name),
+                    deep_set: None,
+                    deep_path: None,
+                    meta: None,
+                    type_annotation: Some(type_expr.to_string()),
+                    src: None,
+                };
+                expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                expressions.push(value);
+
+                while self.check(&TokenType::Newline) {
+                    self.next();
+                }
+                if self.check(&TokenType::Comma) {
+                    self.next();
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                }
+                continue;
             }
 
             let expr = self.parse_value()?;
@@ -6057,32 +6122,12 @@ impl Parser {
             return self.parse_flow_based_lambda(flow_type);
         }
 
-        // Check for result modifier: |map, |vec, |one
-        let result_modifier = if self.check(&TokenType::Pipe) {
-            self.next(); // consume "|"
-            if let Some(token) = self.peek() {
-                if let TokenType::Identifier(modifier) = &token.token_type {
-                    let modifier = modifier.clone();
-                    self.next(); // consume modifier
-                    match modifier.as_str() {
-                        "map" => Some(ResultModifier::Map),
-                        "vec" => Some(ResultModifier::Vec),
-                        "one" => Some(ResultModifier::One),
-                        _ => {
-                            return Err(
-                                self.error(&format!("Unknown result modifier: {}", modifier))
-                            );
-                        }
-                    }
-                } else {
-                    return Err(self.error("Expected result modifier after |"));
-                }
-            } else {
-                return Err(self.error("Expected result modifier after |"));
-            }
-        } else {
-            None
-        };
+        // |map/|vec/|one result modifiers were removed in Hot 2.6.0;
+        // point old code at the All<...>/One annotations.
+        if self.check(&TokenType::Pipe) {
+            return Err(self.error(REMOVED_RESULT_MODIFIER_MSG));
+        }
+        let result_modifier = None;
 
         let mut expressions = Vec::new();
 
@@ -6116,6 +6161,42 @@ impl Parser {
                 // Check for closing brace after skipping newlines
                 if self.check(&TokenType::RightBrace) {
                     break;
+                }
+
+                // Typed binding statement: `name: Type value` (same form as
+                // function bodies). Unambiguous: identifier-colon is not a
+                // valid expression or condition start.
+                if let Some(tok) = self.peek()
+                    && matches!(tok.token_type, TokenType::Identifier(_))
+                    && self
+                        .peek_n(1)
+                        .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+                {
+                    let name = self.expect_identifier()?;
+                    self.next(); // consume ':'
+                    let type_expr = self.parse_type_ref()?;
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    let value = self.parse_value()?;
+                    let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                    let var = Var {
+                        sym: Sym::String(name),
+                        deep_set: None,
+                        deep_path: None,
+                        meta: None,
+                        type_annotation: Some(type_expr.to_string()),
+                        src: None,
+                    };
+                    expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                    expressions.push(value);
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    if self.check(&TokenType::Comma) {
+                        self.next();
+                    }
+                    continue;
                 }
 
                 // Parse conditional branch: condition => result OR => result (default) OR _ => result (default)

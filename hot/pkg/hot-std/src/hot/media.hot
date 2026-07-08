@@ -235,7 +235,7 @@ meta {
     """
 }
 fn (media: Media): Dec? {
-    media.$val.duration_seconds
+    untype(media).duration_seconds
 }
 
 // Constructor helpers (`image`, `audio`, `video`) were removed in favor

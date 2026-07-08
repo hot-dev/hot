@@ -1,0 +1,24 @@
+::hot::conf ns
+
+// Test configuration for the hot.dev/redis package.
+//
+// Runs against a local Redis/Valkey (the dev container exposes 6379).
+// The integration test reads REDISHOST and REDISPORT from the
+// environment, defaulting to 127.0.0.1:6379.
+//
+// Run:  cargo run -p hot_cli -- test -c redis.pkg.test.hot
+
+hot.set.profile "redis-pkg"
+hot.set.project "redis-pkg"
+
+hot.profile.redis-pkg.user.email "redis-pkg-test@hot.dev"
+hot.profile.redis-pkg.org.slug "redis-pkg"
+hot.profile.redis-pkg.env.name "development"
+
+hot.project.redis-pkg.src.paths ["./hot/pkg/redis/src"]
+hot.project.redis-pkg.test.paths ["./hot/pkg/redis/test"]
+hot.project.redis-pkg.test.capture true
+hot.project.redis-pkg.skills.codegen.enabled false
+
+hot.log.level "info"
+hot.log.target "stdout"

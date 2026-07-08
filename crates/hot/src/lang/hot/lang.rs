@@ -523,20 +523,14 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     )))
 }
 
-enum TryShape {
-    Result,
-    LegacyMap,
-}
-
-fn try_success(value: Val, shape: TryShape) -> HotResult<Val> {
-    match shape {
-        TryShape::Result => HotResult::Ok(Val::ok(value)),
-        TryShape::LegacyMap => {
-            let mut result = indexmap::IndexMap::new();
-            result.insert(Val::from("ok"), Val::Bool(true));
-            result.insert(Val::from("value"), value);
-            HotResult::Ok(Val::Map(Box::new(result)))
-        }
+fn contain_success(value: Val) -> HotResult<Val> {
+    // Idempotent on Results: a callee that already returned a Result
+    // (e.g. a native that errors by value) passes through unchanged.
+    // Wrapping an Err in Ok would hide it from is-err/if-err.
+    if value.is_ok() || value.is_err() {
+        HotResult::Ok(value)
+    } else {
+        HotResult::Ok(Val::ok(value))
     }
 }
 
@@ -558,21 +552,11 @@ fn contained_error_payload(
     })
 }
 
-fn try_error(
+fn contain_error(
     vm: &crate::lang::runtime::vm::VirtualMachine,
     err: impl ToString,
-    shape: TryShape,
 ) -> HotResult<Val> {
-    let payload = contained_error_payload(vm, err);
-    match shape {
-        TryShape::Result => HotResult::Ok(Val::err(payload)),
-        TryShape::LegacyMap => {
-            let mut result = indexmap::IndexMap::new();
-            result.insert(Val::from("ok"), Val::Bool(false));
-            result.insert(Val::from("error"), Val::from(payload.to_string()));
-            HotResult::Ok(Val::Map(Box::new(result)))
-        }
-    }
+    HotResult::Ok(Val::err(contained_error_payload(vm, err)))
 }
 
 fn reset_contained_state(vm: &crate::lang::runtime::vm::VirtualMachine) {
@@ -580,24 +564,24 @@ fn reset_contained_state(vm: &crate::lang::runtime::vm::VirtualMachine) {
     vm.reset_cancellation_state();
 }
 
-fn execute_try_boundary(
-    vm: &mut crate::lang::runtime::vm::VirtualMachine,
-    args: &[Val],
-    shape: TryShape,
-    name: &str,
-) -> HotResult<Val> {
+/// Runtime-internal halt containment (::hot::internal::exec/contain).
+/// Calls a function and contains halts (fail()/cancel()) and hard runtime
+/// errors as a Result.Err; a callee that returns a Result passes through
+/// unchanged. This backs the engine's own supervision boundaries (AI tool
+/// dispatch, lifecycle fan-out). Application code uses the error model
+/// instead; the public ::hot::lang/try and try-call were removed in 2.6.0.
+pub fn contain(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Support 1-arg (function only) and 2-arg (function, args) forms
     if args.len() != 1 && args.len() != 2 {
         return HotResult::Err(Val::from(format!(
-            "{} expects 1 or 2 arguments, got {}",
-            name,
+            "::hot::internal::exec/contain expects 1 or 2 arguments, got {}",
             args.len(),
         )));
     }
 
     // Check for call function recursion to prevent infinite loops
     if let Err(err) = vm.increment_call_depth() {
-        return try_error(vm, err, shape);
+        return contain_error(vm, err);
     }
 
     let function_val = &args[0];
@@ -608,13 +592,13 @@ fn execute_try_boundary(
             Ok(av) => av,
             Err(err) => {
                 vm.decrement_call_depth();
-                return try_error(vm, err, shape);
+                return contain_error(vm, err);
             }
         }
     };
 
     // Fast-path: typed Fn wrapping an inline lambda. Mirrors `call`'s
-    // lambda fast-path so `try-call(some-lambda, [...])` works when the
+    // lambda fast-path so `contain(some-lambda, [...])` works when the
     // callee is an inline lambda value rather than a qualified function
     // name. Without this, the generic name-extraction path below errors
     // because $val is a boxed LambdaInfo rather than a string.
@@ -630,9 +614,9 @@ fn execute_try_boundary(
         let exec = vm.execute_lambda(inner, &arg_vals);
         vm.decrement_call_depth();
         return match exec {
-            Ok(value) => try_success(value, shape),
+            Ok(value) => contain_success(value),
             Err(err) => {
-                let result = try_error(vm, err, shape);
+                let result = contain_error(vm, err);
                 reset_contained_state(vm);
                 result
             }
@@ -649,9 +633,9 @@ fn execute_try_boundary(
         let exec = vm.execute_lambda(&Val::Box(boxed_val.clone_box()), &arg_vals);
         vm.decrement_call_depth();
         return match exec {
-            Ok(value) => try_success(value, shape),
+            Ok(value) => contain_success(value),
             Err(err) => {
-                let result = try_error(vm, err, shape);
+                let result = contain_error(vm, err);
                 reset_contained_state(vm);
                 result
             }
@@ -669,11 +653,11 @@ fn execute_try_boundary(
                     (**qualified_name).to_owned()
                 } else {
                     vm.decrement_call_depth();
-                    return try_error(vm, "Fn value missing string $val", shape);
+                    return contain_error(vm, "Fn value missing string $val");
                 }
             } else {
                 vm.decrement_call_depth();
-                return try_error(vm, "Expected function reference (Fn)", shape);
+                return contain_error(vm, "Expected function reference (Fn)");
             }
         }
         Val::Box(boxed_val) => {
@@ -684,15 +668,14 @@ fn execute_try_boundary(
                 fr.name().to_string()
             } else {
                 vm.decrement_call_depth();
-                return try_error(vm, "Invalid function reference", shape);
+                return contain_error(vm, "Invalid function reference");
             }
         }
         _ => {
             vm.decrement_call_depth();
-            return try_error(
+            return contain_error(
                 vm,
                 format!("Invalid function reference type: {:?}", function_val),
-                shape,
             );
         }
     };
@@ -714,12 +697,12 @@ fn execute_try_boundary(
         let exec = vm.execute_compiled_user_function(function_id, &arg_vals);
         vm.decrement_call_depth();
         return match exec {
-            Ok(value) => try_success(value, shape),
+            Ok(value) => contain_success(value),
             Err(err) => {
-                // try / try-call are halt boundaries: if the inner call halted via
+                // contain is a halt boundary: if the inner call halted via
                 // fail() or cancel(), reset that state so subsequent code
                 // outside the boundary can run normally.
-                let result = try_error(vm, err, shape);
+                let result = contain_error(vm, err);
                 reset_contained_state(vm);
                 result
             }
@@ -727,25 +710,13 @@ fn execute_try_boundary(
     }
 
     vm.decrement_call_depth();
-    try_error(
+    contain_error(
         vm,
         format!(
             "Function '{}' not found in compiled Hot functions",
             resolved_function_name
         ),
-        shape,
     )
-}
-
-/// VM-aware try function - calls a function and catches halts/runtime errors as Result.Err.
-pub fn r#try(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    execute_try_boundary(vm, args, TryShape::Result, "::hot::lang/try")
-}
-
-/// VM-aware try-call function - legacy map-shaped halt boundary.
-/// Returns {ok: true, value: <result>} on success, {ok: false, error: "message"} on failure.
-pub fn try_call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    execute_try_boundary(vm, args, TryShape::LegacyMap, "::hot::lang/try-call")
 }
 
 /// VM-aware resolve function with proper namespace scoping (implements ::hot::lang/resolve)

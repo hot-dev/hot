@@ -64,7 +64,7 @@ Hot automatically analyzes dependencies and executes in "levels" - variables at 
 
 ```hot
 // Parallel with automatic dependency resolution
-enrich-user fn parallel (id: Str): Map {
+enrich-user fn parallel (id: Str): All<Map> {
   user ::api/get-user(id)           // Level 0
   orders ::api/get-orders(user.id)  // Level 1 (depends on user)
   prefs ::api/get-prefs(user.id)    // Level 1 (depends on user)
@@ -407,10 +407,23 @@ data: All<Map> parallel {
   user ::api/get-user(id)
   orders ::api/get-orders(id)
 }
+
+// Any other type opts a collect-all flow OUT of collection: the
+// annotation states the type of the single final value. On
+// single-value flows a plain annotation is an ordinary type check.
+last: Int parallel {
+  a 1
+  b 2
+}
 ```
 
 Bare `All` is accepted only on natural collect-all flows (`parallel`,
 `cond-all`, and `match-all`). Use `All<Vec>` or `All<Map>` on other flows.
+
+Annotations are not enforced at runtime, but `hot check` reports an
+`annotation-mismatch` warning when an annotation names a type the value
+can never be (for example `x: Int parallel { ... }` whose final value is
+a `Str`).
 
 ### Default Flow Shapes
 

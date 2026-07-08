@@ -122,7 +122,7 @@ create-user fn (request: CreateUserRequest): User {
 // ============================================
 
 // Fetch user with related data
-get-user-full fn parallel (id: Str): Map {
+get-user-full fn parallel (id: Str): All<Map> {
     user api-get(`/users/${id}`)
     posts api-get(`/users/${id}/posts`)
     comments api-get(`/users/${id}/comments`)

@@ -144,10 +144,12 @@ with-default fn (): Map {
     if(is-ok(result), result, default-config())
 }
 
-// Pattern 4: Fail with context using fail()
+// Pattern 4: Expected failures are err(...) values the caller can
+// branch on; fail() is reserved for broken invariants and halts the
+// run or task (there is no catch)
 validate-email fn (data: Map): Map {
     if(is-empty(data.email),
-        fail("Email is required", {field: "email", code: "REQUIRED"}),
+        err({message: "Email is required", field: "email", code: "REQUIRED"}),
         data)
 }
 

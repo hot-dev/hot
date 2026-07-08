@@ -569,7 +569,7 @@ fn test_parallel_flow_compilation_and_execution() {
 
     // Parse and compile a parallel flow with dependencies
     let source = r#"
-    result parallel|map {
+    result: All<Map> parallel {
         a 10
         b 20
         c ::hot::math/add(a, 5)
@@ -625,7 +625,7 @@ fn test_parallel_flow_respects_dependencies() {
 
     // Test that a parallel flow with chain dependencies works correctly
     let source = r#"
-    result parallel|vec {
+    result: All<Vec> parallel {
         a 5
         b ::hot::math/mul(a, 2)
         c ::hot::math/mul(b, 2)
@@ -681,7 +681,7 @@ fn test_parallel_flow_worker_resolves_cross_namespace_global() {
 
     ::parallel::global::test ns
 
-    result parallel|map {
+    result: All<Map> parallel {
         value ::parallel::global::dep/read-global()
         other "side"
     }

@@ -28,7 +28,7 @@ maybe-domain-err-for-call fn (x: Int) {
 
 test-call-forces-domain-err-by-default
 meta ["test"] fn () {
-    attempt ::hot::lang/try(() { call(maybe-domain-err-for-call, [2]) })
+    attempt ::hot::internal::exec/contain(() { call(maybe-domain-err-for-call, [2]) })
     assert(is-err(attempt))
     failure if-err(attempt, (failure) { failure })
     assert(contains(Str(failure), "call domain err"))

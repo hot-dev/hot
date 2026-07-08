@@ -1,0 +1,172 @@
+::redis::resp ns
+meta {
+    doc: """
+    RESP (REdis Serialization Protocol) encoding and decoding over
+    `::hot::tcp`. Handles RESP2 and the RESP3 additions. Internal to the
+    `redis` package.
+
+    Commands are encoded as arrays of bulk strings. Replies are decoded to
+    Hot values: simple strings to Str, bulk strings to Str when valid
+    UTF-8 (else Bytes), integers to Int, doubles to Dec, booleans to
+    Bool, arrays/sets/pushes to Vec, maps to Map, and the various null
+    forms to null. Error replies decode to `Result.Err`.
+    """
+}
+
+::tcp ::hot::tcp
+::bytes ::hot::bytes
+
+CR 13
+LF 10
+
+// ---------------------------------------------------------------------------
+// Encoding
+// ---------------------------------------------------------------------------
+
+encode-command
+meta {
+    doc: """
+    Encode a command (a Vec of arguments) as a RESP array of bulk strings.
+    Bytes arguments pass through unchanged (bulk strings are binary-safe);
+    everything else is coerced to its string form. Lengths are byte
+    lengths, not character lengths.
+    """
+}
+fn (args: Vec): Bytes {
+    reduce(args, (acc, arg) {
+        bytes if(is-bytes(arg), arg, Bytes(Str(arg)))
+        concat(acc, Bytes(`$${length(bytes)}\r\n`), bytes, Bytes("\r\n"))
+    }, Bytes(`*${length(args)}\r\n`))
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+// Read one CRLF-terminated line, returning its content without the CRLF.
+read-line fn (socket): Str {
+    read-line-loop(socket, Bytes([]))
+}
+
+read-line-loop fn (socket, acc: Bytes): Str {
+    b ::tcp/read-exact(socket, 1)
+    cond {
+        eq(::bytes/to-uint(b), CR) => {
+            lf ::tcp/read-exact(socket, 1)
+            Str(acc)
+        }
+        => { read-line-loop(socket, concat(acc, b)) }
+    }
+}
+
+read-reply
+meta {
+    doc: """
+    Read and decode a single RESP reply from `socket`. Blocks until a full
+    reply arrives. Error replies (`-`) decode to a `Result.Err` carrying
+    the Redis error message.
+    """
+}
+fn (socket): Any {
+    type-char Str(::tcp/read-exact(socket, 1))
+    cond {
+        eq(type-char, "+") => { read-line(socket) }             // simple string
+        eq(type-char, "-") => { err(`redis: ${read-line(socket)}`) }  // error
+        eq(type-char, ":") => { Int(read-line(socket)) }        // integer
+        eq(type-char, "$") => { read-bulk(socket) }             // bulk string
+        eq(type-char, "*") => { read-aggregate(socket) }        // array
+        // RESP3
+        eq(type-char, "_") => { read-null(socket) }             // null
+        eq(type-char, "#") => { eq(read-line(socket), "t") }    // boolean
+        eq(type-char, ",") => { Dec(read-line(socket)) }        // double
+        eq(type-char, "(") => { Int(read-line(socket)) }        // big number
+        eq(type-char, "=") => { read-verbatim(socket) }         // verbatim string
+        eq(type-char, "%") => { read-map(socket) }              // map
+        eq(type-char, "~") => { read-aggregate(socket) }        // set -> Vec
+        eq(type-char, ">") => { read-aggregate(socket) }        // push -> Vec
+        eq(type-char, "!") => { err(`redis: ${read-blob-error(socket)}`) }  // blob error
+        => { err(`redis: unknown reply type '${type-char}'`) }
+    }
+}
+
+// RESP3 explicit null "_\r\n"
+read-null fn (socket): Null {
+    consumed read-line(socket)
+    null
+}
+
+// Decode a bulk payload: Str when the bytes are valid UTF-8, else Bytes.
+// Str() substitutes U+FFFD for invalid sequences, so a value survives the
+// round-trip unchanged exactly when it is valid UTF-8.
+decode-bulk-value fn (data: Bytes): Any {
+    text Str(data)
+    if(eq(Bytes(text), data), text, data)
+}
+
+// Bulk string "$<len>\r\n<bytes>\r\n"; "$-1\r\n" is null.
+read-bulk fn (socket): Any {
+    len Int(read-line(socket))
+    cond {
+        lt(len, 0) => { null }
+        => {
+            data ::tcp/read-exact(socket, len)
+            crlf ::tcp/read-exact(socket, 2)
+            decode-bulk-value(data)
+        }
+    }
+}
+
+// RESP3 verbatim string "=<len>\r\n<3-char format>:<data>\r\n". The
+// format prefix ("txt:", "mkd:") is stripped from the decoded value.
+read-verbatim fn (socket): Any {
+    len Int(read-line(socket))
+    cond {
+        lt(len, 0) => { null }
+        => {
+            data ::tcp/read-exact(socket, len)
+            crlf ::tcp/read-exact(socket, 2)
+            decode-bulk-value(slice(data, 4, length(data)))
+        }
+    }
+}
+
+// Array/set/push "*<n>\r\n<n replies>"; "*-1\r\n" is null.
+read-aggregate fn (socket): Any {
+    count Int(read-line(socket))
+    cond {
+        lt(count, 0) => { null }
+        => { read-n(socket, count, []) }
+    }
+}
+
+read-n fn (socket, remaining: Int, acc: Vec): Vec {
+    cond {
+        eq(remaining, 0) => { acc }
+        => { read-n(socket, sub(remaining, 1), concat(acc, [read-reply(socket)])) }
+    }
+}
+
+// RESP3 map "%<n>\r\n<n key/value reply pairs>"
+read-map fn (socket): Map {
+    pairs Int(read-line(socket))
+    read-map-n(socket, pairs, {})
+}
+
+read-map-n fn (socket, remaining: Int, acc: Map): Map {
+    cond {
+        eq(remaining, 0) => { acc }
+        => {
+            k read-reply(socket)
+            v read-reply(socket)
+            read-map-n(socket, sub(remaining, 1), assoc(acc, k, v))
+        }
+    }
+}
+
+// RESP3 blob error "!<len>\r\n<bytes>\r\n"
+read-blob-error fn (socket): Str {
+    len Int(read-line(socket))
+    data ::tcp/read-exact(socket, len)
+    crlf ::tcp/read-exact(socket, 2)
+    Str(data)
+}

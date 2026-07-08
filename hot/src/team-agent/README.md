@@ -98,14 +98,15 @@ tg-record-voice ::tg-adapter/record-voice meta { on-event: "telegram:record-voic
 ```
 
 If you need transport-specific behaviour beyond registration (e.g.
-wrapping the call in `try` for fault isolation, or doing some
-pre/post-processing), upgrade the alias to a full wrapper:
+recovering from the adapter's `Result.Err` instead of letting it
+halt the handler, or doing some pre/post-processing), upgrade the
+alias to a full wrapper:
 
 ```hot
 tg-record-voice
 meta { on-event: "telegram:record-voice", retry: 2 }
 fn (event) {
-    result ::hot::lang/try(() { ::tg-adapter/record-voice(event) })
+    result ::tg-adapter/record-voice(event)
     if-err(result, (failure) { record-error("voice", failure) })
 }
 ```
@@ -479,10 +480,10 @@ All command replies are threaded to the original message
 | `daily-digest` | every day at 9am | Posts a digest of yesterday's activity to **every registered session** (each transport's adapter handles the actual send) |
 | `weekly-summary` | every Monday at 9am | Same fan-out, weekly window |
 
-`daily-digest` and `weekly-summary` iterate over
-`list-registered-sessions()` and use `::hot::lang/try` so a
-failure on one session (down API, evicted credentials) doesn't kill
-the run for the others.
+`daily-digest` and `weekly-summary` fan out over
+`list-registered-sessions()` with `map(…, OnErr.Preserve)` so a
+failure on one session (down API, evicted credentials) stays in that
+session's `Result.Err` slot and doesn't kill the run for the others.
 
 ---
 

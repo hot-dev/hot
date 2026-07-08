@@ -156,7 +156,7 @@ area fn match (shape: Shape): Dec {
 // The variant pattern becomes the key in the returned Map
 Trait enum { Flying, Swimming, Walking }
 
-describe-traits fn match-all (creature: Trait): Str {
+describe-traits fn match-all (creature: Trait): All<Map> {
     Trait.Flying => { "can fly" }
     Trait.Swimming => { "can swim" }
     Trait.Walking => { "can walk" }

@@ -92,7 +92,7 @@ meta ["test"] fn () {
 
 // -- Match-all flow returns a map of branch results --
 
-categorize fn match-all (a: Critter): Map {
+categorize fn match-all (a: Critter): All<Map> {
   Critter.Bird => { "flies" }
   Critter.Fish => { "swims" }
   Critter.Dog => { "walks" }

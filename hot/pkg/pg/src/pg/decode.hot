@@ -1,0 +1,176 @@
+::pg::decode ns
+meta {
+    doc: """
+    Decoders for PostgreSQL backend messages: ErrorResponse/NoticeResponse
+    fields, RowDescription, DataRow, and text-format value decoding by type
+    OID. Internal to the `pg` package.
+    """
+}
+
+::bytes ::hot::bytes
+::hex ::hot::hex
+::wire ::pg::wire
+
+// ---------------------------------------------------------------------------
+// Error / Notice fields
+// ---------------------------------------------------------------------------
+
+// ErrorResponse and NoticeResponse share a body of (byte field-type +
+// cstring value) entries, terminated by a zero byte.
+parse-fields fn (payload: Bytes): Map {
+    parse-fields-loop(payload, 0, {})
+}
+
+parse-fields-loop fn (payload: Bytes, pos: Int, acc: Map): Map {
+    field-type get(payload, pos)
+    cond {
+        or(is-null(field-type), eq(field-type, 0)) => { acc }
+        => {
+            key Str(Bytes([field-type]))
+            value-cursor ::wire/read-cstring(payload, add(pos, 1))
+            parse-fields-loop(payload, value-cursor[1], assoc(acc, key, value-cursor[0]))
+        }
+    }
+}
+
+parse-error
+meta {
+    doc: """
+    Parse an ErrorResponse/NoticeResponse payload into a map with the
+    common fields decoded: `severity` (S), `code` (C, the SQLSTATE),
+    `message` (M), `detail` (D), `hint` (H). `fields` holds the raw
+    field map for anything else.
+    """
+}
+fn (payload: Bytes): Map {
+    fields parse-fields(payload)
+    {
+        severity: get(fields, "S"),
+        code: get(fields, "C"),
+        message: get(fields, "M"),
+        detail: get(fields, "D"),
+        hint: get(fields, "H"),
+        fields: fields
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Value decoding (text format)
+// ---------------------------------------------------------------------------
+
+// Common type OIDs (from pg_type).
+OID-BOOL 16
+OID-BYTEA 17
+OID-INT8 20
+OID-INT2 21
+OID-INT4 23
+OID-OID 26
+OID-JSON 114
+OID-FLOAT4 700
+OID-FLOAT8 701
+OID-VARCHAR 1043
+OID-NUMERIC 1700
+OID-JSONB 3802
+
+decode-bytea fn (text: Str): Bytes {
+    // bytea text format is "\xHEXDIGITS"
+    if(starts-with(text, "\\x"),
+        ::hex/decode(slice(text, 2)),
+        Bytes(text))
+}
+
+decode-value
+meta {
+    doc: """
+    Decode a column's raw text-format bytes into a Hot value using its
+    type OID. Integers become Int, float/numeric become Dec, bool becomes
+    Bool, json/jsonb are parsed, bytea is hex-decoded, and everything else
+    (text, varchar, uuid, timestamps, ...) becomes a Str — or Bytes when
+    the value is not valid UTF-8 (a non-UTF8 `client_encoding`), rather
+    than silently substituting replacement characters.
+    """
+}
+fn (oid: Int, raw: Bytes): Any {
+    text Str(raw)
+    cond {
+        eq(oid, OID-BOOL) => { eq(text, "t") }
+        in(oid, [OID-INT8, OID-INT2, OID-INT4, OID-OID]) => { Int(text) }
+        in(oid, [OID-FLOAT4, OID-FLOAT8, OID-NUMERIC]) => { Dec(text) }
+        in(oid, [OID-JSON, OID-JSONB]) => { from-json(text) }
+        eq(oid, OID-BYTEA) => { decode-bytea(text) }
+        // Str() substitutes U+FFFD for invalid UTF-8, so the value
+        // round-trips unchanged exactly when it is valid UTF-8.
+        eq(Bytes(text), raw) => { text }
+        => { raw }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RowDescription ('T')
+// ---------------------------------------------------------------------------
+
+parse-row-description
+meta {
+    doc: """
+    Parse a RowDescription payload into a Vec of `{name, oid}` field
+    descriptors, in column order.
+    """
+}
+fn (payload: Bytes): Vec {
+    count-cursor ::wire/read-uint16(payload, 0)
+    parse-rd-fields(payload, count-cursor[1], count-cursor[0], [])
+}
+
+parse-rd-fields fn (payload: Bytes, pos: Int, remaining: Int, acc: Vec): Vec {
+    cond {
+        eq(remaining, 0) => { acc }
+        => {
+            name-cursor ::wire/read-cstring(payload, pos)
+            name-end name-cursor[1]
+            // Fixed fields after the name: tableOID(4) colAttr(2) typeOID(4)
+            // typeSize(2) typeMod(4) format(2) = 18 bytes. typeOID is at +6.
+            oid-cursor ::wire/read-int32(payload, add(name-end, 6))
+            field {name: name-cursor[0], oid: oid-cursor[0]}
+            parse-rd-fields(payload, add(name-end, 18), sub(remaining, 1), concat(acc, [field]))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DataRow ('D')
+// ---------------------------------------------------------------------------
+
+parse-data-row
+meta {
+    doc: """
+    Parse a DataRow payload into a `{column-name: value}` map, decoding
+    each column by the OID from the matching RowDescription field.
+    A column length of -1 denotes SQL NULL.
+    """
+}
+fn (payload: Bytes, fields: Vec): Map {
+    count-cursor ::wire/read-uint16(payload, 0)
+    parse-columns(payload, count-cursor[1], fields, 0, {})
+}
+
+parse-columns fn (payload: Bytes, pos: Int, fields: Vec, idx: Int, acc: Map): Map {
+    cond {
+        gte(idx, length(fields)) => { acc }
+        => {
+            len-cursor ::wire/read-int32(payload, pos)
+            col-len len-cursor[0]
+            value-start len-cursor[1]
+            field fields[idx]
+            cond {
+                eq(col-len, -1) => {
+                    parse-columns(payload, value-start, fields, add(idx, 1), assoc(acc, field.name, null))
+                }
+                => {
+                    raw slice(payload, value-start, add(value-start, col-len))
+                    value decode-value(field.oid, raw)
+                    parse-columns(payload, add(value-start, col-len), fields, add(idx, 1), assoc(acc, field.name, value))
+                }
+            }
+        }
+    }
+}

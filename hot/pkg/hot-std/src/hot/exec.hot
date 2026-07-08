@@ -17,8 +17,8 @@ meta {
       `fail()` argument).
 
     `fail()` halts execution; user code does not bind a `Failure`
-    directly. Inspect it from a halt boundary like `::hot::lang/try`
-    or from the engine's `run:fail` event.
+    directly. It surfaces as the engine's `run:fail` event, or as
+    `status: "failed"` on the `TaskResult` when the work ran as a task.
     """
 }
 type {
@@ -42,8 +42,8 @@ meta {
       `cancel()` argument).
 
     `cancel()` halts execution; user code does not bind a `Cancellation`
-    directly. Inspect it from a halt boundary like `::hot::lang/try`
-    or from the engine's `run:cancel` event.
+    directly. It surfaces as the engine's `run:cancel` event, or as
+    `status: "cancelled"` on the `TaskResult` when the work ran as a task.
     """
 }
 type {

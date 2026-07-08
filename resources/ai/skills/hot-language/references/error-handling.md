@@ -174,26 +174,37 @@ result fetch-config()
 config if(is-ok(result), result, default-config())
 ```
 
-### Pattern 4: Fail with Context
+### Pattern 4: Fail on Broken Invariants
 
-Use `fail` to halt execution with a custom error. Use `err` for expected,
-recoverable failures that callers may inspect as values:
+Use `err` for expected, recoverable failures that callers inspect as values.
+Use `fail` only for bugs and broken invariants — it halts the run or task and
+surfaces at the runtime boundary (the `run:fail` event, or `status: "failed"`
+on the `TaskResult` from `::hot::task/await`). There is no `catch`
+(`::hot::lang/try` was removed in Hot 2.6.0):
 
 ```hot
-validate fn (data: Map): Map {
-    if(is-empty(data.email),
-        fail("Email is required", {field: "email"}),
-        data)
+apply-migration fn (db, version: Int) {
+    if(lt(version, current-version(db)),
+        fail("migration version went backwards", {version: version}),
+        run-migration(db, version))
 }
 ```
 
-`fail` propagates up until a halt boundary catches it. Most code should let
-that happen — Hot's auto-unwrap is the idiomatic error path. Reach for
-`::hot::lang/try` only at a deliberate fault-isolation boundary, such as a
-fan-out loop where one item must be recorded without stopping the whole batch,
-or when you need to contain a runtime panic.
-For HTTP-specific transport errors, prefer `::hot::http/try-request` over
-wrapping `::hot::http/request` in `try`.
+For fan-out where one item must not stop the batch, pass `OnErr.Preserve` to
+`map` / `pmap` / `call` — per-item `Err` values stay in their slots. To
+supervise untrusted code that may `fail()`, run it as a task and branch on
+the awaited `status`.
+
+### Error Payloads
+
+Payload convention: a plain `Str` for simple errors, or a Map with a
+`message` field (plus structured fields like `code`) for rich ones. Use
+`err-message(result)` to extract readable text from any payload shape,
+including a halt's `Failure`:
+
+```hot
+if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+```
 
 ### Pattern 5: Result Combinators
 

@@ -1,0 +1,150 @@
+::pg::test::integration ns
+meta ["test"]
+
+::env ::hot::env
+::tcp ::hot::tcp
+
+// Connection options from the standard PG* environment variables,
+// falling back to the local dev Postgres.
+pg-options fn (): Map {
+    {
+        host: ::env/get("PGHOST", "127.0.0.1"),
+        port: Int(::env/get("PGPORT", "5432")),
+        user: ::env/get("PGUSER", "postgres"),
+        password: ::env/get("PGPASSWORD", "password"),
+        database: ::env/get("PGDATABASE", "postgres")
+    }
+}
+
+// True when a TCP connection to the configured server succeeds. Only raw
+// reachability is probed here — never the protocol handshake — so that a
+// startup/auth regression fails the test instead of masquerading as an
+// unavailable server.
+server-reachable fn (opts: Map): Bool {
+    probe ::tcp/connect(opts.host, opts.port, {timeout: 2000})
+    cond {
+        is-err(probe) => { false }
+        => {
+            closed ::tcp/close(probe)
+            true
+        }
+    }
+}
+
+// connect to a port with no listener returns a well-formed single Err
+// that is-err/err-value handle directly (regression: this used to come
+// back double-wrapped, invisible to is-err).
+test-connect-refused
+meta ["test"] fn () {
+    attempt ::pg/connect({host: "127.0.0.1", port: 59999, user: "nobody", timeout: 2000})
+    assert(is-err(attempt), "refused connect returns Err")
+    assert(not(is-err(err-value(attempt))), "Err payload is not itself an Err")
+}
+
+// End-to-end exercise of the client against a live server. Skipped only
+// when no TCP listener is reachable; once reachable, connect/auth failures
+// fail the test.
+test-roundtrip
+meta ["test"] fn () {
+    opts pg-options()
+    cond {
+        not(server-reachable(opts)) => {
+            println("  (skipped: no Postgres reachable)")
+            assert(true, "skipped without a database")
+        }
+        => {
+            conn ::pg/connect(opts)
+
+            // Simple query, several types
+            rows ::pg/query(conn, "SELECT 1 AS n, 'hi' AS s, true AS b, 2.5::float8 AS f, null AS z")
+            assert-eq(1, length(rows), "one row")
+            r first(rows)
+            assert-eq(1, r.n, "int decodes")
+            assert-eq("hi", r.s, "text decodes")
+            assert-eq(true, r.b, "bool decodes")
+            assert-eq(2.5, r.f, "float8 decodes to Dec")
+            assert(is-null(r.z), "null decodes")
+
+            // Parameterized query (extended protocol)
+            prow ::pg/query-one(conn, "SELECT $1::int AS a, $2::text AS t, $3::bool AS flag", [42, "world", false])
+            assert-eq(42, prow.a, "param int")
+            assert-eq("world", prow.t, "param text")
+            assert-eq(false, prow.flag, "param bool")
+
+            // query-one returns null with no rows
+            none ::pg/query-one(conn, "SELECT 1 WHERE false")
+            assert(is-null(none), "query-one is null with no rows")
+
+            // DDL + execute with rows-affected
+            ::pg/execute(conn, "CREATE TEMP TABLE pg_test (id int, name text)")
+            ins ::pg/execute(conn, "INSERT INTO pg_test VALUES ($1, $2), ($3, $4)", [1, "a", 2, "b"])
+            assert-eq(2, ins.rows-affected, "insert affected 2 rows")
+
+            upd ::pg/execute(conn, "UPDATE pg_test SET name = $1 WHERE id = $2", ["z", 1])
+            assert-eq(1, upd.rows-affected, "update affected 1 row")
+
+            got ::pg/query(conn, "SELECT id, name FROM pg_test ORDER BY id")
+            assert-eq([1, 2], map(got, (row) { row.id }), "ids round-trip")
+            assert-eq("z", first(got).name, "update persisted")
+
+            // bytea round-trips as Bytes through a parameter and back
+            blob Bytes([0, 255, 254, 104, 105])
+            brow ::pg/query-one(conn, "SELECT $1::bytea AS b", [blob])
+            assert-eq(blob, brow.b, "bytea param round-trips as Bytes")
+
+            // Errors surface as Result.Err with the SQLSTATE attached —
+            // no halt boundary needed, branch on the value directly.
+            failed ::pg/query(conn, "SELECT * FROM does_not_exist")
+            assert(is-err(failed), "bad query returns Err")
+            assert-eq("42P01", err-value(failed).code, "Err carries SQLSTATE")
+
+            ::pg/close(conn)
+            closed-again ::pg/close(conn)
+            assert-eq(true, closed-again, "close is idempotent")
+        }
+    }
+}
+
+// SCRAM-SHA-256 authentication. The default dev pg_hba rules are all
+// `trust`, so the tests above never exercise the auth exchange; this one
+// connects as a role that pg_hba forces through scram-sha-256.
+//
+// Dev fixture (once, on the dev Postgres):
+//   CREATE USER scramtest PASSWORD 'scrampw';
+//   -- pg_hba.conf, BEFORE the trust rules:
+//   -- host all scramtest all scram-sha-256
+//   SELECT pg_reload_conf();
+//
+// Skipped when the fixture role is absent; once it exists, a handshake
+// failure fails the test. Note the client sends an empty SCRAM username
+// (`n=,r=...`) exactly like libpq: PostgreSQL ignores the username inside
+// the SCRAM exchange and authenticates the startup-message user.
+test-scram-auth
+meta ["test"] fn () {
+    opts pg-options()
+    scram-opts {...opts,
+        user: ::env/get("PGSCRAMUSER", "scramtest"),
+        password: ::env/get("PGSCRAMPASSWORD", "scrampw")}
+    conn ::pg/connect(scram-opts)
+    cond {
+        not(server-reachable(scram-opts)) => {
+            println("  (skipped: no Postgres reachable)")
+            assert(true, "skipped without a database")
+        }
+        and(is-err(conn), contains(err-message(conn), "does not exist")) => {
+            println("  (skipped: scramtest fixture role not provisioned)")
+            assert(true, "skipped without the scram fixture role")
+        }
+        => {
+            row ::pg/query-one(conn, "SELECT current_user AS u")
+            assert-eq(scram-opts.user, row.u, "SCRAM handshake authenticates the startup user")
+            ::pg/close(conn)
+
+            // A wrong password must be rejected by SCRAM verification and
+            // surface as a clean Err, not a halt.
+            bad ::pg/connect({...scram-opts, password: "definitely-wrong"})
+            assert(is-err(bad), "wrong password fails SCRAM")
+            assert(contains(err-message(bad), "password"), "Err names the auth failure")
+        }
+    }
+}
