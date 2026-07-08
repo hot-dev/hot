@@ -167,6 +167,29 @@ hotlib-json-roundtrip fn (n: Int): Int {
 }
 
 // ============================================================================
+// BENCHMARK 7: Deep Recursion
+// ============================================================================
+
+// Tail recursion through if(): exercises TCO in the interpreter and the
+// JIT's mid-loop compilation of hot tail loops into native loops.
+// Regression guard: before the vm-jit-perf work this crashed the process
+// with a native stack overflow (JIT off) or ran for minutes (JIT on).
+sum-to-tail fn (i: Int, acc: Int): Int {
+    if(lte(i, 0), acc, sum-to-tail(sub(i, 1), add(acc, i)))
+}
+
+// Non-tail self-recursion through cond: exercises the re-entrant register
+// save/restore. Regression guard: before the vm-jit-perf work this returned
+// a wrong result (register clobbering), so the printed result matters as
+// much as the timing. fib-cond(20) = 6765.
+fib-cond fn (n: Int): Int {
+    cond {
+        lte(n, 1) => n
+        => add(fib-cond(sub(n, 1)), fib-cond(sub(n, 2)))
+    }
+}
+
+// ============================================================================
 // BENCHMARK RUNNER
 // ============================================================================
 
@@ -221,7 +244,11 @@ run-benchmarks fn (): Vec<Map> {
         measure-repeat("lazy-generic-ignore(1000)", 5, () { lazy-generic-ignore(1000) }),
         measure-repeat("cond-skip-expensive(1000)", 20, () { cond-skip-expensive(1000) }),
         measure-repeat("owned-lazy-branch(1000)", 10, () { owned-lazy-branch(1000) }),
-        measure-repeat("hotlib-json-roundtrip(200)", 20, () { hotlib-json-roundtrip(200) })
+        measure-repeat("hotlib-json-roundtrip(200)", 20, () { hotlib-json-roundtrip(200) }),
+
+        // Deep recursion (Hot-only regression guards; see section 7)
+        measure("sum-to-tail(1000000)", () { sum-to-tail(1000000, 0) }),
+        measure("fib-cond(20)", () { fib-cond(20) })
     ]
 
     println("")
