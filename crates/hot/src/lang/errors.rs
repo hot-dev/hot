@@ -281,6 +281,18 @@ pub enum CompilerError {
         field_name: String,
         location: Option<ErrorLocation>,
     },
+    /// A binding or return type annotation names a type the value can never
+    /// be (e.g. `x: Int "hello"`). This is a *warning*: annotations are not
+    /// enforced at runtime, but a definite mismatch is always a bug — either
+    /// the annotation or the value is wrong. Only emitted when both sides
+    /// are statically definite, so `Any`, unresolved names, and partially
+    /// compatible unions never warn.
+    AnnotationMismatch {
+        name: String,
+        annotation: String,
+        inferred: String,
+        location: Option<ErrorLocation>,
+    },
 }
 
 impl fmt::Display for CompilerError {
@@ -968,6 +980,32 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::AnnotationMismatch {
+                name,
+                annotation,
+                inferred,
+                location,
+            } => {
+                let body = format!(
+                    "`{}` is annotated `{}` but its value is `{}`",
+                    name, annotation, inferred
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
         }
     }
 }
@@ -1098,6 +1136,7 @@ impl CompilerErrors {
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
+            CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }?;
 
         let source_name = if let Some(file) = &location.file {
@@ -1555,6 +1594,32 @@ impl CompilerErrors {
                             .with_color(label_color),
                     );
             }
+            CompilerError::AnnotationMismatch {
+                name,
+                annotation,
+                inferred,
+                ..
+            } => {
+                report = report
+                    .with_code("annotation-mismatch")
+                    .with_message(format!(
+                        "`{}` is annotated `{}` but its value is `{}`",
+                        name, annotation, inferred
+                    ))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!(
+                                "this value is `{}`, not `{}`",
+                                inferred, annotation
+                            ))
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "Annotations are not enforced at runtime, so a wrong one \
+                         silently misleads readers and tooling. Fix the annotation \
+                         or the value.",
+                    );
+            }
         }
 
         let mut buffer = Vec::new();
@@ -1619,6 +1684,7 @@ impl CompilerError {
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
+            CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }
     }
 
@@ -1626,9 +1692,9 @@ impl CompilerError {
     /// warning; everything else is a hard error that fails compilation.
     pub fn severity(&self) -> DiagnosticSeverity {
         match self {
-            CompilerError::DeprecatedUsage { .. } | CompilerError::UnknownField { .. } => {
-                DiagnosticSeverity::Warning
-            }
+            CompilerError::DeprecatedUsage { .. }
+            | CompilerError::UnknownField { .. }
+            | CompilerError::AnnotationMismatch { .. } => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
     }
@@ -1672,6 +1738,7 @@ impl CompilerError {
             CompilerError::NestedTypeImplementation { .. } => "nested-type-implementation",
             CompilerError::DeprecatedUsage { .. } => "deprecated-usage",
             CompilerError::UnknownField { .. } => "unknown-field",
+            CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
         }
     }
 }

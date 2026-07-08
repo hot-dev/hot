@@ -420,6 +420,11 @@ last: Int parallel {
 Bare `All` is accepted only on natural collect-all flows (`parallel`,
 `cond-all`, and `match-all`). Use `All<Vec>` or `All<Map>` on other flows.
 
+Annotations are not enforced at runtime, but `hot check` reports an
+`annotation-mismatch` warning when an annotation names a type the value
+can never be (for example `x: Int parallel { ... }` whose final value is
+a `Str`).
+
 ### Default Flow Shapes
 
 Each flow type has a sensible default:

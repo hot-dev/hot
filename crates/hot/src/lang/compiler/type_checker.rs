@@ -591,6 +591,12 @@ pub struct TypeChecker {
     /// itself (e.g. one arity delegating to another), which would otherwise
     /// flag the stdlib definition site and surface on every downstream user.
     current_def: Option<String>,
+    /// Source of the definition named by `current_def`, used as the warning
+    /// location for diagnostics (like return-annotation mismatches) that
+    /// have no more precise source of their own. Warnings without a
+    /// project-file location are dropped by the check pipeline's project
+    /// scoping, so a definition-site fallback keeps them visible.
+    current_def_src: Option<Source>,
 }
 
 impl Default for TypeChecker {
@@ -617,6 +623,7 @@ impl TypeChecker {
             match_subject_stack: Vec::new(),
             deprecated_defs: AHashMap::new(),
             current_def: None,
+            current_def_src: None,
         }
     }
 
@@ -2201,14 +2208,23 @@ impl TypeChecker {
             // Track the qualified name of the definition whose body we're about
             // to walk so the deprecation check can suppress self-references.
             self.current_def = Some(format!("{}/{}", ns_path, var_name));
+            self.current_def_src = var.src.clone();
             let inferred_type = self.infer_value_type(value);
             let inferred_type = if let Some(annotation) = &var.type_annotation {
                 let constraint = self.parse_type_annotation(annotation, var.src.as_ref());
+                self.warn_annotation_mismatch(
+                    &var_name,
+                    annotation,
+                    &constraint,
+                    &inferred_type,
+                    var.src.as_ref(),
+                );
                 self.apply_annotation_constraint(inferred_type, &constraint)
             } else {
                 inferred_type
             };
             self.current_def = None;
+            self.current_def_src = None;
             self.context.add_variable(var_name, inferred_type);
         }
 
@@ -2368,6 +2384,13 @@ impl TypeChecker {
                     let inferred = self.infer_value_type(&values[1]);
                     let assigned = if let Some(ann) = var_ref.var.type_annotation.as_ref() {
                         let constraint = self.parse_type_annotation(ann, None);
+                        self.warn_annotation_mismatch(
+                            var_ref.var.sym.name(),
+                            ann,
+                            &constraint,
+                            &inferred,
+                            var_ref.src.as_ref().or(var_ref.var.src.as_ref()),
+                        );
                         self.apply_annotation_constraint(inferred, &constraint)
                     } else {
                         inferred
@@ -2434,6 +2457,74 @@ impl TypeChecker {
             open: false,
             type_name: None,
         }
+    }
+
+    /// True when a type is definite enough to participate in the
+    /// annotation-mismatch warning: a concrete primitive, literal, or
+    /// container. `Any`, unresolved `Named` types, functions, and other
+    /// inference-weak shapes never participate, so the check stays
+    /// quiet at the cost of missing some mismatches.
+    fn type_is_definite(t: &TypeExpr) -> bool {
+        match t {
+            TypeExpr::Null
+            | TypeExpr::Bool
+            | TypeExpr::Int
+            | TypeExpr::Dec
+            | TypeExpr::Str
+            | TypeExpr::Byte
+            | TypeExpr::Bytes
+            | TypeExpr::Literal(_)
+            | TypeExpr::Vec(_)
+            | TypeExpr::Map(_, _)
+            | TypeExpr::Record { .. } => true,
+            TypeExpr::Optional(inner) => Self::type_is_definite(inner),
+            _ => false,
+        }
+    }
+
+    /// Warn when an annotation names a type the value can never be
+    /// (`annotation-mismatch`). Annotations are not enforced at runtime,
+    /// so a definite mismatch means either the annotation or the value is
+    /// wrong. Conservative by construction: both sides must be definite
+    /// (see `type_is_definite`), a union warns only when *no* member is
+    /// compatible, and `All<...>` flow-shape annotations are exempt (the
+    /// inferred type already reflects the collected shape they describe).
+    fn warn_annotation_mismatch(
+        &mut self,
+        name: &str,
+        annotation: &str,
+        constraint: &TypeExpr,
+        inferred: &TypeExpr,
+        src: Option<&Source>,
+    ) {
+        let base = annotation.split('<').next().unwrap_or(annotation).trim();
+        if base == "All" || base.ends_with("/All") {
+            return;
+        }
+        if !Self::type_is_definite(constraint) {
+            return;
+        }
+        let compatible = match inferred {
+            TypeExpr::Union(members) => members
+                .iter()
+                .any(|m| !Self::type_is_definite(m) || self.types_are_compatible(constraint, m)),
+            _ => {
+                if !Self::type_is_definite(inferred) {
+                    return;
+                }
+                self.types_are_compatible(constraint, inferred)
+            }
+        };
+        if compatible {
+            return;
+        }
+        let location = src.map(|s| self.source_to_error_location(s));
+        self.errors.add_warning(CompilerError::AnnotationMismatch {
+            name: name.to_string(),
+            annotation: annotation.to_string(),
+            inferred: inferred.to_string(),
+            location,
+        });
     }
 
     fn apply_annotation_constraint(&self, actual: TypeExpr, constraint: &TypeExpr) -> TypeExpr {
@@ -3218,7 +3309,32 @@ impl TypeChecker {
                 self.match_subject_stack.push(subject_type);
             }
 
-            let _body_type = self.infer_value_type(&fn_def.body);
+            let body_type = self.infer_value_type(&fn_def.body);
+
+            // Declared return types get the same definite-mismatch warning
+            // as binding annotations. Body inference is weak for anything
+            // ending in a call (Any), which `warn_annotation_mismatch`
+            // skips, so this only fires on statically certain bodies.
+            if let Some(ret_ann) = &fn_def.return_type {
+                let constraint = self.parse_type_annotation(ret_ann, None);
+                let def_name = self
+                    .current_def
+                    .clone()
+                    .unwrap_or_else(|| "function".to_string());
+                let src = fn_def
+                    .args
+                    .args
+                    .first()
+                    .and_then(|a| a.var.src.clone())
+                    .or_else(|| self.current_def_src.clone());
+                self.warn_annotation_mismatch(
+                    &def_name,
+                    ret_ann,
+                    &constraint,
+                    &body_type,
+                    src.as_ref(),
+                );
+            }
 
             if pushed_subject {
                 self.match_subject_stack.pop();
@@ -3989,7 +4105,10 @@ impl TypeChecker {
                 Box::new(union_or_single(result_types)),
             ),
             Some(ResultModifier::Vec) => TypeExpr::Vec(Box::new(union_or_single(result_types))),
-            Some(ResultModifier::One) => union_or_single(result_types),
+            // One takes the single final value. Both callers are parallel
+            // flows, where the final binding is deterministic, so its type
+            // is the result type.
+            Some(ResultModifier::One) => result_types.last().cloned().unwrap_or(TypeExpr::Null),
             None => {
                 if default_map {
                     TypeExpr::Map(
@@ -4403,6 +4522,108 @@ mod tests {
             has_warning,
             "expected DeprecatedUsage warning, got: {:?}",
             checker.errors.warnings
+        );
+    }
+
+    #[test]
+    fn test_annotation_mismatch_warns_on_definite_conflict() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // Binding, collect-all single-value flow, and fn return type each
+        // get the annotation-mismatch warning when both sides are definite.
+        let source = r#"
+        plain: Int "hello"
+
+        flow-fn fn (): Str {
+            single: Int parallel {
+                a 1
+                b "hello"
+            }
+            single
+        }
+
+        bad-return fn (): Int { "hello" }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+        assert!(
+            result.is_ok(),
+            "annotation mismatches must warn, not fail: {:?}",
+            result
+        );
+
+        let names: Vec<&str> = checker
+            .errors
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CompilerError::AnnotationMismatch { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for expected in ["plain", "single", "bad-return"] {
+            assert!(
+                names.iter().any(|n| n.contains(expected)),
+                "expected annotation-mismatch for `{}`, got: {:?}",
+                expected,
+                checker.errors.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_annotation_mismatch_stays_quiet_when_uncertain_or_compatible() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // Compatible values, All flow-shape annotations, inference-weak
+        // values (call results), and partially compatible unions must not
+        // warn.
+        let source = r#"
+        ok-int: Int 42
+        ok-dec: Dec 1
+
+        collected fn (): Map {
+            data: All<Map> parallel {
+                a 1
+                b 2
+            }
+            data
+        }
+
+        last-is-int fn (): Int {
+            v: Int parallel {
+                a "hello"
+                b 2
+            }
+            v
+        }
+
+        maybe fn (flag: Bool): Str {
+            branchy: Str cond {
+                flag => { "yes" }
+                => { "no" }
+            }
+            branchy
+        }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+        assert!(result.is_ok(), "no errors expected: {:?}", result);
+
+        let mismatches: Vec<_> = checker
+            .errors
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, CompilerError::AnnotationMismatch { .. }))
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "expected no annotation-mismatch warnings, got: {:?}",
+            mismatches
         );
     }
 

@@ -1057,17 +1057,44 @@ async fn async_main(providers: CliProviders) {
 
             match action {
                 CacheAction::Clear => {
-                    // All caches are now under .hot/cache/
-                    if cache_root.exists() {
-                        match std::fs::remove_dir_all(&cache_root) {
+                    // Clear every cache location Hot can read from, so a
+                    // clear is a real clean slate. State (.hot/db) is never
+                    // touched — only cache/ subtrees are removed.
+                    let mut targets: Vec<PathBuf> = vec![cache_root.clone()];
+
+                    // The system-level cache serves runs outside a project;
+                    // include it even when a project cache resolved above.
+                    let system_cache = cache_paths::get_system_cache_dir().join("cache");
+                    if system_cache != cache_root {
+                        targets.push(system_cache.clone());
+                    }
+
+                    // Legacy layouts stored package ASTs in a pkg-cache
+                    // sibling; nothing writes it anymore, but stale entries
+                    // there predate the current format.
+                    targets.push(cache_paths::get_system_cache_dir().join("pkg-cache"));
+
+                    // Nested projects: any directory under the CWD where hot
+                    // ran gets its own .hot/cache; in a monorepo these hold
+                    // stale entries the top-level clear used to miss.
+                    collect_nested_hot_caches(Path::new("."), 0, &mut targets);
+
+                    let mut cleared = 0usize;
+                    for target in targets {
+                        if !target.exists() {
+                            continue;
+                        }
+                        match std::fs::remove_dir_all(&target) {
                             Ok(_) => {
-                                println!("{} cleared", cache_root.display());
+                                println!("{} cleared", target.display());
+                                cleared += 1;
                             }
                             Err(e) => {
-                                error!("Failed to clear {}: {}", cache_root.display(), e);
+                                error!("Failed to clear {}: {}", target.display(), e);
                             }
                         }
-                    } else {
+                    }
+                    if cleared == 0 {
                         println!("No caches found to clear.");
                     }
                 }
@@ -1568,6 +1595,42 @@ async fn async_main(providers: CliProviders) {
 //     }
 //     Ok(())
 // }
+
+/// Collect `.hot/cache` directories nested under `dir`. Any directory hot
+/// ran in becomes its own project with its own cache; `hot cache clear`
+/// removes those too so a monorepo clear is complete. Only the `cache`
+/// subtree of each `.hot` is targeted — project state like `.hot/db`
+/// stays. Build/dependency trees are skipped, and depth is bounded to keep
+/// the walk cheap.
+fn collect_nested_hot_caches(dir: &Path, depth: usize, targets: &mut Vec<PathBuf>) {
+    const MAX_DEPTH: usize = 12;
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || path.is_symlink() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == ".hot" {
+            let cache = path.join("cache");
+            if cache.exists() {
+                targets.push(cache);
+            }
+            continue;
+        }
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+        collect_nested_hot_caches(&path, depth + 1, targets);
+    }
+}
 
 /// Calculate the total size of a directory recursively
 fn dir_size(path: &std::path::Path) -> u64 {
