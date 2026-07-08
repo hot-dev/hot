@@ -8995,6 +8995,7 @@ mod tests {
                     flow_type: FlowType::Cond,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9148,6 +9149,7 @@ mod tests {
                     flow_type: FlowType::Cond,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9281,6 +9283,7 @@ mod tests {
                     flow_type: FlowType::Cond,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9389,6 +9392,7 @@ mod tests {
                     flow_type: FlowType::Match,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9534,6 +9538,7 @@ mod tests {
                     flow_type: FlowType::Match,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9645,6 +9650,7 @@ mod tests {
                     flow_type: FlowType::CondAll,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,
@@ -9770,6 +9776,7 @@ mod tests {
                     flow_type: FlowType::MatchAll,
                     result_modifier: FlowResultModifier::One,
                     source: None,
+                    origin_name: None,
                 },
                 Instruction::LoadConst {
                     dest: 0,

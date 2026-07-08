@@ -97,6 +97,13 @@ pub enum Instruction {
         /// Boxed: SourceLocation is ~56 bytes and would otherwise set the
         /// size of every Instruction in every program.
         source: Option<Box<SourceLocation>>,
+        /// StringRef constant with the user-facing callable this flow was
+        /// inlined from (e.g. "::hot::bool/if" for compiler-inlined `if()`).
+        /// The emitter uses it as the traced call name so searching for the
+        /// original function still finds these calls; `None` for ordinary
+        /// flows, which trace under a synthetic name like `<cond>`.
+        #[serde(default)]
+        origin_name: Option<ConstantId>,
     },
 
     /// End a flow execution context and collect results
@@ -1059,6 +1066,7 @@ impl fmt::Display for Instruction {
                 flow_type,
                 result_modifier,
                 source,
+                ..
             } => {
                 if source.is_some() {
                     write!(f, "BEGIN_FLOW {}|{} @source", flow_type, result_modifier)

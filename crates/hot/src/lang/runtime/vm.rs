@@ -2024,9 +2024,11 @@ impl VirtualMachine {
                 flow_type,
                 result_modifier,
                 source,
+                origin_name,
             } => {
                 let flow_type = *flow_type;
                 let result_modifier = *result_modifier;
+                let origin_name = *origin_name;
                 // Only the emitter event needs the source; skip the Box clone
                 // on the hot no-emitter path.
                 let source = if self.emitter.is_some() {
@@ -2078,20 +2080,27 @@ impl VirtualMachine {
                         let call_depth = self.call_stack.len();
                         let runtime_path = self.build_runtime_path();
 
-                        // Synthetic function name for inline flow. The outer
+                        // Traced call name for the inline flow. Flows the
+                        // compiler inlined from a named callable (e.g. `if()`)
+                        // carry that name so call-trace search still finds
+                        // them; ordinary flows get a synthetic name. The outer
                         // `if flow_type != FlowType::Serial` makes Serial logically
                         // impossible here, but we use a string fallback rather than
                         // `unreachable!()` so a future refactor that changes the
                         // outer guard can't take the worker down.
-                        let function_name = match flow_type {
-                            FlowType::Serial => "<serial>".to_string(),
-                            FlowType::Parallel => "<parallel>".to_string(),
-                            FlowType::Cond => "<cond>".to_string(),
-                            FlowType::CondAll => "<cond-all>".to_string(),
-                            FlowType::Pipe => "<pipe>".to_string(),
-                            FlowType::Match => "<match>".to_string(),
-                            FlowType::MatchAll => "<match-all>".to_string(),
-                        };
+                        let function_name =
+                            match origin_name.and_then(|id| self.get_string_constant(id).ok()) {
+                                Some(name) => (*name).to_owned(),
+                                None => match flow_type {
+                                    FlowType::Serial => "<serial>".to_string(),
+                                    FlowType::Parallel => "<parallel>".to_string(),
+                                    FlowType::Cond => "<cond>".to_string(),
+                                    FlowType::CondAll => "<cond-all>".to_string(),
+                                    FlowType::Pipe => "<pipe>".to_string(),
+                                    FlowType::Match => "<match>".to_string(),
+                                    FlowType::MatchAll => "<match-all>".to_string(),
+                                },
+                            };
 
                         // Build flow info with inline marker
                         let flow_type_str = match flow_type {
@@ -2105,8 +2114,16 @@ impl VirtualMachine {
                         };
                         let mut flow_map = IndexMap::new();
                         flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
-                        flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
-                        flow_map.insert(Val::from("inline"), Val::Bool(true));
+                        if origin_name.is_some() {
+                            // Compiler-inlined named callable (e.g. `if()`):
+                            // mirror the flow shape these calls emitted before
+                            // inlining, when they executed as `fn cond`
+                            // functions ({type: "cond", fn: true}).
+                            flow_map.insert(Val::from("fn"), Val::Bool(true));
+                        } else {
+                            flow_map.insert(Val::from("flow_id"), Val::from(flow_id.to_string()));
+                            flow_map.insert(Val::from("inline"), Val::Bool(true));
+                        }
 
                         let start_event = crate::lang::emitter::EngineEvent::call_start(
                             execution_context,

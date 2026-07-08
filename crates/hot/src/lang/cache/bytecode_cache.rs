@@ -1029,6 +1029,7 @@ mod tests {
                         position: 0,
                         length: 50,
                     })),
+                    origin_name: None,
                 },
                 Instruction::EndFlow { dest: 2 },
                 Instruction::Return { value: 2 },

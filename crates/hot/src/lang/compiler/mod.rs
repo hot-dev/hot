@@ -2775,10 +2775,13 @@ impl Compiler {
         }
 
         // The callee must statically resolve to the core lazy `if`.
-        let is_core_if = match fn_call.function.as_ref() {
+        // On success this holds the qualified name (e.g. "::hot::bool/if"),
+        // which the emitter uses as the traced call name so call-trace search
+        // for "if" still finds these calls after inlining.
+        let core_if_name: Option<String> = match fn_call.function.as_ref() {
             Value::Ref(Ref::Var(var_ref)) => {
                 let name = var_ref.var.sym.name();
-                name == "if"
+                if name == "if"
                     && var_ref.var.deep_path.is_none()
                     // The core registry must map the bare name to a bool/if...
                     && self
@@ -2797,20 +2800,30 @@ impl Compiler {
                     && !self
                         .symbol_table
                         .contains_key(&format!("{}/if", self.current_namespace))
+                {
+                    self.core_lazy_function_names.get(name).cloned()
+                } else {
+                    None
+                }
             }
             Value::Ref(Ref::Ns(ns_ref)) => {
                 let resolved = self.resolve_ns_ref_alias(ns_ref);
-                resolved.function_name.as_deref() == Some("if")
+                if resolved.function_name.as_deref() == Some("if")
                     && self
                         .core_lazy_function_names
                         .get("if")
                         .is_some_and(|q| *q == format!("{}/if", resolved.ns))
+                {
+                    self.core_lazy_function_names.get("if").cloned()
+                } else {
+                    None
+                }
             }
-            _ => false,
+            _ => None,
         };
-        if !is_core_if {
+        let Some(core_if_name) = core_if_name else {
             return Ok(None);
-        }
+        };
 
         let result_reg = self.allocate_register();
         // See `next_cond_id` doc on `Compiler`: unique suffix keeps branch
@@ -2818,10 +2831,12 @@ impl Compiler {
         let cond_id = self.next_cond_id;
         self.next_cond_id += 1;
 
+        let origin_name_id = self.program.add_string_ref(core_if_name);
         self.emit_instruction(Instruction::BeginFlow {
             flow_type: crate::lang::bytecode::FlowType::Cond,
             result_modifier: crate::lang::bytecode::FlowResultModifier::One,
-            source: None,
+            source: self.source_to_location(&fn_call.src).map(Box::new),
+            origin_name: Some(origin_name_id),
         });
 
         // Initialize result register with null only for the 2-arg form (a
@@ -6478,6 +6493,7 @@ impl Compiler {
             flow_type: crate::lang::bytecode::FlowType::Pipe,
             result_modifier,
             source: self.source_to_location(&flow.src).map(Box::new),
+            origin_name: None,
         });
 
         // Start with the first expression (the initial value)
@@ -6565,6 +6581,7 @@ impl Compiler {
             flow_type: crate::lang::bytecode::FlowType::Serial,
             result_modifier,
             source: self.source_to_location(&flow.src).map(Box::new),
+            origin_name: None,
         });
 
         // Activate flow-scoped aliases, saving previous state for restore
@@ -6692,6 +6709,7 @@ impl Compiler {
             flow_type: crate::lang::bytecode::FlowType::Parallel,
             result_modifier,
             source: self.source_to_location(&flow.src).map(Box::new),
+            origin_name: None,
         });
 
         // Store the dependency metadata in a special register that the VM can access
@@ -7367,6 +7385,7 @@ impl Compiler {
             flow_type,
             result_modifier,
             source: self.source_to_location(&match_expr.src).map(Box::new),
+            origin_name: None,
         });
 
         // Get the type path of the matched value (works for primitives and custom types)
@@ -7638,6 +7657,7 @@ impl Compiler {
             flow_type,
             result_modifier,
             source: self.source_to_location(&flow.src).map(Box::new),
+            origin_name: None,
         });
 
         // Initialize result register with null (in case no conditions match)
