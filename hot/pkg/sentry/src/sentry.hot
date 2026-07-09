@@ -1,0 +1,114 @@
+::sentry ns
+meta {
+    doc: """
+    Sentry bindings: issues, events, and projects — enough for an agent
+    to triage its own production errors (list new issues, read the
+    latest event's stack, resolve or assign).
+
+    **Setup** — context variables:
+    - `sentry.token` — an organization auth token (`sntrys_...`)
+    - `sentry.org` — the organization slug
+    - `sentry.url` — optional, for self-hosted (default `https://sentry.io`)
+
+    **Quick start**
+
+    ```hot
+    ::sentry ::sentry
+
+    fresh ::sentry/list-issues("my-api", "is:unresolved firstSeen:-24h")
+    latest ::sentry/get-latest-event(first(fresh).id)
+    ::sentry/resolve-issue(first(fresh).id)
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+base-url fn (): Str {
+  root or(::ctx/get("sentry.url"), "https://sentry.io")
+  `${root}/api/0`
+}
+
+request fn (method: Str, path: Str, body: Any): Any {
+  base-headers {
+    Authorization: `Bearer ${::ctx/get("sentry.token")}`
+  }
+  headers cond {
+    eq(body, "") => { base-headers }
+    => { {...base-headers, Content-Type: "application/json"} }
+  }
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${base-url()}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+org fn (): Str {
+  ::ctx/get("sentry.org")
+}
+
+list-projects
+meta {
+    ctx: {"sentry.token": {required: true}, "sentry.org": {required: true}},
+    doc: """GET /organizations/{org}/projects/ - The organization's projects."""
+}
+fn (): Any {
+  request("GET", `/organizations/${org()}/projects/`, "")
+}
+
+list-issues
+meta {
+    doc: """
+    GET /projects/{org}/{project}/issues/ - Search a project's issues
+    with Sentry's query syntax, e.g. `"is:unresolved firstSeen:-24h"`
+    (2-arity) or all unresolved (1-arity).
+    """
+}
+fn
+(project: Str): Any {
+  request("GET", `/projects/${org()}/${project}/issues/`, "")
+},
+(project: Str, query: Str): Any {
+  request("GET", `/projects/${org()}/${project}/issues/?query=${::uri/encode(query)}`, "")
+}
+
+get-issue
+meta {
+    doc: """GET /issues/{id}/ - One issue: title, culprit, counts, status."""
+}
+fn (issue-id: Any): Map {
+  request("GET", `/issues/${issue-id}/`, "")
+}
+
+get-latest-event
+meta {
+    doc: """GET /issues/{id}/events/latest/ - The most recent event for an issue, including the stack trace entries."""
+}
+fn (issue-id: Any): Map {
+  request("GET", `/issues/${issue-id}/events/latest/`, "")
+}
+
+update-issue
+meta {
+    doc: """PUT /issues/{id}/ - Update an issue: `{status: "resolved"/"ignored"/"unresolved", assignedTo: "user@email"}`."""
+}
+fn (issue-id: Any, changes: Map): Map {
+  request("PUT", `/issues/${issue-id}/`, changes)
+}
+
+resolve-issue
+meta {
+    doc: """Mark an issue resolved."""
+}
+fn (issue-id: Any): Map {
+  update-issue(issue-id, {status: "resolved"})
+}

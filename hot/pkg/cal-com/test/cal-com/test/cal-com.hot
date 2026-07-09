@@ -1,0 +1,12 @@
+::cal-com::test ns
+meta ["test"]
+
+test-api-version-pinned
+meta ["test"] fn () {
+    assert-eq("2024-08-13", ::cal-com/API_VERSION)
+}
+
+test-base-url-default
+meta ["test"] fn () {
+    assert-eq("https://api.cal.com/v2", ::cal-com/base-url())
+}

@@ -1,0 +1,167 @@
+::cloudflare ns
+meta {
+    doc: """
+    Cloudflare bindings: zones, DNS records, and Workers KV.
+
+    For R2 object storage, use the `aws-s3` package against your R2
+    S3-compatible endpoint (`https://{account-id}.r2.cloudflarestorage.com`)
+    — R2 speaks SigV4.
+
+    **Setup** — context variables:
+    - `cloudflare.token` — an API token scoped to what you touch
+    - `cloudflare.account.id` — required for KV operations
+
+    **Quick start**
+
+    ```hot
+    ::cf ::cloudflare
+
+    zone first(::cf/list-zones("example.com").result)
+    ::cf/create-dns-record(zone.id, {type: "A", name: "api", content: "203.0.113.7", proxied: true})
+
+    ::cf/kv-write(namespace-id, "greeting", "hot")
+    ::cf/kv-read(namespace-id, "greeting")  // => "hot"
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+BASE_URL "https://api.cloudflare.com/client/v4"
+
+request fn (method: Str, path: Str, body: Any, content-type: Str): Any {
+  base-headers {
+    Authorization: `Bearer ${::ctx/get("cloudflare.token")}`
+  }
+  headers cond {
+    eq(body, "") => { base-headers }
+    => { {...base-headers, Content-Type: content-type} }
+  }
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${BASE_URL}${path}`,
+    headers: headers,
+    body: body
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+json fn (method: Str, path: Str, body: Any): Any {
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  request(method, path, encoded, "application/json")
+}
+
+account fn (): Str {
+  ::ctx/get("cloudflare.account.id")
+}
+
+// ---------------------------------------------------------------------------
+// Zones & DNS
+// ---------------------------------------------------------------------------
+
+list-zones
+meta {
+    ctx: {"cloudflare.token": {required: true}},
+    doc: """GET /zones - Your zones; the 1-arity form filters by domain name. Payload is in `.result`."""
+}
+fn
+(): Any {
+  json("GET", "/zones", "")
+},
+(name: Str): Any {
+  json("GET", `/zones?name=${::uri/encode(name)}`, "")
+}
+
+list-dns-records
+meta {
+    doc: """GET /zones/{zone}/dns_records - A zone's DNS records."""
+}
+fn (zone-id: Str): Any {
+  json("GET", `/zones/${zone-id}/dns_records`, "")
+}
+
+create-dns-record
+meta {
+    doc: """POST /zones/{zone}/dns_records - Create a record: `{type, name, content, ttl?, proxied?, priority?}`."""
+}
+fn (zone-id: Str, record: Map): Any {
+  json("POST", `/zones/${zone-id}/dns_records`, record)
+}
+
+update-dns-record
+meta {
+    doc: """PATCH /zones/{zone}/dns_records/{id} - Update a record's fields."""
+}
+fn (zone-id: Str, record-id: Str, changes: Map): Any {
+  json("PATCH", `/zones/${zone-id}/dns_records/${record-id}`, changes)
+}
+
+delete-dns-record
+meta {
+    doc: """DELETE /zones/{zone}/dns_records/{id} - Delete a record."""
+}
+fn (zone-id: Str, record-id: Str): Any {
+  json("DELETE", `/zones/${zone-id}/dns_records/${record-id}`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Workers KV
+// ---------------------------------------------------------------------------
+
+kv-list-namespaces
+meta {
+    ctx: {"cloudflare.token": {required: true}, "cloudflare.account.id": {required: true}},
+    doc: """GET /accounts/{account}/storage/kv/namespaces - Your KV namespaces."""
+}
+fn (): Any {
+  json("GET", `/accounts/${account()}/storage/kv/namespaces`, "")
+}
+
+kv-key-path fn (namespace-id: Str, key: Str): Str {
+  `/accounts/${account()}/storage/kv/namespaces/${namespace-id}/values/${::uri/encode(key)}`
+}
+
+kv-read
+meta {
+    doc: """GET a KV value by key. Returns the raw value (Str/Bytes), or an Err with status 404 when absent."""
+}
+fn (namespace-id: Str, key: Str): Any {
+  request("GET", kv-key-path(namespace-id, key), "", "")
+}
+
+kv-write
+meta {
+    doc: """PUT a KV value (Str or Bytes). The 4-arity form sets `expiration_ttl` seconds."""
+}
+fn
+(namespace-id: Str, key: Str, value: Any): Any {
+  request("PUT", kv-key-path(namespace-id, key), value, "text/plain")
+},
+(namespace-id: Str, key: Str, value: Any, ttl-seconds: Int): Any {
+  request("PUT", `${kv-key-path(namespace-id, key)}?expiration_ttl=${ttl-seconds}`, value, "text/plain")
+}
+
+kv-delete
+meta {
+    doc: """DELETE a KV key."""
+}
+fn (namespace-id: Str, key: Str): Any {
+  request("DELETE", kv-key-path(namespace-id, key), "", "")
+}
+
+kv-list-keys
+meta {
+    doc: """GET the keys in a namespace (optionally by prefix, 2-arity)."""
+}
+fn
+(namespace-id: Str): Any {
+  json("GET", `/accounts/${account()}/storage/kv/namespaces/${namespace-id}/keys`, "")
+},
+(namespace-id: Str, prefix: Str): Any {
+  json("GET", `/accounts/${account()}/storage/kv/namespaces/${namespace-id}/keys?prefix=${::uri/encode(prefix)}`, "")
+}

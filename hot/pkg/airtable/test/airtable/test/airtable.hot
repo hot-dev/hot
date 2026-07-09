@@ -1,0 +1,14 @@
+::airtable::test ns
+meta ["test"]
+
+test-table-path-encodes-names
+meta ["test"] fn () {
+    assert-eq("/appXYZ/Leads", ::airtable/table-path("appXYZ", "Leads"))
+    assert-eq("/appXYZ/Deal%20Flow", ::airtable/table-path("appXYZ", "Deal Flow"))
+}
+
+test-query-string
+meta ["test"] fn () {
+    qs ::airtable/query-string({maxRecords: 20, view: null})
+    assert-eq("?maxRecords=20", qs)
+}

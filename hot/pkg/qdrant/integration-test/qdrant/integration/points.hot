@@ -1,0 +1,12 @@
+::qdrant::integration ns
+meta ["test"]
+
+// Requires a reachable Qdrant (qdrant.url, default localhost:6333)
+test-roundtrip
+meta ["test"] fn () {
+    ::qdrant/create-collection("hot-itest", 4)
+    ::qdrant/upsert-points("hot-itest", [{id: 1, vector: [0.1, 0.2, 0.3, 0.4], payload: {k: "v"}}])
+    hits ::qdrant/search("hot-itest", {vector: [0.1, 0.2, 0.3, 0.4], limit: 1, with_payload: true})
+    assert-eq("v", first(hits).payload.k)
+    ::qdrant/delete-collection("hot-itest")
+}

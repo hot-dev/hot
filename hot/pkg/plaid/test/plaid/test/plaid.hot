@@ -1,0 +1,9 @@
+::plaid::test ns
+meta ["test"]
+
+test-env-base-urls
+meta ["test"] fn () {
+    assert-eq("https://sandbox.plaid.com", ::plaid/env-base-url("sandbox"))
+    assert-eq("https://production.plaid.com", ::plaid/env-base-url("production"))
+    assert-eq("https://sandbox.plaid.com", ::plaid/env-base-url("bogus"), "unknown env falls back to sandbox")
+}

@@ -1,0 +1,13 @@
+::hot-api::test ns
+meta ["test"]
+
+test-base-url-default
+meta ["test"] fn () {
+    assert-eq("https://api.hot.dev/v1", ::hot-api/base-url())
+}
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("?status=failed&limit=10", ::hot-api/query-string({status: "failed", limit: 10, offset: null}))
+    assert-eq("", ::hot-api/query-string({}))
+}

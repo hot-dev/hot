@@ -1,0 +1,128 @@
+::airtable ns
+meta {
+    doc: """
+    Airtable bindings — the lightweight database half the world runs ops
+    on. Records CRUD with formula filtering, plus the metadata API for
+    base schemas.
+
+    **Setup** — context variable `airtable.token`: a personal access
+    token (`pat...`) with the scopes and bases it needs.
+
+    **Quick start**
+
+    ```hot
+    ::at ::airtable
+
+    rows ::at/list-records(base-id, "Leads", {
+      filterByFormula: "AND({Status} = 'New', {Score} > 50)",
+      maxRecords: 20
+    })
+
+    ::at/create-records(base-id, "Leads", [
+      {fields: {Name: "Ada Lovelace", Status: "New", Score: 99}}
+    ])
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+BASE_URL "https://api.airtable.com/v0"
+
+query-string fn (params: Map): Str {
+  filtered filter-vals(params, is-some)
+  cond {
+    is-empty(filtered) => { "" }
+    => { `?${::uri/encode-query(filtered)}` }
+  }
+}
+
+request fn (method: Str, path: Str, body: Any): Any {
+  headers cond {
+    eq(body, "") => { {Authorization: `Bearer ${::ctx/get("airtable.token")}`} }
+    => { {Authorization: `Bearer ${::ctx/get("airtable.token")}`, Content-Type: "application/json"} }
+  }
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${BASE_URL}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+table-path fn (base-id: Str, table: Str): Str {
+  `/${base-id}/${::uri/encode(table)}`
+}
+
+list-records
+meta {
+    ctx: {"airtable.token": {required: true}},
+    doc: """
+    GET /{base}/{table} - List records. `params`: `filterByFormula`
+    (Airtable formula), `maxRecords`, `view`, `sort` handled by formula,
+    `offset` (paging cursor from the previous page). Returns
+    `{records, offset?}`.
+    """
+}
+fn
+(base-id: Str, table: Str): Map {
+  request("GET", table-path(base-id, table), "")
+},
+(base-id: Str, table: Str, params: Map): Map {
+  request("GET", `${table-path(base-id, table)}${query-string(params)}`, "")
+}
+
+get-record
+meta {
+    doc: """GET /{base}/{table}/{id} - One record (`{id, createdTime, fields}`)."""
+}
+fn (base-id: Str, table: Str, record-id: Str): Map {
+  request("GET", `${table-path(base-id, table)}/${record-id}`, "")
+}
+
+create-records
+meta {
+    doc: """POST /{base}/{table} - Create up to 10 records: `[{fields: {...}}]`. `typecast` is enabled so string inputs coerce to the field types."""
+}
+fn (base-id: Str, table: Str, records: Vec): Map {
+  request("POST", table-path(base-id, table), {records: records, typecast: true})
+}
+
+update-records
+meta {
+    doc: """PATCH /{base}/{table} - Update up to 10 records: `[{id, fields}]` (only the given fields change)."""
+}
+fn (base-id: Str, table: Str, records: Vec): Map {
+  request("PATCH", table-path(base-id, table), {records: records, typecast: true})
+}
+
+delete-record
+meta {
+    doc: """DELETE /{base}/{table}/{id} - Delete one record."""
+}
+fn (base-id: Str, table: Str, record-id: Str): Map {
+  request("DELETE", `${table-path(base-id, table)}/${record-id}`, "")
+}
+
+list-bases
+meta {
+    doc: """GET /meta/bases - The bases the token can access."""
+}
+fn (): Map {
+  request("GET", "/meta/bases", "")
+}
+
+get-base-schema
+meta {
+    doc: """GET /meta/bases/{base}/tables - The base's tables, fields, and views — what an agent reads before writing records."""
+}
+fn (base-id: Str): Map {
+  request("GET", `/meta/bases/${base-id}/tables`, "")
+}

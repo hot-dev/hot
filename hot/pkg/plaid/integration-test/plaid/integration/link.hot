@@ -1,0 +1,9 @@
+::plaid::integration ns
+meta ["test"]
+
+// Requires ctx: plaid.client-id + plaid.secret (sandbox)
+test-create-link-token
+meta ["test"] fn () {
+    out ::plaid/create-link-token("hot-itest-user", "Hot Integration Test")
+    assert(is-some(out.link_token), "sandbox should mint a link token")
+}

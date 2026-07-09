@@ -1,0 +1,31 @@
+::hot::pkg ns
+
+hot.pkg.crm {
+  name: "hot.dev/crm",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "CRM-agnostic contact, company, and activity operations for Hot agents — one surface over HubSpot, Salesforce, and Attio, selected by whichever credentials are configured.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["crm", "agents"],
+  deps: {
+    "hot.dev/hubspot": {
+      local: "../hubspot",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/hubspot"
+    },
+    "hot.dev/salesforce": {
+      local: "../salesforce",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/salesforce"
+    },
+    "hot.dev/attio": {
+      local: "../attio",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/attio"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

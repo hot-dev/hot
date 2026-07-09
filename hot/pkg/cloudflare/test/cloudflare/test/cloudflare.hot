@@ -1,0 +1,7 @@
+::cloudflare::test ns
+meta ["test"]
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://api.cloudflare.com/client/v4", ::cloudflare/BASE_URL)
+}

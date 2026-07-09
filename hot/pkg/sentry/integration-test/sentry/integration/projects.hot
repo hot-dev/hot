@@ -1,0 +1,9 @@
+::sentry::integration ns
+meta ["test"]
+
+// Requires ctx: sentry.token + sentry.org
+test-list-projects
+meta ["test"] fn () {
+    out ::sentry/list-projects()
+    assert(not(is-err(out)), "token should list projects")
+}

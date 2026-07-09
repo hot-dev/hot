@@ -1,0 +1,75 @@
+::crm::test ns
+meta ["test"]
+
+::hs ::crm::hubspot
+::sf ::crm::salesforce
+::at ::crm::attio
+
+test-no-provider-errors
+meta ["test"] fn () {
+    out ::crm/upsert-contact({email: "a@b.c"})
+    assert(is-err(out), "no configured CRM should be a clear error")
+}
+
+// ============================================================================
+// Normalizers (shapes from each provider's documented responses)
+// ============================================================================
+
+test-hubspot-normalize-contact
+meta ["test"] fn () {
+    c ::hs/normalize-contact({id: "1234", properties: {email: "ada@example.com", firstname: "Ada", lastname: "Lovelace"}})
+    assert-eq("1234", c.id)
+    assert-eq("ada@example.com", c.email)
+    assert-eq("Ada", c.first-name)
+    assert-eq("hubspot", c.provider)
+}
+
+test-salesforce-normalize-contact
+meta ["test"] fn () {
+    c ::sf/normalize-contact({Id: "003xx", Email: "ada@example.com", FirstName: "Ada", LastName: "Lovelace"})
+    assert-eq("003xx", c.id)
+    assert-eq("Lovelace", c.last-name)
+    assert-eq("salesforce", c.provider)
+}
+
+test-attio-normalize-contact
+meta ["test"] fn () {
+    c ::at/normalize-contact({
+        id: {record_id: "rec-9"},
+        values: {
+            email_addresses: [{email_address: "ada@example.com"}],
+            name: [{first_name: "Ada", last_name: "Lovelace", full_name: "Ada Lovelace"}]
+        }
+    })
+    assert-eq("rec-9", c.id)
+    assert-eq("ada@example.com", c.email)
+    assert-eq("Ada", c.first-name)
+    assert-eq("attio", c.provider)
+}
+
+test-attio-normalize-contact-missing-name
+meta ["test"] fn () {
+    c ::at/normalize-contact({id: {record_id: "rec-2"}, values: {email_addresses: [{email_address: "x@y.z"}]}})
+    assert(is-null(c.first-name), "missing name attribute normalizes to null")
+}
+
+// ============================================================================
+// Builders and escaping
+// ============================================================================
+
+test-soql-escaping
+meta ["test"] fn () {
+    assert-eq("O\\'Brien", ::sf/escape-soql("O'Brien"))
+    assert-eq("a\\\\b", ::sf/escape-soql("a\\b"))
+    assert-eq("plain", ::sf/escape-soql("plain"))
+}
+
+test-attio-person-values
+meta ["test"] fn () {
+    v ::at/build-person-values({email: "ada@example.com", first-name: "Ada", last-name: "Lovelace"})
+    assert-eq("ada@example.com", first(v.email_addresses).email_address)
+    assert-eq("Ada Lovelace", first(v.name).full_name)
+
+    no-name ::at/build-person-values({email: "x@y.z"})
+    assert(not(in("name", keys(no-name))), "no name attribute when no name fields")
+}

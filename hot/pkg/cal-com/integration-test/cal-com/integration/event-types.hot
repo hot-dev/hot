@@ -1,0 +1,9 @@
+::cal-com::integration ns
+meta ["test"]
+
+// Requires ctx: cal-com.api.key
+test-list-event-types
+meta ["test"] fn () {
+    out ::cal-com/list-event-types()
+    assert(not(is-err(out)), "key should list event types")
+}

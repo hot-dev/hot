@@ -1,0 +1,7 @@
+::firecrawl::test ns
+meta ["test"]
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://api.firecrawl.dev/v2", ::firecrawl/BASE_URL)
+}

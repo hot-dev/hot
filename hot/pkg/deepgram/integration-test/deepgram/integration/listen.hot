@@ -1,0 +1,9 @@
+::deepgram::integration ns
+meta ["test"]
+
+// Requires ctx: deepgram.api.key
+test-transcribe-sample
+meta ["test"] fn () {
+    out ::deepgram/transcribe-url("https://static.deepgram.com/examples/Bueller-Life-moves-pretty-fast.wav")
+    assert(gt(length(::deepgram/transcript(out)), 10), "should transcribe the sample")
+}

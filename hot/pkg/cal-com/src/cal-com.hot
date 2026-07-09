@@ -1,0 +1,135 @@
+::cal-com ns
+meta {
+    doc: """
+    Cal.com bindings: event types, availability slots, and bookings —
+    the scheduling half of a sales or assistant agent (find lead → log
+    to CRM → book the meeting).
+
+    **Setup** — context variable `cal-com.api.key` (`cal_...` from
+    Settings → Developer → API keys). Works with cal.com cloud and
+    self-hosted (`cal-com.url` overrides the base URL).
+
+    **Quick start**
+
+    ```hot
+    ::cal ::cal-com
+
+    types ::cal/list-event-types()
+
+    slots ::cal/get-slots(event-type-id, "2026-07-10", "2026-07-14", "America/Chicago")
+
+    booking ::cal/create-booking({
+      eventTypeId: event-type-id,
+      start: "2026-07-10T15:00:00Z",
+      attendee: {name: "Ada Lovelace", email: "ada@example.com", timeZone: "America/Chicago"}
+    })
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+API_VERSION "2024-08-13"
+
+base-url fn (): Str {
+  or(::ctx/get("cal-com.url"), "https://api.cal.com/v2")
+}
+
+request fn (method: Str, path: Str, body: Any): Any {
+  base-headers {
+    Authorization: `Bearer ${::ctx/get("cal-com.api.key")}`,
+    cal-api-version: API_VERSION
+  }
+  headers cond {
+    eq(body, "") => { base-headers }
+    => { {...base-headers, Content-Type: "application/json"} }
+  }
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${base-url()}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { get(response.body, "data", response.body) }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+list-event-types
+meta {
+    ctx: {"cal-com.api.key": {required: true}},
+    doc: """GET /event-types - Your event types (the bookable meeting kinds) with their ids and durations."""
+}
+fn (): Any {
+  request("GET", "/event-types", "")
+}
+
+get-slots
+meta {
+    doc: """
+    GET /slots - Available start times for an event type between two
+    dates (inclusive, `YYYY-MM-DD`), localized to `time-zone`. Returns a
+    map of date → slots.
+    """
+}
+fn (event-type-id: Any, start-date: Str, end-date: Str, time-zone: Str): Any {
+  params ::uri/encode-query({
+    eventTypeId: event-type-id,
+    start: start-date,
+    end: end-date,
+    timeZone: time-zone
+  })
+  request("GET", `/slots?${params}`, "")
+}
+
+create-booking
+meta {
+    doc: """
+    POST /bookings - Book a slot. `booking`: `eventTypeId`, `start`
+    (UTC RFC3339 from `get-slots`), `attendee` (`{name, email,
+    timeZone}`), optional `metadata`, `guests`.
+    """
+}
+fn (booking: Map): Any {
+  request("POST", "/bookings", booking)
+}
+
+list-bookings
+meta {
+    doc: """GET /bookings - Your bookings; the 1-arity form filters by status ("upcoming", "past", "cancelled")."""
+}
+fn
+(): Any {
+  request("GET", "/bookings", "")
+},
+(status: Str): Any {
+  request("GET", `/bookings?status=${status}`, "")
+}
+
+get-booking
+meta {
+    doc: """GET /bookings/{uid} - One booking by uid."""
+}
+fn (uid: Str): Any {
+  request("GET", `/bookings/${uid}`, "")
+}
+
+cancel-booking
+meta {
+    doc: """POST /bookings/{uid}/cancel - Cancel a booking with a reason."""
+}
+fn (uid: Str, reason: Str): Any {
+  request("POST", `/bookings/${uid}/cancel`, {cancellationReason: reason})
+}
+
+reschedule-booking
+meta {
+    doc: """POST /bookings/{uid}/reschedule - Move a booking to a new start time (UTC RFC3339)."""
+}
+fn (uid: Str, new-start: Str): Any {
+  request("POST", `/bookings/${uid}/reschedule`, {start: new-start})
+}

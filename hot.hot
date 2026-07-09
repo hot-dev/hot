@@ -56,46 +56,59 @@ hot.project.hot-dev.deps {
 // projects and scripts.
 hot.project.hot-pkg-all.src.paths ["./hot/pkg/hot-std/src"]
 hot.project.hot-pkg-all.test.paths [
+    "./hot/pkg/airtable/test",
     "./hot/pkg/anthropic/test",
     "./hot/pkg/attio/test",
     "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/cal-com/test",
+    "./hot/pkg/cloudflare/test",
+    "./hot/pkg/crm/test",
+    "./hot/pkg/deepgram/test",
     "./hot/pkg/discord/test",
     "./hot/pkg/elevenlabs/test",
     "./hot/pkg/ffmpeg/test",
+    "./hot/pkg/firecrawl/test",
     "./hot/pkg/github/test",
     "./hot/pkg/google-core/test",
     "./hot/pkg/google-drive/test",
     "./hot/pkg/google-gmail/test",
-    "./hot/pkg/hot-ai/test",
     "./hot/pkg/hot-ai-agent/test",
+    "./hot/pkg/hot-ai/test",
+    "./hot/pkg/hot-api/test",
     "./hot/pkg/hot-std/test",
     "./hot/pkg/hubspot/test",
     "./hot/pkg/imagemagick/test",
+    "./hot/pkg/intercom/test",
     "./hot/pkg/jwt/test",
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/linear/test",
     "./hot/pkg/mcp/test",
     "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
-    "./hot/pkg/openai/test",
     "./hot/pkg/openai-compatible/test",
+    "./hot/pkg/openai/test",
     "./hot/pkg/pandoc/test",
     "./hot/pkg/pg/test",
     "./hot/pkg/pinecone/test",
+    "./hot/pkg/plaid/test",
     "./hot/pkg/playwright/test",
+    "./hot/pkg/qdrant/test",
     "./hot/pkg/redis/test",
     "./hot/pkg/salesforce/test",
+    "./hot/pkg/sentry/test",
+    "./hot/pkg/shopify/test",
     "./hot/pkg/sox/test",
     "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
-    "./hot/pkg/supabase/test",
     "./hot/pkg/supabase-admin/test",
+    "./hot/pkg/supabase/test",
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
     "./hot/pkg/web-search/test",
     "./hot/pkg/webhooks/test",
     "./hot/pkg/whatsapp/test",
-    "./hot/pkg/whisper/test"
+    "./hot/pkg/whisper/test",
+    "./hot/pkg/zendesk/test"
 ]
 hot.project.hot-pkg-all.test.capture true
 // Fixture resources are data for hot-std's resource tests; keep skill
@@ -103,6 +116,7 @@ hot.project.hot-pkg-all.test.capture true
 hot.project.hot-pkg-all.resources.paths ["./hot/pkg/hot-std/test/fixtures/resources"]
 hot.project.hot-pkg-all.skills.codegen.enabled false
 hot.project.hot-pkg-all.deps {
+    "hot.dev/airtable": { "local": "./hot/pkg/airtable" },
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/attio": { "local": "./hot/pkg/attio" },
     "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
@@ -115,9 +129,14 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/aws-ses": { "local": "./hot/pkg/aws-ses" },
     "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
+    "hot.dev/cal-com": { "local": "./hot/pkg/cal-com" },
+    "hot.dev/cloudflare": { "local": "./hot/pkg/cloudflare" },
+    "hot.dev/crm": { "local": "./hot/pkg/crm" },
+    "hot.dev/deepgram": { "local": "./hot/pkg/deepgram" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
     "hot.dev/elevenlabs": { "local": "./hot/pkg/elevenlabs" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
+    "hot.dev/firecrawl": { "local": "./hot/pkg/firecrawl" },
     "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
     "hot.dev/github": { "local": "./hot/pkg/github" },
     "hot.dev/google-calendar": { "local": "./hot/pkg/google-calendar" },
@@ -127,26 +146,32 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/google-sheets": { "local": "./hot/pkg/google-sheets" },
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
+    "hot.dev/hot-api": { "local": "./hot/pkg/hot-api" },
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
+    "hot.dev/intercom": { "local": "./hot/pkg/intercom" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
     "hot.dev/linear": { "local": "./hot/pkg/linear" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
     "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" },
     "hot.dev/pinecone": { "local": "./hot/pkg/pinecone" },
+    "hot.dev/plaid": { "local": "./hot/pkg/plaid" },
     "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
     "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
+    "hot.dev/qdrant": { "local": "./hot/pkg/qdrant" },
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
     "hot.dev/redis": { "local": "./hot/pkg/redis" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
+    "hot.dev/sentry": { "local": "./hot/pkg/sentry" },
+    "hot.dev/shopify": { "local": "./hot/pkg/shopify" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
     "hot.dev/sox": { "local": "./hot/pkg/sox" },
@@ -161,7 +186,8 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
-    "hot.dev/xai": { "local": "./hot/pkg/xai" }
+    "hot.dev/xai": { "local": "./hot/pkg/xai" },
+    "hot.dev/zendesk": { "local": "./hot/pkg/zendesk" }
 }
 
 hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
@@ -379,6 +405,93 @@ hot.project.pkg-test-stripe.src.paths ["./hot/pkg/stripe/src"]
 hot.project.pkg-test-stripe.test.paths ["./hot/pkg/stripe/test"]
 hot.project.pkg-test-stripe.test.capture true
 hot.project.pkg-test-stripe.deps {}
+
+// airtable unit tests (hermetic)
+hot.project.pkg-test-airtable.src.paths ["./hot/pkg/airtable/src"]
+hot.project.pkg-test-airtable.test.paths ["./hot/pkg/airtable/test"]
+hot.project.pkg-test-airtable.test.capture true
+hot.project.pkg-test-airtable.deps {}
+
+// cal-com unit tests (hermetic)
+hot.project.pkg-test-cal-com.src.paths ["./hot/pkg/cal-com/src"]
+hot.project.pkg-test-cal-com.test.paths ["./hot/pkg/cal-com/test"]
+hot.project.pkg-test-cal-com.test.capture true
+hot.project.pkg-test-cal-com.deps {}
+
+// cloudflare unit tests (hermetic)
+hot.project.pkg-test-cloudflare.src.paths ["./hot/pkg/cloudflare/src"]
+hot.project.pkg-test-cloudflare.test.paths ["./hot/pkg/cloudflare/test"]
+hot.project.pkg-test-cloudflare.test.capture true
+hot.project.pkg-test-cloudflare.deps {}
+
+// deepgram unit tests (hermetic)
+hot.project.pkg-test-deepgram.src.paths ["./hot/pkg/deepgram/src"]
+hot.project.pkg-test-deepgram.test.paths ["./hot/pkg/deepgram/test"]
+hot.project.pkg-test-deepgram.test.capture true
+hot.project.pkg-test-deepgram.deps {}
+
+// firecrawl unit tests (hermetic)
+hot.project.pkg-test-firecrawl.src.paths ["./hot/pkg/firecrawl/src"]
+hot.project.pkg-test-firecrawl.test.paths ["./hot/pkg/firecrawl/test"]
+hot.project.pkg-test-firecrawl.test.capture true
+hot.project.pkg-test-firecrawl.deps {}
+
+// hot-api unit tests (hermetic)
+hot.project.pkg-test-hot-api.src.paths ["./hot/pkg/hot-api/src"]
+hot.project.pkg-test-hot-api.test.paths ["./hot/pkg/hot-api/test"]
+hot.project.pkg-test-hot-api.test.capture true
+hot.project.pkg-test-hot-api.deps {}
+
+// intercom unit tests (hermetic)
+hot.project.pkg-test-intercom.src.paths ["./hot/pkg/intercom/src"]
+hot.project.pkg-test-intercom.test.paths ["./hot/pkg/intercom/test"]
+hot.project.pkg-test-intercom.test.capture true
+hot.project.pkg-test-intercom.deps {}
+
+// plaid unit tests (hermetic)
+hot.project.pkg-test-plaid.src.paths ["./hot/pkg/plaid/src"]
+hot.project.pkg-test-plaid.test.paths ["./hot/pkg/plaid/test"]
+hot.project.pkg-test-plaid.test.capture true
+hot.project.pkg-test-plaid.deps {}
+
+// qdrant unit tests (hermetic)
+hot.project.pkg-test-qdrant.src.paths ["./hot/pkg/qdrant/src"]
+hot.project.pkg-test-qdrant.test.paths ["./hot/pkg/qdrant/test"]
+hot.project.pkg-test-qdrant.test.capture true
+hot.project.pkg-test-qdrant.deps {}
+
+// sentry unit tests (hermetic)
+hot.project.pkg-test-sentry.src.paths ["./hot/pkg/sentry/src"]
+hot.project.pkg-test-sentry.test.paths ["./hot/pkg/sentry/test"]
+hot.project.pkg-test-sentry.test.capture true
+hot.project.pkg-test-sentry.deps {}
+
+// shopify unit tests (hermetic)
+hot.project.pkg-test-shopify.src.paths ["./hot/pkg/shopify/src"]
+hot.project.pkg-test-shopify.test.paths ["./hot/pkg/shopify/test"]
+hot.project.pkg-test-shopify.test.capture true
+hot.project.pkg-test-shopify.deps {
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
+}
+
+// zendesk unit tests (hermetic)
+hot.project.pkg-test-zendesk.src.paths ["./hot/pkg/zendesk/src"]
+hot.project.pkg-test-zendesk.test.paths ["./hot/pkg/zendesk/test"]
+hot.project.pkg-test-zendesk.test.capture true
+hot.project.pkg-test-zendesk.deps {}
+
+// crm unit tests (provider normalizers + builders, hermetic)
+hot.project.pkg-test-crm.src.paths ["./hot/pkg/crm/src"]
+hot.project.pkg-test-crm.test.paths ["./hot/pkg/crm/test"]
+hot.project.pkg-test-crm.test.capture true
+hot.project.pkg-test-crm.deps {
+    "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
+    "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
+    "hot.dev/attio": { "local": "./hot/pkg/attio" },
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
 
 // hubspot unit tests (search bodies, note payloads, v3 webhook signature)
 hot.project.pkg-test-hubspot.src.paths ["./hot/pkg/hubspot/src"]
@@ -665,6 +778,93 @@ hot.project.pkg-integration-aws-sns.deps {
 hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
 hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
 hot.project.pkg-aws-eventstream.test.capture true
+
+// crm integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-crm.src.paths ["./hot/pkg/crm/src"]
+hot.project.pkg-integration-crm.test.paths ["./hot/pkg/crm/integration-test"]
+hot.project.pkg-integration-crm.test.capture true
+hot.project.pkg-integration-crm.deps {
+    "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
+    "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
+    "hot.dev/attio": { "local": "./hot/pkg/attio" },
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// firecrawl integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-firecrawl.src.paths ["./hot/pkg/firecrawl/src"]
+hot.project.pkg-integration-firecrawl.test.paths ["./hot/pkg/firecrawl/integration-test"]
+hot.project.pkg-integration-firecrawl.test.capture true
+hot.project.pkg-integration-firecrawl.deps {}
+
+// deepgram integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-deepgram.src.paths ["./hot/pkg/deepgram/src"]
+hot.project.pkg-integration-deepgram.test.paths ["./hot/pkg/deepgram/integration-test"]
+hot.project.pkg-integration-deepgram.test.capture true
+hot.project.pkg-integration-deepgram.deps {}
+
+// qdrant integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-qdrant.src.paths ["./hot/pkg/qdrant/src"]
+hot.project.pkg-integration-qdrant.test.paths ["./hot/pkg/qdrant/integration-test"]
+hot.project.pkg-integration-qdrant.test.capture true
+hot.project.pkg-integration-qdrant.deps {}
+
+// airtable integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-airtable.src.paths ["./hot/pkg/airtable/src"]
+hot.project.pkg-integration-airtable.test.paths ["./hot/pkg/airtable/integration-test"]
+hot.project.pkg-integration-airtable.test.capture true
+hot.project.pkg-integration-airtable.deps {}
+
+// intercom integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-intercom.src.paths ["./hot/pkg/intercom/src"]
+hot.project.pkg-integration-intercom.test.paths ["./hot/pkg/intercom/integration-test"]
+hot.project.pkg-integration-intercom.test.capture true
+hot.project.pkg-integration-intercom.deps {}
+
+// zendesk integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-zendesk.src.paths ["./hot/pkg/zendesk/src"]
+hot.project.pkg-integration-zendesk.test.paths ["./hot/pkg/zendesk/integration-test"]
+hot.project.pkg-integration-zendesk.test.capture true
+hot.project.pkg-integration-zendesk.deps {}
+
+// cal-com integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-cal-com.src.paths ["./hot/pkg/cal-com/src"]
+hot.project.pkg-integration-cal-com.test.paths ["./hot/pkg/cal-com/integration-test"]
+hot.project.pkg-integration-cal-com.test.capture true
+hot.project.pkg-integration-cal-com.deps {}
+
+// shopify integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-shopify.src.paths ["./hot/pkg/shopify/src"]
+hot.project.pkg-integration-shopify.test.paths ["./hot/pkg/shopify/integration-test"]
+hot.project.pkg-integration-shopify.test.capture true
+hot.project.pkg-integration-shopify.deps {
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
+}
+
+// plaid integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-plaid.src.paths ["./hot/pkg/plaid/src"]
+hot.project.pkg-integration-plaid.test.paths ["./hot/pkg/plaid/integration-test"]
+hot.project.pkg-integration-plaid.test.capture true
+hot.project.pkg-integration-plaid.deps {}
+
+// sentry integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-sentry.src.paths ["./hot/pkg/sentry/src"]
+hot.project.pkg-integration-sentry.test.paths ["./hot/pkg/sentry/integration-test"]
+hot.project.pkg-integration-sentry.test.capture true
+hot.project.pkg-integration-sentry.deps {}
+
+// cloudflare integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-cloudflare.src.paths ["./hot/pkg/cloudflare/src"]
+hot.project.pkg-integration-cloudflare.test.paths ["./hot/pkg/cloudflare/integration-test"]
+hot.project.pkg-integration-cloudflare.test.capture true
+hot.project.pkg-integration-cloudflare.deps {}
+
+// hot-api integration tests (requires credentials; read-only or self-cleaning)
+hot.project.pkg-integration-hot-api.src.paths ["./hot/pkg/hot-api/src"]
+hot.project.pkg-integration-hot-api.test.paths ["./hot/pkg/hot-api/integration-test"]
+hot.project.pkg-integration-hot-api.test.capture true
+hot.project.pkg-integration-hot-api.deps {}
 
 // HubSpot integration tests (requires hubspot.token; read-only)
 hot.project.pkg-integration-hubspot.src.paths ["./hot/pkg/hubspot/src"]

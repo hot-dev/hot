@@ -62,16 +62,33 @@ supabase-admin
 
 # CRM
 #attio
+#crm
 #hubspot
+#intercom
 #salesforce
+#zendesk
 
 # Knowledge & Retrieval
+#airtable
+#firecrawl
 #notion
 #pinecone
+#qdrant
 #web-search
 
 # Voice AI
+#deepgram
 #elevenlabs
+
+# Business & Fintech
+#cal-com
+#plaid
+#shopify
+
+# Infrastructure & Platform
+#cloudflare
+#hot-api
+#sentry
 
 # Model Routers
 #openai-compatible

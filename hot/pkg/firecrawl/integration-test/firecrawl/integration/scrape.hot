@@ -1,0 +1,9 @@
+::firecrawl::integration ns
+meta ["test"]
+
+// Requires ctx: firecrawl.api.key
+test-scrape
+meta ["test"] fn () {
+    page ::firecrawl/scrape("https://example.com", {formats: ["markdown"]})
+    assert(contains(lowercase(page.markdown), "example"), "scraped content")
+}

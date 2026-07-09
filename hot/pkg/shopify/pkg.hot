@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.shopify {
+  name: "hot.dev/shopify",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "Shopify Admin bindings for Hot over the GraphQL Admin API: orders, products, customers, and webhook verification.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["commerce", "shopify"],
+  deps: {
+    "hot.dev/webhooks": {
+      local: "../webhooks",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/webhooks"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

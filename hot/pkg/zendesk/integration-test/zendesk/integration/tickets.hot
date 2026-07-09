@@ -1,0 +1,9 @@
+::zendesk::integration ns
+meta ["test"]
+
+// Requires ctx: zendesk.subdomain / zendesk.email / zendesk.api.token
+test-list-tickets
+meta ["test"] fn () {
+    out ::zendesk/list-tickets()
+    assert(is-some(out.tickets), "should return tickets array")
+}

@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.hot-api {
+  name: "hot.dev/hot-api",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "Hot platform API client. Projects, events, runs, context variables, and environment info — write operators and self-managing agents in Hot itself.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["hot", "platform"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

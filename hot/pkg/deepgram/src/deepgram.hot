@@ -1,0 +1,128 @@
+::deepgram ns
+meta {
+    doc: """
+    Deepgram bindings: fast speech-to-text (prerecorded) and Aura
+    text-to-speech. Pairs with `elevenlabs` (premium voices), `whisper`
+    (batch STT in a Hot Box), and the messaging packages for voice
+    agents.
+
+    Live websocket streaming is not covered yet — use prerecorded
+    transcription on audio chunks for near-real-time flows.
+
+    **Setup** — context variable `deepgram.api.key`.
+
+    **Quick start**
+
+    ```hot
+    ::dg ::deepgram
+
+    out ::dg/transcribe-url("https://static.deepgram.com/examples/interview_speech-analytics.wav")
+    ::dg/transcript(out)  // => "another big problem ..."
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+BASE_URL "https://api.deepgram.com/v1"
+
+query-string fn (params: Map): Str {
+  filtered filter-vals(params, is-some)
+  cond {
+    is-empty(filtered) => { "" }
+    => { `?${::uri/encode-query(filtered)}` }
+  }
+}
+
+request fn (path: Str, content-type: Str, body: Any): Any {
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method: "POST",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      Authorization: `Token ${::ctx/get("deepgram.api.key")}`,
+      Content-Type: content-type
+    },
+    body: body
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+transcribe-url
+meta {
+    ctx: {"deepgram.api.key": {required: true}},
+    doc: """
+    POST /listen with a URL source. `options` map to Deepgram query
+    params: `model` (default "nova-3"), `language`, `smart_format`
+    (default true), `diarize`, `punctuate`, `detect_language`. Returns
+    the full response; use `transcript` for the text.
+    """
+}
+fn
+(audio-url: Str): Map {
+  transcribe-url(audio-url, {})
+},
+(audio-url: Str, options: Map): Map {
+  params {model: "nova-3", smart_format: true, ...options}
+  request(`/listen${query-string(params)}`, "application/json", to-json({url: audio-url}))
+}
+
+transcribe-audio
+meta {
+    ctx: {"deepgram.api.key": {required: true}},
+    doc: """POST /listen with raw audio Bytes (wav/mp3/ogg/webm...). Same `options` as `transcribe-url`; pass the audio's MIME type (3-arity, default "audio/wav")."""
+}
+fn
+(audio: Bytes, options: Map): Map {
+  transcribe-audio(audio, options, "audio/wav")
+},
+(audio: Bytes, options: Map, mime-type: Str): Map {
+  params {model: "nova-3", smart_format: true, ...options}
+  request(`/listen${query-string(params)}`, mime-type, audio)
+}
+
+transcript
+meta {
+    doc: """Pull the best transcript text out of a `/listen` response. Exposed for testing."""
+}
+fn (response: Map): Str {
+  channels get(or(get(response, "results"), {}), "channels", [])
+  cond {
+    is-empty(channels) => { "" }
+    => {
+      alternatives get(first(channels), "alternatives", [])
+      cond {
+        is-empty(alternatives) => { "" }
+        => { get(first(alternatives), "transcript", "") }
+      }
+    }
+  }
+}
+
+speak
+meta {
+    ctx: {"deepgram.api.key": {required: true}},
+    doc: """
+    POST /speak - Aura text-to-speech. Returns audio Bytes (mp3 by
+    default). `options`: `model` (default "aura-2-thalia-en"),
+    `encoding`/`container` for telephony formats.
+
+    **Example**
+
+    ```hot
+    audio ::deepgram/speak("Your build is green.", {model: "aura-2-orion-en"})
+    ```
+    """
+}
+fn
+(text: Str): Any {
+  speak(text, {})
+},
+(text: Str, options: Map): Any {
+  params {model: "aura-2-thalia-en", ...options}
+  request(`/speak${query-string(params)}`, "application/json", to-json({text: text}))
+}
