@@ -14,6 +14,7 @@ hot-ai
 hot-ai-agent
 mcp
 openai
+#qwen
 xai
 
 # AWS Services
@@ -40,26 +41,6 @@ resend
 
 # Payments
 #stripe
-#stripe-billing
-#stripe-checkout
-#stripe-climate
-#stripe-connect
-#stripe-core
-#stripe-customers
-#stripe-entitlements
-#stripe-files
-#stripe-identity
-#stripe-issuing
-#stripe-misc
-#stripe-payments
-#stripe-products
-#stripe-radar
-#stripe-reporting
-#stripe-subscriptions
-#stripe-tax
-#stripe-terminal
-#stripe-treasury
-#stripe-webhooks
 
 # Backend-as-a-Service
 supabase

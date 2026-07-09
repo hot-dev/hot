@@ -1,0 +1,187 @@
+::stripe::webhooks ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+
+// ============================================================================
+// Webhook Signature Verification
+// ============================================================================
+// Stripe signs every webhook with HMAC-SHA256 using your endpoint's signing
+// secret (whsec_...). The Stripe-Signature header looks like:
+//   t=1492774577,v1=5257a869e7...,v0=...
+// The signed payload is `${t}.${raw_body}`. Verify before trusting any event.
+//
+// See: https://docs.stripe.com/webhooks#verify-manually
+
+DEFAULT_TOLERANCE_SECONDS 300
+
+parse-signature-header
+meta {
+    doc: """Parse a Stripe-Signature header into `{t: Str, v1: Vec<Str>}`. Multiple `v1` entries can be present after a signing secret roll; unknown schemes (e.g. `v0`) are ignored."""
+}
+fn (header: Str): Map {
+  parts split(header, ",")
+  reduce(parts, (acc, part) {
+    kv split(trim(part), "=")
+    cond {
+      lt(length(kv), 2) => { acc }
+      eq(kv[0], "t") => { {...acc, t: kv[1]} }
+      eq(kv[0], "v1") => { {...acc, v1: concat(acc.v1, [kv[1]])} }
+      => { acc }
+    }
+  }, {t: "", v1: []})
+}
+
+verify-request
+meta {
+    ctx: {"stripe.webhook.secret": {required: false}},
+    doc: """
+Verify a Stripe webhook request signature using HMAC-SHA256. Returns true if the request is authentic and its timestamp is within the tolerance window (default 300 seconds, matching Stripe's official libraries). Pass a tolerance of 0 to skip the timestamp check.
+
+Uses the `stripe.webhook.secret` context variable (your endpoint's `whsec_...` signing secret) by default, or accepts an explicit secret.
+
+Always verify before trusting a webhook — unverified requests can be forged payment events.
+
+**Example**
+
+```hot
+// Using context variable (1-arity)
+is-valid ::stripe::webhooks/verify-request(request)
+
+// With explicit signing secret (2-arity)
+is-valid ::stripe::webhooks/verify-request(request, "whsec_...")
+
+// Custom tolerance in seconds (3-arity); 0 disables the timestamp check
+is-valid ::stripe::webhooks/verify-request(request, "whsec_...", 600)
+```
+"""
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("stripe.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("stripe.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, webhook-secret: Str): Bool {
+  verify-request(request, webhook-secret, DEFAULT_TOLERANCE_SECONDS)
+},
+(request: Map, webhook-secret: Str, tolerance-seconds: Int): Bool {
+  header get(request.headers, "stripe-signature", "")
+  raw-body or(get(request, "body-raw", ""), "")
+
+  cond {
+    is-empty(webhook-secret) => { false }
+    is-empty(header) => { false }
+    => {
+      parsed parse-signature-header(header)
+      // hmac-sha256 returns the digest as a lowercase hex string
+      expected ::hmac/hmac-sha256(webhook-secret, `${parsed.t}.${raw-body}`)
+      signature-valid reduce(parsed.v1, (acc, sig) { or(acc, secure-compare(expected, lowercase(sig))) }, false)
+
+      cond {
+        not(signature-valid) => { false }
+        eq(tolerance-seconds, 0) => { true }
+        => { timestamp-within-tolerance(parsed.t, tolerance-seconds) }
+      }
+    }
+  }
+}
+
+timestamp-within-tolerance fn (timestamp: Str, tolerance-seconds: Int): Bool {
+  parsed Int(timestamp)
+  cond {
+    is-err(parsed) => { false }
+    => {
+      now-seconds Int(floor(div(::time/now().epochNanoseconds, 1000000000)))
+      age sub(now-seconds, parsed)
+      and(gte(age, sub(0, tolerance-seconds)), lte(age, tolerance-seconds))
+    }
+  }
+}
+
+// ============================================================================
+// Webhook Endpoints
+// ============================================================================
+
+CreateWebhookEndpointRequest type {
+  url: Str,
+  enabled_events: Vec<Str>,
+  description: Str?,
+  metadata: Map?,
+  api_version: Str?
+}
+
+create-webhook-endpoint
+meta {
+    doc: """
+POST /v1/webhook_endpoints - Register a webhook endpoint. The response includes the signing `secret` (whsec_...) — store it; it is only returned on creation.
+
+**Example**
+
+```hot
+::webhooks ::stripe::webhooks
+
+endpoint ::webhooks/create-webhook-endpoint(::webhooks/CreateWebhookEndpointRequest({
+  url: "https://myapp.hot.dev/stripe/webhook",
+  enabled_events: ["payment_intent.succeeded", "checkout.session.completed"]
+}))
+endpoint.secret  // => "whsec_..." (save as stripe.webhook.secret)
+```
+"""
+}
+fn (request: CreateWebhookEndpointRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/webhook_endpoints`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-webhook-endpoint
+meta {
+    doc: """GET /v1/webhook_endpoints/{webhook_endpoint} - Retrieve a webhook endpoint by ID."""
+}
+fn (webhook-endpoint: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/webhook_endpoints/${webhook-endpoint}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdateWebhookEndpointRequest type {
+  url: Str?,
+  enabled_events: Vec<Str>?,
+  description: Str?,
+  disabled: Bool?,
+  metadata: Map?
+}
+
+update-webhook-endpoint
+meta {
+    doc: """POST /v1/webhook_endpoints/{webhook_endpoint} - Update a webhook endpoint. Set `disabled: true` to pause deliveries."""
+}
+fn (webhook-endpoint: Str, request: UpdateWebhookEndpointRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/webhook_endpoints/${webhook-endpoint}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+delete-webhook-endpoint
+meta {
+    doc: """DELETE /v1/webhook_endpoints/{webhook_endpoint} - Delete a webhook endpoint."""
+}
+fn (webhook-endpoint: Str): Map {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/webhook_endpoints/${webhook-endpoint}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+list-webhook-endpoints
+meta {
+    doc: """GET /v1/webhook_endpoints - List your webhook endpoints."""
+}
+fn (): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/webhook_endpoints`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

@@ -1,0 +1,165 @@
+::stripe::payment-intents ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Payment Intents
+// ============================================================================
+// A PaymentIntent tracks a payment from creation through checkout. Create one
+// per customer session, then confirm it (server-side or via Stripe.js).
+
+CreatePaymentIntentRequest type {
+  amount: Int,
+  currency: Str,
+  customer: Str?,
+  payment_method: Str?,
+  payment_method_types: Vec<Str>?,
+  automatic_payment_methods: Map?,
+  capture_method: Str?,
+  confirm: Bool?,
+  confirmation_method: Str?,
+  description: Str?,
+  metadata: Map?,
+  off_session: Bool?,
+  receipt_email: Str?,
+  return_url: Str?,
+  setup_future_usage: Str?,
+  shipping: Map?,
+  statement_descriptor_suffix: Str?,
+  transfer_group: Str?
+}
+
+create-payment-intent
+meta {
+    doc: """
+POST /v1/payment_intents - Create a PaymentIntent. `amount` is in the smallest currency unit (cents for USD).
+
+**Example**
+
+```hot
+::pi ::stripe::payment-intents
+
+intent ::pi/create-payment-intent(::pi/CreatePaymentIntentRequest({
+  amount: 2000,
+  currency: "usd",
+  customer: "cus_...",
+  automatic_payment_methods: {enabled: true}
+}))
+intent.client_secret  // => "pi_..._secret_..." (pass to Stripe.js)
+intent.status         // => "requires_payment_method"
+```
+"""
+}
+fn (request: CreatePaymentIntentRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-payment-intent
+meta {
+    doc: """GET /v1/payment_intents/{payment_intent} - Retrieve a PaymentIntent by ID."""
+}
+fn (payment-intent: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_intents/${payment-intent}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdatePaymentIntentRequest type {
+  amount: Int?,
+  currency: Str?,
+  customer: Str?,
+  payment_method: Str?,
+  description: Str?,
+  metadata: Map?,
+  receipt_email: Str?,
+  setup_future_usage: Str?,
+  shipping: Map?,
+  transfer_group: Str?
+}
+
+update-payment-intent
+meta {
+    doc: """POST /v1/payment_intents/{payment_intent} - Update a PaymentIntent before it is confirmed."""
+}
+fn (payment-intent: Str, request: UpdatePaymentIntentRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${payment-intent}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ConfirmPaymentIntentRequest type {
+  payment_method: Str?,
+  return_url: Str?,
+  off_session: Bool?,
+  receipt_email: Str?,
+  setup_future_usage: Str?
+}
+
+confirm-payment-intent
+meta {
+    doc: """POST /v1/payment_intents/{payment_intent}/confirm - Confirm a PaymentIntent to attempt payment. Server-side confirmation requires a `payment_method`; `return_url` is required for redirect-based methods."""
+}
+fn
+(payment-intent: Str): Map {
+  confirm-payment-intent(payment-intent, ConfirmPaymentIntentRequest({}))
+},
+(payment-intent: Str, request: ConfirmPaymentIntentRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${payment-intent}/confirm`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+CapturePaymentIntentRequest type {
+  amount_to_capture: Int?,
+  metadata: Map?,
+  statement_descriptor_suffix: Str?
+}
+
+capture-payment-intent
+meta {
+    doc: """POST /v1/payment_intents/{payment_intent}/capture - Capture the funds of a PaymentIntent created with `capture_method: "manual"`. Uncaptured intents are canceled automatically after 7 days."""
+}
+fn
+(payment-intent: Str): Map {
+  capture-payment-intent(payment-intent, CapturePaymentIntentRequest({}))
+},
+(payment-intent: Str, request: CapturePaymentIntentRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${payment-intent}/capture`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+cancel-payment-intent
+meta {
+    doc: """POST /v1/payment_intents/{payment_intent}/cancel - Cancel a PaymentIntent. Optional `cancellation-reason`: "duplicate", "fraudulent", "requested_by_customer", or "abandoned"."""
+}
+fn
+(payment-intent: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${payment-intent}/cancel`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+},
+(payment-intent: Str, cancellation-reason: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_intents/${payment-intent}/cancel`, {}, {cancellation_reason: cancellation-reason})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListPaymentIntentsRequest type {
+  customer: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-payment-intents
+meta {
+    doc: """GET /v1/payment_intents - List PaymentIntents, most recent first. Filter by `customer` or `created`."""
+}
+fn
+(): Map {
+  list-payment-intents(ListPaymentIntentsRequest({}))
+},
+(request: ListPaymentIntentsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_intents${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

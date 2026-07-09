@@ -1,0 +1,55 @@
+::stripe::events ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Events
+// ============================================================================
+// Stripe records every change to your account as an Event. Webhooks deliver
+// events in near real-time; this API lets you list or re-fetch them.
+
+get-event
+meta {
+    doc: """GET /v1/events/{event} - Retrieve an event by ID. Useful for re-fetching an event referenced by a webhook to confirm its authenticity."""
+}
+fn (event: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/events/${event}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListEventsRequest type {
+  type: Str?,
+  types: Vec<Str>?,
+  created: Any?,
+  delivery_success: Bool?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-events
+meta {
+    doc: """
+GET /v1/events - List events from the last 30 days, most recent first. Filter by a single `type` (supports `*` wildcards, e.g. "invoice.*") or a list of `types`.
+
+**Example**
+
+```hot
+::events ::stripe::events
+
+page ::events/list-events(::events/ListEventsRequest({type: "payment_intent.succeeded", limit: 10}))
+page.data[0].data.object  // => the PaymentIntent
+```
+"""
+}
+fn
+(): Map {
+  list-events(ListEventsRequest({}))
+},
+(request: ListEventsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/events${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

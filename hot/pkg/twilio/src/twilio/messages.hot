@@ -200,7 +200,14 @@ response.messages  // => [{sid: "SM...", body: "Hello", status: "delivered", ...
 """
 }
 fn (request: ListMessagesRequest): ListMessagesResponse {
-  response api-request("GET", `${account-url()}/Messages.json?To=${or(request.To, "")}&From=${or(request.From, "")}&DateSent=${or(request.DateSent, "")}&PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  query ::twilio::api/query-string({
+    To: request.To,
+    From: request.From,
+    DateSent: request.DateSent,
+    PageSize: request.PageSize,
+    Page: request.Page
+  })
+  response api-request("GET", `${account-url()}/Messages.json${query}`)
   if(is-ok-response(response), ListMessagesResponse(response.body), err(HttpError(response)))
 }
 
@@ -274,6 +281,10 @@ meta {
     doc: """GET /Accounts/{AccountSid}/Messages/{MessageSid}/Media.json - List media resources attached to a message (e.g., MMS images)."""
 }
 fn (request: ListMediaRequest): ListMediaResponse {
-  response api-request("GET", `${account-url()}/Messages/${request.message_sid}/Media.json?PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  query ::twilio::api/query-string({
+    PageSize: request.PageSize,
+    Page: request.Page
+  })
+  response api-request("GET", `${account-url()}/Messages/${request.message_sid}/Media.json${query}`)
   if(is-ok-response(response), ListMediaResponse(response.body), err(HttpError(response)))
 }

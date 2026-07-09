@@ -1,0 +1,149 @@
+::stripe::api ns
+meta {ctx: {"stripe.api.key": {required: true}}}
+
+// Namespace aliases
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError
+meta {
+    doc: """
+    Represents an error response from the Stripe API. Wraps the HTTP status code, response headers, and error body returned by a failed request.
+
+    **Example**
+
+    ```hot
+    response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/balance`)
+    error ::stripe::api/HttpError(response)
+    error.status  // => 401
+    error.body.error.type  // => "authentication_error"
+    ```
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError
+meta {
+    doc: """Coerce an HttpResponse into an HttpError. Automatically extracts status, headers, and body from the response."""
+}
+fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+encode-pairs fn (key: Str, value: Any): Vec<Str> {
+  cond {
+    is-null(value) => { [] }
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        concat(acc, encode-pairs(`${key}[${k}]`, get(value, k)))
+      }, [])
+    }
+    is-vec(value) => {
+      nested map-indexed(value, (i, item) { encode-pairs(`${key}[${i}]`, item) })
+      reduce(nested, (acc, pairs) { concat(acc, pairs) }, [])
+    }
+    => {
+      value-str `${value}`
+      [`${::uri/encode(key)}=${::uri/encode(value-str)}`]
+    }
+  }
+}
+
+form-encode
+meta {
+    doc: """
+    Encode a Map as `application/x-www-form-urlencoded` using Stripe's bracket syntax: nested maps become `metadata[order_id]=6735` and arrays become `expand[0]=customer`. Null values are omitted. Stripe does not accept JSON request bodies.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/form-encode({amount: 2000, currency: "usd", metadata: {order_id: "6735"}})
+    // => "amount=2000&currency=usd&metadata%5Border_id%5D=6735"
+    ```
+    """
+}
+fn (data: Map): Str {
+  parts reduce(keys(data), (acc, key) {
+    concat(acc, encode-pairs(key, get(data, key)))
+  }, [])
+  join(parts, "&")
+}
+
+query-string
+meta {
+    doc: """Build a query string (`?limit=10&starting_after=cus_123`) from a Map. Null values are omitted; returns an empty string when no parameters remain. Uses the same bracket syntax as `form-encode`, so `expand: ["customer"]` becomes `expand[0]=customer`."""
+}
+fn (params: Map): Str {
+  encoded form-encode(untype(params))
+  if(is-empty(encoded), "", `?${encoded}`)
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated HTTP request to the Stripe API with pre-filled authorization headers. Supports multiple arities for convenience.
+
+    The API key is read from context (`stripe.api.key`) by default, or can be provided explicitly via the 5-arity form. Additional headers can be provided to merge with or override the defaults.
+
+    Request bodies are form-encoded (`application/x-www-form-urlencoded`) per Stripe's API convention — Stripe does not accept JSON bodies. Nested maps and arrays use Stripe's bracket syntax (see `form-encode`).
+
+    Use this directly for any Stripe endpoint not covered by the typed module functions.
+
+    **Example**
+
+    ```hot
+    // GET request — fetch balance
+    response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/balance`)
+    response.status           // => 200
+    response.body.available   // => [{amount: 1000, currency: "usd"}]
+
+    // POST request — create a customer (body is form-encoded automatically)
+    response ::stripe::api/request("POST", `${::stripe/BASE_URL}/v1/customers`, {}, {name: "Alice Smith"})
+
+    // With explicit API key override
+    response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/balance`, {}, "", "sk_test_...")
+    ```
+    """
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default) — delegates to 5-arity
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("stripe.api.key"))
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  default-headers {
+    Authorization: `Bearer ${api-key}`
+  }
+
+  encoded-body if(eq(body, ""), "", form-encode(untype(body)))
+  has-body not(is-empty(encoded-body))
+  headers if(has-body, {...default-headers, Content-Type: "application/x-www-form-urlencoded"}, default-headers)
+  final-headers {...headers, ...additional-headers}
+
+  ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: final-headers,
+    body: encoded-body
+  }))
+}

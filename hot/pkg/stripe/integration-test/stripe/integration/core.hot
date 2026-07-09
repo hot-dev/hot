@@ -1,0 +1,39 @@
+::stripe::integration::core ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests
+// =============================================================================
+// These tests require stripe.api.key to be set in context (use a test-mode
+// sk_test_... key). All operations are read-only.
+
+test-stripe-api-connection
+meta ["test"]
+fn () {
+    // Test basic API connectivity by checking balance (read-only)
+    balance ::stripe::balance/get-balance()
+    assert(balance.available, "Balance response should have 'available' field")
+}
+
+test-stripe-list-customers
+meta ["test"]
+fn () {
+    // List customers (read-only, safe operation)
+    page ::stripe::customers/list-customers(::stripe::customers/ListCustomersRequest({limit: 1}))
+    assert(page.data, "Response should have 'data' field")
+    assert-eq("list", page.object, "Response object should be 'list'")
+}
+
+test-stripe-list-products
+meta ["test"]
+fn () {
+    page ::stripe::products/list-products(::stripe::products/ListProductsRequest({limit: 1}))
+    assert-eq("list", page.object, "Response object should be 'list'")
+}
+
+test-stripe-list-events
+meta ["test"]
+fn () {
+    page ::stripe::events/list-events(::stripe::events/ListEventsRequest({limit: 1}))
+    assert-eq("list", page.object, "Response object should be 'list'")
+}

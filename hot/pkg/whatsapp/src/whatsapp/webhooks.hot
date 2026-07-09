@@ -2,7 +2,6 @@
 
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
-::base16 ::hot::base16
 
 // ============================================================================
 // Webhook Signature Verification
@@ -47,8 +46,9 @@ fn
     => {
       signature slice(header, 7)
       raw-body or(get(request, "body-raw", ""), "")
-      expected ::base16/encode(::hmac/hmac-sha256(app-secret, raw-body))
-      secure-compare(lowercase(expected), lowercase(signature))
+      // hmac-sha256 returns the digest as a lowercase hex string
+      expected ::hmac/hmac-sha256(app-secret, raw-body)
+      secure-compare(expected, lowercase(signature))
     }
   }
 }

@@ -1,0 +1,85 @@
+::stripe::payment-methods ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Payment Methods
+// ============================================================================
+// Payment methods are usually created client-side with Stripe.js and then
+// attached to a customer server-side.
+
+get-payment-method
+meta {
+    doc: """GET /v1/payment_methods/{payment_method} - Retrieve a PaymentMethod by ID."""
+}
+fn (payment-method: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+attach-payment-method
+meta {
+    doc: """
+POST /v1/payment_methods/{payment_method}/attach - Attach a PaymentMethod to a customer.
+
+**Example**
+
+```hot
+::pm ::stripe::payment-methods
+
+::pm/attach-payment-method("pm_...", "cus_...")
+```
+"""
+}
+fn (payment-method: Str, customer: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}/attach`, {}, {customer: customer})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+detach-payment-method
+meta {
+    doc: """POST /v1/payment_methods/{payment_method}/detach - Detach a PaymentMethod from its customer. The PaymentMethod cannot be used for payments afterwards."""
+}
+fn (payment-method: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}/detach`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdatePaymentMethodRequest type {
+  billing_details: Map?,
+  card: Map?,
+  metadata: Map?,
+  allow_redisplay: Str?
+}
+
+update-payment-method
+meta {
+    doc: """POST /v1/payment_methods/{payment_method} - Update a PaymentMethod. `card` accepts `exp_month`/`exp_year` updates."""
+}
+fn (payment-method: Str, request: UpdatePaymentMethodRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/payment_methods/${payment-method}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListPaymentMethodsRequest type {
+  type: Str?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-payment-methods
+meta {
+    doc: """GET /v1/customers/{customer}/payment_methods - List a customer's PaymentMethods. Optionally filter by `type` (e.g. "card")."""
+}
+fn
+(customer: Str): Map {
+  list-payment-methods(customer, ListPaymentMethodsRequest({}))
+},
+(customer: Str, request: ListPaymentMethodsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}/payment_methods${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

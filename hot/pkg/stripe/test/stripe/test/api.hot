@@ -1,0 +1,98 @@
+::stripe::test::api ns
+meta ["test"]
+
+::api ::stripe::api
+
+// ============================================================================
+// form-encode — Stripe requires application/x-www-form-urlencoded bodies
+// ============================================================================
+
+test-form-encode-flat
+meta ["test"]
+fn () {
+    assert-eq("amount=2000&currency=usd", ::api/form-encode({amount: 2000, currency: "usd"}))
+}
+
+test-form-encode-nested-map-bracket-syntax
+meta ["test"]
+fn () {
+    assert-eq("metadata%5Border_id%5D=6735", ::api/form-encode({metadata: {order_id: "6735"}}))
+}
+
+test-form-encode-array-bracket-syntax
+meta ["test"]
+fn () {
+    assert-eq("expand%5B0%5D=customer&expand%5B1%5D=invoice", ::api/form-encode({expand: ["customer", "invoice"]}))
+}
+
+test-form-encode-array-of-maps
+meta ["test"]
+fn () {
+    // Checkout line_items: [{price, quantity}]
+    encoded ::api/form-encode({line_items: [{price: "price_1", quantity: 2}]})
+    assert-eq("line_items%5B0%5D%5Bprice%5D=price_1&line_items%5B0%5D%5Bquantity%5D=2", encoded)
+}
+
+test-form-encode-deep-nesting
+meta ["test"]
+fn () {
+    encoded ::api/form-encode({payment_method_data: {billing_details: {name: "Alice"}}})
+    assert-eq("payment_method_data%5Bbilling_details%5D%5Bname%5D=Alice", encoded)
+}
+
+test-form-encode-omits-nulls
+meta ["test"]
+fn () {
+    assert-eq("amount=2000", ::api/form-encode({amount: 2000, customer: null}))
+}
+
+test-form-encode-bools
+meta ["test"]
+fn () {
+    assert-eq("livemode=false", ::api/form-encode({livemode: false}))
+}
+
+test-form-encode-percent-encodes-values
+meta ["test"]
+fn () {
+    assert-eq("name=Alice%20Smith%20%2B%20Co", ::api/form-encode({name: "Alice Smith + Co"}))
+}
+
+test-form-encode-empty-map
+meta ["test"]
+fn () {
+    assert-eq("", ::api/form-encode({}))
+}
+
+// ============================================================================
+// query-string
+// ============================================================================
+
+test-query-string-basic
+meta ["test"]
+fn () {
+    assert-eq("?limit=10&starting_after=cus_123", ::api/query-string({limit: 10, starting_after: "cus_123"}))
+}
+
+test-query-string-omits-nulls
+meta ["test"]
+fn () {
+    assert-eq("?limit=10", ::api/query-string({customer: null, limit: 10}))
+}
+
+test-query-string-empty-when-all-null
+meta ["test"]
+fn () {
+    assert-eq("", ::api/query-string({customer: null}))
+    assert-eq("", ::api/query-string({}))
+}
+
+// ============================================================================
+// BASE_URL
+// ============================================================================
+
+test-base-url-has-no-trailing-slash
+meta ["test"]
+fn () {
+    assert-eq("https://api.stripe.com", ::stripe/BASE_URL)
+}

@@ -1,0 +1,52 @@
+::discord::test::webhooks ns
+meta ["test"]
+
+::webhooks ::discord::webhooks
+
+// RFC 8032 test vector 2: message is the single byte "r". Discord's signed
+// message is `${timestamp}${raw-body}`, so timestamp "r" + empty body
+// reproduces it exactly.
+TEST_PUBLIC_KEY "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+TEST_SIGNATURE "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+
+make-request fn (timestamp: Str, signature: Str, raw-body: Str): Map {
+  {
+    headers: {x-signature-ed25519: signature, x-signature-timestamp: timestamp},
+    body-raw: raw-body
+  }
+}
+
+test-verify-accepts-known-vector
+meta ["test"]
+fn () {
+    request make-request("r", TEST_SIGNATURE, "")
+    assert(::webhooks/verify-request(request, TEST_PUBLIC_KEY), "known Ed25519 vector should verify")
+}
+
+test-verify-rejects-tampered-body
+meta ["test"]
+fn () {
+    request make-request("r", TEST_SIGNATURE, "tampered")
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "tampered body should fail")
+}
+
+test-verify-rejects-wrong-timestamp
+meta ["test"]
+fn () {
+    request make-request("x", TEST_SIGNATURE, "")
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "wrong timestamp should fail")
+}
+
+test-verify-rejects-malformed-signature
+meta ["test"]
+fn () {
+    request make-request("r", "not-hex-at-all", "")
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "malformed signature should fail, not error")
+}
+
+test-verify-rejects-missing-headers
+meta ["test"]
+fn () {
+    request {headers: {}, body-raw: ""}
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "missing signature headers should fail")
+}

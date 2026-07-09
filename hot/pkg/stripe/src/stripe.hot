@@ -1,0 +1,50 @@
+::stripe ns
+
+BASE_URL
+meta {
+    doc: """Base URL for all Stripe API requests (no trailing slash). Endpoint URLs are built as `${::stripe/BASE_URL}/v1/...`."""
+}
+"https://api.stripe.com"
+
+ApiErrors
+meta {
+    doc: """
+    Structured error details returned by the Stripe API inside an Error response body. Contains machine-readable codes and a human-readable message describing what went wrong.
+
+    See https://docs.stripe.com/api/errors for field descriptions.
+
+    **Example**
+
+    ```hot
+    response ::stripe::api/request("GET", `${::stripe/BASE_URL}/v1/charges/ch_invalid`)
+    error ::stripe/Error(response.body)
+    error.error.type     // => "invalid_request_error"
+    error.error.message  // => "No such charge: ch_invalid"
+    error.error.code     // => "resource_missing"
+    ```
+    """
+}
+type {
+  advice_code: Str?,
+  charge: Str?,
+  code: Str?,
+  decline_code: Str?,
+  doc_url: Str?,
+  message: Str?,
+  param: Str?,
+  payment_intent: Any?,
+  payment_method: Any?,
+  payment_method_type: Str?,
+  request_log_url: Str?,
+  setup_intent: Any?,
+  source: Any?,
+  type: Str?,
+}
+
+Error
+meta {
+    doc: """Top-level error wrapper returned by the Stripe API when a request fails. Contains an `error` field with detailed ApiErrors information."""
+}
+type {
+  error: ApiErrors,
+}

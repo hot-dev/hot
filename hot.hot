@@ -58,6 +58,7 @@ hot.project.hot-pkg-all.src.paths ["./hot/pkg/hot-std/src"]
 hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/anthropic/test",
     "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/discord/test",
     "./hot/pkg/ffmpeg/test",
     "./hot/pkg/hot-ai/test",
     "./hot/pkg/hot-ai-agent/test",
@@ -69,12 +70,16 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/pandoc/test",
     "./hot/pkg/playwright/test",
     "./hot/pkg/sox/test",
+    "./hot/pkg/stripe/test",
     "./hot/pkg/supabase/test",
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/tesseract/test",
+    "./hot/pkg/twilio/test",
+    "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test"
 ]
 hot.project.hot-pkg-all.test.capture true
+hot.project.hot-pkg-all.resources.paths ["./hot/pkg/hot-std/test/fixtures/resources"]
 hot.project.hot-pkg-all.deps {
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
@@ -88,15 +93,6 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
-    "hot.dev/discord-core": { "local": "./hot/pkg/discord-core" },
-    "hot.dev/discord-guilds": { "local": "./hot/pkg/discord-guilds" },
-    "hot.dev/discord-interactions": { "local": "./hot/pkg/discord-interactions" },
-    "hot.dev/discord-messages": { "local": "./hot/pkg/discord-messages" },
-    "hot.dev/discord-misc": { "local": "./hot/pkg/discord-misc" },
-    "hot.dev/discord-oauth": { "local": "./hot/pkg/discord-oauth" },
-    "hot.dev/discord-users": { "local": "./hot/pkg/discord-users" },
-    "hot.dev/discord-voice": { "local": "./hot/pkg/discord-voice" },
-    "hot.dev/discord-webhooks": { "local": "./hot/pkg/discord-webhooks" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
     "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
@@ -115,26 +111,6 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
     "hot.dev/sox": { "local": "./hot/pkg/sox" },
     "hot.dev/stripe": { "local": "./hot/pkg/stripe" },
-    "hot.dev/stripe-billing": { "local": "./hot/pkg/stripe-billing" },
-    "hot.dev/stripe-checkout": { "local": "./hot/pkg/stripe-checkout" },
-    "hot.dev/stripe-climate": { "local": "./hot/pkg/stripe-climate" },
-    "hot.dev/stripe-connect": { "local": "./hot/pkg/stripe-connect" },
-    "hot.dev/stripe-core": { "local": "./hot/pkg/stripe-core" },
-    "hot.dev/stripe-customers": { "local": "./hot/pkg/stripe-customers" },
-    "hot.dev/stripe-entitlements": { "local": "./hot/pkg/stripe-entitlements" },
-    "hot.dev/stripe-files": { "local": "./hot/pkg/stripe-files" },
-    "hot.dev/stripe-identity": { "local": "./hot/pkg/stripe-identity" },
-    "hot.dev/stripe-issuing": { "local": "./hot/pkg/stripe-issuing" },
-    "hot.dev/stripe-misc": { "local": "./hot/pkg/stripe-misc" },
-    "hot.dev/stripe-payments": { "local": "./hot/pkg/stripe-payments" },
-    "hot.dev/stripe-products": { "local": "./hot/pkg/stripe-products" },
-    "hot.dev/stripe-radar": { "local": "./hot/pkg/stripe-radar" },
-    "hot.dev/stripe-reporting": { "local": "./hot/pkg/stripe-reporting" },
-    "hot.dev/stripe-subscriptions": { "local": "./hot/pkg/stripe-subscriptions" },
-    "hot.dev/stripe-tax": { "local": "./hot/pkg/stripe-tax" },
-    "hot.dev/stripe-terminal": { "local": "./hot/pkg/stripe-terminal" },
-    "hot.dev/stripe-treasury": { "local": "./hot/pkg/stripe-treasury" },
-    "hot.dev/stripe-webhooks": { "local": "./hot/pkg/stripe-webhooks" },
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
     "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
@@ -349,6 +325,30 @@ hot.project.pkg-test-supabase-admin.test.paths ["./hot/pkg/supabase-admin/test"]
 hot.project.pkg-test-supabase-admin.test.capture true
 hot.project.pkg-test-supabase-admin.deps {}
 
+// twilio unit tests (pure-Hot form/query encoders, no network required)
+hot.project.pkg-test-twilio.src.paths ["./hot/pkg/twilio/src"]
+hot.project.pkg-test-twilio.test.paths ["./hot/pkg/twilio/test"]
+hot.project.pkg-test-twilio.test.capture true
+hot.project.pkg-test-twilio.deps {}
+
+// stripe unit tests (pure-Hot form encoder + webhook signature verification)
+hot.project.pkg-test-stripe.src.paths ["./hot/pkg/stripe/src"]
+hot.project.pkg-test-stripe.test.paths ["./hot/pkg/stripe/test"]
+hot.project.pkg-test-stripe.test.capture true
+hot.project.pkg-test-stripe.deps {}
+
+// whatsapp unit tests (pure-Hot webhook signature verification)
+hot.project.pkg-test-whatsapp.src.paths ["./hot/pkg/whatsapp/src"]
+hot.project.pkg-test-whatsapp.test.paths ["./hot/pkg/whatsapp/test"]
+hot.project.pkg-test-whatsapp.test.capture true
+hot.project.pkg-test-whatsapp.deps {}
+
+// discord unit tests (Ed25519 interaction webhook verification)
+hot.project.pkg-test-discord.src.paths ["./hot/pkg/discord/src"]
+hot.project.pkg-test-discord.test.paths ["./hot/pkg/discord/test"]
+hot.project.pkg-test-discord.test.capture true
+hot.project.pkg-test-discord.deps {}
+
 // =============================================================================
 // TeamAgent Agent Demo
 // =============================================================================
@@ -510,11 +510,11 @@ hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
 hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
 hot.project.pkg-aws-eventstream.test.capture true
 
-// Stripe Core integration tests
-hot.project.pkg-integration-stripe-core.src.paths ["./hot/pkg/stripe-core/src"]
-hot.project.pkg-integration-stripe-core.test.paths ["./hot/pkg/stripe-core/integration-test"]
-hot.project.pkg-integration-stripe-core.test.capture true
-hot.project.pkg-integration-stripe-core.deps {}
+// Stripe integration tests
+hot.project.pkg-integration-stripe.src.paths ["./hot/pkg/stripe/src"]
+hot.project.pkg-integration-stripe.test.paths ["./hot/pkg/stripe/integration-test"]
+hot.project.pkg-integration-stripe.test.capture true
+hot.project.pkg-integration-stripe.deps {}
 
 // OpenAI integration tests
 hot.project.pkg-integration-openai.src.paths ["./hot/pkg/openai/src"]

@@ -1,0 +1,212 @@
+::stripe::products ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Products
+// ============================================================================
+
+CreateProductRequest type {
+  name: Str,
+  description: Str?,
+  id: Str?,
+  active: Bool?,
+  metadata: Map?,
+  images: Vec<Str>?,
+  url: Str?,
+  statement_descriptor: Str?,
+  tax_code: Str?,
+  default_price_data: Map?
+}
+
+create-product
+meta {
+    doc: """
+POST /v1/products - Create a product. Provide `default_price_data` to create a price in the same call.
+
+**Example**
+
+```hot
+::products ::stripe::products
+
+product ::products/create-product(::products/CreateProductRequest({
+  name: "Pro Plan",
+  default_price_data: {currency: "usd", unit_amount: 1500, recurring: {interval: "month"}}
+}))
+product.default_price  // => "price_..."
+```
+"""
+}
+fn (request: CreateProductRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/products`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-product
+meta {
+    doc: """GET /v1/products/{product} - Retrieve a product by ID."""
+}
+fn (product: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/products/${product}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdateProductRequest type {
+  name: Str?,
+  description: Str?,
+  active: Bool?,
+  metadata: Map?,
+  images: Vec<Str>?,
+  url: Str?,
+  default_price: Str?,
+  tax_code: Str?
+}
+
+update-product
+meta {
+    doc: """POST /v1/products/{product} - Update a product."""
+}
+fn (product: Str, request: UpdateProductRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/products/${product}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+delete-product
+meta {
+    doc: """DELETE /v1/products/{product} - Delete a product. Only possible if it has no prices attached; otherwise set `active: false` via `update-product`."""
+}
+fn (product: Str): Map {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/products/${product}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListProductsRequest type {
+  active: Bool?,
+  ids: Vec<Str>?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-products
+meta {
+    doc: """GET /v1/products - List products, most recent first. Filter by `active` or specific `ids`."""
+}
+fn
+(): Map {
+  list-products(ListProductsRequest({}))
+},
+(request: ListProductsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/products${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+search-products
+meta {
+    doc: """GET /v1/products/search - Search products with Stripe's search query language, e.g. `active:"true" AND name~"plan"`."""
+}
+fn (query: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/products/search${query-string({query: query})}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+// ============================================================================
+// Prices
+// ============================================================================
+
+CreatePriceRequest type {
+  currency: Str,
+  product: Str?,
+  product_data: Map?,
+  unit_amount: Int?,
+  recurring: Map?,
+  billing_scheme: Str?,
+  tiers: Vec<Map>?,
+  tiers_mode: Str?,
+  lookup_key: Str?,
+  transfer_lookup_key: Bool?,
+  nickname: Str?,
+  metadata: Map?,
+  active: Bool?,
+  tax_behavior: Str?
+}
+
+create-price
+meta {
+    doc: """
+POST /v1/prices - Create a price for a product. `unit_amount` is in the smallest currency unit. For subscriptions, set `recurring: {interval: "month"}`.
+
+**Example**
+
+```hot
+::products ::stripe::products
+
+price ::products/create-price(::products/CreatePriceRequest({
+  product: "prod_...",
+  currency: "usd",
+  unit_amount: 1500,
+  recurring: {interval: "month"}
+}))
+```
+"""
+}
+fn (request: CreatePriceRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/prices`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-price
+meta {
+    doc: """GET /v1/prices/{price} - Retrieve a price by ID."""
+}
+fn (price: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/prices/${price}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdatePriceRequest type {
+  active: Bool?,
+  nickname: Str?,
+  lookup_key: Str?,
+  transfer_lookup_key: Bool?,
+  metadata: Map?,
+  tax_behavior: Str?
+}
+
+update-price
+meta {
+    doc: """POST /v1/prices/{price} - Update a price. Amounts are immutable — create a new price and deactivate the old one to change pricing."""
+}
+fn (price: Str, request: UpdatePriceRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/prices/${price}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListPricesRequest type {
+  product: Str?,
+  active: Bool?,
+  currency: Str?,
+  type: Str?,
+  lookup_keys: Vec<Str>?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-prices
+meta {
+    doc: """GET /v1/prices - List prices. Filter by `product`, `active`, `currency`, `type` ("one_time" or "recurring"), or `lookup_keys`."""
+}
+fn
+(): Map {
+  list-prices(ListPricesRequest({}))
+},
+(request: ListPricesRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/prices${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

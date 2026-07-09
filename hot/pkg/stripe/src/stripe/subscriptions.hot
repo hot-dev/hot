@@ -1,0 +1,132 @@
+::stripe::subscriptions ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Subscriptions
+// ============================================================================
+
+CreateSubscriptionRequest type {
+  customer: Str,
+  items: Vec<Map>,
+  trial_period_days: Int?,
+  trial_end: Any?,
+  default_payment_method: Str?,
+  payment_behavior: Str?,
+  proration_behavior: Str?,
+  collection_method: Str?,
+  days_until_due: Int?,
+  cancel_at_period_end: Bool?,
+  metadata: Map?,
+  coupon: Str?,
+  automatic_tax: Map?,
+  expand: Vec<Str>?
+}
+
+create-subscription
+meta {
+    doc: """
+POST /v1/subscriptions - Create a subscription for an existing customer. `items` is a list of `{price, quantity?}` maps.
+
+**Example**
+
+```hot
+::subs ::stripe::subscriptions
+
+sub ::subs/create-subscription(::subs/CreateSubscriptionRequest({
+  customer: "cus_...",
+  items: [{price: "price_..."}],
+  payment_behavior: "default_incomplete",
+  expand: ["latest_invoice.payment_intent"]
+}))
+sub.status  // => "incomplete"
+```
+"""
+}
+fn (request: CreateSubscriptionRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/subscriptions`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-subscription
+meta {
+    doc: """GET /v1/subscriptions/{subscription} - Retrieve a subscription by ID."""
+}
+fn (subscription: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/subscriptions/${subscription}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdateSubscriptionRequest type {
+  items: Vec<Map>?,
+  cancel_at_period_end: Bool?,
+  proration_behavior: Str?,
+  default_payment_method: Str?,
+  trial_end: Any?,
+  metadata: Map?,
+  coupon: Str?,
+  payment_behavior: Str?,
+  pause_collection: Any?
+}
+
+update-subscription
+meta {
+    doc: """POST /v1/subscriptions/{subscription} - Update a subscription. To change plans, pass `items` with the existing item `id` and the new `price`. Set `cancel_at_period_end: true` to schedule cancellation."""
+}
+fn (subscription: Str, request: UpdateSubscriptionRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/subscriptions/${subscription}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+cancel-subscription
+meta {
+    doc: """DELETE /v1/subscriptions/{subscription} - Cancel a subscription immediately. To cancel at period end instead, use `update-subscription` with `cancel_at_period_end: true`."""
+}
+fn (subscription: Str): Map {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/subscriptions/${subscription}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+resume-subscription
+meta {
+    doc: """POST /v1/subscriptions/{subscription}/resume - Resume a paused subscription."""
+}
+fn (subscription: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/subscriptions/${subscription}/resume`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListSubscriptionsRequest type {
+  customer: Str?,
+  price: Str?,
+  status: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-subscriptions
+meta {
+    doc: """GET /v1/subscriptions - List subscriptions. Filter by `customer`, `price`, or `status` ("active", "canceled", "trialing", "past_due", "all", ...). By default only non-canceled subscriptions are returned."""
+}
+fn
+(): Map {
+  list-subscriptions(ListSubscriptionsRequest({}))
+},
+(request: ListSubscriptionsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/subscriptions${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+search-subscriptions
+meta {
+    doc: """GET /v1/subscriptions/search - Search subscriptions with Stripe's search query language, e.g. `status:"active" AND metadata["plan"]:"pro"`."""
+}
+fn (query: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/subscriptions/search${query-string({query: query})}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

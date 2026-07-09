@@ -3,6 +3,7 @@
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
 ::base64 ::hot::base64
+::hex ::hot::hex
 ::uri ::hot::uri
 
 // ============================================================================
@@ -63,7 +64,8 @@ fn
       url or(get(request, "url", ""), "")
       base-string `${url}${param-string}`
 
-      expected ::base64/encode(::hmac/hmac-sha1(auth-token, base-string))
+      // hmac-sha1 returns hex; Twilio signatures are base64 of the raw digest
+      expected ::base64/encode(::hex/decode(::hmac/hmac-sha1(auth-token, base-string)))
       secure-compare(expected, signature)
     }
   }

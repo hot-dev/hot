@@ -1,0 +1,126 @@
+::stripe::test::webhooks ns
+meta ["test"]
+
+::webhooks ::stripe::webhooks
+::hmac ::hot::hmac
+::time ::hot::time
+
+TEST_SECRET "whsec_test_secret_do_not_use"
+
+// Build a valid Stripe-Signature header for a payload, the way Stripe does:
+// signed payload is `${t}.${raw_body}`, HMAC-SHA256, hex-encoded.
+sign fn (timestamp: Str, raw-body: Str, secret: Str): Str {
+  signature ::hmac/hmac-sha256(secret, `${timestamp}.${raw-body}`)
+  `t=${timestamp},v1=${signature}`
+}
+
+now-seconds fn (): Int {
+  Int(floor(div(::time/now().epochNanoseconds, 1000000000)))
+}
+
+make-request fn (header: Str, raw-body: Str): Map {
+  {headers: {stripe-signature: header}, body-raw: raw-body}
+}
+
+// ============================================================================
+// parse-signature-header
+// ============================================================================
+
+test-parse-signature-header
+meta ["test"]
+fn () {
+    parsed ::webhooks/parse-signature-header("t=1492774577,v1=abc123,v0=legacy")
+    assert-eq("1492774577", parsed.t)
+    assert-eq(["abc123"], parsed.v1)
+}
+
+test-parse-signature-header-multiple-v1
+meta ["test"]
+fn () {
+    // Stripe sends multiple v1 entries while a signing secret roll is in progress
+    parsed ::webhooks/parse-signature-header("t=123,v1=first,v1=second")
+    assert-eq(["first", "second"], parsed.v1)
+}
+
+test-parse-signature-header-garbage
+meta ["test"]
+fn () {
+    parsed ::webhooks/parse-signature-header("not a signature header")
+    assert-eq("", parsed.t)
+    assert-eq([], parsed.v1)
+}
+
+// ============================================================================
+// verify-request
+// ============================================================================
+
+test-verify-accepts-valid-signature
+meta ["test"]
+fn () {
+    body """{"id": "evt_123", "type": "payment_intent.succeeded"}"""
+    ts `${now-seconds()}`
+    request make-request(sign(ts, body, TEST_SECRET), body)
+    assert(::webhooks/verify-request(request, TEST_SECRET), "valid signature should verify")
+}
+
+test-verify-rejects-wrong-secret
+meta ["test"]
+fn () {
+    body """{"id": "evt_123"}"""
+    ts `${now-seconds()}`
+    request make-request(sign(ts, body, "whsec_other_secret"), body)
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "wrong secret should fail")
+}
+
+test-verify-rejects-tampered-body
+meta ["test"]
+fn () {
+    ts `${now-seconds()}`
+    header sign(ts, """{"amount": 100}""", TEST_SECRET)
+    request make-request(header, """{"amount": 999999}""")
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "tampered body should fail")
+}
+
+test-verify-rejects-missing-header
+meta ["test"]
+fn () {
+    request {headers: {}, body-raw: "{}"}
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "missing header should fail")
+}
+
+test-verify-rejects-stale-timestamp
+meta ["test"]
+fn () {
+    body "{}"
+    stale-ts `${sub(now-seconds(), 3600)}`
+    request make-request(sign(stale-ts, body, TEST_SECRET), body)
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "hour-old timestamp should fail default tolerance")
+}
+
+test-verify-zero-tolerance-skips-timestamp-check
+meta ["test"]
+fn () {
+    body "{}"
+    stale-ts `${sub(now-seconds(), 3600)}`
+    request make-request(sign(stale-ts, body, TEST_SECRET), body)
+    assert(::webhooks/verify-request(request, TEST_SECRET, 0), "tolerance 0 should skip timestamp check")
+}
+
+test-verify-accepts-second-v1-signature
+meta ["test"]
+fn () {
+    body "{}"
+    ts `${now-seconds()}`
+    good ::hmac/hmac-sha256(TEST_SECRET, `${ts}.${body}`)
+    header `t=${ts},v1=deadbeef,v1=${good}`
+    request make-request(header, body)
+    assert(::webhooks/verify-request(request, TEST_SECRET), "any matching v1 should verify")
+}
+
+test-verify-rejects-non-numeric-timestamp
+meta ["test"]
+fn () {
+    body "{}"
+    request make-request(sign("notanumber", body, TEST_SECRET), body)
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "non-numeric timestamp should fail")
+}
