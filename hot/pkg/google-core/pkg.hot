@@ -3,7 +3,7 @@
 hot.pkg.google-core {
   name: "hot.dev/google-core",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "Google API foundation for Hot: service-account and OAuth token acquisition plus the authenticated request helper shared by the google-* packages.",
   author: "Hot Dev",
   email: "support@hot.dev",

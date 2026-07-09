@@ -3,7 +3,7 @@
 hot.pkg.crm {
   name: "hot.dev/crm",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "CRM-agnostic contact, company, and activity operations for Hot agents — one surface over HubSpot, Salesforce, and Attio, selected by whichever credentials are configured.",
   author: "Hot Dev",
   email: "support@hot.dev",

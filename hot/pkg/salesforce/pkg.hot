@@ -3,7 +3,7 @@
 hot.pkg.salesforce {
   name: "hot.dev/salesforce",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "Salesforce bindings for Hot. SObject CRUD and SOQL queries with client-credentials or JWT-bearer (connected app) authentication.",
   author: "Hot Dev",
   email: "support@hot.dev",

@@ -3,7 +3,7 @@
 hot.pkg.google-drive {
   name: "hot.dev/google-drive",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "Google Drive API bindings for Hot: list, search, upload, download, and manage files and folders.",
   author: "Hot Dev",
   email: "support@hot.dev",

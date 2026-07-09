@@ -3,7 +3,7 @@
 hot.pkg.stripe {
   name: "hot.dev/stripe",
   version: "1.0.0",
-  hot-min-version: "1.2.0",
+  hot-min-version: "2.6.1",
   description: "Stripe API bindings for Hot. Payments, customers, checkout, subscriptions, invoicing, and webhook signature verification.",
   author: "Hot Dev",
   email: "support@hot.dev",

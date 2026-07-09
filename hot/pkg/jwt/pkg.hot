@@ -3,7 +3,7 @@
 hot.pkg.jwt {
   name: "hot.dev/jwt",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "JSON Web Tokens for Hot. HS256 and RS256 signing and verification with exp/nbf/iss/aud claims validation.",
   author: "Hot Dev",
   email: "support@hot.dev",

@@ -3,7 +3,7 @@
 hot.pkg.google-gmail {
   name: "hot.dev/google-gmail",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "Gmail API bindings for Hot: send email, search and read messages, and manage labels.",
   author: "Hot Dev",
   email: "support@hot.dev",

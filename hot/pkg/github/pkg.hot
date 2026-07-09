@@ -3,7 +3,7 @@
 hot.pkg.github {
   name: "hot.dev/github",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "GitHub API bindings for Hot. Repos, issues, pull requests, Actions, and search — with token and GitHub App authentication and webhook verification.",
   author: "Hot Dev",
   email: "support@hot.dev",

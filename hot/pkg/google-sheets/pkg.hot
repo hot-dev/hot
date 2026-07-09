@@ -3,7 +3,7 @@
 hot.pkg.google-sheets {
   name: "hot.dev/google-sheets",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "Google Sheets API bindings for Hot: read, write, append, and clear spreadsheet values.",
   author: "Hot Dev",
   email: "support@hot.dev",
