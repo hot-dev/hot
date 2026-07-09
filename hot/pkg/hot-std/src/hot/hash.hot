@@ -118,3 +118,23 @@ meta {
 fn (data: Str | Bytes): Str {
     call-lib(::hot::hash/md5, [data])
 }
+
+
+ed25519-verify
+meta {
+    doc: """
+    Verify an Ed25519 signature. Takes a hex-encoded 32-byte public key, the signed message, and a hex-encoded 64-byte signature. Returns true if the signature is valid; false for a bad or malformed signature. Errors only if the public key itself is not valid hex.
+
+    Used for verifying Discord interaction webhooks, which sign `${timestamp}${raw-body}` with your application's public key.
+
+    **Example**
+
+    ```hot
+    ed25519-verify(public-key-hex, `${timestamp}${body}`, signature-hex)
+    // => true or false
+    ```
+    """
+}
+fn (public-key: Str, message: Str | Bytes, signature: Str): Bool {
+    call-lib(::hot::hash/ed25519-verify, [public-key, message, signature])
+}

@@ -857,6 +857,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert("::hot::hash/sha1".to_string(), HotLibFn::LibFn(hash::sha1));
         map.insert("::hot::hash/md5".to_string(), HotLibFn::LibFn(hash::md5));
+        map.insert(
+            "::hot::hash/ed25519-verify".to_string(),
+            HotLibFn::LibFn(hash::ed25519_verify),
+        );
 
         // HMAC functions
         map.insert(

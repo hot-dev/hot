@@ -564,6 +564,34 @@ fn reset_contained_state(vm: &crate::lang::runtime::vm::VirtualMachine) {
     vm.reset_cancellation_state();
 }
 
+/// Resolve a contained call's outcome at the halt boundary. A halt raised
+/// inside a JIT-compiled frame surfaces as an Ok-wrapped Err value while the
+/// VM failure/cancellation state is still set (the run boundary handles the
+/// same Ok-but-failed case when emitting events). Treat that state as the
+/// halt it represents: return the structured halt payload and reset so code
+/// outside the boundary runs normally.
+fn contain_outcome(
+    vm: &crate::lang::runtime::vm::VirtualMachine,
+    exec: Result<Val, impl ToString>,
+) -> HotResult<Val> {
+    match exec {
+        Ok(value) => {
+            if vm.has_failed() || vm.has_cancelled() {
+                let result = contain_error(vm, "halted");
+                reset_contained_state(vm);
+                result
+            } else {
+                contain_success(value)
+            }
+        }
+        Err(err) => {
+            let result = contain_error(vm, err);
+            reset_contained_state(vm);
+            result
+        }
+    }
+}
+
 /// Runtime-internal halt containment (::hot::internal::exec/contain).
 /// Calls a function and contains halts (fail()/cancel()) and hard runtime
 /// errors as a Result.Err; a callee that returns a Result passes through
@@ -613,14 +641,7 @@ pub fn contain(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
     {
         let exec = vm.execute_lambda(inner, &arg_vals);
         vm.decrement_call_depth();
-        return match exec {
-            Ok(value) => contain_success(value),
-            Err(err) => {
-                let result = contain_error(vm, err);
-                reset_contained_state(vm);
-                result
-            }
-        };
+        return contain_outcome(vm, exec);
     }
 
     // Bare boxed LambdaInfo (less common; mirrors `call`'s Val::Box arm).
@@ -632,14 +653,7 @@ pub fn contain(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
     {
         let exec = vm.execute_lambda(&Val::Box(boxed_val.clone_box()), &arg_vals);
         vm.decrement_call_depth();
-        return match exec {
-            Ok(value) => contain_success(value),
-            Err(err) => {
-                let result = contain_error(vm, err);
-                reset_contained_state(vm);
-                result
-            }
-        };
+        return contain_outcome(vm, exec);
     }
 
     // Extract function name (same logic as call)
@@ -696,17 +710,7 @@ pub fn contain(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
     {
         let exec = vm.execute_compiled_user_function(function_id, &arg_vals);
         vm.decrement_call_depth();
-        return match exec {
-            Ok(value) => contain_success(value),
-            Err(err) => {
-                // contain is a halt boundary: if the inner call halted via
-                // fail() or cancel(), reset that state so subsequent code
-                // outside the boundary can run normally.
-                let result = contain_error(vm, err);
-                reset_contained_state(vm);
-                result
-            }
-        };
+        return contain_outcome(vm, exec);
     }
 
     vm.decrement_call_depth();

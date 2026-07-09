@@ -70,6 +70,60 @@ pub fn md5(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::from(format!("{:x}", hash)))
 }
 
+/// Ed25519 signature verification. Takes a hex-encoded 32-byte public key, the
+/// message (string or bytes), and a hex-encoded 64-byte signature. Returns
+/// Bool: false for a bad or malformed signature, Err only for a malformed
+/// public key (a configuration problem, not attacker-controlled input).
+/// Used for Discord interaction webhook verification.
+pub fn ed25519_verify(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::hash/ed25519-verify", args, 3);
+    let public_key_hex = match &args[0] {
+        Val::Str(s) => s.clone(),
+        _ => {
+            return HotResult::Err(Val::from(
+                "::hot::hash/ed25519-verify: public key must be a hex string".to_string(),
+            ));
+        }
+    };
+    let message = match get_bytes_from_arg(&args[1]) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return HotResult::Err(Val::from(format!(
+                "::hot::hash/ed25519-verify message: {}",
+                e
+            )));
+        }
+    };
+    let signature_hex = match &args[2] {
+        Val::Str(s) => s.clone(),
+        _ => {
+            return HotResult::Err(Val::from(
+                "::hot::hash/ed25519-verify: signature must be a hex string".to_string(),
+            ));
+        }
+    };
+
+    let public_key = match hex::decode(&*public_key_hex) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return HotResult::Err(Val::from(format!(
+                "::hot::hash/ed25519-verify: invalid hex in public key: {}",
+                e
+            )));
+        }
+    };
+    // The signature comes from the request; treat malformed hex as verification
+    // failure rather than an error.
+    let signature = match hex::decode(&*signature_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => return HotResult::Ok(Val::Bool(false)),
+    };
+
+    let key =
+        aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, &public_key);
+    HotResult::Ok(Val::Bool(key.verify(&message, &signature).is_ok()))
+}
+
 /// Helper to extract bytes from a Val (Str or Bytes)
 fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
     match arg {
@@ -145,5 +199,56 @@ mod tests {
             }
             _ => panic!("Expected hash string"),
         }
+    }
+
+    // RFC 8032 test vector 1 (empty message)
+    const ED25519_PUBLIC_KEY: &str =
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    const ED25519_SIGNATURE: &str = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+
+    #[test]
+    fn test_ed25519_verify_valid() {
+        let result = ed25519_verify(&[
+            Val::from(ED25519_PUBLIC_KEY),
+            Val::from(""),
+            Val::from(ED25519_SIGNATURE),
+        ]);
+        match result {
+            HotResult::Ok(Val::Bool(valid)) => assert!(valid),
+            _ => panic!("Expected bool"),
+        }
+    }
+
+    #[test]
+    fn test_ed25519_verify_wrong_message() {
+        let result = ed25519_verify(&[
+            Val::from(ED25519_PUBLIC_KEY),
+            Val::from("tampered"),
+            Val::from(ED25519_SIGNATURE),
+        ]);
+        match result {
+            HotResult::Ok(Val::Bool(valid)) => assert!(!valid),
+            _ => panic!("Expected bool"),
+        }
+    }
+
+    #[test]
+    fn test_ed25519_verify_malformed_signature_is_false() {
+        let result = ed25519_verify(&[
+            Val::from(ED25519_PUBLIC_KEY),
+            Val::from(""),
+            Val::from("not-hex"),
+        ]);
+        match result {
+            HotResult::Ok(Val::Bool(valid)) => assert!(!valid),
+            _ => panic!("Expected bool"),
+        }
+    }
+
+    #[test]
+    fn test_ed25519_verify_malformed_public_key_is_err() {
+        let result =
+            ed25519_verify(&[Val::from("zz"), Val::from(""), Val::from(ED25519_SIGNATURE)]);
+        assert!(matches!(result, HotResult::Err(_)));
     }
 }
