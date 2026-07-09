@@ -138,7 +138,8 @@ hot.log.rotation ::env/get("HOT_LOG_ROTATION", "daily")
 hot.log.retention Int(::env/get("HOT_LOG_RETENTION", "7"))
 
 // Redis Configuration
-// Used for queue and cache when enabled
+// Used for queue and cache when enabled (default: unset — only needed
+// when queue.type is "redis")
 hot.redis.uri ::env/get("HOT_REDIS_URI", "redis://localhost:6379")
 hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
 
@@ -238,10 +239,14 @@ hot.cache.format "zstdjson"
 // Type Checker Configuration
 hot.check.format "pretty"
 hot.check.raw false
-hot.check.include-tests false
+// Type-check test files during `hot check` (true by default; also
+// overridable per run with --with-tests)
+hot.check.with-tests true
 
 // Event Emitter Configuration
 // Type: "db" (database), "console" (stdout), or "none" (disabled)
+// Default when unset: "db" for runtime commands inside a project,
+// "none" otherwise (`hot test`/`hot check` always default to "none")
 hot.emitter.type ::env/get("HOT_EMITTER_TYPE", "db")
 
 // Execution Engine Configuration
@@ -254,9 +259,13 @@ hot.engine.threads Int(::env/get("HOT_ENGINE_THREADS", "4"))
 hot.jit.mode ::env/get("HOT_JIT", "enabled")
 // Threshold: number of calls before a function is JIT-compiled (higher = less compile overhead)
 hot.jit.threshold Int(::env/get("HOT_JIT_THRESHOLD", "100"))
+// Higher-order-function pipeline fusion (map/filter/etc. compiled as one loop)
+hot.jit.hof.fusion Bool(::env/get("HOT_JIT_HOF_FUSION", "true"))
 
 // Queue Configuration
 // Type: "memory", "redis", or "none" (disabled)
+// Default when unset: "memory" for runtime commands inside a project,
+// "none" otherwise
 hot.queue.type ::env/get("HOT_QUEUE_TYPE", "memory")
 hot.queue.event-orphan-idle-ms Int(::env/get("HOT_QUEUE_EVENT_ORPHAN_IDLE_MS", "60000"))
 hot.queue.task-orphan-idle-ms Int(::env/get("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "120000"))
@@ -283,18 +292,25 @@ hot.retry.default-delay-ms Int(::env/get("HOT_RETRY_DEFAULT_DELAY_MS", "1000"))
 // Type: "json" (default) or "zstdjson" (compressed, better for large payloads)
 hot.serialization.type "json"
 
+// Value Output Format
+// Format for values printed by `hot run` / `hot eval` / `hot repl`:
+// "hot" (default, typed Hot syntax) or "json"
+hot.value.format "hot"
+
 // LSP Configuration
 // Transport: "stdio" or "tcp"
 hot.lsp.transport "stdio"
 
 // File Watcher Configuration
 hot.watch.debounce Int(::env/get("HOT_WATCH_DEBOUNCE", "200"))
-hot.watch.include-tests false
+// Type-check test files during `hot watch` (false by default; also
+// overridable per run with --with-tests)
+hot.watch.with-tests false
 
 // Worker Configuration
 hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
-hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "1"))
-hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "4"))
+hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "60"))
+hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
 hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")
 hot.worker.vm-memory-mb Int(::env/get("HOT_WORKER_VM_MEMORY_MB", "256"))
 hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "512"))
@@ -303,7 +319,7 @@ hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
 hot.worker.cancel-on-timeout Bool(::env/get("HOT_WORKER_CANCEL_ON_TIMEOUT", "true"))
 hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
 hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
-hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "true"))
+hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "false"))
 hot.worker.local-write-concurrency Int(::env/get("HOT_WORKER_LOCAL_WRITE_CONCURRENCY", "1"))
 hot.worker.read-batch-size Int(::env/get("HOT_WORKER_READ_BATCH_SIZE", "8"))
 
@@ -319,7 +335,7 @@ hot.task.container-reserved-memory-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED
 hot.task.container-reserved-disk-mb Int(::env/get("HOT_TASK_CONTAINER_RESERVED_DISK_MB", "10240"))
 hot.task.recovery-reserved-slots Int(::env/get("HOT_TASK_RECOVERY_RESERVED_SLOTS", "1"))
 hot.task.capacity-fairness ::env/get("HOT_TASK_CAPACITY_FAIRNESS", "none")
-hot.task.shutdown-drain-seconds Int(::env/get("HOT_TASK_SHUTDOWN_DRAIN_SECONDS", "5"))
+hot.task.shutdown-drain-seconds Int(::env/get("HOT_TASK_SHUTDOWN_DRAIN_SECONDS", "30"))
 hot.task.shutdown-container-timeout-seconds Int(::env/get("HOT_TASK_SHUTDOWN_CONTAINER_TIMEOUT_SECONDS", "30"))
 hot.task.reconcile-queued-after-seconds Int(::env/get("HOT_TASK_RECONCILE_QUEUED_AFTER_SECONDS", "60"))
 hot.task.reconcile-interval-seconds Int(::env/get("HOT_TASK_RECONCILE_INTERVAL_SECONDS", "30"))

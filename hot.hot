@@ -209,7 +209,7 @@ hot.cache.format "zstdjson"
 
 hot.check.format "pretty"
 hot.check.raw false
-hot.check.include-tests false
+hot.check.with-tests false
 // Treat deprecation (and future) warnings as errors: when true, `hot check`
 // exits non-zero if any warnings are emitted. Default false (warnings report
 // but never fail the check).
@@ -239,7 +239,7 @@ hot.serialization.type "zstdjson"
 hot.lsp.transport "stdio"
 
 hot.watch.debounce 200
-hot.watch.include-tests false
+hot.watch.with-tests false
 
 // Worker Configuration
 hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))

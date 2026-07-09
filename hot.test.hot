@@ -77,7 +77,7 @@ hot.cache.format "zstdjson"
 
 hot.check.format "pretty"
 hot.check.raw false
-hot.check.include-tests false
+hot.check.with-tests false
 hot.check.deny-warnings false
 
 hot.emitter.type "none"
@@ -94,7 +94,7 @@ hot.serialization.type "json"
 hot.lsp.transport "stdio"
 
 hot.watch.debounce 200
-hot.watch.include-tests false
+hot.watch.with-tests false
 
 hot.worker.threads 2
 

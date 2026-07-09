@@ -1847,13 +1847,14 @@ impl Val {
     }
 
     /// Returns a formatted string based on the value format preference in conf
-    /// Reads `hot.value.format` from conf (defaults to "hot")
+    /// Reads `value.format` from conf — the conf root is already the `hot`
+    /// map, so this corresponds to `hot.value.format` in hot.hot (defaults to "hot")
     /// Format value for display based on configuration
-    /// Uses `hot.value.format` setting: "hot" (default) or "json"
+    /// Uses `value.format` setting: "hot" (default) or "json"
     /// For Hot format, uses the human-readable display format with typed value syntax
     pub fn format_with_conf(&self, conf: Option<&Val>) -> String {
         let format = conf
-            .map(|c| c.get_str_or_default("hot.value.format", "hot"))
+            .map(|c| c.get_str_or_default("value.format", "hot"))
             .unwrap_or_else(|| "hot".to_string());
 
         match ValFormat::parse(&format) {
