@@ -60,6 +60,11 @@ supabase-admin
 #github
 #linear
 
+# CRM
+#attio
+#hubspot
+#salesforce
+
 # Knowledge & Retrieval
 #notion
 #pinecone

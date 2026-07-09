@@ -1,0 +1,64 @@
+::salesforce::sobjects ns
+
+::api ::salesforce::api
+
+create-record
+meta {
+    doc: """
+    POST /sobjects/{type} - Create a record. Returns `{id, success}`.
+
+    **Example**
+
+    ```hot
+    lead ::salesforce::sobjects/create-record("Lead", {LastName: "Lovelace", Company: "AE"})
+    lead.id
+    ```
+    """
+}
+fn (sobject-type: Str, fields: Map): Map {
+  ::api/json("POST", `/sobjects/${sobject-type}`, fields)
+}
+
+get-record
+meta {
+    doc: """GET /sobjects/{type}/{id} - One record; the 3-arity form limits the returned `fields` (Vec of names)."""
+}
+fn
+(sobject-type: Str, id: Str): Map {
+  ::api/json("GET", `/sobjects/${sobject-type}/${id}`)
+},
+(sobject-type: Str, id: Str, fields: Vec): Map {
+  ::api/json("GET", `/sobjects/${sobject-type}/${id}?fields=${join(fields, ",")}`)
+}
+
+update-record
+meta {
+    doc: """PATCH /sobjects/{type}/{id} - Update fields. Salesforce replies 204; returns null on success."""
+}
+fn (sobject-type: Str, id: Str, fields: Map): Any {
+  ::api/json("PATCH", `/sobjects/${sobject-type}/${id}`, fields)
+}
+
+delete-record
+meta {
+    doc: """DELETE /sobjects/{type}/{id} - Delete a record (goes to the recycle bin)."""
+}
+fn (sobject-type: Str, id: Str): Any {
+  ::api/json("DELETE", `/sobjects/${sobject-type}/${id}`)
+}
+
+upsert-record
+meta {
+    doc: """PATCH /sobjects/{type}/{externalIdField}/{value} - Create-or-update by external id — the idempotent way to sync records in."""
+}
+fn (sobject-type: Str, external-id-field: Str, value: Str, fields: Map): Any {
+  ::api/json("PATCH", `/sobjects/${sobject-type}/${external-id-field}/${::hot::uri/encode(value)}`, fields)
+}
+
+describe-object
+meta {
+    doc: """GET /sobjects/{type}/describe - The object's schema: fields, picklist values, relationships."""
+}
+fn (sobject-type: Str): Map {
+  ::api/json("GET", `/sobjects/${sobject-type}/describe`)
+}

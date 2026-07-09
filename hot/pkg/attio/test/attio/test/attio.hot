@@ -1,0 +1,18 @@
+::attio::test ns
+meta ["test"]
+
+::notes ::attio::notes
+
+test-note-payload
+meta ["test"] fn () {
+    payload ::notes/build-note-payload("people", "rec-123", "Intro call", "Wants enterprise.")
+    assert-eq("people", payload.data.parent_object)
+    assert-eq("rec-123", payload.data.parent_record_id)
+    assert-eq("plaintext", payload.data.format)
+    assert-eq("Wants enterprise.", payload.data.content)
+}
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://api.attio.com/v2", ::attio/BASE_URL)
+}

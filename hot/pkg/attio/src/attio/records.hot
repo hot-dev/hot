@@ -1,0 +1,110 @@
+::attio::records ns
+
+::api ::attio::api
+
+list-objects
+meta {
+    doc: """GET /objects - The workspace's objects (system `people`/`companies`/`deals` and custom ones) with their slugs."""
+}
+fn (): Map {
+  ::api/json("GET", "/objects")
+}
+
+query-records
+meta {
+    doc: """
+    POST /objects/{object}/records/query - Query records. `options`:
+    `filter` (https://docs.attio.com/rest-api/how-to/filtering-and-sorting),
+    `sorts`, `limit` (max 500), `offset`.
+
+    **Example**
+
+    ```hot
+    hits ::attio::records/query-records("companies", {
+      filter: {domains: {domain: {"$contains": "example.com"}}},
+      limit: 10
+    })
+    hits.data
+    ```
+    """
+}
+fn
+(object: Str): Map {
+  query-records(object, {})
+},
+(object: Str, options: Map): Map {
+  ::api/json("POST", `/objects/${object}/records/query`, options)
+}
+
+get-record
+meta {
+    doc: """GET /objects/{object}/records/{id} - One record with all attribute values."""
+}
+fn (object: Str, record-id: Str): Map {
+  out ::api/json("GET", `/objects/${object}/records/${record-id}`)
+  cond {
+    is-err(out) => { out }
+    => { out.data }
+  }
+}
+
+create-record
+meta {
+    doc: """
+    POST /objects/{object}/records - Create a record from attribute
+    `values` (Attio's value shapes, e.g.
+    `{email_addresses: [{email_address: "a@b.c"}]}`).
+    """
+}
+fn (object: Str, values: Map): Map {
+  out ::api/json("POST", `/objects/${object}/records`, {data: {values: values}})
+  cond {
+    is-err(out) => { out }
+    => { out.data }
+  }
+}
+
+assert-record
+meta {
+    doc: """
+    PUT /objects/{object}/records?matching_attribute= - Create-or-update
+    keyed on a unique attribute (Attio's upsert). The idiomatic way to
+    sync people/companies in.
+
+    **Example**
+
+    ```hot
+    person ::attio::records/assert-record("people", "email_addresses", {
+      email_addresses: [{email_address: "ada@example.com"}],
+      name: [{first_name: "Ada", last_name: "Lovelace", full_name: "Ada Lovelace"}]
+    })
+    ```
+    """
+}
+fn (object: Str, matching-attribute: Str, values: Map): Map {
+  out ::api/json("PUT", `/objects/${object}/records?matching_attribute=${matching-attribute}`, {data: {values: values}})
+  cond {
+    is-err(out) => { out }
+    => { out.data }
+  }
+}
+
+update-record
+meta {
+    doc: """PATCH /objects/{object}/records/{id} - Update the given attribute values of a record."""
+}
+fn (object: Str, record-id: Str, values: Map): Map {
+  out ::api/json("PATCH", `/objects/${object}/records/${record-id}`, {data: {values: values}})
+  cond {
+    is-err(out) => { out }
+    => { out.data }
+  }
+}
+
+delete-record
+meta {
+    doc: """DELETE /objects/{object}/records/{id} - Delete a record."""
+}
+fn (object: Str, record-id: Str): Any {
+  ::api/json("DELETE", `/objects/${object}/records/${record-id}`)
+}

@@ -1,0 +1,59 @@
+::hubspot::notes ns
+meta {
+    doc: """Notes — HubSpot's activity log entries, attached to contacts, companies, or deals. The agent-facing "log this to the CRM" surface."""
+}
+
+::api ::hubspot::api
+::time ::hot::time
+
+// HubSpot-defined association type ids for notes:
+// https://developers.hubspot.com/docs/api/crm/associations (v4 type ids)
+note-association-type-id
+meta {
+    doc: """The HUBSPOT_DEFINED association type id linking a note to a record type. Exposed for testing."""
+}
+fn cond (object-type: Str): Int {
+  eq(object-type, "contacts") => { 202 }
+  eq(object-type, "companies") => { 190 }
+  eq(object-type, "deals") => { 214 }
+  eq(object-type, "tickets") => { 228 }
+  => { fail(`hubspot: no note association type for '${object-type}' (use contacts/companies/deals/tickets)`) }
+}
+
+build-note-body
+meta {
+    doc: """Build the create-note payload for a note attached to a record. Exposed for testing; `log-note` uses it."""
+}
+fn (object-type: Str, record-id: Str, body: Str, timestamp-ms: Int): Map {
+  {
+    properties: {
+      hs_note_body: body,
+      hs_timestamp: timestamp-ms
+    },
+    associations: [{
+      to: {id: record-id},
+      types: [{
+        associationCategory: "HUBSPOT_DEFINED",
+        associationTypeId: note-association-type-id(object-type)
+      }]
+    }]
+  }
+}
+
+log-note
+meta {
+    doc: """
+    POST /crm/v3/objects/notes - Attach a note to a contact, company,
+    deal, or ticket.
+
+    **Example**
+
+    ```hot
+    ::hubspot::notes/log-note("contacts", contact.id, "Demo went well; sending pricing.")
+    ```
+    """
+}
+fn (object-type: Str, record-id: Str, body: Str): Map {
+  now-ms Int(floor(div(::time/now().epochNanoseconds, 1000000)))
+  ::api/json("POST", "/crm/v3/objects/notes", {}, build-note-body(object-type, record-id, body, now-ms))
+}

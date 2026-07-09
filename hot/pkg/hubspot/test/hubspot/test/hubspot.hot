@@ -1,0 +1,122 @@
+::hubspot::test ns
+meta ["test"]
+
+::objects ::hubspot::objects
+::notes ::hubspot::notes
+::wh ::hubspot::webhooks
+query-string ::hubspot::api/query-string
+
+// ============================================================================
+// query-string (HubSpot's comma-separated Vec style)
+// ============================================================================
+
+test-query-string-flattens-vecs
+meta ["test"] fn () {
+    qs query-string({properties: ["email", "firstname"], limit: 10})
+    assert(contains(qs, "properties=email%2Cfirstname"), "vec becomes comma-separated (encoded)")
+    assert(contains(qs, "limit=10"))
+}
+
+// ============================================================================
+// Search body builder
+// ============================================================================
+
+test-build-search-body
+meta ["test"] fn () {
+    body ::objects/build-search-body({
+        filters: [{propertyName: "email", operator: "EQ", value: "a@b.c"}],
+        sorts: [{propertyName: "createdate", direction: "DESCENDING"}],
+        limit: 5
+    })
+    assert-eq(1, length(body.filterGroups), "filters wrap in one AND group")
+    assert-eq("EQ", first(first(body.filterGroups).filters).operator)
+    assert-eq(5, body.limit)
+    assert(not(in("query", keys(body))), "unset options omitted")
+}
+
+test-build-search-body-query-only
+meta ["test"] fn () {
+    body ::objects/build-search-body({query: "ada"})
+    assert-eq("ada", body.query)
+    assert(not(in("filterGroups", keys(body))))
+}
+
+// ============================================================================
+// Notes
+// ============================================================================
+
+test-note-association-type-ids
+meta ["test"] fn () {
+    assert-eq(202, ::notes/note-association-type-id("contacts"))
+    assert-eq(190, ::notes/note-association-type-id("companies"))
+    assert-eq(214, ::notes/note-association-type-id("deals"))
+}
+
+test-build-note-body
+meta ["test"] fn () {
+    body ::notes/build-note-body("contacts", "1234", "Called Ada.", 1700000000000)
+    assert-eq("Called Ada.", body.properties.hs_note_body)
+    assert-eq(1700000000000, body.properties.hs_timestamp)
+    assoc first(body.associations)
+    assert-eq("1234", assoc.to.id)
+    assert-eq(202, first(assoc.types).associationTypeId)
+    assert-eq("HUBSPOT_DEFINED", first(assoc.types).associationCategory)
+}
+
+// ============================================================================
+// Webhook v3 signature (vector generated independently with Python)
+// ============================================================================
+
+HS_SECRET "hs_test_client_secret"
+HS_URL "https://myapp.hot.dev/hubspot/webhook"
+HS_BODY """{"eventId":1}"""
+HS_TS "1700000000000"
+HS_SIG "H7ZiMnrj1J2lbxVhk3XPpKzmrc2EWoB2kKzPeDKzc6Q="
+
+hs-request fn (sig: Str, ts: Str): Map {
+  {
+    method: "POST",
+    url: HS_URL,
+    headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
+    body-raw: HS_BODY
+  }
+}
+
+test-webhook-base-string
+meta ["test"] fn () {
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, HS_TS)
+    assert-eq(`POST${HS_URL}${HS_BODY}${HS_TS}`, base)
+}
+
+test-webhook-signature-matches-vector
+meta ["test"] fn () {
+    // The vector's 2023 timestamp is stale, so verify-request's tolerance
+    // check must reject it — but the signature itself must match, which
+    // we prove by checking the recipe directly first.
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, HS_TS)
+    assert(::webhooks/verify-hmac-sha256-base64(HS_SECRET, base, HS_SIG), "signature matches the independent vector")
+    assert(not(::wh/verify-request(hs-request(HS_SIG, HS_TS), HS_SECRET)), "stale timestamp is rejected by the replay window")
+}
+
+test-webhook-accepts-fresh-request
+meta ["test"] fn () {
+    ts Str(mul(::webhooks/now-seconds(), 1000))
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, ts)
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
+    assert(::wh/verify-request(hs-request(sig, ts), HS_SECRET))
+}
+
+test-webhook-rejects-tampering
+meta ["test"] fn () {
+    ts Str(mul(::webhooks/now-seconds(), 1000))
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, ts)
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
+    tampered {
+        method: "POST",
+        url: HS_URL,
+        headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
+        body-raw: """{"eventId":999}"""
+    }
+    assert(not(::wh/verify-request(tampered, HS_SECRET)), "tampered body fails")
+    assert(not(::wh/verify-request(hs-request(sig, "garbage"), HS_SECRET)), "non-numeric timestamp fails closed")
+}

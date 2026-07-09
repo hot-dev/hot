@@ -1,0 +1,69 @@
+::salesforce::api ns
+
+::auth ::salesforce::auth
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+data-path
+meta {
+    doc: """Prefix a REST resource with the pinned data API root: `/sobjects/Lead` → `/services/data/v62.0/sobjects/Lead`. Exposed for testing."""
+}
+fn (path: Str): Str {
+  `/services/data/${::salesforce/API_VERSION}${path}`
+}
+
+json
+meta {
+    doc: """
+    Make an authenticated request against the org's `instance_url` and
+    unwrap the response. `path` is relative to the data API root (e.g.
+    `/sobjects/Lead`). Salesforce returns 204 for updates/deletes — those
+    yield null.
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, "")
+},
+(method: Str, path: Str, body: Any): Any {
+  session ::auth/session()
+  cond {
+    is-err(session) => { session }
+    => {
+      headers cond {
+        eq(body, "") => { {Authorization: `Bearer ${session.token}`} }
+        => { {Authorization: `Bearer ${session.token}`, Content-Type: "application/json"} }
+      }
+      encoded-body if(eq(body, ""), "", to-json(untype(body)))
+
+      response ::hot::http/request(HttpRequest({
+        method,
+        url: `${session.instance-url}${data-path(path)}`,
+        headers: headers,
+        body: encoded-body
+      }))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response.body }
+        => { err(HttpError(response)) }
+      }
+    }
+  }
+}

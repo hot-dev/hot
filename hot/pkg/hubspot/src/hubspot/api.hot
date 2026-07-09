@@ -1,0 +1,79 @@
+::hubspot::api ns
+meta {ctx: {"hubspot.token": {required: true}}}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+query-string
+meta {
+    doc: """Build a query string from a Map, omitting nulls; Vec values become comma-separated (HubSpot's `properties=email,firstname` style)."""
+}
+fn (params: Map): Str {
+  filtered filter-vals(params, is-some)
+  flattened map-vals(filtered, (v) { if(is-vec(v), join(v, ","), v) })
+  cond {
+    is-empty(flattened) => { "" }
+    => { `?${::uri/encode-query(flattened)}` }
+  }
+}
+
+request
+meta {
+    doc: """Make an authenticated HubSpot request. `path` is relative to api.hubapi.com (e.g. `/crm/v3/objects/contacts`)."""
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  default-headers {
+    Authorization: `Bearer ${::ctx/get("hubspot.token")}`
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  ::hot::http/request(HttpRequest({
+    method,
+    url: `${::hubspot/BASE_URL}${path}`,
+    headers: final-headers,
+    body: encoded-body
+  }))
+}
+
+json
+meta {
+    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (HubSpot's `category`/`message` in `body`)."""
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  response request(method, path, additional-headers, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}

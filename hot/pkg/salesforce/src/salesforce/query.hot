@@ -1,0 +1,51 @@
+::salesforce::query ns
+
+::api ::salesforce::api
+::uri ::hot::uri
+
+soql
+meta {
+    doc: """
+    GET /query?q= - Run a SOQL query. Returns `{totalSize, done, records,
+    nextRecordsUrl?}`; pass `nextRecordsUrl` to `next-page` when `done`
+    is false.
+
+    **Example**
+
+    ```hot
+    open ::salesforce::query/soql("SELECT Id, Name, StageName FROM Opportunity WHERE IsClosed = false")
+    open.totalSize
+    ```
+    """
+}
+fn (query: Str): Map {
+  ::api/json("GET", `/query?q=${::uri/encode(query)}`)
+}
+
+next-page
+meta {
+    doc: """Fetch the next page of a SOQL result from its `nextRecordsUrl` (which Salesforce returns as a full data-API path)."""
+}
+fn (next-records-url: Str): Map {
+  // nextRecordsUrl already includes /services/data/vXX.0; strip to the
+  // /query... suffix so the api helper doesn't double the prefix.
+  marker "/query"
+  idx index-of-str(next-records-url, marker)
+  cond {
+    lt(idx, 0) => { err(`salesforce: unexpected nextRecordsUrl shape: ${next-records-url}`) }
+    => { ::api/json("GET", slice(next-records-url, idx)) }
+  }
+}
+
+// Position of the first occurrence of `needle` in `haystack`, or -1.
+index-of-str fn (haystack: Str, needle: Str): Int {
+  scan-index(haystack, needle, 0)
+}
+
+scan-index fn (haystack: Str, needle: Str, i: Int): Int {
+  cond {
+    gt(add(i, length(needle)), length(haystack)) => { -1 }
+    eq(slice(haystack, i, add(i, length(needle))), needle) => { i }
+    => { scan-index(haystack, needle, add(i, 1)) }
+  }
+}

@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.hubspot {
+  name: "hot.dev/hubspot",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "HubSpot CRM bindings for Hot. Contacts, companies, deals, and any CRM v3 object — CRUD, search, associations, notes — plus v3 webhook verification.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["crm", "hubspot"],
+  deps: {
+    "hot.dev/webhooks": {
+      local: "../webhooks",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/webhooks"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

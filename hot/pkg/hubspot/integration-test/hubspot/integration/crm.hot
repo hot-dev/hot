@@ -1,0 +1,11 @@
+::hubspot::integration ns
+meta ["test"]
+
+// Requires ctx: hubspot.token (private app with crm.objects.contacts read)
+// Run with: hot test --project pkg-integration-hubspot
+
+test-list-contacts
+meta ["test"] fn () {
+    page ::hubspot::objects/list-objects("contacts", {limit: 1})
+    assert(is-some(page.results), "should return a results array")
+}

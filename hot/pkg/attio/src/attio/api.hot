@@ -1,0 +1,51 @@
+::attio::api ns
+meta {ctx: {"attio.api.key": {required: true}}}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+json
+meta {
+    doc: """Make an authenticated Attio request and unwrap: the decoded JSON body on 2xx (Attio wraps payloads in `data`), or an Err carrying `HttpError`."""
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, "")
+},
+(method: Str, path: Str, body: Any): Any {
+  headers cond {
+    eq(body, "") => { {Authorization: `Bearer ${::ctx/get("attio.api.key")}`} }
+    => { {Authorization: `Bearer ${::ctx/get("attio.api.key")}`, Content-Type: "application/json"} }
+  }
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+
+  response ::hot::http/request(HttpRequest({
+    method,
+    url: `${::attio/BASE_URL}${path}`,
+    headers: headers,
+    body: encoded-body
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}

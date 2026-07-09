@@ -1,0 +1,27 @@
+::salesforce::test ns
+meta ["test"]
+
+::auth ::salesforce::auth
+::api ::salesforce::api
+::query ::salesforce::query
+
+test-jwt-claims
+meta ["test"] fn () {
+    claims ::auth/build-jwt-claims("3MVG9consumer", "ops@acme.com", "https://login.salesforce.com")
+    assert-eq("3MVG9consumer", claims.iss)
+    assert-eq("ops@acme.com", claims.sub)
+    assert-eq("https://login.salesforce.com", claims.aud)
+    assert(gt(claims.exp, 0), "expiry set")
+}
+
+test-data-path
+meta ["test"] fn () {
+    assert-eq("/services/data/v62.0/sobjects/Lead", ::api/data-path("/sobjects/Lead"))
+}
+
+test-index-of-str
+meta ["test"] fn () {
+    assert-eq(20, ::query/index-of-str("/services/data/v62.0/query/01g?locator=abc", "/query"))
+    assert-eq(-1, ::query/index-of-str("/services/data/v62.0/sobjects", "/query"))
+    assert-eq(0, ::query/index-of-str("/query?q=x", "/query"))
+}

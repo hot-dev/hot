@@ -1,0 +1,123 @@
+::hubspot::objects ns
+meta {
+    doc: """
+    The generic CRM v3 objects surface. `object-type` is `"contacts"`,
+    `"companies"`, `"deals"`, `"tickets"`, or a custom object's fully
+    qualified name — every function here works uniformly across them.
+    The typed modules (`::hubspot::contacts`, ...) delegate here.
+    """
+}
+
+::api ::hubspot::api
+query-string ::hubspot::api/query-string
+
+get-object
+meta {
+    doc: """GET /crm/v3/objects/{type}/{id} - One record. The 3-arity form selects which `properties` to return (Vec of names)."""
+}
+fn
+(object-type: Str, id: Str): Map {
+  ::api/json("GET", `/crm/v3/objects/${object-type}/${id}`)
+},
+(object-type: Str, id: Str, properties: Vec): Map {
+  ::api/json("GET", `/crm/v3/objects/${object-type}/${id}${query-string({properties: properties})}`)
+}
+
+create-object
+meta {
+    doc: """POST /crm/v3/objects/{type} - Create a record from a properties Map."""
+}
+fn (object-type: Str, properties: Map): Map {
+  ::api/json("POST", `/crm/v3/objects/${object-type}`, {}, {properties: properties})
+}
+
+update-object
+meta {
+    doc: """PATCH /crm/v3/objects/{type}/{id} - Update the given properties of a record."""
+}
+fn (object-type: Str, id: Str, properties: Map): Map {
+  ::api/json("PATCH", `/crm/v3/objects/${object-type}/${id}`, {}, {properties: properties})
+}
+
+archive-object
+meta {
+    doc: """DELETE /crm/v3/objects/{type}/{id} - Archive a record (moves to the recycle bin)."""
+}
+fn (object-type: Str, id: Str): Any {
+  ::api/json("DELETE", `/crm/v3/objects/${object-type}/${id}`)
+}
+
+list-objects
+meta {
+    doc: """GET /crm/v3/objects/{type} - Page through records. `params`: `limit` (max 100), `after` (paging cursor), `properties` (Vec), `archived`. Returns `{results, paging?}`."""
+}
+fn
+(object-type: Str): Map {
+  ::api/json("GET", `/crm/v3/objects/${object-type}`)
+},
+(object-type: Str, params: Map): Map {
+  ::api/json("GET", `/crm/v3/objects/${object-type}${query-string(params)}`)
+}
+
+build-search-body
+meta {
+    doc: """
+    Build a CRM search body. `options`: `query` (free-text), `filters`
+    (Vec of `{propertyName, operator, value}` — combined with AND),
+    `sorts`, `properties`, `limit`, `after`. Exposed for testing;
+    `search-objects` uses it.
+    """
+}
+fn (options: Map): Map {
+  filters get(options, "filters")
+  filter-vals({
+    query: get(options, "query"),
+    filterGroups: if(is-null(filters), null, [{filters: filters}]),
+    sorts: get(options, "sorts"),
+    properties: get(options, "properties"),
+    limit: get(options, "limit"),
+    after: get(options, "after")
+  }, is-some)
+}
+
+search-objects
+meta {
+    doc: """
+    POST /crm/v3/objects/{type}/search - Search records. See
+    `build-search-body` for the options; operators include `EQ`, `NEQ`,
+    `GT`, `CONTAINS_TOKEN`, `HAS_PROPERTY`, `IN`.
+
+    **Example**
+
+    ```hot
+    open-deals ::hubspot::objects/search-objects("deals", {
+      filters: [{propertyName: "dealstage", operator: "NEQ", value: "closedlost"}],
+      sorts: [{propertyName: "amount", direction: "DESCENDING"}],
+      limit: 20
+    })
+    ```
+    """
+}
+fn (object-type: Str, options: Map): Map {
+  ::api/json("POST", `/crm/v3/objects/${object-type}/search`, {}, build-search-body(options))
+}
+
+associate
+meta {
+    doc: """
+    PUT /crm/v4/objects/{fromType}/{fromId}/associations/default/{toType}/{toId} -
+    Associate two records with the default association type (e.g. contact
+    ↔ company, deal ↔ contact).
+    """
+}
+fn (from-type: Str, from-id: Str, to-type: Str, to-id: Str): Any {
+  ::api/json("PUT", `/crm/v4/objects/${from-type}/${from-id}/associations/default/${to-type}/${to-id}`, {}, {})
+}
+
+list-associations
+meta {
+    doc: """GET /crm/v4/objects/{type}/{id}/associations/{toType} - The records associated with one record."""
+}
+fn (object-type: Str, id: Str, to-type: Str): Map {
+  ::api/json("GET", `/crm/v4/objects/${object-type}/${id}/associations/${to-type}`)
+}

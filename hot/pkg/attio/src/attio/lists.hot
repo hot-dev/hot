@@ -1,0 +1,57 @@
+::attio::lists ns
+
+::api ::attio::api
+
+list-lists
+meta {
+    doc: """GET /lists - The workspace's lists (pipelines, curated collections)."""
+}
+fn (): Map {
+  ::api/json("GET", "/lists")
+}
+
+add-entry
+meta {
+    doc: """
+    POST /lists/{list}/entries - Add a record to a list. `entry-values`
+    (3-arity) sets list-specific attributes (e.g. a pipeline stage).
+
+    **Example**
+
+    ```hot
+    ::attio::lists/add-entry("sales-pipeline", {
+      parent_object: "companies",
+      parent_record_id: company.id.record_id
+    })
+    ```
+    """
+}
+fn
+(list: Str, parent: Map): Map {
+  add-entry(list, parent, {})
+},
+(list: Str, parent: Map, entry-values: Map): Map {
+  out ::api/json("POST", `/lists/${list}/entries`, {
+    data: {
+      parent_object: parent.parent_object,
+      parent_record_id: parent.parent_record_id,
+      entry_values: entry-values
+    }
+  })
+  cond {
+    is-err(out) => { out }
+    => { out.data }
+  }
+}
+
+query-entries
+meta {
+    doc: """POST /lists/{list}/entries/query - Query a list's entries (filter/sorts/limit/offset like record queries)."""
+}
+fn
+(list: Str): Map {
+  query-entries(list, {})
+},
+(list: Str, options: Map): Map {
+  ::api/json("POST", `/lists/${list}/entries/query`, options)
+}

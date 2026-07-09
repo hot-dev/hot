@@ -1,0 +1,11 @@
+::salesforce::integration ns
+meta ["test"]
+
+// Requires ctx: one salesforce.* auth mode (see package docs)
+// Run with: hot test --project pkg-integration-salesforce
+
+test-soql-roundtrip
+meta ["test"] fn () {
+    out ::salesforce::query/soql("SELECT Id FROM User LIMIT 1")
+    assert(gt(out.totalSize, 0), "org should have a user")
+}

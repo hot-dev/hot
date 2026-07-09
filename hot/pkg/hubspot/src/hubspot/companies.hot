@@ -1,0 +1,55 @@
+::hubspot::companies ns
+
+::objects ::hubspot::objects
+
+create-company
+meta {
+    doc: """Create a company from a properties Map (`name`, `domain`, `industry`, ...)."""
+}
+fn (properties: Map): Map {
+  ::objects/create-object("companies", properties)
+}
+
+get-company
+meta {
+    doc: """Fetch a company by id; the 2-arity form selects `properties`."""
+}
+fn
+(id: Str): Map {
+  ::objects/get-object("companies", id)
+},
+(id: Str, properties: Vec): Map {
+  ::objects/get-object("companies", id, properties)
+}
+
+update-company
+meta {
+    doc: """Update a company's properties."""
+}
+fn (id: Str, properties: Map): Map {
+  ::objects/update-object("companies", id, properties)
+}
+
+find-by-domain
+meta {
+    doc: """Search for a company by exact domain. Returns the company or null."""
+}
+fn (domain: Str): Any {
+  out ::objects/search-objects("companies", {
+    filters: [{propertyName: "domain", operator: "EQ", value: domain}],
+    limit: 1
+  })
+  cond {
+    is-err(out) => { out }
+    is-empty(out.results) => { null }
+    => { first(out.results) }
+  }
+}
+
+search-companies
+meta {
+    doc: """Search companies — see `::hubspot::objects/build-search-body` for the options."""
+}
+fn (options: Map): Map {
+  ::objects/search-objects("companies", options)
+}

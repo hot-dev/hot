@@ -1,0 +1,11 @@
+::attio::integration ns
+meta ["test"]
+
+// Requires ctx: attio.api.key
+// Run with: hot test --project pkg-integration-attio
+
+test-list-objects
+meta ["test"] fn () {
+    out ::attio::records/list-objects()
+    assert(is-some(out.data), "workspace should expose objects")
+}

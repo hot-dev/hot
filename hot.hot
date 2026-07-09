@@ -57,6 +57,7 @@ hot.project.hot-dev.deps {
 hot.project.hot-pkg-all.src.paths ["./hot/pkg/hot-std/src"]
 hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/anthropic/test",
+    "./hot/pkg/attio/test",
     "./hot/pkg/aws-eventstream/test",
     "./hot/pkg/discord/test",
     "./hot/pkg/elevenlabs/test",
@@ -68,6 +69,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/hot-ai/test",
     "./hot/pkg/hot-ai-agent/test",
     "./hot/pkg/hot-std/test",
+    "./hot/pkg/hubspot/test",
     "./hot/pkg/imagemagick/test",
     "./hot/pkg/jwt/test",
     "./hot/pkg/libreoffice/test",
@@ -82,6 +84,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/pinecone/test",
     "./hot/pkg/playwright/test",
     "./hot/pkg/redis/test",
+    "./hot/pkg/salesforce/test",
     "./hot/pkg/sox/test",
     "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
@@ -101,6 +104,7 @@ hot.project.hot-pkg-all.resources.paths ["./hot/pkg/hot-std/test/fixtures/resour
 hot.project.hot-pkg-all.skills.codegen.enabled false
 hot.project.hot-pkg-all.deps {
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
+    "hot.dev/attio": { "local": "./hot/pkg/attio" },
     "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },
     "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
     "hot.dev/aws-dynamodb": { "local": "./hot/pkg/aws-dynamodb" },
@@ -123,6 +127,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/google-sheets": { "local": "./hot/pkg/google-sheets" },
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
+    "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
@@ -141,6 +146,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
     "hot.dev/redis": { "local": "./hot/pkg/redis" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
+    "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
     "hot.dev/sox": { "local": "./hot/pkg/sox" },
@@ -373,6 +379,29 @@ hot.project.pkg-test-stripe.src.paths ["./hot/pkg/stripe/src"]
 hot.project.pkg-test-stripe.test.paths ["./hot/pkg/stripe/test"]
 hot.project.pkg-test-stripe.test.capture true
 hot.project.pkg-test-stripe.deps {}
+
+// hubspot unit tests (search bodies, note payloads, v3 webhook signature)
+hot.project.pkg-test-hubspot.src.paths ["./hot/pkg/hubspot/src"]
+hot.project.pkg-test-hubspot.test.paths ["./hot/pkg/hubspot/test"]
+hot.project.pkg-test-hubspot.test.capture true
+hot.project.pkg-test-hubspot.deps {
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
+}
+
+// salesforce unit tests (JWT claims, data paths — hermetic)
+hot.project.pkg-test-salesforce.src.paths ["./hot/pkg/salesforce/src"]
+hot.project.pkg-test-salesforce.test.paths ["./hot/pkg/salesforce/test"]
+hot.project.pkg-test-salesforce.test.capture true
+hot.project.pkg-test-salesforce.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// attio unit tests (payload builders — hermetic)
+hot.project.pkg-test-attio.src.paths ["./hot/pkg/attio/src"]
+hot.project.pkg-test-attio.test.paths ["./hot/pkg/attio/test"]
+hot.project.pkg-test-attio.test.capture true
+hot.project.pkg-test-attio.deps {}
 
 // web-search unit tests (provider selection + normalizers, hermetic)
 hot.project.pkg-test-web-search.src.paths ["./hot/pkg/web-search/src"]
@@ -636,6 +665,29 @@ hot.project.pkg-integration-aws-sns.deps {
 hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
 hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
 hot.project.pkg-aws-eventstream.test.capture true
+
+// HubSpot integration tests (requires hubspot.token; read-only)
+hot.project.pkg-integration-hubspot.src.paths ["./hot/pkg/hubspot/src"]
+hot.project.pkg-integration-hubspot.test.paths ["./hot/pkg/hubspot/integration-test"]
+hot.project.pkg-integration-hubspot.test.capture true
+hot.project.pkg-integration-hubspot.deps {
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
+}
+
+// Salesforce integration tests (requires salesforce.* auth; read-only)
+hot.project.pkg-integration-salesforce.src.paths ["./hot/pkg/salesforce/src"]
+hot.project.pkg-integration-salesforce.test.paths ["./hot/pkg/salesforce/integration-test"]
+hot.project.pkg-integration-salesforce.test.capture true
+hot.project.pkg-integration-salesforce.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Attio integration tests (requires attio.api.key; read-only)
+hot.project.pkg-integration-attio.src.paths ["./hot/pkg/attio/src"]
+hot.project.pkg-integration-attio.test.paths ["./hot/pkg/attio/integration-test"]
+hot.project.pkg-integration-attio.test.capture true
+hot.project.pkg-integration-attio.deps {}
 
 // web-search integration tests (requires a provider key; read-only)
 hot.project.pkg-integration-web-search.src.paths ["./hot/pkg/web-search/src"]
