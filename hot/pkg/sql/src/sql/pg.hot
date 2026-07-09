@@ -30,7 +30,8 @@ meta {
   connect: ::pg/connect,
   query: pg-query,
   execute: pg-execute,
-  close: ::pg/close
+  close: ::pg/close,
+  quote-ident: ::sql/ansi-quote-ident
 })
 
 open

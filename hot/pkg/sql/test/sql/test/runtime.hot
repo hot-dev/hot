@@ -212,3 +212,42 @@ meta ["test"] fn () {
     })
     assert-eq("SELECT * FROM t WHERE id = $1", out)
 }
+
+// ============================================================================
+// Identifier quoting
+// ============================================================================
+
+test-ansi-quote-ident
+meta ["test"] fn () {
+    assert-eq("\"users\"", ::sql/ansi-quote-ident("users"))
+    assert-eq("\"weird\"\"name\"", ::sql/ansi-quote-ident("weird\"name"), "embedded quotes doubled")
+    assert(is-err(::sql/ansi-quote-ident("")), "empty identifier rejected")
+}
+
+test-quote-ident-uses-driver-dialect
+meta ["test"] fn () {
+    // Drivers without quote-ident get the ANSI default
+    db ::sql/open(echo-driver, {})
+    assert-eq("\"t\"", ::sql/quote-ident(db, "t"))
+
+    // A MySQL-style driver supplies its own
+    backtick-driver ::sql/Driver({
+        name: "my",
+        placeholder: "question",
+        connect: (options) { {} },
+        query: (conn, sql, params) { [] },
+        execute: (conn, sql, params) { {command: "OK", rows-affected: 0} },
+        close: (conn) { true },
+        quote-ident: (name) { concat("`", name, "`") }
+    })
+    my-db ::sql/open(backtick-driver, {})
+    assert-eq("`t`", ::sql/quote-ident(my-db, "t"))
+}
+
+test-quoted-ident-in-query-reaches-driver
+meta ["test"] fn () {
+    db ::sql/open(echo-driver, {})
+    table ::sql/quote-ident(db, "user\"s")
+    rows ::sql/query(db, `SELECT * FROM ${table} WHERE id = ?`, [1])
+    assert-eq("SELECT * FROM \"user\"\"s\" WHERE id = $1", first(rows).sql)
+}

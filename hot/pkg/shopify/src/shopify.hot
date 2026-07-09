@@ -141,9 +141,19 @@ fn (search-query: Str, limit: Int): Any {
   }
 }
 
+quote-search-term
+meta {
+    doc: """Quote a value as an exact term for Shopify's search syntax (backslashes and quotes escaped, wrapped in double quotes) so operators or spaces in the value can't broaden the search. Exposed for testing."""
+}
+fn (value: Str): Str {
+  no-backslash join(split(value, "\\"), "\\\\")
+  escaped join(split(no-backslash, "\""), "\\\"")
+  `"${escaped}"`
+}
+
 find-customer-by-email
 meta {
-    doc: """Find a customer by email. Returns the customer or null."""
+    doc: """Find a customer by exact email. Returns the customer or null."""
 }
 fn (email: Str): Any {
   query """
@@ -153,7 +163,7 @@ fn (email: Str): Any {
     }
   }
   """
-  data graphql(query, {query: `email:${email}`})
+  data graphql(query, {query: `email:${quote-search-term(email)}`})
   cond {
     is-err(data) => { data }
     is-empty(data.customers.nodes) => { null }

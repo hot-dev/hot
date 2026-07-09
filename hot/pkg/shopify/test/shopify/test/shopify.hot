@@ -19,3 +19,10 @@ meta ["test"] fn () {
     assert(::shopify/verify-request(request, "shpss_test_secret"))
     assert(not(::shopify/verify-request({headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="}, body-raw: "tampered"}, "shpss_test_secret")))
 }
+
+test-quote-search-term
+meta ["test"] fn () {
+    assert-eq("\"ada@example.com\"", ::shopify/quote-search-term("ada@example.com"))
+    assert-eq("\"a OR email:*\"", ::shopify/quote-search-term("a OR email:*"), "operators stay inside the quoted term")
+    assert-eq("\"say \\\"hi\\\"\"", ::shopify/quote-search-term("say \"hi\""), "embedded quotes escaped")
+}

@@ -61,6 +61,29 @@ table-path fn (base-id: Str, table: Str): Str {
   `/${base-id}/${::uri/encode(table)}`
 }
 
+escape-formula-value
+meta {
+    doc: """
+    Escape a value for interpolation into an Airtable formula as a
+    single-quoted string literal (backslashes and quotes escaped, quotes
+    included). **Always use this when building `filterByFormula` from
+    user or agent input** — unescaped interpolation lets crafted input
+    rewrite the formula.
+
+    **Example**
+
+    ```hot
+    formula `{Email} = ${::airtable/escape-formula-value(input)}`
+    ::airtable/list-records(base, "Leads", {filterByFormula: formula})
+    ```
+    """
+}
+fn (value: Str): Str {
+  no-backslash join(split(value, "\\"), "\\\\")
+  escaped join(split(no-backslash, "'"), "\\'")
+  `'${escaped}'`
+}
+
 list-records
 meta {
     ctx: {"airtable.token": {required: true}},

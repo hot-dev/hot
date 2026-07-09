@@ -66,6 +66,10 @@ meta {
     - `query` — `fn (conn, sql: Str, params: Vec)` returning `Vec<Map>` or Err
     - `execute` — `fn (conn, sql: Str, params: Vec)` returning `{command, rows-affected}` or Err
     - `close` — `fn (conn)` returning Bool
+    - `quote-ident` — optional `fn (name: Str)` quoting an identifier in
+      the driver's dialect; when absent the runtime uses ANSI
+      double-quoting (correct for PostgreSQL and SQLite; a MySQL driver
+      supplies backtick quoting here)
     """
 }
 type {
@@ -74,7 +78,8 @@ type {
   connect: Any,
   query: Any,
   execute: Any,
-  close: Any
+  close: Any,
+  quote-ident: Any?
 }
 
 Db
@@ -162,6 +167,58 @@ wrap-error fn (driver-name: Str, payload: Any): SqlError {
 // argument to a regular function (the VM halts on it). Error rewrapping is
 // therefore inlined at each site: extract the payload with if-err (which
 // suppresses that check) and hand only the plain payload to wrap-error.
+
+// ---------------------------------------------------------------------------
+// Identifier quoting
+// ---------------------------------------------------------------------------
+
+ansi-quote-ident
+meta {
+    doc: """
+    Quote an identifier ANSI-style: wrapped in double quotes with embedded
+    double quotes doubled (`weird"name` → `"weird""name"`). Correct for
+    PostgreSQL and SQLite. Rejects empty identifiers and identifiers
+    containing NUL.
+    """
+}
+fn (name: Str): Str {
+  dq "\""
+  cond {
+    is-empty(name) => { err("sql: cannot quote an empty identifier") }
+    contains(name, "\u{0}") => { err("sql: identifier contains a NUL byte") }
+    => {
+      doubled join(split(name, dq), concat(dq, dq))
+      concat(dq, doubled, dq)
+    }
+  }
+}
+
+quote-ident
+meta {
+    doc: """
+    Quote an identifier (table or column name) in the database's dialect,
+    via the driver's `quote-ident` or the ANSI default. **Values must use
+    placeholders — this is only for the identifiers that placeholders
+    cannot parameterize.** Quote each part of a qualified name separately.
+
+    **Example**
+
+    ```hot
+    table ::sql/quote-ident(db, user-chosen-table)
+    rows ::sql/query(db, `SELECT * FROM ${table} WHERE id = ?`, [id])
+
+    // Qualified names: quote each part
+    target `${::sql/quote-ident(db, schema)}.${::sql/quote-ident(db, table)}`
+    ```
+    """
+}
+fn (db: Db, name: Str): Str {
+  quoter db.driver.quote-ident
+  cond {
+    is-null(quoter) => { ansi-quote-ident(name) }
+    => { quoter(name) }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Open / close
