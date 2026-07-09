@@ -8314,16 +8314,20 @@ impl VirtualMachine {
                                         }
                                     }
                                 }
-                                if let Some(result) = self
-                                    .jit
-                                    .try_call_compiled(function_id, &new_args)
-                                    .map_err(|msg| {
-                                        VmError::RuntimeError(
-                                            RuntimeError::new(msg)
-                                                .with_instruction_pointer(self.instruction_pointer),
-                                        )
-                                    })?
-                                {
+                                // Compiled code calls helpers that resolve the VM
+                                // through the thread-local pointer; bracket the
+                                // call like try_jit_call does or a mid-loop
+                                // switch to compiled code sees no VM.
+                                let prev = super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+                                let call_result =
+                                    self.jit.try_call_compiled(function_id, &new_args);
+                                super::jit::set_jit_vm_ptr(prev);
+                                if let Some(result) = call_result.map_err(|msg| {
+                                    VmError::RuntimeError(
+                                        RuntimeError::new(msg)
+                                            .with_instruction_pointer(self.instruction_pointer),
+                                    )
+                                })? {
                                     break result;
                                 }
                             }

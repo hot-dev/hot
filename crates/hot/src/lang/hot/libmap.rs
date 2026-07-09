@@ -954,6 +954,16 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::LibFn(crypto::pbkdf2_hmac_sha256),
         );
 
+        // RSA signatures (JWT RS256, GitHub Apps, Google service accounts)
+        map.insert(
+            "::hot::crypto/rsa-sha256-sign".to_string(),
+            HotLibFn::LibFn(crypto::rsa_sha256_sign),
+        );
+        map.insert(
+            "::hot::crypto/rsa-sha256-verify".to_string(),
+            HotLibFn::LibFn(crypto::rsa_sha256_verify),
+        );
+
         // Secure random functions
         map.insert(
             "::hot::random/random-bytes".to_string(),
