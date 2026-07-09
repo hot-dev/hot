@@ -1,0 +1,26 @@
+::hot::pkg ns
+
+hot.pkg.github {
+  name: "hot.dev/github",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "GitHub API bindings for Hot. Repos, issues, pull requests, Actions, and search — with token and GitHub App authentication and webhook verification.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["github", "developer-tools"],
+  deps: {
+    "hot.dev/jwt": {
+      local: "../jwt",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/jwt"
+    },
+    "hot.dev/webhooks": {
+      local: "../webhooks",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/webhooks"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,72 @@
+::github::app ns
+meta {
+    doc: """
+    GitHub App authentication: sign an app JWT with the App's RSA private
+    key, then mint short-lived installation tokens with it. Built on
+    `hot.dev/jwt` and the `::hot::crypto` RS256 natives.
+
+    **Example**
+
+    ```hot
+    ::app ::github::app
+
+    token ::app/installation-token(app-id, private-key-pem, installation-id)
+    // use token.token as github.token for the next hour
+    issues ::github::issues/list-issues("acme", "api", {}, token.token)
+    ```
+    """
+}
+
+::jwt ::jwt
+
+build-app-claims
+meta {
+    doc: """Build the app JWT claims per GitHub's spec: `iat` 60s in the past (clock drift), `exp` at most 10 minutes out, `iss` = the App id."""
+}
+fn (app-id: Any): Map {
+  now ::jwt/now-seconds()
+  {
+    iat: sub(now, 60),
+    exp: add(now, 540),
+    iss: Str(app-id)
+  }
+}
+
+app-jwt
+meta {
+    doc: """Sign a GitHub App JWT (RS256) from the App id and its PEM private key (the `.pem` GitHub generates — PKCS#1 `BEGIN RSA PRIVATE KEY` — or a PKCS#8 conversion)."""
+}
+fn (app-id: Any, private-key-pem: Str): Str {
+  ::jwt/sign(build-app-claims(app-id), private-key-pem, "RS256")
+}
+
+installation-token
+meta {
+    doc: """
+    POST /app/installations/{id}/access_tokens - Mint an installation
+    access token (~1 hour). Returns `{token, expires_at, permissions}`.
+    Pass `token.token` as the `token` argument of the endpoint functions,
+    or set it as `github.token` for the run.
+    """
+}
+fn (app-id: Any, private-key-pem: Str, installation-id: Any): Map {
+  bearer app-jwt(app-id, private-key-pem)
+  cond {
+    is-err(bearer) => { bearer }
+    => {
+      ::github::api/json("POST", `/app/installations/${installation-id}/access_tokens`, {}, {}, bearer)
+    }
+  }
+}
+
+list-installations
+meta {
+    doc: """GET /app/installations - The installations of your App (authenticated with the app JWT)."""
+}
+fn (app-id: Any, private-key-pem: Str): Any {
+  bearer app-jwt(app-id, private-key-pem)
+  cond {
+    is-err(bearer) => { bearer }
+    => { ::github::api/json("GET", "/app/installations", {}, "", bearer) }
+  }
+}

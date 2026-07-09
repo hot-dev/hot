@@ -1,0 +1,108 @@
+::github::api ns
+meta {ctx: {"github.token": {required: true}}}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+query-string
+meta {
+    doc: """Build a query string from a Map, omitting null values; empty when nothing remains. Used by the list endpoints for `state`, `labels`, `per_page`, `page`, ..."""
+}
+fn (params: Map): Str {
+  filtered filter-vals(params, is-some)
+  cond {
+    is-empty(filtered) => { "" }
+    => { `?${::uri/encode-query(filtered)}` }
+  }
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to the GitHub REST API. `path` is
+    relative to api.github.com (e.g. `/repos/hot-dev/hot/issues`). Sends
+    the standard `Accept`, `X-GitHub-Api-Version`, and `User-Agent`
+    headers (GitHub rejects requests without a User-Agent).
+
+    **Example**
+
+    ```hot
+    response ::github::api/request("GET", "/user")
+    response.body.login
+    ```
+    """
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map): HttpResponse {
+  request(method, path, additional-headers, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, path, additional-headers, body, ::ctx/get("github.token"))
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
+  default-headers {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    X-GitHub-Api-Version: ::github/API_VERSION,
+    User-Agent: "hot-dev-github-pkg"
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  ::hot::http/request(HttpRequest({
+    method,
+    url: `${::github/BASE_URL}${path}`,
+    headers: final-headers,
+    body: encoded-body
+  }))
+}
+
+json
+meta {
+    doc: """Like `request`, but unwraps: returns the decoded JSON body on 2xx, or an Err carrying `HttpError`. The shape used by all github endpoint functions."""
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): Any {
+  response request(method, path, additional-headers, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+},
+// 5-arity: explicit token override (App JWTs, installation tokens)
+(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): Any {
+  response request(method, path, additional-headers, body, token)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}

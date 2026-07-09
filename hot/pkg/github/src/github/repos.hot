@@ -1,0 +1,114 @@
+::github::repos ns
+
+::api ::github::api
+::b64 ::hot::base64
+query-string ::github::api/query-string
+
+get-repo
+meta {
+    doc: """GET /repos/{owner}/{repo} - Repository metadata (default branch, visibility, topics, counts)."""
+}
+fn (owner: Str, repo: Str): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}`)
+}
+
+list-repos
+meta {
+    doc: """GET /users/{owner}/repos or /orgs/{owner}/repos - List an owner's repositories. `params` supports `type`, `sort`, `per_page`, `page`. The 1-arity form lists a user's repos."""
+}
+fn
+(owner: Str): Vec {
+  ::api/json("GET", `/users/${owner}/repos`)
+},
+(owner: Str, params: Map): Vec {
+  ::api/json("GET", `/users/${owner}/repos${query-string(params)}`)
+}
+
+list-branches
+meta {
+    doc: """GET /repos/{owner}/{repo}/branches - List branches."""
+}
+fn (owner: Str, repo: Str): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/branches`)
+}
+
+list-commits
+meta {
+    doc: """GET /repos/{owner}/{repo}/commits - List commits, newest first. `params` supports `sha` (branch), `path`, `author`, `since`, `until`, `per_page`, `page`."""
+}
+fn
+(owner: Str, repo: Str): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/commits`)
+},
+(owner: Str, repo: Str, params: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/commits${query-string(params)}`)
+}
+
+decode-content
+meta {
+    doc: """Decode a contents-API response (`{content: base64-with-newlines, encoding: "base64"}`) into the file text. Exposed for testing; `get-content` applies it."""
+}
+fn (resource: Map): Str {
+  cond {
+    eq(get(resource, "encoding"), "base64") => {
+      Str(::b64/decode(join(split(resource.content, "\n"), "")))
+    }
+    => { get(resource, "content", "") }
+  }
+}
+
+get-content
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/contents/{path} - Fetch a file and decode
+    its content. Returns `{path, sha, content}` where `content` is the
+    decoded text — the `sha` is what `put-content` needs to update it.
+    Pass a `ref` (branch/tag/sha) with the 4-arity form.
+    """
+}
+fn
+(owner: Str, repo: Str, path: Str): Map {
+  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${path}`)
+  cond {
+    is-err(resource) => { resource }
+    => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
+  }
+},
+(owner: Str, repo: Str, path: Str, ref: Str): Map {
+  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${path}?ref=${ref}`)
+  cond {
+    is-err(resource) => { resource }
+    => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
+  }
+}
+
+put-content
+meta {
+    doc: """
+    PUT /repos/{owner}/{repo}/contents/{path} - Create or update a file
+    with a commit. `options`: `message` (required), `content` (required,
+    plain text — encoded automatically), `sha` (required when updating),
+    `branch`.
+
+    **Example**
+
+    ```hot
+    existing ::github::repos/get-content("acme", "api", "VERSION")
+    ::github::repos/put-content("acme", "api", "VERSION", {
+      message: "Bump version",
+      content: "2.0.0",
+      sha: existing.sha
+    })
+    ```
+    """
+}
+fn (owner: Str, repo: Str, path: Str, options: Map): Map {
+  body filter-vals({
+    message: options.message,
+    // base64/encode takes Bytes; content arrives as text
+    content: ::b64/encode(Bytes(get(options, "content", ""))),
+    sha: get(options, "sha"),
+    branch: get(options, "branch")
+  }, is-some)
+  ::api/json("PUT", `/repos/${owner}/${repo}/contents/${path}`, {}, body)
+}

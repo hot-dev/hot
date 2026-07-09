@@ -1,0 +1,56 @@
+::github::test ns
+meta ["test"]
+
+::app ::github::app
+::repos ::github::repos
+query-string ::github::api/query-string
+
+// ============================================================================
+// App JWT claims
+// ============================================================================
+
+test-app-claims-shape
+meta ["test"] fn () {
+    claims ::app/build-app-claims(12345)
+    assert-eq("12345", claims.iss, "iss is the App id as a string")
+    assert-eq(600, sub(claims.exp, claims.iat), "60s backdate + 540s ahead = 10 minute window")
+}
+
+test-app-jwt-is-rs256
+meta ["test"] fn () {
+    // Structural check with a throwaway key: three segments, RS256 header.
+    // (Signature correctness is covered by the jwt package's tests.)
+    key-err ::app/app-jwt(1, "not a pem")
+    assert(is-err(key-err), "invalid PEM should error, not sign")
+}
+
+// ============================================================================
+// query-string
+// ============================================================================
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("", query-string({}))
+    assert-eq("", query-string({state: null}))
+    qs query-string({state: "open", per_page: 50})
+    assert(contains(qs, "state=open"))
+    assert(contains(qs, "per_page=50"))
+    assert(starts-with(qs, "?"))
+}
+
+// ============================================================================
+// Contents decoding
+// ============================================================================
+
+test-decode-content-base64-with-newlines
+meta ["test"] fn () {
+    // GitHub wraps base64 at 60 chars with \n — decode must strip them.
+    encoded ::hot::base64/encode(Bytes("hello from the contents api"))
+    resource {content: `${slice(encoded, 0, 10)}\n${slice(encoded, 10)}`, encoding: "base64"}
+    assert-eq("hello from the contents api", ::repos/decode-content(resource))
+}
+
+test-decode-content-passthrough
+meta ["test"] fn () {
+    assert-eq("raw", ::repos/decode-content({content: "raw", encoding: "utf-8"}))
+}

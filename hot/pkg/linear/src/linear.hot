@@ -1,0 +1,28 @@
+::linear ns
+meta {
+    doc: """
+    Linear API bindings.
+
+    Linear's API is GraphQL-only; this package provides curated issue and
+    team functions plus `::linear::api/graphql` for anything else.
+
+    **Setup** — set `linear.api.key` in context: a personal API key
+    (`lin_api_...`) or an OAuth access token (`lin_oauth_...`) — the right
+    Authorization form is chosen automatically.
+
+    **Quick start**
+
+    ```hot
+    ::issues ::linear::issues
+
+    todo ::issues/list-issues({filter: {state: {type: {eq: "unstarted"}}}, first: 20})
+
+    issue ::issues/create-issue(team.id, "Rate limit the export endpoint", {
+      description: "Seen 429s from the reporting job.",
+      priority: 2
+    })
+    ```
+    """
+}
+
+GRAPHQL_URL "https://api.linear.app/graphql"

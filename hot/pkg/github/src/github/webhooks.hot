@@ -1,0 +1,6 @@
+::github::webhooks ns
+meta {
+    doc: """GitHub webhook verification — re-exported from `hot.dev/webhooks` so everything a GitHub integration needs lives under `::github`. Uses the `github.webhook.secret` context variable."""
+}
+
+verify-request ::webhooks::github/verify-request

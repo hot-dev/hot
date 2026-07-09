@@ -1,0 +1,188 @@
+::linear::issues ns
+
+::api ::linear::api
+
+ISSUE_FIELDS """
+id
+identifier
+title
+description
+priority
+url
+createdAt
+state { id name type }
+assignee { id name }
+team { id key }
+labels { nodes { id name } }
+"""
+
+list-issues
+meta {
+    doc: """
+    List issues. `options` maps to the GraphQL `issues` arguments:
+    `filter` (an IssueFilter Map — https://developers.linear.app/docs/graphql/filtering),
+    `first` (page size, default 50), `after` (cursor), `orderBy`.
+    Returns `{nodes: [...], pageInfo: {hasNextPage, endCursor}}`.
+
+    **Example**
+
+    ```hot
+    urgent ::linear::issues/list-issues({
+      filter: {priority: {lte: 2}, state: {type: {neq: "completed"}}},
+      first: 25
+    })
+    map(urgent.nodes, (i) { `${i.identifier}: ${i.title}` })
+    ```
+    """
+}
+fn
+(): Map {
+  list-issues({})
+},
+(options: Map): Map {
+  query ```
+  query Issues($filter: IssueFilter, $first: Int, $after: String) {
+    issues(filter: $filter, first: $first, after: $after) {
+      nodes { ${ISSUE_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  ```
+  variables {
+    filter: get(options, "filter"),
+    first: or(get(options, "first"), 50),
+    after: get(options, "after")
+  }
+  data ::api/graphql(query, filter-vals(variables, is-some))
+  cond {
+    is-err(data) => { data }
+    => { data.issues }
+  }
+}
+
+get-issue
+meta {
+    doc: """Fetch one issue by id or identifier (e.g. "ENG-123")."""
+}
+fn (id: Str): Map {
+  query ```
+  query Issue($id: String!) {
+    issue(id: $id) { ${ISSUE_FIELDS} }
+  }
+  ```
+  data ::api/graphql(query, {id: id})
+  cond {
+    is-err(data) => { data }
+    => { data.issue }
+  }
+}
+
+build-create-input
+meta {
+    doc: """Build an IssueCreateInput from a team id, title, and options (`description`, `priority` 0-4, `assigneeId`, `stateId`, `labelIds`, `projectId`). Exposed for testing; `create-issue` uses it."""
+}
+fn (team-id: Str, title: Str, options: Map): Map {
+  filter-vals({
+    teamId: team-id,
+    title: title,
+    description: get(options, "description"),
+    priority: get(options, "priority"),
+    assigneeId: get(options, "assigneeId"),
+    stateId: get(options, "stateId"),
+    labelIds: get(options, "labelIds"),
+    projectId: get(options, "projectId")
+  }, is-some)
+}
+
+create-issue
+meta {
+    doc: """
+    Create an issue in a team. See `build-create-input` for the options.
+
+    **Example**
+
+    ```hot
+    issue ::linear::issues/create-issue(team.id, "Fix flaky webhook test", {priority: 2})
+    issue.identifier  // => "ENG-231"
+    ```
+    """
+}
+fn
+(team-id: Str, title: Str): Map {
+  create-issue(team-id, title, {})
+},
+(team-id: Str, title: Str, options: Map): Map {
+  query ```
+  mutation CreateIssue($input: IssueCreateInput!) {
+    issueCreate(input: $input) {
+      success
+      issue { ${ISSUE_FIELDS} }
+    }
+  }
+  ```
+  data ::api/graphql(query, {input: build-create-input(team-id, title, options)})
+  cond {
+    is-err(data) => { data }
+    => { data.issueCreate.issue }
+  }
+}
+
+update-issue
+meta {
+    doc: """Update an issue's fields (IssueUpdateInput: `title`, `description`, `priority`, `stateId`, `assigneeId`, ...)."""
+}
+fn (id: Str, changes: Map): Map {
+  query ```
+  mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+    issueUpdate(id: $id, input: $input) {
+      success
+      issue { ${ISSUE_FIELDS} }
+    }
+  }
+  ```
+  data ::api/graphql(query, {id: id, input: changes})
+  cond {
+    is-err(data) => { data }
+    => { data.issueUpdate.issue }
+  }
+}
+
+create-comment
+meta {
+    doc: """Comment on an issue (markdown body)."""
+}
+fn (issue-id: Str, body: Str): Map {
+  query ```
+  mutation CreateComment($input: CommentCreateInput!) {
+    commentCreate(input: $input) {
+      success
+      comment { id body url }
+    }
+  }
+  ```
+  data ::api/graphql(query, {input: {issueId: issue-id, body: body}})
+  cond {
+    is-err(data) => { data }
+    => { data.commentCreate.comment }
+  }
+}
+
+search-issues
+meta {
+    doc: """Full-text issue search. Returns `{nodes, pageInfo}`."""
+}
+fn (term: Str): Map {
+  query ```
+  query Search($term: String!) {
+    searchIssues(term: $term) {
+      nodes { ${ISSUE_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  ```
+  data ::api/graphql(query, {term: term})
+  cond {
+    is-err(data) => { data }
+    => { data.searchIssues }
+  }
+}

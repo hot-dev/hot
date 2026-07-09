@@ -1,0 +1,71 @@
+::linear::api ns
+meta {ctx: {"linear.api.key": {required: true}}}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+auth-header
+meta {
+    doc: """Build the Authorization header value: personal API keys (`lin_api_...`) go raw; OAuth tokens (`lin_oauth_...`) get the `Bearer ` prefix, per Linear's docs."""
+}
+fn (key: Str): Str {
+  cond {
+    starts-with(key, "lin_oauth_") => { `Bearer ${key}` }
+    => { key }
+  }
+}
+
+parse-graphql-response
+meta {
+    doc: """Unwrap a GraphQL response body: returns `data` when there are no errors, otherwise an Err carrying `{errors, data}`. Exposed for testing; `graphql` applies it."""
+}
+fn (body: Map): Any {
+  errors get(body, "errors", [])
+  cond {
+    is-empty(errors) => { get(body, "data") }
+    => { err({errors: errors, data: get(body, "data")}) }
+  }
+}
+
+graphql
+meta {
+    doc: """
+    Execute a GraphQL query or mutation against Linear. Returns the
+    `data` object, or an Err carrying `{errors, data}` for GraphQL errors
+    and `{status, body}` for transport errors.
+
+    **Example**
+
+    ```hot
+    me ::linear::api/graphql("query { viewer { id name email } }", {})
+    me.viewer.name
+    ```
+    """
+}
+fn
+(query: Str): Any {
+  graphql(query, {})
+},
+(query: Str, variables: Map): Any {
+  graphql(query, variables, ::ctx/get("linear.api.key"))
+},
+(query: Str, variables: Map, api-key: Str): Any {
+  response ::hot::http/request(HttpRequest({
+    method: "POST",
+    url: ::linear/GRAPHQL_URL,
+    headers: {
+      Authorization: auth-header(api-key),
+      Content-Type: "application/json"
+    },
+    body: to-json({query: query, variables: untype(variables)})
+  }))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err({status: response.status, body: response.body}) }
+    => { parse-graphql-response(response.body) }
+  }
+}
