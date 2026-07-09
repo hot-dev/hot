@@ -18,10 +18,3 @@ meta ["test"] fn () {
     assert-eq("", ::deepgram/transcript({results: {channels: [{alternatives: []}]}}))
 }
 
-test-query-string
-meta ["test"] fn () {
-    qs ::deepgram/query-string({model: "nova-3", smart_format: true, language: null})
-    assert(contains(qs, "model=nova-3"))
-    assert(contains(qs, "smart_format=true"))
-    assert(not(contains(qs, "language")))
-}

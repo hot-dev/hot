@@ -27,14 +27,6 @@ meta {
 
 BASE_URL "https://api.deepgram.com/v1"
 
-query-string fn (params: Map): Str {
-  filtered filter-vals(params, is-some)
-  cond {
-    is-empty(filtered) => { "" }
-    => { `?${::uri/encode-query(filtered)}` }
-  }
-}
-
 request fn
 (path: Str, content-type: Str, body: Any): Any {
   request(path, content-type, body, ::ctx/get("deepgram.api.key"))
@@ -73,7 +65,7 @@ fn
 },
 (audio-url: Str, options: Map): Map {
   params {model: "nova-3", smart_format: true, ...options}
-  request(`/listen${query-string(params)}`, "application/json", to-json({url: audio-url}))
+  request(`/listen${::uri/query-string(params)}`, "application/json", to-json({url: audio-url}))
 }
 
 transcribe-audio
@@ -87,7 +79,7 @@ fn
 },
 (audio: Bytes, options: Map, mime-type: Str): Map {
   params {model: "nova-3", smart_format: true, ...options}
-  request(`/listen${query-string(params)}`, mime-type, audio)
+  request(`/listen${::uri/query-string(params)}`, mime-type, audio)
 }
 
 transcript
@@ -129,5 +121,5 @@ fn
 },
 (text: Str, options: Map): Any {
   params {model: "aura-2-thalia-en", ...options}
-  request(`/speak${query-string(params)}`, "application/json", to-json({text: text}))
+  request(`/speak${::uri/query-string(params)}`, "application/json", to-json({text: text}))
 }

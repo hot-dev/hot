@@ -36,14 +36,6 @@ fn (): Map {
   ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/calendarList`)
 }
 
-query-string fn (params: Map): Str {
-  filtered filter-vals(params, is-some)
-  cond {
-    is-empty(filtered) => { "" }
-    => { `?${::uri/encode-query(filtered)}` }
-  }
-}
-
 list-events
 meta {
     doc: """
@@ -57,7 +49,7 @@ fn
   list-events(calendar-id, {})
 },
 (calendar-id: Str, params: Map): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events${query-string(params)}`)
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events${::uri/query-string(params)}`)
 }
 
 get-event

@@ -28,7 +28,9 @@ meta {
 
     HubSpot signs the exact URL configured in your app. The 3-arity form
     takes that URL explicitly for when the platform-reconstructed
-    `original-url` differs from it (e.g. a rewriting proxy in front).
+    `original-url` differs from it — e.g. a rewriting proxy in front, or
+    a plain `http://` endpoint behind an edge that doesn't set
+    `x-forwarded-proto` (reconstruction defaults to `https`).
     """
 }
 fn

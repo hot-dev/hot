@@ -30,14 +30,6 @@ meta {
 
 BASE_URL "https://api.airtable.com/v0"
 
-query-string fn (params: Map): Str {
-  filtered filter-vals(params, is-some)
-  cond {
-    is-empty(filtered) => { "" }
-    => { `?${::uri/encode-query(filtered)}` }
-  }
-}
-
 request fn
 (method: Str, path: Str, body: Any): Any {
   request(method, path, body, ::ctx/get("airtable.token"))
@@ -104,7 +96,7 @@ fn
   request("GET", table-path(base-id, table), "")
 },
 (base-id: Str, table: Str, params: Map): Map {
-  request("GET", `${table-path(base-id, table)}${query-string(params)}`, "")
+  request("GET", `${table-path(base-id, table)}${::uri/query-string(params)}`, "")
 }
 
 get-record

@@ -34,14 +34,6 @@ base-url fn (): Str {
   if(ends-with(url, "/"), slice(url, 0, sub(length(url), 1)), url)
 }
 
-query-string fn (params: Map): Str {
-  filtered filter-vals(params, is-some)
-  cond {
-    is-empty(filtered) => { "" }
-    => { `?${::uri/encode-query(filtered)}` }
-  }
-}
-
 request
 meta {
     ctx: {"hot-api.key": {required: true}, "hot-api.url": {required: false}},
@@ -124,7 +116,7 @@ fn
   request("GET", "/events", "")
 },
 (params: Map): Any {
-  request("GET", `/events${query-string(params)}`, "")
+  request("GET", `/events${::uri/query-string(params)}`, "")
 }
 
 get-event
@@ -152,7 +144,7 @@ fn
   request("GET", "/runs", "")
 },
 (params: Map): Any {
-  request("GET", `/runs${query-string(params)}`, "")
+  request("GET", `/runs${::uri/query-string(params)}`, "")
 }
 
 get-run

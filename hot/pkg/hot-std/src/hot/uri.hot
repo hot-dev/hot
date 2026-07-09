@@ -106,6 +106,31 @@ fn (params: Map): Str {
 }
 
 
+query-string
+meta {
+    doc: """
+    Build an optional query-string suffix from a Map: null values are
+    dropped, remaining params are encoded with `encode-query` and prefixed
+    with `?`; an empty result yields `""`. The shape API clients want when
+    appending optional params to a path.
+
+    **Example**
+
+    ```hot
+    ::uri/query-string({page: 2, status: null})   // "?page=2"
+    ::uri/query-string({})                        // ""
+    ```
+    """
+}
+fn (params: Map): Str {
+    filtered filter-vals(params, is-some)
+    cond {
+        is-empty(filtered) => { "" }
+        => { `?${encode-query(filtered)}` }
+    }
+}
+
+
 decode-query
 meta {
     doc: """

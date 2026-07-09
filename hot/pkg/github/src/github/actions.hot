@@ -1,7 +1,7 @@
 ::github::actions ns
 
 ::api ::github::api
-query-string ::github::api/query-string
+query-string ::hot::uri/query-string
 
 list-workflow-runs
 meta {

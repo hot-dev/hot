@@ -2,7 +2,7 @@
 
 ::api ::github::api
 ::b64 ::hot::base64
-query-string ::github::api/query-string
+query-string ::hot::uri/query-string
 
 get-repo
 meta {

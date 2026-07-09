@@ -82,6 +82,17 @@ pub fn build_call_event_data(function_name: &str, args: Val, caller: Option<Val>
     event_data
 }
 
+/// Read a proxy/forwarding header and return the first comma-separated value,
+/// trimmed, or None when the header is absent or empty. Multi-proxy chains
+/// append values; the first is the client-facing one.
+pub fn first_forwarded_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Optional body content for the request builder.
 /// Webhooks provide body/body-raw; MCP does not.
 /// `body_bytes` carries the verbatim wire bytes only when they are not valid
@@ -182,12 +193,8 @@ pub fn build_request_val(
     }
 
     // Client IP from proxy headers
-    let ip = headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty());
+    let ip = first_forwarded_value(headers, "x-forwarded-for")
+        .or_else(|| first_forwarded_value(headers, "x-real-ip"));
     if let Some(ip) = ip {
         request_map.insert(Val::from("ip"), Val::from(ip));
     }

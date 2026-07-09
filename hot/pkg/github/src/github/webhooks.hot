@@ -42,7 +42,6 @@ fn
     starts-with(header, "sha256=") => { slice(header, 7) }
     => { "" }
   }
-  // Prefer the verbatim bytes when present (body-raw is lossy for non-UTF-8)
-  raw-body or(get(request, "body-bytes", null), or(get(request, "body-raw", ""), ""))
+  raw-body ::hot::http/raw-body(request)
   ::hmac/hmac-verify-hex(secret, raw-body, signature, "sha256")
 }

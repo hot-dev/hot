@@ -194,7 +194,6 @@ fn
 },
 (request: Map, secret: Str): Bool {
   signature get(request.headers, "x-shopify-hmac-sha256", "")
-  // Prefer the verbatim bytes when present (body-raw is lossy for non-UTF-8)
-  raw-body or(get(request, "body-bytes", null), or(get(request, "body-raw", ""), ""))
+  raw-body ::hot::http/raw-body(request)
   ::hot::hmac/hmac-verify-base64(secret, raw-body, signature, "sha256")
 }

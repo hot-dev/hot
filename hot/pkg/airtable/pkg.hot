@@ -3,7 +3,7 @@
 hot.pkg.airtable {
   name: "hot.dev/airtable",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
+  hot-min-version: "2.6.1",
   description: "Airtable bindings for Hot. Records CRUD with formula filtering plus the metadata API for base schemas.",
   author: "Hot Dev",
   email: "support@hot.dev",

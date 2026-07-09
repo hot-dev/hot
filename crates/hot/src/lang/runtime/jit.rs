@@ -87,7 +87,7 @@ pub enum JitMode {
 ///
 /// All settings flow through the standard conf system:
 ///   - `hot.hot` template (with `::env/get` for env var support)
-///   - CLI flags (`--jit`, `--jit.threshold`)
+///   - CLI flags (`--jit.mode`, `--jit.threshold`)
 ///   - `apply_env_vars` auto-mapping (`HOT_JIT_MODE`, `HOT_JIT_THRESHOLD`)
 ///
 /// The JIT code itself never reads environment variables directly.
@@ -96,7 +96,7 @@ pub struct JitConfig {
     pub mode: JitMode,
     pub threshold: u32,
     /// Kill switch for higher-order-function pipeline fusion. Defaults on; can
-    /// be disabled via conf `jit.hof.fusion`, CLI `--jit-hof-fusion`, or env
+    /// be disabled via conf `jit.hof.fusion`, CLI `--jit.hof.fusion`, or env
     /// `HOT_JIT_HOF_FUSION`. Disabling falls back to the per-element lambda-JIT
     /// / interpreter path with no behavior change.
     pub hof_fusion: bool,

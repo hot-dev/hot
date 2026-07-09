@@ -1,7 +1,7 @@
 ::github::issues ns
 
 ::api ::github::api
-query-string ::github::api/query-string
+query-string ::hot::uri/query-string
 
 list-issues
 meta {

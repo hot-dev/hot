@@ -28,12 +28,8 @@ meta {
     doc: """Build a query string from a Map, omitting nulls; Vec values become comma-separated (HubSpot's `properties=email,firstname` style)."""
 }
 fn (params: Map): Str {
-  filtered filter-vals(params, is-some)
-  flattened map-vals(filtered, (v) { if(is-vec(v), join(v, ","), v) })
-  cond {
-    is-empty(flattened) => { "" }
-    => { `?${::uri/encode-query(flattened)}` }
-  }
+  flattened map-vals(filter-vals(params, is-some), (v) { if(is-vec(v), join(v, ","), v) })
+  ::uri/query-string(flattened)
 }
 
 request

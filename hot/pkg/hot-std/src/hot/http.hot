@@ -70,6 +70,26 @@ type {
     auth: Map?
 }
 
+raw-body
+meta {
+    doc: """
+    The verbatim body of an inbound request for signature verification:
+    `body-bytes` when present (the body was not valid UTF-8 and `body-raw`
+    is lossy), otherwise `body-raw` (`""` when absent). Webhook verifiers
+    should hash this value rather than reading `body-raw` directly.
+
+    **Example**
+
+    ```hot
+    ::hmac/hmac-verify-hex(secret, ::http/raw-body(request), signature, "sha256")
+    ```
+    """
+}
+fn (request: Map): Str | Bytes {
+    // `get` here is this namespace's HTTP GET; use the qualified map accessor.
+    or(::hot::coll/get(request, "body-bytes", null), or(::hot::coll/get(request, "body-raw", ""), ""))
+}
+
 HttpResponse
 meta {
     doc: """

@@ -23,18 +23,6 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-query-string
-meta {
-    doc: """Build a query string from a Map, omitting null values; empty when nothing remains. Used by the list endpoints for `state`, `labels`, `per_page`, `page`, ..."""
-}
-fn (params: Map): Str {
-  filtered filter-vals(params, is-some)
-  cond {
-    is-empty(filtered) => { "" }
-    => { `?${::uri/encode-query(filtered)}` }
-  }
-}
-
 request
 meta {
     doc: """

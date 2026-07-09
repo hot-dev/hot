@@ -245,21 +245,29 @@ pub async fn webhook_catch_all_handler(
 /// this exact string, so any normalization here breaks their signatures.
 /// Returns None when no host can be determined.
 fn build_original_url(headers: &HeaderMap, original_uri: &Uri) -> Option<String> {
-    let header_str = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
+    use super::request::first_forwarded_value;
 
-    let scheme = header_str("x-forwarded-proto")
+    let scheme = first_forwarded_value(headers, "x-forwarded-proto")
         .or_else(|| original_uri.scheme_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "https".to_string());
 
-    let host = header_str("x-forwarded-host")
-        .or_else(|| header_str("host"))
+    let host = first_forwarded_value(headers, "x-forwarded-host")
+        .or_else(|| first_forwarded_value(headers, "host"))
         .or_else(|| original_uri.authority().map(|a| a.to_string()))?;
+
+    // Providers sign the URL as configured, which omits the default port —
+    // but proxies sometimes inject it into Host/X-Forwarded-Host. Strip it
+    // so the reconstruction matches the signed string; non-default ports are
+    // kept (a URL configured with one carries it).
+    let default_port = match scheme.as_str() {
+        "https" => Some(":443"),
+        "http" => Some(":80"),
+        _ => None,
+    };
+    let host = match default_port {
+        Some(suffix) => host.strip_suffix(suffix).unwrap_or(&host).to_string(),
+        None => host,
+    };
 
     let path_and_query = original_uri
         .path_and_query()
@@ -498,15 +506,18 @@ async fn webhook_handler_inner(
 
     // Build the unified HttpRequest value using the shared builder.
     // Includes method, url, headers, query, body, body-raw, ip, and auth (when authenticated).
-    let raw_body_str = String::from_utf8_lossy(&body).to_string();
-    let body_val: Val = serde_json::from_slice(&body).unwrap_or(Val::from(raw_body_str.clone()));
-    // body-raw is lossy for non-UTF-8 payloads; carry the verbatim bytes too
+    // One UTF-8 validation: valid bodies use the borrowed str directly; for
+    // non-UTF-8 payloads body-raw is lossy, so carry the verbatim bytes too
     // so body-signing webhook verifiers hash what the provider actually sent.
-    let body_bytes = if std::str::from_utf8(&body).is_err() {
-        Some(body.to_vec())
-    } else {
-        None
+    let (raw_body_str, body_bytes) = match std::str::from_utf8(&body) {
+        Ok(s) => (s.to_string(), None),
+        Err(_) => (
+            String::from_utf8_lossy(&body).to_string(),
+            Some(body.to_vec()),
+        ),
     };
+    let body_val: Val =
+        serde_json::from_slice(&body).unwrap_or_else(|_| Val::from(raw_body_str.clone()));
 
     let http_request = build_request_val(
         &method_str,
@@ -1193,6 +1204,42 @@ mod tests {
         assert_eq!(
             url.as_deref(),
             Some("https://api.hot.dev/webhook/svc/abcdef123456")
+        );
+    }
+
+    #[test]
+    fn test_original_url_strips_default_port() {
+        // Proxies sometimes inject the default port; providers sign without it.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("x-forwarded-host", "api.hot.dev:443".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://api.hot.dev/webhook/svc/abcdef123456")
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        headers.insert("host", "localhost:80".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("http://localhost/webhook/svc/abcdef123456")
+        );
+    }
+
+    #[test]
+    fn test_original_url_keeps_non_default_port() {
+        // A URL configured with an explicit non-default port carries it in
+        // the signed string, so reconstruction must keep it.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        headers.insert("host", "localhost:8080".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("http://localhost:8080/webhook/svc/abcdef123456")
         );
     }
 

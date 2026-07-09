@@ -89,14 +89,10 @@ fn
       cond {
         not(signature-valid) => { false }
         eq(tolerance-seconds, 0) => { true }
-        => { timestamp-within-tolerance(parsed.t, tolerance-seconds) }
+        => { ::time/within-seconds-of-now(parsed.t, tolerance-seconds) }
       }
     }
   }
-}
-
-timestamp-within-tolerance fn (timestamp: Str, tolerance-seconds: Int): Bool {
-  ::time/within-seconds-of-now(timestamp, tolerance-seconds)
 }
 
 // ============================================================================

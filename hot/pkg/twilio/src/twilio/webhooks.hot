@@ -4,8 +4,6 @@
 ::hmac ::hot::hmac
 ::hash ::hot::hash
 ::str ::hot::str
-::base64 ::hot::base64
-::hex ::hot::hex
 ::uri ::hot::uri
 
 // ============================================================================
@@ -36,7 +34,9 @@ meta {
   The URL is taken from `request.original-url` (the URL as Twilio
   requested it, delivered by the platform). The 3-arity form takes the
   URL explicitly for when the reconstructed value differs from what is
-  configured at Twilio (e.g. a rewriting proxy in front).
+  configured at Twilio — e.g. a rewriting proxy in front, or a plain
+  `http://` endpoint behind an edge that doesn't set
+  `x-forwarded-proto` (reconstruction defaults to `https`).
 
   **Example**
 
@@ -81,8 +81,7 @@ fn
           cond {
             not(::hmac/hmac-verify-base64(auth-token, url, signature, "sha1")) => { false }
             => {
-              // Prefer the verbatim bytes when present (body-raw is lossy for non-UTF-8)
-              raw-body or(get(request, "body-bytes", null), or(get(request, "body-raw", ""), ""))
+              raw-body ::hot::http/raw-body(request)
               eq(::str/lowercase(::hash/sha256(raw-body)), ::str/lowercase(body-sha))
             }
           }
