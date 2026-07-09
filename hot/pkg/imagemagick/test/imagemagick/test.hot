@@ -36,7 +36,7 @@ meta ["test"] fn () {
         format: null, image: null, size: null,
     })
     args build-resize-args("/tmp/in.jpg", "/tmp/out.jpg", opts)
-    assert-eq("convert", first(args))
+    assert-eq("magick", first(args))
     assert(in("-resize", args), "should resize")
     assert(in("800x", args), "should set width geometry")
     assert-eq("/tmp/out.jpg", last(args))
@@ -88,7 +88,7 @@ meta ["test"] fn () {
         image: null, size: null,
     })
     args build-convert-args("/tmp/in.jpg", "/tmp/out.webp", opts)
-    assert-eq(["convert", "/tmp/in.jpg", "/tmp/out.webp"], args)
+    assert-eq(["magick", "/tmp/in.jpg", "/tmp/out.webp"], args)
 }
 
 test-convert-args-with-options
@@ -123,7 +123,7 @@ test-optimize-args-defaults
 meta ["test"] fn () {
     opts OptimizeOpts({quality: null, strip: null, format: null, image: null, size: null})
     args build-optimize-args("/tmp/in.jpg", "/tmp/out.jpg", opts)
-    assert-eq("convert", first(args))
+    assert-eq("magick", first(args))
     assert(in("-strip", args), "default strip true")
     assert(in("-quality", args), "default quality")
     assert(in("85", args), "default quality 85")
@@ -144,9 +144,10 @@ meta ["test"] fn () {
 test-identify-args-structure
 meta ["test"] fn () {
     args build-identify-args("/tmp/sample.jpg")
-    assert-eq("-format", first(args))
+    assert-eq("identify", first(args))
+    assert-eq("-format", get(args, 1))
     assert-eq("/tmp/sample.jpg", last(args))
-    fmt get(args, 1, "")
+    fmt get(args, 2, "")
     assert(contains(fmt, "%w"), "format has width")
     assert(contains(fmt, "%h"), "format has height")
     assert(contains(fmt, "%[colorspace]"), "format has colorspace")

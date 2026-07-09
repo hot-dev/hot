@@ -57,13 +57,13 @@ meta ["test"] fn () {
 
 test-ocr-args-minimal-txt
 meta ["test"] fn () {
-    args build-ocr-args("/tmp/in.png", "/tmp/out", null, null, null, "txt", null)
+    args build-ocr-args("/tmp/in.png", "/tmp/out", null, null, null, "txt", null, null)
     assert-eq(["/tmp/in.png", "/tmp/out", "txt"], args)
 }
 
 test-ocr-args-with-lang-psm-oem
 meta ["test"] fn () {
-    args build-ocr-args("/tmp/input.png", "/tmp/output", "eng", 3, 1, "txt", null)
+    args build-ocr-args("/tmp/input.png", "/tmp/output", "eng", 3, 1, "txt", null, null)
     assert-eq([
         "/tmp/input.png", "/tmp/output",
         "-l", "eng", "--psm", "3", "--oem", "1",
@@ -73,14 +73,14 @@ meta ["test"] fn () {
 
 test-ocr-args-multi-language
 meta ["test"] fn () {
-    args build-ocr-args("/tmp/in.tif", "/tmp/base", "deu+eng", null, null, "txt", null)
+    args build-ocr-args("/tmp/in.tif", "/tmp/base", "deu+eng", null, null, "txt", null, null)
     assert(in("-l", args), "should have -l")
     assert(in("deu+eng", args), "should list combined langs")
 }
 
 test-ocr-args-with-dpi
 meta ["test"] fn () {
-    args build-ocr-args("/tmp/a.png", "/tmp/b", null, null, null, "hocr", 300)
+    args build-ocr-args("/tmp/a.png", "/tmp/b", null, null, null, "hocr", 300, null)
     assert(in("--dpi", args), "should pass --dpi")
     assert(in("300", args), "should pass dpi value")
     assert-eq("hocr", last(args), "format should be last")
@@ -88,7 +88,7 @@ meta ["test"] fn () {
 
 test-ocr-args-hocr-format
 meta ["test"] fn () {
-    args build-ocr-args("/tmp/page.png", "/tmp/page-out", "fra", 6, null, "hocr", null)
+    args build-ocr-args("/tmp/page.png", "/tmp/page-out", "fra", 6, null, "hocr", null, null)
     assert-eq("hocr", last(args))
     assert(in("--psm", args))
     assert(in("6", args))
@@ -96,7 +96,7 @@ meta ["test"] fn () {
 
 test-join-args-ocr-roundtrip
 meta ["test"] fn () {
-    args build-ocr-args("/tmp/in.png", "/tmp/out", "eng", 3, 1, "txt", null)
+    args build-ocr-args("/tmp/in.png", "/tmp/out", "eng", 3, 1, "txt", null, null)
     joined join-args(args)
     assert(not(contains(joined, "tesseract")), "join-args should not include executable name")
     assert(starts-with(joined, "/tmp/in.png"), "should start with input path")

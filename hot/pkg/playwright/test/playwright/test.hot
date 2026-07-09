@@ -37,7 +37,7 @@ meta ["test"] fn () {
 test-screenshot-script-contains-core
 meta ["test"] fn () {
     js build-screenshot-script(TEST_URL, "/tmp/out.png", 1280, 720, false, "png", null, "networkidle", 0)
-    assert(contains(js, "require(\"playwright\")"), "should require playwright")
+    assert(contains(js, "require(\"playwright-core\")"), "should require playwright-core")
     assert(contains(js, "chromium.launch"), "should launch chromium")
     assert(contains(js, "example.com"), "should embed url")
     assert(contains(js, "setViewportSize"), "should set viewport")

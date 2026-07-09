@@ -79,7 +79,10 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/whisper/test"
 ]
 hot.project.hot-pkg-all.test.capture true
+// Fixture resources are data for hot-std's resource tests; keep skill
+// codegen off so `skills/*.skill.md` fixtures are not turned into stubs.
 hot.project.hot-pkg-all.resources.paths ["./hot/pkg/hot-std/test/fixtures/resources"]
+hot.project.hot-pkg-all.skills.codegen.enabled false
 hot.project.hot-pkg-all.deps {
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/aws-bedrock": { "local": "./hot/pkg/aws-bedrock" },

@@ -118,19 +118,24 @@ fn () {
     assert-eq({}, out.headers, "headers default to empty map")
 }
 
+// validate-config halts via fail() on a bad shape (so operators see the
+// misconfiguration immediately); contain the halt to assert on it.
+
 test-validate-rejects-missing-url
 meta ["test"]
 fn () {
     resolved { name: "fs", config: {headers: {Authorization: "x"}} }
-    out ::ai-mcp/validate-config(resolved)
+    out ::hot::internal::exec/contain(::ai-mcp/validate-config, [resolved])
     assert(is-err(out), "config without a url is rejected")
+    failure if-err(out, (f) { f })
+    assert(contains(failure.msg, "missing a required Str 'url'"))
 }
 
 test-validate-rejects-empty-url
 meta ["test"]
 fn () {
     resolved { name: "weather", config: {url: ""} }
-    out ::ai-mcp/validate-config(resolved)
+    out ::hot::internal::exec/contain(::ai-mcp/validate-config, [resolved])
     assert(is-err(out), "empty url is rejected")
 }
 
@@ -138,7 +143,7 @@ test-validate-rejects-non-str-url
 meta ["test"]
 fn () {
     resolved { name: "weather", config: {url: 42} }
-    out ::ai-mcp/validate-config(resolved)
+    out ::hot::internal::exec/contain(::ai-mcp/validate-config, [resolved])
     assert(is-err(out), "non-Str url is rejected")
 }
 
